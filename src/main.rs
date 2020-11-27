@@ -6,7 +6,7 @@ use std::sync::{mpsc, Mutex, Arc};
 use std::net::{TcpListener, TcpStream};
 use std::io::{Read, Write};
 use std::str::from_utf8;
-use std::collections::HashMap;
+use std::collections::{HashMap, LinkedList};
 use std::sync::mpsc::Sender;
 
 /// The threading architecture we use is as follows. Every network
@@ -22,15 +22,14 @@ use std::sync::mpsc::Sender;
 /// socket, it places it in the socket's Output Queue. The Sending Thread
 /// picks this up and sends it out of the socket. The Output Queue is a
 /// Single-Producer-Single-Consumer queue.
+///
+/// For the Server Thread also needs to connect to itself. We don't use
+/// a network socket for this, and we don't have two auxiliary threads.
+/// Instead, we have one auxiliary thread, called the Self Connection
+/// Thread, which takes packets that are sent out of Server Thread and
+/// immediately feeds it back in.
 
 const SERVER_PORT: u32 = 1610;
-const IPS: [&str;5] = [
-    "172.19.0.3",
-    "172.19.0.4",
-    "172.19.0.5",
-    "172.19.0.6",
-    "172.19.0.7"
-];
 
 fn handle_conn(
     conn_map: &Arc<Mutex<HashMap<String, Sender<String>>>>,
@@ -46,7 +45,6 @@ fn handle_conn(
             receiving_stream.read(&mut buf).unwrap();
             let str_in = from_utf8(&buf).unwrap();
             sender.send(String::from(str_in)).unwrap();
-            println!("Received string: {}", str_in);
         }
     });
 
@@ -90,9 +88,12 @@ fn handle_self_conn(
 }
 
 fn main() {
-    let mut args: Vec<String> = env::args().collect();
-    let index = args.pop().expect(
-        "An integer should be present to indicate which server this is.");
+    let mut args: LinkedList<String> = env::args().collect();
+    args.pop_front(); // Removes the program name argument.
+    let _seed = args.pop_front().expect( // This remove the seed for now.
+        "A random seed should be provided.");
+    let cur_ip = args.pop_front().expect(
+        "The endpoint_id of the current server should be provided.");
     // The mpsc channel for sending data to the Server Thread
     let (sender, receiver) = mpsc::channel();
     // The map mapping the IP addresses to a mpsc Sender object, used to
@@ -100,27 +101,32 @@ fn main() {
     let conn_map = Arc::new(Mutex::new(HashMap::new()));
 
     // Start the Accepting Thread
-    let sender_acceptor = sender.clone();
-    let conn_map_acceptor = conn_map.clone();
-    thread::spawn(move || {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", SERVER_PORT)).unwrap();
-        for stream in listener.incoming() {
-            handle_conn(&conn_map_acceptor, &sender_acceptor, stream.unwrap());
-        }
-    });
+    {
+        let sender = sender.clone();
+        let conn_map = conn_map.clone();
+        let cur_ip = cur_ip.clone();
+        thread::spawn(move || {
+            let listener = TcpListener::bind(format!("{}:{}", cur_ip, SERVER_PORT)).unwrap();
+            for stream in listener.incoming() {
+                let stream = stream.unwrap();
+                println!("Connected from: {}", stream.peer_addr().unwrap().ip().to_string());
+                handle_conn(&conn_map, &sender, stream);
+            }
+        });
+    }
 
     // Connect to other IPs
     for ip in args {
         let stream = TcpStream::connect(format!("{}:{}", ip, SERVER_PORT));
         handle_conn(&conn_map, &sender, stream.unwrap());
+        println!("Connected to: {}", ip);
     }
 
     // Handle self-connection
-    let index = index.parse::<usize>().unwrap();
-    handle_self_conn(IPS[index], &conn_map, &sender);
+    handle_self_conn(&cur_ip, &conn_map, &sender);
 
     // Start Server Thread
-    println!("Index: {}", index);
+    println!("Starting Server {}", cur_ip);
     loop {
         let msg: String = receiver.recv().unwrap();
         println!("Recieved message: {}", msg);
