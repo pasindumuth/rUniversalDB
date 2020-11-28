@@ -1,10 +1,11 @@
 use rmp_serde;
-use runiversal::net::network::send;
+use runiversal::net::network::{send, recv};
 use runiversal::model::message::Message::Basic;
 use std::collections::LinkedList;
 use std::env;
 use std::net::TcpStream;
 use std::io::stdin;
+use runiversal::model::message::Message;
 
 fn main() {
     let mut args: LinkedList<String> = env::args().collect();
@@ -24,5 +25,10 @@ fn main() {
         // Send the message
         let buf = rmp_serde::to_vec(&msg).unwrap();
         send(buf.as_slice(), &stream);
+
+        // Receive a message
+        let buf = recv(&stream);
+        let msg: Message = rmp_serde::from_read_ref(&buf).unwrap();
+        println!("{:?}", msg);
     }
 }

@@ -6,6 +6,7 @@ use std::collections::{HashMap, LinkedList};
 use std::sync::mpsc::Sender;
 use runiversal::net::network::{recv, send};
 use runiversal::model::message::Message;
+use runiversal::model::message::Message::Basic;
 
 /// The threading architecture we use is as follows. Every network
 /// connection has 2 threads, one for receiving data, called the
@@ -31,20 +32,25 @@ const SERVER_PORT: u32 = 1610;
 
 fn handle_conn(
     conn_map: &Arc<Mutex<HashMap<String, Sender<Vec<u8>>>>>,
-    sender: &Sender<Vec<u8>>,
-    receiving_stream: TcpStream
+    sender: &Sender<(String, Vec<u8>)>,
+    stream: TcpStream
 ){
-    let sending_stream = receiving_stream.try_clone().unwrap();
-    // Setup Receiving Thread
-    let sender = sender.clone();
-    thread::spawn(move || {
-        loop {
-            let val_in = recv(&receiving_stream);
-            sender.send(val_in).unwrap();
-        }
-    });
+    let endpoint_id = stream.peer_addr().unwrap().ip().to_string();
 
-    let endpoint_id = sending_stream.peer_addr().unwrap().ip().to_string();
+    // Setup Receiving Thread
+    {
+        let sender = sender.clone();
+        let endpoint_id = endpoint_id.clone();
+        let stream = stream.try_clone().unwrap();
+        thread::spawn(move || {
+            loop {
+                let val_in = recv(&stream);
+                sender.send((endpoint_id.clone(), val_in)).unwrap();
+            }
+        });
+
+    }
+
     // Used like a Single-Producer-Single-Consumer queue, where Server Thread
     // is the producer, the Sending Thread is the consumer.
     let (sender, receiver) = mpsc::channel();
@@ -56,29 +62,29 @@ fn handle_conn(
     thread::spawn(move || {
         loop {
             let data_out = receiver.recv().unwrap();
-            send(&data_out, &sending_stream);
+            send(&data_out, &stream);
         }
     });
 }
 
 fn handle_self_conn(
-    endpoint_id: &str,
+    endpoint_id: String,
     conn_map: &Arc<Mutex<HashMap<String, Sender<Vec<u8>>>>>,
-    server_thread_sender: &Sender<Vec<u8>>
+    server_thread_sender: &Sender<(String, Vec<u8>)>
 ){
     // Used like a Single-Producer-Single-Consumer queue, where Server Thread
     // is the producer, the Sending Thread is the consumer.
     let (sender, receiver) = mpsc::channel();
     // Add sender of the SPSC to the conn_map so the Server Thread can access it.
     let mut conn_map = conn_map.lock().unwrap();
-    conn_map.insert(String::from(endpoint_id), sender);
+    conn_map.insert(endpoint_id.clone(), sender);
 
     // Setup Sending Thread
     let server_thread_sender = server_thread_sender.clone();
     thread::spawn(move || {
         loop {
             let data = receiver.recv().unwrap();
-            server_thread_sender.send(data).unwrap();
+            server_thread_sender.send((endpoint_id.clone(), data)).unwrap();
         }
     });
 }
@@ -119,13 +125,23 @@ fn main() {
     }
 
     // Handle self-connection
-    handle_self_conn(&cur_ip, &conn_map, &sender);
+    handle_self_conn(cur_ip.clone(), &conn_map, &sender);
 
     // Start Server Thread
     println!("Starting Server {}", cur_ip);
     loop {
-        let data = receiver.recv().unwrap();
+        // Receive the data.
+        let (endpoint_id, data) = receiver.recv().unwrap();
         let msg: Message = rmp_serde::from_read_ref(&data).unwrap();
+
         println!("Recieved message: {:?}", msg);
+
+        // Create the response.
+        let res = Basic(String::from("hi"));
+
+        // Send the response.
+        let conn_map = conn_map.lock().unwrap();
+        let sender = conn_map.get(&endpoint_id).unwrap();
+        sender.send(rmp_serde::to_vec(&res).unwrap()).unwrap();
     }
 }
