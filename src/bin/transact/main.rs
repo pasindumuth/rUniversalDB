@@ -1,13 +1,11 @@
-#![allow(non_snake_case)]
-
 use std::env;
 use std::thread;
 use std::sync::{mpsc, Mutex, Arc};
 use std::net::{TcpListener, TcpStream};
-use std::io::{Read, Write};
-use std::str::from_utf8;
 use std::collections::{HashMap, LinkedList};
 use std::sync::mpsc::Sender;
+use runiversal::net::network::{recv, send};
+use runiversal::model::message::Message;
 
 /// The threading architecture we use is as follows. Every network
 /// connection has 2 threads, one for receiving data, called the
@@ -32,19 +30,17 @@ use std::sync::mpsc::Sender;
 const SERVER_PORT: u32 = 1610;
 
 fn handle_conn(
-    conn_map: &Arc<Mutex<HashMap<String, Sender<String>>>>,
-    sender: &Sender<String>,
-    mut receiving_stream: TcpStream
+    conn_map: &Arc<Mutex<HashMap<String, Sender<Vec<u8>>>>>,
+    sender: &Sender<Vec<u8>>,
+    receiving_stream: TcpStream
 ){
-    let mut sending_stream = receiving_stream.try_clone().unwrap();
+    let sending_stream = receiving_stream.try_clone().unwrap();
     // Setup Receiving Thread
     let sender = sender.clone();
     thread::spawn(move || {
         loop {
-            let mut buf = [0; 128]; // We use 128 byte headers
-            receiving_stream.read(&mut buf).unwrap();
-            let str_in = from_utf8(&buf).unwrap();
-            sender.send(String::from(str_in)).unwrap();
+            let val_in = recv(&receiving_stream);
+            sender.send(val_in).unwrap();
         }
     });
 
@@ -59,16 +55,16 @@ fn handle_conn(
     // Setup Sending Thread
     thread::spawn(move || {
         loop {
-            let out_msg: String = receiver.recv().unwrap();
-            sending_stream.write(out_msg.as_bytes()).unwrap();
+            let data_out = receiver.recv().unwrap();
+            send(&data_out, &sending_stream);
         }
     });
 }
 
 fn handle_self_conn(
     endpoint_id: &str,
-    conn_map: &Arc<Mutex<HashMap<String, Sender<String>>>>,
-    server_thread_sender: &Sender<String>
+    conn_map: &Arc<Mutex<HashMap<String, Sender<Vec<u8>>>>>,
+    server_thread_sender: &Sender<Vec<u8>>
 ){
     // Used like a Single-Producer-Single-Consumer queue, where Server Thread
     // is the producer, the Sending Thread is the consumer.
@@ -81,8 +77,8 @@ fn handle_self_conn(
     let server_thread_sender = server_thread_sender.clone();
     thread::spawn(move || {
         loop {
-            let msg: String = receiver.recv().unwrap();
-            server_thread_sender.send(msg).unwrap();
+            let data = receiver.recv().unwrap();
+            server_thread_sender.send(data).unwrap();
         }
     });
 }
@@ -128,7 +124,8 @@ fn main() {
     // Start Server Thread
     println!("Starting Server {}", cur_ip);
     loop {
-        let msg: String = receiver.recv().unwrap();
-        println!("Recieved message: {}", msg);
+        let data = receiver.recv().unwrap();
+        let msg: Message = rmp_serde::from_read_ref(&data).unwrap();
+        println!("Recieved message: {:?}", msg);
     }
 }
