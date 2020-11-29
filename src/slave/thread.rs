@@ -25,7 +25,9 @@ pub fn start_server_thread(
         println!("Recieved message: {:?}", msg);
 
         // Create the response.
-        let res = Client(String::from("hi"));
+        let res = Client {
+            msg: String::from("hi"),
+        };
 
         // Send the response.
         let net_conn_map = net_conn_map.lock().unwrap();
@@ -36,10 +38,10 @@ pub fn start_server_thread(
             actions: Vec::new(),
         };
 
-        handle_incoming_message(
-            &side_effects,
-            &state,
-            (endpoint_id.clone(), Client(String::from("hi"))),
-        );
+        let msg = Client {
+            msg: String::from("hi"),
+        };
+
+        handle_incoming_message(&side_effects, &state, (endpoint_id.clone(), msg));
     }
 }

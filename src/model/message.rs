@@ -3,26 +3,38 @@ use serde::{Deserialize, Serialize};
 
 // Message that go into the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum AdminMessage {
+    Insert { key: String, value: String },
+}
+
+// Message that go into the Slave's handler
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SlaveMessage {
-    Client(String),
-    Admin(String),
+    Client { msg: String },
+    Admin { msg: String },
 }
 
 // Message that go into the Tablet's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TabletMessage {
-    Input(EndpointId, String),
+    Input { eid: EndpointId, msg: String },
 }
 
 // Message that come out of the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SlaveActions {
-    Forward(TabletShape, TabletMessage),
-    Send(EndpointId, SlaveMessage),
+    Forward {
+        shape: TabletShape,
+        msg: TabletMessage,
+    },
+    Send {
+        eid: EndpointId,
+        msg: SlaveMessage,
+    },
 }
 
 // Message that come out of the Tablet's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TabletActions {
-    Send(EndpointId, SlaveMessage),
+    Send { eid: EndpointId, msg: SlaveMessage },
 }

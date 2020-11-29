@@ -20,7 +20,7 @@ fn main() {
         // Read in the message to send
         let mut val = String::new();
         stdin().read_line(&mut val).unwrap();
-        let msg = Client(val);
+        let msg = Client { msg: val };
 
         // Send the message
         let buf = rmp_serde::to_vec(&msg).unwrap();

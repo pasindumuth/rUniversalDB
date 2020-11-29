@@ -31,18 +31,20 @@ use std::thread;
 /// Thread, which takes packets that are sent out of Server Thread and
 /// immediately feeds it back in.
 
-fn endpoint(e_id: &str) -> EndpointId {
-    EndpointId::from(String::from(e_id))
+fn endpoint(eid: &str) -> EndpointId {
+    EndpointId(String::from(eid))
 }
 
 fn table_shape(path: &str, start: Option<&str>, end: Option<&str>) -> TabletShape {
-    TabletShape::from(
-        TabletPath::from(String::from(path)),
-        TabletKeyRange::from(
-            start.map(|start| String::from(start)),
-            end.map(|end| String::from(end)),
-        ),
-    )
+    TabletShape {
+        path: TabletPath {
+            path: String::from(path),
+        },
+        range: TabletKeyRange {
+            start: start.map(|start| String::from(start)),
+            end: end.map(|end| String::from(end)),
+        },
+    }
 }
 
 const SERVER_PORT: u32 = 1610;
@@ -52,7 +54,7 @@ fn handle_conn(
     slave_sender: &Sender<(EndpointId, Vec<u8>)>,
     stream: TcpStream,
 ) -> EndpointId {
-    let endpoint_id = EndpointId::from(stream.peer_addr().unwrap().ip().to_string());
+    let endpoint_id = EndpointId(stream.peer_addr().unwrap().ip().to_string());
 
     // Setup Receiving Thread
     {
@@ -129,7 +131,7 @@ fn main() {
         let net_conn_map = net_conn_map.clone();
         let cur_ip = cur_ip.clone();
         thread::spawn(move || {
-            let listener = TcpListener::bind(format!("{}:{}", cur_ip, SERVER_PORT)).unwrap();
+            let listener = TcpListener::bind(format!("{}:{}", &cur_ip, SERVER_PORT)).unwrap();
             for stream in listener.incoming() {
                 let stream = stream.unwrap();
                 let endpoint_id = handle_conn(&net_conn_map, &sender, stream);
@@ -146,7 +148,7 @@ fn main() {
     }
 
     // Handle self-connection
-    let endpoint_id = EndpointId::from(cur_ip);
+    let endpoint_id = EndpointId(cur_ip);
     handle_self_conn(&endpoint_id, &net_conn_map, &slave_sender);
 
     // A pre-defined map of what tablets that each server should be managing.
