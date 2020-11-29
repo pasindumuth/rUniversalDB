@@ -1,6 +1,6 @@
-use std::net::TcpStream;
-use std::io::{Read, Write};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
 /// We use simple 4 byte header that holds the
 /// length of the real message.
