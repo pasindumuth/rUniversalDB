@@ -9,7 +9,8 @@ pub struct MultiVersionMap<K, V> {
 
 impl<K, V> MultiVersionMap<K, V>
 where
-    K: Eq + Hash,
+    K: Eq + Hash + Clone,
+    V: Clone,
 {
     pub fn new() -> MultiVersionMap<K, V> {
         MultiVersionMap {
@@ -17,31 +18,36 @@ where
         }
     }
 
-    pub fn write(&mut self, key: K, value: Option<V>, timestamp: Timestamp) {
-        if let Some((lat, versions)) = self.map.get_mut(&key) {
-            assert!(timestamp > *lat);
-            *lat = timestamp;
-            versions.push((timestamp, value));
+    pub fn write(&mut self, key: &K, value: Option<V>, timestamp: Timestamp) -> Result<(), String> {
+        if let Some((lat, versions)) = self.map.get_mut(key) {
+            if timestamp <= *lat {
+                Err(String::from("Timestamps must be >= current lat."))
+            } else {
+                *lat = timestamp;
+                versions.push((timestamp, value));
+                Ok(())
+            }
         } else {
-            self.map.insert(key, (timestamp, vec![(timestamp, value)]));
+            self.map
+                .insert(key.clone(), (timestamp, vec![(timestamp, value)]));
+            Ok(())
         }
     }
 
-    pub fn read(&mut self, key: &K, timestamp: Timestamp) -> Option<&V> {
+    pub fn read(&mut self, key: &K, timestamp: Timestamp) -> Option<V> {
         if let Some((lat, versions)) = self.map.get_mut(key) {
             *lat = max(*lat, timestamp);
             MultiVersionMap::<K, V>::find_version(versions, timestamp)
         } else {
+            self.map.insert(key.clone(), (timestamp, vec![]));
             None
         }
     }
 
-    fn find_version(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> Option<&V> {
+    fn find_version(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> Option<V> {
         for (t, value) in versions.iter().rev() {
-            if let Some(v) = value {
-                if *t <= timestamp {
-                    return Some(v);
-                }
+            if *t <= timestamp {
+                return value.clone();
             }
         }
         return None;
@@ -52,15 +58,23 @@ where
 mod tests {
     use crate::model::common::Timestamp;
     use crate::storage::multiversion_map::MultiVersionMap;
-    use std::ops::Deref;
 
     #[test]
-    fn test1() {
+    fn single_key_test() {
         let mut mvm = MultiVersionMap::new();
         let k = String::from("k");
-        let v = String::from("v");
-        mvm.write(k.clone(), Some(v.clone()), Timestamp(2));
-        let ret = mvm.read(&k, Timestamp(2));
-        assert_eq!(ret.unwrap().deref(), v);
+        let v1 = String::from("v1");
+        let v2 = String::from("v2");
+        let v3 = String::from("v3");
+        assert_eq!(mvm.read(&k, Timestamp(1)), None);
+        assert!(mvm.write(&k, Some(v1.clone()), Timestamp(2)).is_ok());
+        assert!(mvm.write(&k, Some(v2.clone()), Timestamp(4)).is_ok());
+        assert_eq!(mvm.read(&k, Timestamp(3)), Some(v1));
+        assert_eq!(mvm.read(&k, Timestamp(5)), Some(v2));
+        assert!(mvm.write(&k, Some(v3.clone()), Timestamp(5)).is_err());
+        assert!(mvm.write(&k, Some(v3.clone()), Timestamp(6)).is_ok());
+        assert_eq!(mvm.read(&k, Timestamp(6)), Some(v3));
+        assert!(mvm.write(&k, None, Timestamp(7)).is_ok());
+        assert_eq!(mvm.read(&k, Timestamp(7)), None);
     }
 }
