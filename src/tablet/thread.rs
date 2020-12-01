@@ -3,12 +3,13 @@ use crate::model::message::TabletMessage;
 use crate::tablet::tablet::TabletState;
 use rand::RngCore;
 
+use crate::common::rand::RandGen;
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 pub fn start_tablet_thread(
-    rand_gen: Box<dyn RngCore>,
+    rand_gen: RandGen,
     _receiver: Receiver<TabletMessage>,
     _net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
 ) {

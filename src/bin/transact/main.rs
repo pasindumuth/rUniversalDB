@@ -1,8 +1,9 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
+use runiversal::common::rand::RandGen;
 use runiversal::model::common::{EndpointId, TabletKeyRange, TabletPath, TabletShape};
 use runiversal::net::network::{recv, send};
-use runiversal::slave::thread::start_server_thread;
+use runiversal::slave::thread::start_slave_thread;
 use runiversal::tablet::thread::start_tablet_thread;
 use std::collections::{HashMap, LinkedList};
 use std::env;
@@ -112,9 +113,9 @@ fn main() {
     // This remove the seed for now.
     let slave_index = args
         .pop_front()
-        .expect("A server index should be provided.")
+        .expect("A slave index should be provided.")
         .parse::<u32>()
-        .expect("The server index couldn't be parsed as a string.");
+        .expect("The slave index couldn't be parsed as a string.");
     let cur_ip = args
         .pop_front()
         .expect("The endpoint_id of the current slave should be provided.");
@@ -151,7 +152,7 @@ fn main() {
     let endpoint_id = EndpointId(cur_ip);
     handle_self_conn(&endpoint_id, &net_conn_map, &slave_sender);
 
-    // A pre-defined map of what tablets that each server should be managing.
+    // A pre-defined map of what tablets that each slave should be managing.
     // For now, we create all tablets for the current Slave during boot-time.
     let mut key_space_config = HashMap::new();
     key_space_config.insert(
@@ -185,13 +186,13 @@ fn main() {
 
     // Create the seed that this Slave uses for random number generation.
     // It's 16 bytes long, so we do (16 * slave_index + i) to make sure
-    // every element of the seed is different across all servers.
+    // every element of the seed is different across all slaves.
     let mut seed = [0; 16];
     for i in 0..16 {
         seed[i] = (16 * slave_index + i as u32) as u8;
     }
     // Create Slave RNG.
-    let mut rand_gen = Box::new(XorShiftRng::from_seed(seed));
+    let mut rng = Box::new(XorShiftRng::from_seed(seed));
 
     // Setup the Tablet.
     let mut tablet_map = HashMap::new();
@@ -200,9 +201,9 @@ fn main() {
         // Create the seed for the Tablet's RNG. We use the Slave's
         // RNG to create a random seed.
         let mut seed = [0; 16];
-        rand_gen.fill_bytes(&mut seed);
+        rng.fill_bytes(&mut seed);
         // Create Tablet RNG.
-        let rand_gen = Box::new(XorShiftRng::from_seed(seed));
+        let rng = Box::new(XorShiftRng::from_seed(seed));
 
         // Create mpsc queue for Slave-Tablet communication.
         let (tablet_sender, tablet_receiver) = mpsc::channel();
@@ -211,13 +212,13 @@ fn main() {
         // Start the Tablet Thread
         let net_conn_map = net_conn_map.clone();
         thread::spawn(move || {
-            start_tablet_thread(rand_gen, tablet_receiver, net_conn_map);
+            start_tablet_thread(RandGen { rng }, tablet_receiver, net_conn_map);
         });
     }
 
-    start_server_thread(
+    start_slave_thread(
         endpoint_id,
-        rand_gen,
+        RandGen { rng },
         slave_receiver,
         net_conn_map,
         tablet_map,

@@ -118,7 +118,7 @@ impl RelationalTablet {
             self.mvm.write(&mvm_key, val.clone(), timestamp).unwrap();
         }
 
-        return OK(());
+        return Ok(());
     }
 
     /// This function returns an error if the key doesn't conform

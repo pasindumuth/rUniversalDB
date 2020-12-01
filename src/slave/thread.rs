@@ -1,3 +1,4 @@
+use crate::common::rand::RandGen;
 use crate::model::common::{EndpointId, TabletShape};
 use crate::model::message::SlaveMessage::Client;
 use crate::model::message::{SlaveMessage, TabletMessage};
@@ -7,9 +8,9 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-pub fn start_server_thread(
+pub fn start_slave_thread(
     cur_ip: EndpointId,
-    rand_gen: Box<dyn RngCore>,
+    rand_gen: RandGen,
     receiver: Receiver<(EndpointId, Vec<u8>)>,
     net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
     _tablet_map: HashMap<TabletShape, Sender<TabletMessage>>,

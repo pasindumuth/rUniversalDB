@@ -1,22 +1,77 @@
-use crate::model::common::{EndpointId, TabletShape};
+use crate::model::common::{ColumnValue, EndpointId, PrimaryKey, Row, TabletPath, TabletShape};
 use serde::{Deserialize, Serialize};
 
 /// These are PODs that are used for Threads to communicate with
 /// each other. This includes communication over the network, as
 /// well as across threads on the same machine.
 
-/// Message that go into the Slave's handler
+// -------------------------------------------------------------------------------------------------
+//  Admin messages
+// -------------------------------------------------------------------------------------------------
+
+/// Client Request
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ClientRequest {}
+
+/// Client Response
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ClientResponse {}
+
+/// Client Message
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ClientMessage {
+    Request(AdminRequest),
+    Response(AdminResponse),
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Admin messages
+// -------------------------------------------------------------------------------------------------
+/// These are message send by the Admin, for debugging,
+/// development, and testing.
+
+/// Admin Request
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum AdminRequest {
+    Insert {
+        path: TabletPath,
+        key: PrimaryKey,
+        value: Vec<Option<ColumnValue>>,
+    },
+    Read {
+        path: TabletPath,
+        key: PrimaryKey,
+    },
+}
+
+/// Admin Response
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum AdminResponse {
+    Insert { result: Result<(), String> },
+    Read { result: Result<Option<Row>, String> },
+}
+
+/// Admin Message
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AdminMessage {
-    Insert { key: String, value: String },
+    Request(AdminRequest),
+    Response(AdminResponse),
 }
+
+// -------------------------------------------------------------------------------------------------
+//  Slave Message
+// -------------------------------------------------------------------------------------------------
 
 /// Message that go into the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SlaveMessage {
     Client { msg: String },
-    Admin { msg: String },
+    Admin(AdminMessage),
 }
+
+// -------------------------------------------------------------------------------------------------
+//  Slave Message
+// -------------------------------------------------------------------------------------------------
 
 /// Message that go into the Tablet's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]

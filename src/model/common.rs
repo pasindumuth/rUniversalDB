@@ -64,7 +64,7 @@ pub struct Schema {
 
 /// A Row of a Relational Tablet. The reason for Option<ColumnValue> is that None
 /// represents the NULL value for a column.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub key: PrimaryKey,
     pub val: Vec<Option<ColumnValue>>,
