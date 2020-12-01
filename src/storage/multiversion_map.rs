@@ -44,6 +44,25 @@ where
         }
     }
 
+    /// Reads the version prior to the timestamp. This doesn't mutate
+    /// the lat if the read happens with a future timestamp.
+    pub fn static_read(&self, key: &K, timestamp: Timestamp) -> Option<V> {
+        if let Some((_, versions)) = self.map.get(key) {
+            MultiVersionMap::<K, V>::find_version(versions, timestamp)
+        } else {
+            None
+        }
+    }
+
+    /// Recall that abstractly, all keys are mapped to `(0, [])`
+    pub fn get_lat(&self, key: &K) -> Timestamp {
+        if let Some((lat, _)) = self.map.get(key) {
+            *lat
+        } else {
+            Timestamp(0)
+        }
+    }
+
     fn find_version(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> Option<V> {
         for (t, value) in versions.iter().rev() {
             if *t <= timestamp {

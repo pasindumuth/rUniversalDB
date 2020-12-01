@@ -1,26 +1,30 @@
 use crate::model::common::{EndpointId, TabletShape};
 use serde::{Deserialize, Serialize};
 
-// Message that go into the Slave's handler
+/// These are PODs that are used for Threads to communicate with
+/// each other. This includes communication over the network, as
+/// well as across threads on the same machine.
+
+/// Message that go into the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AdminMessage {
     Insert { key: String, value: String },
 }
 
-// Message that go into the Slave's handler
+/// Message that go into the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SlaveMessage {
     Client { msg: String },
     Admin { msg: String },
 }
 
-// Message that go into the Tablet's handler
+/// Message that go into the Tablet's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TabletMessage {
     Input { eid: EndpointId, msg: String },
 }
 
-// Message that come out of the Slave's handler
+/// Message that come out of the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SlaveActions {
     Forward {
@@ -33,7 +37,7 @@ pub enum SlaveActions {
     },
 }
 
-// Message that come out of the Tablet's handler
+/// Message that come out of the Tablet's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TabletActions {
     Send { eid: EndpointId, msg: SlaveMessage },
