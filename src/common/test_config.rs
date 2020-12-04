@@ -1,5 +1,4 @@
 use crate::model::common::{EndpointId, TabletKeyRange, TabletPath, TabletShape};
-use std::collections::HashMap;
 
 pub fn endpoint(eid: &str) -> EndpointId {
     EndpointId(String::from(eid))

@@ -197,13 +197,13 @@ mod tests {
             val: v3.clone(),
         };
 
-        assert!(tablet.insert_row(&row1, Timestamp(2)));
-        assert!(!tablet.insert_row(&row2, Timestamp(2)));
-        assert!(tablet.insert_row(&row3, Timestamp(3)));
+        assert!(tablet.insert_row(&row1, Timestamp(2)).is_ok());
+        assert!(!tablet.insert_row(&row2, Timestamp(2)).is_err());
+        assert!(tablet.insert_row(&row3, Timestamp(3)).is_ok());
         assert_eq!(tablet.read_row(&k, Timestamp(2)).unwrap().unwrap(), row1);
         assert_eq!(tablet.read_row(&k, Timestamp(4)).unwrap().unwrap(), row3);
-        assert!(!tablet.insert_row(&row4, Timestamp(4)));
-        assert!(tablet.insert_row(&row4, Timestamp(5)));
+        assert!(!tablet.insert_row(&row4, Timestamp(4)).is_err());
+        assert!(tablet.insert_row(&row4, Timestamp(5)).is_ok());
         assert_eq!(tablet.read_row(&k, Timestamp(6)).unwrap().unwrap(), row4);
     }
 }

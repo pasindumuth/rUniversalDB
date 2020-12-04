@@ -3,7 +3,6 @@ use crate::model::common::{EndpointId, TabletShape};
 use crate::model::message::SlaveMessage::Client;
 use crate::model::message::{SlaveMessage, TabletMessage};
 use crate::slave::slave::{handle_incoming_message, SideEffects, SlaveState};
-use rand::RngCore;
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};

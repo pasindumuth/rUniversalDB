@@ -1,7 +1,6 @@
 use crate::common::rand::RandGen;
 use crate::model::common::EndpointId;
 use crate::model::message::{TabletActions, TabletMessage};
-use rand::RngCore;
 
 #[derive(Debug)]
 pub struct SideEffects {

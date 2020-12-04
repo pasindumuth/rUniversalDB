@@ -1,5 +1,5 @@
 use rand::RngCore;
-use serde::export::fmt::{Debug, Error, Result};
+use serde::export::fmt::{Debug, Result};
 use serde::export::Formatter;
 
 pub struct RandGen {

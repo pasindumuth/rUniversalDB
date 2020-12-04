@@ -1,7 +1,6 @@
 use crate::model::common::EndpointId;
 use crate::model::message::TabletMessage;
 use crate::tablet::tablet::TabletState;
-use rand::RngCore;
 
 use crate::common::rand::RandGen;
 use std::collections::HashMap;

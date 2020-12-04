@@ -2,7 +2,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::rand::RandGen;
 use runiversal::common::test_config::{endpoint, table_shape};
-use runiversal::model::common::{EndpointId, TabletKeyRange, TabletPath, TabletShape};
+use runiversal::model::common::{EndpointId};
 use runiversal::net::network::{recv, send};
 use runiversal::slave::thread::start_slave_thread;
 use runiversal::tablet::thread::start_tablet_thread;
