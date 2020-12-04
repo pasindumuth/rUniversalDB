@@ -1,6 +1,7 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::rand::RandGen;
+use runiversal::common::test_config::{endpoint, table_shape};
 use runiversal::model::common::{EndpointId, TabletKeyRange, TabletPath, TabletShape};
 use runiversal::net::network::{recv, send};
 use runiversal::slave::thread::start_slave_thread;
@@ -31,22 +32,6 @@ use std::thread;
 /// Instead, we have one auxiliary thread, called the Self Connection
 /// Thread, which takes packets that are sent out of Server Thread and
 /// immediately feeds it back in.
-
-fn endpoint(eid: &str) -> EndpointId {
-    EndpointId(String::from(eid))
-}
-
-fn table_shape(path: &str, start: Option<&str>, end: Option<&str>) -> TabletShape {
-    TabletShape {
-        path: TabletPath {
-            path: String::from(path),
-        },
-        range: TabletKeyRange {
-            start: start.map(|start| String::from(start)),
-            end: end.map(|end| String::from(end)),
-        },
-    }
-}
 
 const SERVER_PORT: u32 = 1610;
 

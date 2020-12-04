@@ -2,7 +2,7 @@ use crate::common::rand::RandGen;
 use crate::model::common::{EndpointId, TabletShape};
 use crate::model::message::SlaveMessage::Client;
 use crate::model::message::{SlaveMessage, TabletMessage};
-use crate::slave::slave::{handle_incoming_message, ServerState, SideEffects};
+use crate::slave::slave::{handle_incoming_message, SideEffects, SlaveState};
 use rand::RngCore;
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
@@ -15,7 +15,7 @@ pub fn start_slave_thread(
     net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
     _tablet_map: HashMap<TabletShape, Sender<TabletMessage>>,
 ) {
-    let state = ServerState { rand_gen };
+    let state = SlaveState { rand_gen };
 
     // Start Server Thread
     println!("Starting Server {:?}", cur_ip);

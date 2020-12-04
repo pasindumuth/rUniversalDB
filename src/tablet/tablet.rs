@@ -13,6 +13,12 @@ pub struct TabletState {
     pub rand_gen: RandGen,
 }
 
+impl TabletState {
+    pub fn new(rand_gen: RandGen) -> TabletState {
+        TabletState { rand_gen: rand_gen }
+    }
+}
+
 pub fn handle_incoming_message(
     _side_effects: &SideEffects,
     _state: &TabletState,
