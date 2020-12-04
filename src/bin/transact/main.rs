@@ -2,7 +2,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::rand::RandGen;
 use runiversal::common::test_config::{endpoint, table_shape};
-use runiversal::model::common::{EndpointId};
+use runiversal::model::common::EndpointId;
 use runiversal::net::network::{recv, send};
 use runiversal::slave::thread::start_slave_thread;
 use runiversal::tablet::thread::start_tablet_thread;
@@ -196,8 +196,9 @@ fn main() {
 
         // Start the Tablet Thread
         let net_conn_map = net_conn_map.clone();
+        let tablet_shape = tablet_shape.clone();
         thread::spawn(move || {
-            start_tablet_thread(RandGen { rng }, tablet_receiver, net_conn_map);
+            start_tablet_thread(tablet_shape, RandGen { rng }, tablet_receiver, net_conn_map);
         });
     }
 

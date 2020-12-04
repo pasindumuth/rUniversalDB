@@ -81,19 +81,21 @@ pub enum TabletMessage {
 
 /// Message that come out of the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum SlaveActions {
+pub enum SlaveAction {
     Forward {
         shape: TabletShape,
         msg: TabletMessage,
     },
     Send {
+        /// Endpoint to send the message to.
         eid: EndpointId,
+        /// The message to send.
         msg: SlaveMessage,
     },
 }
 
 /// Message that come out of the Tablet's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum TabletActions {
+pub enum TabletAction {
     Send { eid: EndpointId, msg: SlaveMessage },
 }
