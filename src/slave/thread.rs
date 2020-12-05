@@ -7,37 +7,37 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 pub fn start_slave_thread(
-    this_eid: EndpointId,
-    rand_gen: RandGen,
-    receiver: Receiver<(EndpointId, Vec<u8>)>,
-    net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
-    tablet_map: HashMap<TabletShape, Sender<TabletMessage>>,
+  this_eid: EndpointId,
+  rand_gen: RandGen,
+  receiver: Receiver<(EndpointId, Vec<u8>)>,
+  net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
+  tablet_map: HashMap<TabletShape, Sender<TabletMessage>>,
 ) {
-    let mut state = SlaveState::new(rand_gen, this_eid.clone());
-    println!("Starting Slave Thread {:?}", this_eid);
-    loop {
-        // Receive the data.
-        let (endpoint_id, data) = receiver.recv().unwrap();
-        let msg: SlaveMessage = rmp_serde::from_read_ref(&data).unwrap();
-        println!("Recieved message: {:?}", msg);
+  let mut state = SlaveState::new(rand_gen, this_eid.clone());
+  println!("Starting Slave Thread {:?}", this_eid);
+  loop {
+    // Receive the data.
+    let (endpoint_id, data) = receiver.recv().unwrap();
+    let msg: SlaveMessage = rmp_serde::from_read_ref(&data).unwrap();
+    println!("Recieved message: {:?}", msg);
 
-        // Handle the incoming message.
-        let mut side_effects = SlaveSideEffects::new();
-        state.handle_incoming_message(&mut side_effects, &endpoint_id, msg);
+    // Handle the incoming message.
+    let mut side_effects = SlaveSideEffects::new();
+    state.handle_incoming_message(&mut side_effects, &endpoint_id, msg);
 
-        // Interpret the actions and perform the necessary
-        // side effectful operations.
-        for action in side_effects.actions {
-            match action {
-                SlaveAction::Send { eid, msg } => {
-                    let net_conn_map = net_conn_map.lock().unwrap();
-                    let sender = net_conn_map.get(&eid).unwrap();
-                    sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
-                }
-                SlaveAction::Forward { shape, msg } => {
-                    tablet_map.get(&shape).unwrap().send(msg).unwrap();
-                }
-            }
+    // Interpret the actions and perform the necessary
+    // side effectful operations.
+    for action in side_effects.actions {
+      match action {
+        SlaveAction::Send { eid, msg } => {
+          let net_conn_map = net_conn_map.lock().unwrap();
+          let sender = net_conn_map.get(&eid).unwrap();
+          sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
         }
+        SlaveAction::Forward { shape, msg } => {
+          tablet_map.get(&shape).unwrap().send(msg).unwrap();
+        }
+      }
     }
+  }
 }

@@ -3,5 +3,5 @@
 /// I can already use.
 
 pub fn rvec(i: i32, j: i32) -> Vec<i32> {
-    (i..j).collect()
+  (i..j).collect()
 }

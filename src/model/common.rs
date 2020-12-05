@@ -10,36 +10,36 @@ use serde::{Deserialize, Serialize};
 /// A global identifier of a Tablet (across tables and databases).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TabletPath {
-    pub path: String,
+  pub path: String,
 }
 
 /// The key range that a tablet manages.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TabletKeyRange {
-    pub start: Option<String>,
-    pub end: Option<String>,
+  pub start: Option<String>,
+  pub end: Option<String>,
 }
 
 /// A global identifier for a tablet.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TabletShape {
-    pub path: TabletPath,
-    pub range: TabletKeyRange,
+  pub path: TabletPath,
+  pub range: TabletKeyRange,
 }
 
 /// The types that the columns of a Relational Tablet can take on.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
-    Int,
-    String,
+  Int,
+  String,
 }
 
 /// The values that the columns of a Relational Tablet can take on.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ColumnValue {
-    Int(i32),
-    String(String),
-    Unit,
+  Int(i32),
+  String(String),
+  Unit,
 }
 
 /// The name of a column.
@@ -50,7 +50,7 @@ pub struct ColumnName(pub String);
 /// Vec<Option<ColumnValue>> because values of a key column can't be NULL.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrimaryKey {
-    pub cols: Vec<ColumnValue>,
+  pub cols: Vec<ColumnValue>,
 }
 
 /// The Schema of a Relational Tablet. This stays constant throughout the lifetime
@@ -58,16 +58,16 @@ pub struct PrimaryKey {
 /// we implement that by creating a new Relational Tablet.
 #[derive(Debug, Clone)]
 pub struct Schema {
-    pub key_cols: Vec<(ColumnType, ColumnName)>,
-    pub val_cols: Vec<(ColumnType, ColumnName)>,
+  pub key_cols: Vec<(ColumnType, ColumnName)>,
+  pub val_cols: Vec<(ColumnType, ColumnName)>,
 }
 
 /// A Row of a Relational Tablet. The reason for Option<ColumnValue> is that None
 /// represents the NULL value for a column.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    pub key: PrimaryKey,
-    pub val: Vec<Option<ColumnValue>>,
+  pub key: PrimaryKey,
+  pub val: Vec<Option<ColumnValue>>,
 }
 
 // -------------------------------------------------------------------------------------------------

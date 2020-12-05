@@ -20,8 +20,8 @@ pub enum ClientResponse {}
 /// Client Message
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientMessage {
-    Request(AdminRequest),
-    Response(AdminResponse),
+  Request(AdminRequest),
+  Response(AdminResponse),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -33,29 +33,29 @@ pub enum ClientMessage {
 /// Admin Request
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AdminRequest {
-    Insert {
-        path: TabletPath,
-        key: PrimaryKey,
-        value: Vec<Option<ColumnValue>>,
-    },
-    Read {
-        path: TabletPath,
-        key: PrimaryKey,
-    },
+  Insert {
+    path: TabletPath,
+    key: PrimaryKey,
+    value: Vec<Option<ColumnValue>>,
+  },
+  Read {
+    path: TabletPath,
+    key: PrimaryKey,
+  },
 }
 
 /// Admin Response
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AdminResponse {
-    Insert { result: Result<(), String> },
-    Read { result: Result<Option<Row>, String> },
+  Insert { result: Result<(), String> },
+  Read { result: Result<Option<Row>, String> },
 }
 
 /// Admin Message
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AdminMessage {
-    Request(AdminRequest),
-    Response(AdminResponse),
+  Request(AdminRequest),
+  Response(AdminResponse),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -65,8 +65,8 @@ pub enum AdminMessage {
 /// Message that go into the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SlaveMessage {
-    Client(ClientMessage),
-    Admin(AdminMessage),
+  Client(ClientMessage),
+  Admin(AdminMessage),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -76,26 +76,26 @@ pub enum SlaveMessage {
 /// Message that go into the Tablet's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TabletMessage {
-    Input { eid: EndpointId, msg: String },
+  Input { eid: EndpointId, msg: String },
 }
 
 /// Message that come out of the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SlaveAction {
-    Forward {
-        shape: TabletShape,
-        msg: TabletMessage,
-    },
-    Send {
-        /// Endpoint to send the message to.
-        eid: EndpointId,
-        /// The message to send.
-        msg: SlaveMessage,
-    },
+  Forward {
+    shape: TabletShape,
+    msg: TabletMessage,
+  },
+  Send {
+    /// Endpoint to send the message to.
+    eid: EndpointId,
+    /// The message to send.
+    msg: SlaveMessage,
+  },
 }
 
 /// Message that come out of the Tablet's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TabletAction {
-    Send { eid: EndpointId, msg: SlaveMessage },
+  Send { eid: EndpointId, msg: SlaveMessage },
 }

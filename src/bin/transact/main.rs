@@ -36,177 +36,178 @@ use std::thread;
 const SERVER_PORT: u32 = 1610;
 
 fn handle_conn(
-    net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
-    slave_sender: &Sender<(EndpointId, Vec<u8>)>,
-    stream: TcpStream,
+  net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
+  slave_sender: &Sender<(EndpointId, Vec<u8>)>,
+  stream: TcpStream,
 ) -> EndpointId {
-    let endpoint_id = EndpointId(stream.peer_addr().unwrap().ip().to_string());
+  let endpoint_id = EndpointId(stream.peer_addr().unwrap().ip().to_string());
 
-    // Setup Receiving Thread
-    {
-        let slave_sender = slave_sender.clone();
-        let endpoint_id = endpoint_id.clone();
-        let stream = stream.try_clone().unwrap();
-        thread::spawn(move || loop {
-            let val_in = recv(&stream);
-            slave_sender.send((endpoint_id.clone(), val_in)).unwrap();
-        });
-    }
-
-    // Used like a Single-Producer-Single-Consumer queue, where Server Thread
-    // is the producer, the Sending Thread is the consumer.
-    let (slave_sender, receiver) = mpsc::channel();
-    // Add slave_sender of the SPSC to the net_conn_map so the Server Thread can access it.
-    let mut net_conn_map = net_conn_map.lock().unwrap();
-    net_conn_map.insert(endpoint_id.clone(), slave_sender);
-
-    // Setup Sending Thread
+  // Setup Receiving Thread
+  {
+    let slave_sender = slave_sender.clone();
+    let endpoint_id = endpoint_id.clone();
+    let stream = stream.try_clone().unwrap();
     thread::spawn(move || loop {
-        let data_out = receiver.recv().unwrap();
-        send(&data_out, &stream);
+      let val_in = recv(&stream);
+      slave_sender.send((endpoint_id.clone(), val_in)).unwrap();
     });
+  }
 
-    return endpoint_id;
+  // Used like a Single-Producer-Single-Consumer queue, where Server Thread
+  // is the producer, the Sending Thread is the consumer.
+  let (slave_sender, receiver) = mpsc::channel();
+  // Add slave_sender of the SPSC to the net_conn_map so the Server Thread can access it.
+  let mut net_conn_map = net_conn_map.lock().unwrap();
+  net_conn_map.insert(endpoint_id.clone(), slave_sender);
+
+  // Setup Sending Thread
+  thread::spawn(move || loop {
+    let data_out = receiver.recv().unwrap();
+    send(&data_out, &stream);
+  });
+
+  return endpoint_id;
 }
 
 fn handle_self_conn(
-    endpoint_id: &EndpointId,
-    net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
-    slave_sender: &Sender<(EndpointId, Vec<u8>)>,
+  endpoint_id: &EndpointId,
+  net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
+  slave_sender: &Sender<(EndpointId, Vec<u8>)>,
 ) {
-    // Used like a Single-Producer-Single-Consumer queue, where Server Thread
-    // is the producer, the Sending Thread is the consumer.
-    let (sender, receiver) = mpsc::channel();
-    // Add sender of the SPSC to the net_conn_map so the Server Thread can access it.
-    let mut net_conn_map = net_conn_map.lock().unwrap();
-    net_conn_map.insert(endpoint_id.clone(), sender);
+  // Used like a Single-Producer-Single-Consumer queue, where Server Thread
+  // is the producer, the Sending Thread is the consumer.
+  let (sender, receiver) = mpsc::channel();
+  // Add sender of the SPSC to the net_conn_map so the Server Thread can access it.
+  let mut net_conn_map = net_conn_map.lock().unwrap();
+  net_conn_map.insert(endpoint_id.clone(), sender);
 
-    // Setup Sending Thread
-    let slave_sender = slave_sender.clone();
-    let endpoint_id = endpoint_id.clone();
-    thread::spawn(move || loop {
-        let data = receiver.recv().unwrap();
-        slave_sender.send((endpoint_id.clone(), data)).unwrap();
-    });
+  // Setup Sending Thread
+  let slave_sender = slave_sender.clone();
+  let endpoint_id = endpoint_id.clone();
+  thread::spawn(move || loop {
+    let data = receiver.recv().unwrap();
+    slave_sender.send((endpoint_id.clone(), data)).unwrap();
+  });
 }
 
 fn main() {
-    let mut args: LinkedList<String> = env::args().collect();
+  let mut args: LinkedList<String> = env::args().collect();
 
-    // Removes the program name argument.
-    args.pop_front();
-    // This remove the seed for now.
-    let slave_index = args
-        .pop_front()
-        .expect("A slave index should be provided.")
-        .parse::<u32>()
-        .expect("The slave index couldn't be parsed as a string.");
-    let cur_ip = args
-        .pop_front()
-        .expect("The endpoint_id of the current slave should be provided.");
+  // Removes the program name argument.
+  args.pop_front();
+  // This remove the seed for now.
+  let slave_index = args
+    .pop_front()
+    .expect("A slave index should be provided.")
+    .parse::<u32>()
+    .expect("The slave index couldn't be parsed as a string.");
+  let cur_ip = args
+    .pop_front()
+    .expect("The endpoint_id of the current slave should be provided.");
 
-    // The mpsc channel for sending data to the Server Thread
-    let (slave_sender, slave_receiver) = mpsc::channel();
-    // The map mapping the IP addresses to a mpsc Sender object, used to
-    // communicate with the Sender Threads to send data out.
-    let net_conn_map = Arc::new(Mutex::new(HashMap::new()));
+  // The mpsc channel for sending data to the Server Thread
+  let (slave_sender, slave_receiver) = mpsc::channel();
+  // The map mapping the IP addresses to a mpsc Sender object, used to
+  // communicate with the Sender Threads to send data out.
+  let net_conn_map = Arc::new(Mutex::new(HashMap::new()));
 
-    // Start the Accepting Thread
-    {
-        let sender = slave_sender.clone();
-        let net_conn_map = net_conn_map.clone();
-        let cur_ip = cur_ip.clone();
-        thread::spawn(move || {
-            let listener = TcpListener::bind(format!("{}:{}", &cur_ip, SERVER_PORT)).unwrap();
-            for stream in listener.incoming() {
-                let stream = stream.unwrap();
-                let endpoint_id = handle_conn(&net_conn_map, &sender, stream);
-                println!("Connected from: {:?}", endpoint_id);
-            }
-        });
-    }
+  // Start the Accepting Thread
+  {
+    let sender = slave_sender.clone();
+    let net_conn_map = net_conn_map.clone();
+    let cur_ip = cur_ip.clone();
+    thread::spawn(move || {
+      let listener = TcpListener::bind(format!("{}:{}", &cur_ip, SERVER_PORT)).unwrap();
+      for stream in listener.incoming() {
+        let stream = stream.unwrap();
+        let endpoint_id = handle_conn(&net_conn_map, &sender, stream);
+        println!("Connected from: {:?}", endpoint_id);
+      }
+    });
+  }
 
-    // Connect to other IPs
-    for ip in args {
-        let stream = TcpStream::connect(format!("{}:{}", ip, SERVER_PORT));
-        let endpoint_id = handle_conn(&net_conn_map, &slave_sender, stream.unwrap());
-        println!("Connected to: {:?}", endpoint_id);
-    }
+  // Connect to other IPs
+  for ip in args {
+    let stream = TcpStream::connect(format!("{}:{}", ip, SERVER_PORT));
+    let endpoint_id = handle_conn(&net_conn_map, &slave_sender, stream.unwrap());
+    println!("Connected to: {:?}", endpoint_id);
+  }
 
-    // Handle self-connection
-    let endpoint_id = EndpointId(cur_ip);
-    handle_self_conn(&endpoint_id, &net_conn_map, &slave_sender);
+  // Handle self-connection
+  let endpoint_id = EndpointId(cur_ip);
+  handle_self_conn(&endpoint_id, &net_conn_map, &slave_sender);
 
-    // A pre-defined map of what tablets that each slave should be managing.
-    // For now, we create all tablets for the current Slave during boot-time.
-    let mut key_space_config = HashMap::new();
-    key_space_config.insert(
-        endpoint("172.19.0.3"),
-        vec![table_shape("table1", None, None)],
-    );
-    key_space_config.insert(
-        endpoint("172.19.0.4"),
-        vec![table_shape("table2", None, Some("j"))],
-    );
-    key_space_config.insert(
-        endpoint("172.19.0.5"),
-        vec![
-            table_shape("table2", Some("j"), None),
-            table_shape("table3", None, Some("d")),
-            table_shape("table4", None, Some("k")),
-        ],
-    );
-    key_space_config.insert(
-        endpoint("172.19.0.6"),
-        vec![table_shape("table3", Some("d"), Some("p"))],
-    );
-    key_space_config.insert(
-        endpoint("172.19.0.7"),
-        vec![
-            table_shape("table3", Some("p"), None),
-            table_shape("table4", Some("k"), None),
-        ],
-    );
-    let key_space_config = key_space_config;
+  // A pre-defined map of what tablets that each slave should be managing.
+  // For now, we create all tablets for the current Slave during boot-time.
+  let mut key_space_config = HashMap::new();
+  key_space_config.insert(
+    endpoint("172.19.0.3"),
+    vec![table_shape("table1", None, None)],
+  );
+  key_space_config.insert(
+    endpoint("172.19.0.4"),
+    vec![table_shape("table2", None, Some("j"))],
+  );
+  key_space_config.insert(
+    endpoint("172.19.0.5"),
+    vec![
+      table_shape("table2", Some("j"), None),
+      table_shape("table3", None, Some("d")),
+      table_shape("table4", None, Some("k")),
+    ],
+  );
+  key_space_config.insert(
+    endpoint("172.19.0.6"),
+    vec![table_shape("table3", Some("d"), Some("p"))],
+  );
+  key_space_config.insert(
+    endpoint("172.19.0.7"),
+    vec![
+      table_shape("table3", Some("p"), None),
+      table_shape("table4", Some("k"), None),
+    ],
+  );
+  let key_space_config = key_space_config;
 
-    // Create the seed that this Slave uses for random number generation.
-    // It's 16 bytes long, so we do (16 * slave_index + i) to make sure
-    // every element of the seed is different across all slaves.
+  // Create the seed that this Slave uses for random number generation.
+  // It's 16 bytes long, so we do (16 * slave_index + i) to make sure
+  // every element of the seed is different across all slaves.
+  let mut seed = [0; 16];
+
+  for i in 0..16 {
+    seed[i] = (16 * slave_index + i as u32) as u8;
+  }
+  // Create Slave RNG.
+  let mut rng = Box::new(XorShiftRng::from_seed(seed));
+
+  // Setup the Tablet.
+  let mut tablet_map = HashMap::new();
+
+  for tablet_shape in key_space_config.get(&endpoint_id).unwrap() {
+    // Create the seed for the Tablet's RNG. We use the Slave's
+    // RNG to create a random seed.
     let mut seed = [0; 16];
-    for i in 0..16 {
-        seed[i] = (16 * slave_index + i as u32) as u8;
-    }
-    // Create Slave RNG.
-    let mut rng = Box::new(XorShiftRng::from_seed(seed));
+    rng.fill_bytes(&mut seed);
+    // Create Tablet RNG.
+    let rng = Box::new(XorShiftRng::from_seed(seed));
 
-    // Setup the Tablet.
-    let mut tablet_map = HashMap::new();
+    // Create mpsc queue for Slave-Tablet communication.
+    let (tablet_sender, tablet_receiver) = mpsc::channel();
+    tablet_map.insert(tablet_shape.clone(), tablet_sender);
 
-    for tablet_shape in key_space_config.get(&endpoint_id).unwrap() {
-        // Create the seed for the Tablet's RNG. We use the Slave's
-        // RNG to create a random seed.
-        let mut seed = [0; 16];
-        rng.fill_bytes(&mut seed);
-        // Create Tablet RNG.
-        let rng = Box::new(XorShiftRng::from_seed(seed));
+    // Start the Tablet Thread
+    let net_conn_map = net_conn_map.clone();
+    let tablet_shape = tablet_shape.clone();
+    thread::spawn(move || {
+      start_tablet_thread(tablet_shape, RandGen { rng }, tablet_receiver, net_conn_map);
+    });
+  }
 
-        // Create mpsc queue for Slave-Tablet communication.
-        let (tablet_sender, tablet_receiver) = mpsc::channel();
-        tablet_map.insert(tablet_shape.clone(), tablet_sender);
-
-        // Start the Tablet Thread
-        let net_conn_map = net_conn_map.clone();
-        let tablet_shape = tablet_shape.clone();
-        thread::spawn(move || {
-            start_tablet_thread(tablet_shape, RandGen { rng }, tablet_receiver, net_conn_map);
-        });
-    }
-
-    start_slave_thread(
-        endpoint_id,
-        RandGen { rng },
-        slave_receiver,
-        net_conn_map,
-        tablet_map,
-    );
+  start_slave_thread(
+    endpoint_id,
+    RandGen { rng },
+    slave_receiver,
+    net_conn_map,
+    tablet_map,
+  );
 }

@@ -7,32 +7,32 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 pub fn start_tablet_thread(
-    this_shape: TabletShape,
-    rand_gen: RandGen,
-    receiver: Receiver<TabletMessage>,
-    net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
+  this_shape: TabletShape,
+  rand_gen: RandGen,
+  receiver: Receiver<TabletMessage>,
+  net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
 ) {
-    let mut state = TabletState::new(rand_gen, this_shape.clone());
-    println!("Starting Tablet Thread {:?}", this_shape);
-    loop {
-        // Receive the Tablet message.
-        let msg = receiver.recv().unwrap();
-        println!("Recieved message: {:?}", msg);
+  let mut state = TabletState::new(rand_gen, this_shape.clone());
+  println!("Starting Tablet Thread {:?}", this_shape);
+  loop {
+    // Receive the Tablet message.
+    let msg = receiver.recv().unwrap();
+    println!("Recieved message: {:?}", msg);
 
-        // Handle the incoming message.
-        let mut side_effects = TabletSideEffects::new();
-        state.handle_incoming_message(&mut side_effects, msg);
+    // Handle the incoming message.
+    let mut side_effects = TabletSideEffects::new();
+    state.handle_incoming_message(&mut side_effects, msg);
 
-        // Interpret the actions and perform the necessary
-        // side effectful operations.
-        for action in side_effects.actions {
-            match action {
-                TabletAction::Send { eid, msg } => {
-                    let net_conn_map = net_conn_map.lock().unwrap();
-                    let sender = net_conn_map.get(&eid).unwrap();
-                    sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
-                }
-            }
+    // Interpret the actions and perform the necessary
+    // side effectful operations.
+    for action in side_effects.actions {
+      match action {
+        TabletAction::Send { eid, msg } => {
+          let net_conn_map = net_conn_map.lock().unwrap();
+          let sender = net_conn_map.get(&eid).unwrap();
+          sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
         }
+      }
     }
+  }
 }
