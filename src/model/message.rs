@@ -1,4 +1,6 @@
-use crate::model::common::{ColumnValue, EndpointId, PrimaryKey, Row, TabletPath, TabletShape};
+use crate::model::common::{
+  ColumnValue, EndpointId, PrimaryKey, Row, TabletPath, TabletShape, Timestamp,
+};
 use serde::{Deserialize, Serialize};
 
 /// These are PODs that are used for Threads to communicate with
@@ -20,8 +22,8 @@ pub enum ClientResponse {}
 /// Client Message
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientMessage {
-  Request(AdminRequest),
-  Response(AdminResponse),
+  Request(ClientRequest),
+  Response(ClientResponse),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -37,10 +39,12 @@ pub enum AdminRequest {
     path: TabletPath,
     key: PrimaryKey,
     value: Vec<Option<ColumnValue>>,
+    timestamp: Timestamp,
   },
   Read {
     path: TabletPath,
     key: PrimaryKey,
+    timestamp: Timestamp,
   },
 }
 
@@ -73,10 +77,15 @@ pub enum SlaveMessage {
 //  Miscellaneous
 // -------------------------------------------------------------------------------------------------
 
-/// Message that go into the Tablet's handler
+/// Message that go into the Tablet's handler.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum TabletMessage {
-  Input { eid: EndpointId, msg: String },
+  Input {
+    /// The endpoint that send the message
+    eid: EndpointId,
+    /// The message that was sent.
+    msg: SlaveMessage,
+  },
 }
 
 /// Message that come out of the Slave's handler

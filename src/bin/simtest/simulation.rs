@@ -2,7 +2,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::lang::rvec;
 use runiversal::common::rand::RandGen;
-use runiversal::model::common::{EndpointId, TabletShape};
+use runiversal::model::common::{EndpointId, Schema, TabletShape};
 use runiversal::model::message::{SlaveAction, SlaveMessage, TabletAction, TabletMessage};
 use runiversal::slave::slave::{SlaveSideEffects, SlaveState};
 use runiversal::tablet::tablet::{TabletSideEffects, TabletState};
@@ -39,6 +39,7 @@ fn client_id(i: &i32) -> EndpointId {
 impl Simulation {
   pub fn new(
     seed: [u8; 16],
+    static_schema: Schema,
     key_space_config: HashMap<EndpointId, Vec<TabletShape>>,
     num_clients: i32,
   ) -> Simulation {
@@ -89,6 +90,7 @@ impl Simulation {
               rng: Box::new(XorShiftRng::from_seed(seed)),
             },
             shape.clone(),
+            static_schema.clone(),
           ),
         );
         tablet_states.insert(eid.clone(), slave_tablet_states);

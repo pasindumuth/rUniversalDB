@@ -13,11 +13,14 @@ pub struct TabletPath {
   pub path: String,
 }
 
-/// The key range that a tablet manages.
+/// The key range that a tablet manages. The `start` and `end` are
+/// PrimaryKey types, which are convenient for splitting the key-space.
+/// If either `start` or `end` is `None`, that means there is no bound
+/// for that direction.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TabletKeyRange {
-  pub start: Option<String>,
-  pub end: Option<String>,
+  pub start: Option<PrimaryKey>,
+  pub end: Option<PrimaryKey>,
 }
 
 /// A global identifier for a tablet.

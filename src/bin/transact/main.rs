@@ -2,7 +2,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::rand::RandGen;
 use runiversal::common::test_config::{endpoint, table_shape};
-use runiversal::model::common::EndpointId;
+use runiversal::model::common::{ColumnName, ColumnType, EndpointId, Schema};
 use runiversal::net::network::{recv, send};
 use runiversal::slave::thread::start_slave_thread;
 use runiversal::tablet::thread::start_tablet_thread;
@@ -169,6 +169,12 @@ fn main() {
   );
   let key_space_config = key_space_config;
 
+  // The above map was constructed assuming this predefined schema:
+  let static_schema = Schema {
+    key_cols: vec![(ColumnType::String, ColumnName(String::from("key")))],
+    val_cols: vec![(ColumnType::Int, ColumnName(String::from("value")))],
+  };
+
   // Create the seed that this Slave uses for random number generation.
   // It's 16 bytes long, so we do (16 * slave_index + i) to make sure
   // every element of the seed is different across all slaves.
@@ -199,7 +205,13 @@ fn main() {
     let net_conn_map = net_conn_map.clone();
     let tablet_shape = tablet_shape.clone();
     thread::spawn(move || {
-      start_tablet_thread(tablet_shape, RandGen { rng }, tablet_receiver, net_conn_map);
+      start_tablet_thread(
+        tablet_shape,
+        static_schema.clone(),
+        RandGen { rng },
+        tablet_receiver,
+        net_conn_map,
+      );
     });
   }
 

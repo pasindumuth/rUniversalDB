@@ -1,6 +1,8 @@
 use crate::common::rand::RandGen;
-use crate::model::common::{Schema, TabletShape};
-use crate::model::message::{SlaveMessage, TabletAction, TabletMessage};
+use crate::model::common::{Row, Schema, TabletShape, Timestamp};
+use crate::model::message::{
+  AdminMessage, AdminRequest, AdminResponse, SlaveMessage, TabletAction, TabletMessage,
+};
 use crate::storage::relational_tablet::RelationalTablet;
 
 #[derive(Debug)]
@@ -28,11 +30,7 @@ pub struct TabletState {
 }
 
 impl TabletState {
-  pub fn new(rand_gen: RandGen, this_shape: TabletShape) -> TabletState {
-    let schema = Schema {
-      key_cols: Vec::new(),
-      val_cols: Vec::new(),
-    };
+  pub fn new(rand_gen: RandGen, this_shape: TabletShape, schema: Schema) -> TabletState {
     TabletState {
       rand_gen,
       this_shape,
@@ -42,9 +40,42 @@ impl TabletState {
 
   pub fn handle_incoming_message(
     &mut self,
-    _side_effects: &mut TabletSideEffects,
+    side_effects: &mut TabletSideEffects,
     msg: TabletMessage,
   ) {
     println!("msg: {:?}", msg);
+    match msg {
+      TabletMessage::Input {
+        eid,
+        msg: slave_msg,
+      } => match slave_msg {
+        SlaveMessage::Admin(admin_msg) => match admin_msg {
+          AdminMessage::Request(admin_request) => {
+            match admin_request {
+              AdminRequest::Insert {
+                key,
+                value,
+                timestamp,
+                ..
+              } => {
+                let row = Row { key, val: value };
+                self.relational_tablet.insert_row(&row, timestamp);
+              }
+              AdminRequest::Read { key, timestamp, .. } => {
+                let result = self.relational_tablet.read_row(&key, timestamp);
+                let read_res = AdminResponse::Read { result };
+                let admin_res = AdminMessage::Response(read_res);
+                side_effects.add(TabletAction::Send {
+                  eid,
+                  msg: SlaveMessage::Admin(admin_res),
+                });
+              }
+            };
+          }
+          AdminMessage::Response(_) => panic!("Admin should never send a response here."),
+        },
+        SlaveMessage::Client(_) => panic!("Can't handle client messages yet."),
+      },
+    }
   }
 }

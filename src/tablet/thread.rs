@@ -1,5 +1,5 @@
 use crate::common::rand::RandGen;
-use crate::model::common::{EndpointId, TabletShape};
+use crate::model::common::{EndpointId, Schema, TabletShape};
 use crate::model::message::{TabletAction, TabletMessage};
 use crate::tablet::tablet::{TabletSideEffects, TabletState};
 use std::collections::HashMap;
@@ -8,11 +8,12 @@ use std::sync::{Arc, Mutex};
 
 pub fn start_tablet_thread(
   this_shape: TabletShape,
+  static_schema: Schema,
   rand_gen: RandGen,
   receiver: Receiver<TabletMessage>,
   net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
 ) {
-  let mut state = TabletState::new(rand_gen, this_shape.clone());
+  let mut state = TabletState::new(rand_gen, this_shape.clone(), static_schema);
   println!("Starting Tablet Thread {:?}", this_shape);
   loop {
     // Receive the Tablet message.
