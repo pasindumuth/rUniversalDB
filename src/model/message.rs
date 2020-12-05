@@ -65,12 +65,12 @@ pub enum AdminMessage {
 /// Message that go into the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SlaveMessage {
-    Client { msg: String },
+    Client(ClientMessage),
     Admin(AdminMessage),
 }
 
 // -------------------------------------------------------------------------------------------------
-//  Slave Message
+//  Miscellaneous
 // -------------------------------------------------------------------------------------------------
 
 /// Message that go into the Tablet's handler

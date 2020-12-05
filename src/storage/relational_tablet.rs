@@ -16,6 +16,7 @@ use crate::storage::multiversion_map::MultiVersionMap;
 /// Value Column - A column of a non-Primary Key column when a given
 ///                Row is understood.
 
+#[derive(Debug)]
 pub struct RelationalTablet {
     mvm: MultiVersionMap<(PrimaryKey, Option<ColumnName>), ColumnValue>,
     schema: Schema,

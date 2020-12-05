@@ -3,6 +3,7 @@ use std::cmp::max;
 use std::collections::HashMap;
 use std::hash::Hash;
 
+#[derive(Debug)]
 pub struct MultiVersionMap<K, V> {
     pub map: HashMap<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>,
 }

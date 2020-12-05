@@ -1,6 +1,7 @@
 use crate::common::rand::RandGen;
-use crate::model::common::EndpointId;
-use crate::model::message::{SlaveAction, SlaveMessage};
+use crate::model::common::{EndpointId, Schema};
+use crate::model::message::{AdminMessage, AdminRequest, SlaveAction, SlaveMessage};
+use crate::storage::relational_tablet::RelationalTablet;
 
 #[derive(Debug)]
 pub struct SlaveSideEffects {
@@ -35,14 +36,20 @@ impl SlaveState {
     /// operations that need to be done as a consequence.
     pub fn handle_incoming_message(
         &mut self,
-        side_effects: &mut SlaveSideEffects,
+        _side_effects: &mut SlaveSideEffects,
         from_eid: &EndpointId,
         msg: SlaveMessage,
     ) {
-        println!("eid: {:?}, msg: {:?}", from_eid, msg);
-        side_effects.add(SlaveAction::Send {
-            eid: from_eid.clone(),
-            msg,
-        });
+        println!("eid: {:?}, msg: {:?}", from_eid, &msg);
+        match msg {
+            SlaveMessage::Admin(msg) => match msg {
+                AdminMessage::Request(msg) => match msg {
+                    AdminRequest::Insert { path, key, value } => {}
+                    AdminRequest::Read { path, key } => {}
+                },
+                _ => panic!("Admin Response not supported yet."),
+            },
+            SlaveMessage::Client(_) => panic!("Client messages not supported yet."),
+        }
     }
 }

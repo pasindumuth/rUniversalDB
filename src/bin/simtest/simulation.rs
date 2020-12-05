@@ -222,7 +222,7 @@ impl Simulation {
         }
     }
 
-    fn simulateNms(&mut self, n: &i32) {
+    fn simulateNms(&mut self, n: i32) {
         for _ in 0..n {
             self.simulate1ms();
         }

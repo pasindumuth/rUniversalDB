@@ -1,6 +1,7 @@
 use crate::common::rand::RandGen;
-use crate::model::common::{TabletShape};
+use crate::model::common::{Schema, TabletShape};
 use crate::model::message::{SlaveMessage, TabletAction, TabletMessage};
+use crate::storage::relational_tablet::RelationalTablet;
 
 #[derive(Debug)]
 pub struct TabletSideEffects {
@@ -23,29 +24,27 @@ impl TabletSideEffects {
 pub struct TabletState {
     pub rand_gen: RandGen,
     pub this_shape: TabletShape,
+    pub relational_tablet: RelationalTablet,
 }
 
 impl TabletState {
     pub fn new(rand_gen: RandGen, this_shape: TabletShape) -> TabletState {
+        let schema = Schema {
+            key_cols: Vec::new(),
+            val_cols: Vec::new(),
+        };
         TabletState {
             rand_gen,
             this_shape,
+            relational_tablet: RelationalTablet::new(schema),
         }
     }
 
     pub fn handle_incoming_message(
         &mut self,
-        side_effects: &mut TabletSideEffects,
+        _side_effects: &mut TabletSideEffects,
         msg: TabletMessage,
     ) {
         println!("msg: {:?}", msg);
-        match msg {
-            TabletMessage::Input { eid, msg } => {
-                side_effects.add(TabletAction::Send {
-                    eid: eid.clone(),
-                    msg: SlaveMessage::Client { msg },
-                });
-            }
-        }
     }
 }
