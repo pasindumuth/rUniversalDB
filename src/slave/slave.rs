@@ -1,7 +1,8 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{EndpointId, Schema, TabletKeyRange, TabletPath, TabletShape};
-use crate::model::message::{AdminMessage, AdminRequest, SlaveAction, SlaveMessage, TabletMessage};
-use crate::storage::relational_tablet::RelationalTablet;
+use crate::model::message::{
+  AdminMessage, AdminPayload, AdminRequest, SlaveAction, SlaveMessage, TabletMessage,
+};
 
 #[derive(Debug)]
 pub struct SlaveSideEffects {
@@ -40,10 +41,9 @@ impl SlaveState {
     from_eid: &EndpointId,
     msg: SlaveMessage,
   ) {
-    println!("eid: {:?}, msg: {:?}", from_eid, &msg);
     match &msg {
-      SlaveMessage::Admin(admin_msg) => match admin_msg {
-        AdminMessage::Request(admin_request) => {
+      SlaveMessage::Admin(AdminMessage { payload, .. }) => match payload {
+        AdminPayload::Request(admin_request) => {
           let path = match admin_request {
             AdminRequest::Insert { path, .. } => path,
             AdminRequest::Read { path, .. } => path,
@@ -65,7 +65,7 @@ impl SlaveState {
             },
           });
         }
-        _ => panic!("Admin Response not supported yet."),
+        AdminPayload::Response(_) => panic!("Admin Response not supported yet."),
       },
       SlaveMessage::Client(_) => panic!("Client messages not supported yet."),
     }

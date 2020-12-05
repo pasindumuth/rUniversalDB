@@ -1,7 +1,7 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::rand::RandGen;
-use runiversal::common::test_config::{endpoint, table_shape};
+use runiversal::common::test_config::table_shape;
 use runiversal::model::common::{ColumnName, ColumnType, EndpointId, Schema};
 use runiversal::net::network::{recv, send};
 use runiversal::slave::thread::start_slave_thread;
@@ -141,15 +141,15 @@ fn main() {
   // For now, we create all tablets for the current Slave during boot-time.
   let mut key_space_config = HashMap::new();
   key_space_config.insert(
-    endpoint("172.19.0.3"),
+    EndpointId::from("172.19.0.3"),
     vec![table_shape("table1", None, None)],
   );
   key_space_config.insert(
-    endpoint("172.19.0.4"),
+    EndpointId::from("172.19.0.4"),
     vec![table_shape("table2", None, Some("j"))],
   );
   key_space_config.insert(
-    endpoint("172.19.0.5"),
+    EndpointId::from("172.19.0.5"),
     vec![
       table_shape("table2", Some("j"), None),
       table_shape("table3", None, Some("d")),
@@ -157,11 +157,11 @@ fn main() {
     ],
   );
   key_space_config.insert(
-    endpoint("172.19.0.6"),
+    EndpointId::from("172.19.0.6"),
     vec![table_shape("table3", Some("d"), Some("p"))],
   );
   key_space_config.insert(
-    endpoint("172.19.0.7"),
+    EndpointId::from("172.19.0.7"),
     vec![
       table_shape("table3", Some("p"), None),
       table_shape("table4", Some("k"), None),
@@ -179,10 +179,10 @@ fn main() {
   // It's 16 bytes long, so we do (16 * slave_index + i) to make sure
   // every element of the seed is different across all slaves.
   let mut seed = [0; 16];
-
   for i in 0..16 {
     seed[i] = (16 * slave_index + i as u32) as u8;
   }
+
   // Create Slave RNG.
   let mut rng = Box::new(XorShiftRng::from_seed(seed));
 
@@ -202,12 +202,13 @@ fn main() {
     tablet_map.insert(tablet_shape.clone(), tablet_sender);
 
     // Start the Tablet Thread
-    let net_conn_map = net_conn_map.clone();
     let tablet_shape = tablet_shape.clone();
+    let static_schema = static_schema.clone();
+    let net_conn_map = net_conn_map.clone();
     thread::spawn(move || {
       start_tablet_thread(
         tablet_shape,
-        static_schema.clone(),
+        static_schema,
         RandGen { rng },
         tablet_receiver,
         net_conn_map,

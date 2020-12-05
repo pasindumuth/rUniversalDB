@@ -1,7 +1,8 @@
 use crate::common::rand::RandGen;
-use crate::model::common::{Row, Schema, TabletShape, Timestamp};
+use crate::model::common::{Row, Schema, TabletShape};
 use crate::model::message::{
-  AdminMessage, AdminRequest, AdminResponse, SlaveMessage, TabletAction, TabletMessage,
+  AdminMessage, AdminPayload, AdminRequest, AdminResponse, SlaveMessage, TabletAction,
+  TabletMessage,
 };
 use crate::storage::relational_tablet::RelationalTablet;
 
@@ -43,14 +44,13 @@ impl TabletState {
     side_effects: &mut TabletSideEffects,
     msg: TabletMessage,
   ) {
-    println!("msg: {:?}", msg);
     match msg {
       TabletMessage::Input {
         eid,
         msg: slave_msg,
       } => match slave_msg {
-        SlaveMessage::Admin(admin_msg) => match admin_msg {
-          AdminMessage::Request(admin_request) => {
+        SlaveMessage::Admin(AdminMessage { meta, payload }) => match payload {
+          AdminPayload::Request(admin_request) => {
             match admin_request {
               AdminRequest::Insert {
                 key,
@@ -59,20 +59,21 @@ impl TabletState {
                 ..
               } => {
                 let row = Row { key, val: value };
-                self.relational_tablet.insert_row(&row, timestamp);
+                self.relational_tablet.insert_row(&row, timestamp).unwrap();
               }
               AdminRequest::Read { key, timestamp, .. } => {
                 let result = self.relational_tablet.read_row(&key, timestamp);
-                let read_res = AdminResponse::Read { result };
-                let admin_res = AdminMessage::Response(read_res);
                 side_effects.add(TabletAction::Send {
                   eid,
-                  msg: SlaveMessage::Admin(admin_res),
+                  msg: SlaveMessage::Admin(AdminMessage {
+                    meta,
+                    payload: AdminPayload::Response(AdminResponse::Read { result }),
+                  }),
                 });
               }
             };
           }
-          AdminMessage::Response(_) => panic!("Admin should never send a response here."),
+          AdminPayload::Response(_) => panic!("Admin should never send a response here."),
         },
         SlaveMessage::Client(_) => panic!("Can't handle client messages yet."),
       },

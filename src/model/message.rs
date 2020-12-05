@@ -1,5 +1,5 @@
 use crate::model::common::{
-  ColumnValue, EndpointId, PrimaryKey, Row, TabletPath, TabletShape, Timestamp,
+  ColumnValue, EndpointId, PrimaryKey, RequestId, Row, TabletPath, TabletShape, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 
@@ -12,15 +12,15 @@ use serde::{Deserialize, Serialize};
 // -------------------------------------------------------------------------------------------------
 
 /// Client Request
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ClientRequest {}
 
 /// Client Response
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ClientResponse {}
 
 /// Client Message
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ClientMessage {
   Request(ClientRequest),
   Response(ClientResponse),
@@ -33,7 +33,7 @@ pub enum ClientMessage {
 /// development, and testing.
 
 /// Admin Request
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum AdminRequest {
   Insert {
     path: TabletPath,
@@ -49,17 +49,30 @@ pub enum AdminRequest {
 }
 
 /// Admin Response
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum AdminResponse {
   Insert { result: Result<(), String> },
   Read { result: Result<Option<Row>, String> },
 }
 
-/// Admin Message
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum AdminMessage {
+/// Admin Payload
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum AdminPayload {
   Request(AdminRequest),
   Response(AdminResponse),
+}
+
+/// Admin Metadata
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AdminMeta {
+  pub request_id: RequestId,
+}
+
+/// Admin Message
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AdminMessage {
+  pub meta: AdminMeta,
+  pub payload: AdminPayload,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -67,7 +80,7 @@ pub enum AdminMessage {
 // -------------------------------------------------------------------------------------------------
 
 /// Message that go into the Slave's handler
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveMessage {
   Client(ClientMessage),
   Admin(AdminMessage),
@@ -78,7 +91,7 @@ pub enum SlaveMessage {
 // -------------------------------------------------------------------------------------------------
 
 /// Message that go into the Tablet's handler.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletMessage {
   Input {
     /// The endpoint that send the message
@@ -89,7 +102,7 @@ pub enum TabletMessage {
 }
 
 /// Message that come out of the Slave's handler
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveAction {
   Forward {
     shape: TabletShape,
@@ -104,7 +117,7 @@ pub enum SlaveAction {
 }
 
 /// Message that come out of the Tablet's handler
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletAction {
   Send { eid: EndpointId, msg: SlaveMessage },
 }

@@ -2,11 +2,13 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::lang::rvec;
 use runiversal::common::rand::RandGen;
-use runiversal::model::common::{EndpointId, Schema, TabletShape};
-use runiversal::model::message::{SlaveAction, SlaveMessage, TabletAction, TabletMessage};
+use runiversal::model::common::{EndpointId, RequestId, Schema, TabletShape};
+use runiversal::model::message::{
+  AdminMessage, AdminMeta, AdminPayload, SlaveAction, SlaveMessage, TabletAction, TabletMessage,
+};
 use runiversal::slave::slave::{SlaveSideEffects, SlaveState};
 use runiversal::tablet::tablet::{TabletSideEffects, TabletState};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug)]
 pub struct Simulation {
@@ -25,14 +27,14 @@ pub struct Simulation {
   next_int: i32,
   true_timestamp: i64,
   /// Accumulated client responses for each client.
-  client_msgs_received: HashMap<EndpointId, SlaveMessage>,
+  client_msgs_received: HashMap<EndpointId, Vec<SlaveMessage>>,
 }
 
-fn slave_id(i: &i32) -> EndpointId {
+pub fn slave_id(i: &i32) -> EndpointId {
   EndpointId(format!("s{}", i))
 }
 
-fn client_id(i: &i32) -> EndpointId {
+pub fn client_id(i: &i32) -> EndpointId {
   EndpointId(format!("c{}", i))
 }
 
@@ -96,6 +98,10 @@ impl Simulation {
         tablet_states.insert(eid.clone(), slave_tablet_states);
       }
     }
+    let client_msgs_received = client_eids
+      .iter()
+      .map(|eid| (eid.clone(), Vec::new()))
+      .collect();
     Simulation {
       rng,
       slave_eids,
@@ -106,12 +112,24 @@ impl Simulation {
       tablet_states,
       next_int: 0,
       true_timestamp: 0,
-      client_msgs_received: Default::default(),
+      client_msgs_received,
     }
   }
 
+  // -----------------------------------------------------------------------------------------------
+  //  Const getters
+  // -----------------------------------------------------------------------------------------------
+
+  pub fn get_responses(&self) -> &HashMap<EndpointId, Vec<SlaveMessage>> {
+    return &self.client_msgs_received;
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  //  Simulation Methods
+  // -----------------------------------------------------------------------------------------------
+
   /// Add a message between two nodes in the network.
-  fn add_msg(&mut self, msg: SlaveMessage, from_eid: &EndpointId, to_eid: &EndpointId) {
+  pub fn add_msg(&mut self, msg: SlaveMessage, from_eid: &EndpointId, to_eid: &EndpointId) {
     let queue = self
       .queues
       .get_mut(from_eid)
@@ -126,7 +144,7 @@ impl Simulation {
   }
 
   /// Poll a message between two nodes in the network.
-  fn poll_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) -> Option<SlaveMessage> {
+  pub fn poll_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) -> Option<SlaveMessage> {
     let queue = self
       .queues
       .get_mut(from_eid)
@@ -149,7 +167,12 @@ impl Simulation {
   /// `queues`. This function will run the Slave on the `to_eid` end,
   /// running any of it's tablets as necessary, before placing any new
   /// message back into `queues`.
-  fn run_slave_message(&mut self, msg: SlaveMessage, from_eid: &EndpointId, to_eid: &EndpointId) {
+  pub fn run_slave_message(
+    &mut self,
+    msg: SlaveMessage,
+    from_eid: &EndpointId,
+    to_eid: &EndpointId,
+  ) {
     let mut side_effects = SlaveSideEffects::new();
     self
       .slave_states
@@ -169,7 +192,12 @@ impl Simulation {
 
   /// This function will run the Tablet at `to_eid` and `shape` before
   /// placing any new message back into `queues`.
-  fn run_tablet_message(&mut self, msg: TabletMessage, to_eid: &EndpointId, shape: &TabletShape) {
+  pub fn run_tablet_message(
+    &mut self,
+    msg: TabletMessage,
+    to_eid: &EndpointId,
+    shape: &TabletShape,
+  ) {
     let mut side_effects = TabletSideEffects::new();
     self
       .tablet_states
@@ -189,12 +217,16 @@ impl Simulation {
   /// the message queue between them and delivers to the `to_eid`. If that's
   /// a client, the message is added to `client_msgs_received`, and if it's
   /// a slave, the slave processes the message.
-  fn deliver_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) {
+  pub fn deliver_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) {
     if let Some(msg) = self.poll_msg(from_eid, to_eid) {
       if self.slave_states.contains_key(to_eid) {
         self.run_slave_message(msg, from_eid, to_eid);
       } else if self.client_msgs_received.contains_key(to_eid) {
-        self.client_msgs_received.insert(to_eid.clone(), msg);
+        if let Some(msgs) = self.client_msgs_received.get_mut(to_eid) {
+          msgs.push(msg);
+        } else {
+          self.client_msgs_received.insert(to_eid.clone(), vec![msg]);
+        }
       } else {
         panic!("Endpoint {:?} does not exist", to_eid);
       }
@@ -203,12 +235,12 @@ impl Simulation {
 
   /// Drops messages until `num_msgs` have been dropped, or until
   /// there are no more messages to drop.
-  fn drop_messages(&mut self, num_msgs: i32) {
+  pub fn drop_messages(&mut self, num_msgs: i32) {
     for _ in 0..num_msgs {
       if self.nonempty_queues.len() > 0 {
         let r = self.rng.next_u32() as usize % self.nonempty_queues.len();
-        let (from_eid, to_eid) = self.nonempty_queues.get(r).unwrap();
-        self.poll_msg(&from_eid.clone(), &to_eid.clone());
+        let (from_eid, to_eid) = self.nonempty_queues.get(r).unwrap().clone();
+        self.poll_msg(&from_eid, &to_eid);
       }
     }
   }
@@ -216,25 +248,46 @@ impl Simulation {
   /// This function simply delivers 1ms worth of messages. For simplicity, we assume
   /// that this means that every non-empty queue of messsages delivers about one
   /// message in this time.
-  fn simulate1ms(&mut self) {
+  pub fn simulate1ms(&mut self) {
     // `num_msgs` is about the number of message to deliver for this ms.
     let num_msgs = self.nonempty_queues.len();
     for _ in 0..num_msgs {
       let r = self.rng.next_u32() as usize % self.nonempty_queues.len();
-      let (from_eid, to_eid) = self.nonempty_queues.get(r).unwrap();
-      self.deliver_msg(&from_eid.clone(), &to_eid.clone());
+      let (from_eid, to_eid) = self.nonempty_queues.get(r).unwrap().clone();
+      self.deliver_msg(&from_eid, &to_eid);
     }
   }
 
-  fn simulateNms(&mut self, n: i32) {
+  pub fn simulate_n_ms(&mut self, n: i32) {
     for _ in 0..n {
       self.simulate1ms();
     }
   }
 
-  fn simulateAll(&mut self) {
+  pub fn simulate_all(&mut self) {
     while self.nonempty_queues.len() > 0 {
       self.simulate1ms();
     }
+  }
+
+  pub fn add_admin_msg(
+    &mut self,
+    from_eid: &EndpointId,
+    to_eid: &EndpointId,
+    payload: AdminPayload,
+  ) -> RequestId {
+    let request_id = RequestId(self.next_int.to_string());
+    self.next_int += 1;
+    self.add_msg(
+      SlaveMessage::Admin(AdminMessage {
+        meta: AdminMeta {
+          request_id: request_id.clone(),
+        },
+        payload,
+      }),
+      from_eid,
+      to_eid,
+    );
+    return request_id;
   }
 }

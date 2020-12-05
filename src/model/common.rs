@@ -82,6 +82,33 @@ pub struct Row {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EndpointId(pub String);
 
+/// A request Id that globally identifies a request.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RequestId(pub String);
+
 /// A timestamp.
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(pub u64);
+
+// -------------------------------------------------------------------------------------------------
+//  Implementations
+// -------------------------------------------------------------------------------------------------
+
+impl TabletPath {
+  pub fn from(eid: &str) -> TabletPath {
+    TabletPath {
+      path: eid.to_string(),
+    }
+  }
+}
+impl EndpointId {
+  pub fn from(eid: &str) -> EndpointId {
+    EndpointId(eid.to_string())
+  }
+}
+
+impl RequestId {
+  pub fn from(eid: &str) -> RequestId {
+    RequestId(eid.to_string())
+  }
+}
