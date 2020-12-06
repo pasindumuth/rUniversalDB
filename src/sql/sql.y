@@ -1,24 +1,31 @@
-%start Expr
+%start sql_statement
 %%
-Expr -> Result<u64, ()>
-    : Expr 'PLUS' Term { Ok($1? + $3?) }
-    | Term { $1 }
-    | Expr 'DOUBLE_PLUS' Term { Ok($1? + $3? + $3?) }
-    ;
+sql_statement -> Statement
+  : 'SELECT' iden_list 'FROM' iden
+    {
+      Statement::Select($2, $4)
+    }
+  ;
 
-Term -> Result<u64, ()>
-    : Term 'MUL' Factor { Ok($1? * $3?) }
-    | Factor { $1 }
-    ;
+iden_list -> Vec<String>
+  : iden
+    {
+      vec![$1]
+    }
+  | iden_list ',' iden
+    {
+      $1.push($3);
+      $1
+    }
+  ;
 
-Factor -> Result<u64, ()>
-    : 'LBRACK' Expr 'RBRACK' { $2 }
-    | 'INT'
-      {
-          let v = $1.map_err(|_| ())?;
-          parse_int($lexer.span_str(v.span()))
-      }
-    ;
+iden -> String
+  : "identifier"
+    {
+      $lexer.span_str($1.as_ref().unwrap().span()).to_string()
+    }
+  ;
+
 %%
 
-use runiversal::sql::parser::parse_int;
+use runiversal::model::sqlast::Statement;

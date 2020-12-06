@@ -1,8 +1,11 @@
 %%
-\+\+ "DOUBLE_PLUS"
-[0-9]+ "INT"
-\+ "PLUS"
-\* "MUL"
-\( "LBRACK"
-\) "RBRACK"
-[\t ]+ ;
+SELECT                  "SELECT"
+FROM                    "FROM"
+,                       ","
+[a-zA-Z][a-zA-Z0-9_]+   "identifier"
+[0-9]+                  "INT"
+\+                      "+"
+\*                      "*"
+\(                      "("
+\)                      ")"
+[\t ]+      ;
