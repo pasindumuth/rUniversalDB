@@ -1,36 +1,43 @@
-use rmp_serde;
-use runiversal::model::common::TabletPath;
-use runiversal::model::message::{AdminMessage, AdminRequest, ClientMessage, SlaveMessage};
-use runiversal::net::network::{recv, send};
-use std::collections::LinkedList;
-use std::env;
-use std::io::stdin;
-use std::net::TcpStream;
+use std::io::{self, BufRead, Write};
+
+use lrlex::lrlex_mod;
+use lrpar::lrpar_mod;
+
+// Using `lrlex_mod!` brings the lexer for `sql.l` into scope. By default the
+// module name will be `sql_l` (i.e. the file name, minus any extensions,
+// with a suffix of `_l`).
+lrlex_mod!("sql/sql.l");
+// Using `lrpar_mod!` brings the parser for `sql.y` into scope. By default the
+// module name will be `sql_y` (i.e. the file name, minus any extensions,
+// with a suffix of `_y`).
+lrpar_mod!("sql/sql.y");
 
 fn main() {
-  // let mut args: LinkedList<String> = env::args().collect();
-  // args.pop_front(); // Remove the program name arg.
-  // let ip = args.pop_front().unwrap();
-  // let port = args.pop_front().unwrap().parse::<i32>().unwrap();
-  //
-  // // Connect to the slave
-  // let stream = TcpStream::connect(format!("{}:{}", ip, port)).unwrap();
-  //
-  // loop {
-  //   // Read in the message to send
-  //   let mut val = String::new();
-  //   stdin().read_line(&mut val).unwrap();
-  //   let msg = SlaveMessage::Admin(AdminMessage::Request(AdminRequest::Read {
-  //     path: TabletPath { path: val },
-  //   }));
-  //
-  //   // Send the message
-  //   let buf = rmp_serde::to_vec(&msg).unwrap();
-  //   send(buf.as_slice(), &stream);
-  //
-  //   // Receive a message
-  //   let buf = recv(&stream);
-  //   let msg: SlaveMessage = rmp_serde::from_read_ref(&buf).unwrap();
-  //   println!("{:?}", msg);
-  // }
+  // Get the `LexerDef` for the `calc` language.
+  let lexerdef = sql_l::lexerdef();
+  let stdin = io::stdin();
+  loop {
+    print!(">>> ");
+    io::stdout().flush().ok();
+    match stdin.lock().lines().next() {
+      Some(Ok(ref l)) => {
+        if l.trim().is_empty() {
+          continue;
+        }
+        // Now we create a lexer with the `lexer` method with which
+        // we can lex an input.
+        let lexer = lexerdef.lexer(l);
+        // Pass the lexer to the parser and lex and parse the input.
+        let (res, errs) = sql_y::parse(&lexer);
+        for e in errs {
+          println!("{}", e.pp(&lexer, &sql_y::token_epp));
+        }
+        match res {
+          Some(r) => println!("Result: {:?}", r),
+          _ => eprintln!("Unable to evaluate expression."),
+        }
+      }
+      _ => break,
+    }
+  }
 }
