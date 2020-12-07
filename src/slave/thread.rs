@@ -12,8 +12,9 @@ pub fn start_slave_thread(
   receiver: Receiver<(EndpointId, Vec<u8>)>,
   net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
   tablet_map: HashMap<TabletShape, Sender<TabletMessage>>,
+  tablet_config: HashMap<EndpointId, Vec<TabletShape>>,
 ) {
-  let mut state = SlaveState::new(rand_gen, this_eid.clone());
+  let mut state = SlaveState::new(rand_gen, this_eid.clone(), tablet_config);
   println!("Starting Slave Thread {:?}", this_eid);
   loop {
     // Receive the data.
@@ -34,8 +35,8 @@ pub fn start_slave_thread(
           let sender = net_conn_map.get(&eid).unwrap();
           sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
         }
-        SlaveAction::Forward { shape, msg } => {
-          tablet_map.get(&shape).unwrap().send(msg).unwrap();
+        SlaveAction::Forward { tablet, msg } => {
+          tablet_map.get(&tablet).unwrap().send(msg).unwrap();
         }
       }
     }

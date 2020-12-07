@@ -1,9 +1,9 @@
 %start sql_statement
 %%
-sql_statement -> Statement
+sql_statement -> SqlStmt
   : 'SELECT' iden_list 'FROM' iden
     {
-      Statement::Select($2, $4)
+      SqlStmt::Select(SelectStmt {col_names: $2, table_name: $4})
     }
   ;
 
@@ -28,4 +28,4 @@ iden -> String
 
 %%
 
-use runiversal::model::sqlast::Statement;
+use runiversal::model::sqlast::{SqlStmt, SelectStmt};

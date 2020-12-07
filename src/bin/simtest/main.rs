@@ -18,11 +18,11 @@ mod simulation;
 /// A pre-defined map of what tablets that each slave should be managing.
 /// For the simulation, this map specifies all initial tables in the system,
 /// initial number of slaves, which slave holds which tabet, etc.
-fn key_space_config() -> HashMap<EndpointId, Vec<TabletShape>> {
-  let mut key_space_config = HashMap::new();
-  key_space_config.insert(slave_id(&0), vec![table_shape("table1", None, None)]);
-  key_space_config.insert(slave_id(&1), vec![table_shape("table2", None, Some("j"))]);
-  key_space_config.insert(
+fn tablet_config() -> HashMap<EndpointId, Vec<TabletShape>> {
+  let mut tablet_config = HashMap::new();
+  tablet_config.insert(slave_id(&0), vec![table_shape("table1", None, None)]);
+  tablet_config.insert(slave_id(&1), vec![table_shape("table2", None, Some("j"))]);
+  tablet_config.insert(
     slave_id(&2),
     vec![
       table_shape("table2", Some("j"), None),
@@ -30,18 +30,18 @@ fn key_space_config() -> HashMap<EndpointId, Vec<TabletShape>> {
       table_shape("table4", None, Some("k")),
     ],
   );
-  key_space_config.insert(
+  tablet_config.insert(
     slave_id(&3),
     vec![table_shape("table3", Some("d"), Some("p"))],
   );
-  key_space_config.insert(
+  tablet_config.insert(
     slave_id(&4),
     vec![
       table_shape("table3", Some("p"), None),
       table_shape("table4", Some("k"), None),
     ],
   );
-  return key_space_config;
+  return tablet_config;
 }
 
 /// Schema that the above map was constructed assuming.
@@ -96,6 +96,7 @@ fn check_expected_res(
           let rid = match res {
             AdminResponse::Insert { rid, .. } => rid,
             AdminResponse::Read { rid, .. } => rid,
+            AdminResponse::SqlQuery { rid, .. } => rid,
           };
           res_map.insert(rid.clone(), msg.clone());
         }
@@ -188,7 +189,7 @@ fn drive_test(test_num: u32, test: fn(&mut Simulation) -> Result<(), String>) {
     seed[i] = (16 * test_num + i as u32) as u8;
   }
 
-  match test(&mut Simulation::new(seed, schema(), key_space_config(), 5)) {
+  match test(&mut Simulation::new(seed, schema(), tablet_config(), 5)) {
     Ok(_) => println!("Test {} Passed!", test_num),
     Err(err) => println!("Test {} Failed with Error: {}", test_num, err),
   }

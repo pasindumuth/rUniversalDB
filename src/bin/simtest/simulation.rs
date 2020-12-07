@@ -43,11 +43,11 @@ impl Simulation {
   pub fn new(
     seed: [u8; 16],
     static_schema: Schema,
-    key_space_config: HashMap<EndpointId, Vec<TabletShape>>,
+    tablet_config: HashMap<EndpointId, Vec<TabletShape>>,
     num_clients: i32,
   ) -> Simulation {
     let mut rng = XorShiftRng::from_seed(seed);
-    let slave_eids: Vec<EndpointId> = key_space_config.keys().cloned().collect();
+    let slave_eids: Vec<EndpointId> = tablet_config.keys().cloned().collect();
     let client_eids: Vec<EndpointId> = rvec(0, num_clients).iter().map(client_id).collect();
     let all_eids: Vec<EndpointId> = slave_eids
       .iter()
@@ -77,12 +77,13 @@ impl Simulation {
             rng: Box::new(XorShiftRng::from_seed(seed)),
           },
           eid.clone(),
+          tablet_config.clone(),
         ),
       );
     }
     let mut tablet_states = HashMap::new();
     for eid in &slave_eids {
-      for shape in &key_space_config[eid] {
+      for shape in &tablet_config[eid] {
         let mut slave_tablet_states = HashMap::new();
         let mut seed = [0; 16];
         rng.fill_bytes(&mut seed);
@@ -183,8 +184,8 @@ impl Simulation {
     for action in side_effects.actions {
       match action {
         SlaveAction::Send { eid, msg } => self.add_msg(msg, &to_eid, &eid),
-        SlaveAction::Forward { shape, msg } => {
-          self.run_tablet_message(msg, to_eid, &shape);
+        SlaveAction::Forward { tablet, msg } => {
+          self.run_tablet_message(msg, to_eid, &tablet);
         }
       }
     }

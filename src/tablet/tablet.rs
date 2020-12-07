@@ -1,8 +1,8 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{Row, Schema, TabletShape};
 use crate::model::message::{
-  AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SlaveMessage, TabletAction,
-  TabletMessage,
+  AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SelectPrepare, SlaveMessage,
+  TabletAction, TabletMessage,
 };
 use crate::storage::relational_tablet::RelationalTablet;
 
@@ -44,7 +44,7 @@ impl TabletState {
     side_effects: &mut TabletSideEffects,
     msg: TabletMessage,
   ) {
-    match msg {
+    match &msg {
       TabletMessage::AdminRequest { eid, req } => {
         match req {
           AdminRequest::Insert {
@@ -54,12 +54,18 @@ impl TabletState {
             timestamp,
             ..
           } => {
-            let row = Row { key, val: value };
-            let result = self.relational_tablet.insert_row(&row, timestamp);
+            let row = Row {
+              key: key.clone(),
+              val: value.clone(),
+            };
+            let result = self.relational_tablet.insert_row(&row, *timestamp);
             side_effects.add(TabletAction::Send {
-              eid,
+              eid: eid.clone(),
               msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
-                res: AdminResponse::Insert { rid, result },
+                res: AdminResponse::Insert {
+                  rid: rid.clone(),
+                  result,
+                },
               }),
             });
           }
@@ -69,17 +75,26 @@ impl TabletState {
             timestamp,
             ..
           } => {
-            let result = self.relational_tablet.read_row(&key, timestamp);
+            let result = self.relational_tablet.read_row(&key, *timestamp);
             side_effects.add(TabletAction::Send {
-              eid,
+              eid: eid.clone(),
               msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
-                res: AdminResponse::Read { rid, result },
+                res: AdminResponse::Read {
+                  rid: rid.clone(),
+                  result,
+                },
               }),
             });
           }
+          _ => panic!("The message {:?} shouldn't be forwarded here.", msg),
         };
       }
-      TabletMessage::ClientRequest { .. } => panic!("Can't handle client messages yet."),
+      TabletMessage::ClientRequest { .. } => {
+        panic!("Can't handle client messages yet.");
+      }
+      TabletMessage::SelectPrepare(_) => {
+        panic!("Preparing is not supported yet.");
+      }
     }
   }
 }

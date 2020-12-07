@@ -90,6 +90,12 @@ pub struct RequestId(pub String);
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(pub u64);
 
+/// A transaction Id that's globally unique. This includes all Select Queries
+/// and Write Queries, but not Partial Queries (the Partial Queries for
+/// a single Full Query uses the same TransactionId).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TransactionId(pub String);
+
 // -------------------------------------------------------------------------------------------------
 //  Implementations
 // -------------------------------------------------------------------------------------------------
@@ -101,6 +107,7 @@ impl TabletPath {
     }
   }
 }
+
 impl EndpointId {
   pub fn from(eid: &str) -> EndpointId {
     EndpointId(eid.to_string())
@@ -110,5 +117,11 @@ impl EndpointId {
 impl RequestId {
   pub fn from(eid: &str) -> RequestId {
     RequestId(eid.to_string())
+  }
+}
+
+impl TransactionId {
+  pub fn from(eid: &str) -> TransactionId {
+    TransactionId(eid.to_string())
   }
 }

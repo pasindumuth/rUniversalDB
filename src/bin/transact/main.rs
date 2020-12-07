@@ -139,16 +139,16 @@ fn main() {
 
   // A pre-defined map of what tablets that each slave should be managing.
   // For now, we create all tablets for the current Slave during boot-time.
-  let mut key_space_config = HashMap::new();
-  key_space_config.insert(
+  let mut tablet_config = HashMap::new();
+  tablet_config.insert(
     EndpointId::from("172.19.0.3"),
     vec![table_shape("table1", None, None)],
   );
-  key_space_config.insert(
+  tablet_config.insert(
     EndpointId::from("172.19.0.4"),
     vec![table_shape("table2", None, Some("j"))],
   );
-  key_space_config.insert(
+  tablet_config.insert(
     EndpointId::from("172.19.0.5"),
     vec![
       table_shape("table2", Some("j"), None),
@@ -156,18 +156,18 @@ fn main() {
       table_shape("table4", None, Some("k")),
     ],
   );
-  key_space_config.insert(
+  tablet_config.insert(
     EndpointId::from("172.19.0.6"),
     vec![table_shape("table3", Some("d"), Some("p"))],
   );
-  key_space_config.insert(
+  tablet_config.insert(
     EndpointId::from("172.19.0.7"),
     vec![
       table_shape("table3", Some("p"), None),
       table_shape("table4", Some("k"), None),
     ],
   );
-  let key_space_config = key_space_config;
+  let tablet_config = tablet_config;
 
   // The above map was constructed assuming this predefined schema:
   let static_schema = Schema {
@@ -189,7 +189,7 @@ fn main() {
   // Setup the Tablet.
   let mut tablet_map = HashMap::new();
 
-  for tablet_shape in key_space_config.get(&endpoint_id).unwrap() {
+  for tablet_shape in tablet_config.get(&endpoint_id).unwrap() {
     // Create the seed for the Tablet's RNG. We use the Slave's
     // RNG to create a random seed.
     let mut seed = [0; 16];
@@ -222,5 +222,6 @@ fn main() {
     slave_receiver,
     net_conn_map,
     tablet_map,
+    tablet_config,
   );
 }

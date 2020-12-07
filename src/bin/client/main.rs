@@ -12,6 +12,8 @@ lrlex_mod!("sql/sql.l");
 // with a suffix of `_y`).
 lrpar_mod!("sql/sql.y");
 
+/// doing `SELECT col1, col2 FROM table` should print out
+/// `Result: Select(SelectStmt { col_names: ["col1", "col2"], table_name: "table" })`
 fn main() {
   // Get the `LexerDef` for the `calc` language.
   let lexerdef = sql_l::lexerdef();
