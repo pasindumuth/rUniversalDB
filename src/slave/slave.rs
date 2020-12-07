@@ -1,8 +1,6 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{EndpointId, Schema, TabletKeyRange, TabletPath, TabletShape};
-use crate::model::message::{
-  AdminMessage, AdminPayload, AdminRequest, SlaveAction, SlaveMessage, TabletMessage,
-};
+use crate::model::message::{AdminMessage, AdminRequest, SlaveAction, SlaveMessage, TabletMessage};
 
 #[derive(Debug)]
 pub struct SlaveSideEffects {
@@ -41,33 +39,30 @@ impl SlaveState {
     from_eid: &EndpointId,
     msg: SlaveMessage,
   ) {
-    match &msg {
-      SlaveMessage::Admin(AdminMessage { payload, .. }) => match payload {
-        AdminPayload::Request(admin_request) => {
-          let path = match admin_request {
-            AdminRequest::Insert { path, .. } => path,
-            AdminRequest::Read { path, .. } => path,
-          };
-          side_effects.add(SlaveAction::Forward {
-            // For now, we just assume that if we get an AdminMessage
-            // with some `path`, then this Slave has the Tablet for it
-            // and that Tablet contains the whole key space.
-            shape: TabletShape {
-              path: path.clone(),
-              range: TabletKeyRange {
-                start: None,
-                end: None,
-              },
+    match msg {
+      SlaveMessage::AdminRequest { req } => {
+        let path = match &req {
+          AdminRequest::Insert { path, .. } => path,
+          AdminRequest::Read { path, .. } => path,
+        };
+        side_effects.add(SlaveAction::Forward {
+          // For now, we just assume that if we get an AdminMessage
+          // with some `path`, then this Slave has the Tablet for it
+          // and that Tablet contains the whole key space.
+          shape: TabletShape {
+            path: path.clone(),
+            range: TabletKeyRange {
+              start: None,
+              end: None,
             },
-            msg: TabletMessage::Input {
-              eid: from_eid.clone(),
-              msg: msg,
-            },
-          });
-        }
-        AdminPayload::Response(_) => panic!("Admin Response not supported yet."),
-      },
-      SlaveMessage::Client(_) => panic!("Client messages not supported yet."),
+          },
+          msg: TabletMessage::AdminRequest {
+            eid: from_eid.clone(),
+            req: req,
+          },
+        });
+      }
+      SlaveMessage::ClientRequest { .. } => panic!("Client messages not supported yet."),
     }
   }
 }

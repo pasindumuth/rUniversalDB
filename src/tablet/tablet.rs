@@ -1,7 +1,7 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{Row, Schema, TabletShape};
 use crate::model::message::{
-  AdminMessage, AdminPayload, AdminRequest, AdminResponse, SlaveMessage, TabletAction,
+  AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SlaveMessage, TabletAction,
   TabletMessage,
 };
 use crate::storage::relational_tablet::RelationalTablet;
@@ -45,38 +45,41 @@ impl TabletState {
     msg: TabletMessage,
   ) {
     match msg {
-      TabletMessage::Input {
-        eid,
-        msg: slave_msg,
-      } => match slave_msg {
-        SlaveMessage::Admin(AdminMessage { meta, payload }) => match payload {
-          AdminPayload::Request(admin_request) => {
-            match admin_request {
-              AdminRequest::Insert {
-                key,
-                value,
-                timestamp,
-                ..
-              } => {
-                let row = Row { key, val: value };
-                self.relational_tablet.insert_row(&row, timestamp).unwrap();
-              }
-              AdminRequest::Read { key, timestamp, .. } => {
-                let result = self.relational_tablet.read_row(&key, timestamp);
-                side_effects.add(TabletAction::Send {
-                  eid,
-                  msg: SlaveMessage::Admin(AdminMessage {
-                    meta,
-                    payload: AdminPayload::Response(AdminResponse::Read { result }),
-                  }),
-                });
-              }
-            };
+      TabletMessage::AdminRequest { eid, req } => {
+        match req {
+          AdminRequest::Insert {
+            rid,
+            key,
+            value,
+            timestamp,
+            ..
+          } => {
+            let row = Row { key, val: value };
+            let result = self.relational_tablet.insert_row(&row, timestamp);
+            side_effects.add(TabletAction::Send {
+              eid,
+              msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
+                res: AdminResponse::Insert { rid, result },
+              }),
+            });
           }
-          AdminPayload::Response(_) => panic!("Admin should never send a response here."),
-        },
-        SlaveMessage::Client(_) => panic!("Can't handle client messages yet."),
-      },
+          AdminRequest::Read {
+            rid,
+            key,
+            timestamp,
+            ..
+          } => {
+            let result = self.relational_tablet.read_row(&key, timestamp);
+            side_effects.add(TabletAction::Send {
+              eid,
+              msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
+                res: AdminResponse::Read { rid, result },
+              }),
+            });
+          }
+        };
+      }
+      TabletMessage::ClientRequest { .. } => panic!("Can't handle client messages yet."),
     }
   }
 }

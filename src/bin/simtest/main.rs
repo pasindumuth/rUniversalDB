@@ -5,7 +5,7 @@ use runiversal::model::common::{
   TabletShape, Timestamp,
 };
 use runiversal::model::message::{
-  AdminMessage, AdminMeta, AdminPayload, AdminRequest, AdminResponse, SlaveMessage,
+  AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SlaveMessage,
 };
 use std::collections::HashMap;
 
@@ -68,15 +68,17 @@ fn add_req_res(
   to_eid: &EndpointId,
   req: AdminRequest,
   expected_res: AdminResponse,
-  expected_res_map: &mut HashMap<RequestId, SlaveMessage>,
+  expected_res_map: &mut HashMap<RequestId, NetworkMessage>,
+  rid: RequestId,
 ) {
-  let request_id = sim.add_admin_msg(from_eid, to_eid, AdminPayload::Request(req));
+  sim.add_msg(
+    NetworkMessage::Slave(SlaveMessage::AdminRequest { req }),
+    &from_eid,
+    &to_eid,
+  );
   expected_res_map.insert(
-    request_id.clone(),
-    SlaveMessage::Admin(AdminMessage {
-      meta: AdminMeta { request_id },
-      payload: AdminPayload::Response(expected_res),
-    }),
+    rid,
+    NetworkMessage::Admin(AdminMessage::AdminResponse { res: expected_res }),
   );
 }
 
@@ -84,14 +86,18 @@ fn add_req_res(
 /// actually sent out by the Simulation.
 fn check_expected_res(
   sim: &Simulation,
-  expected_res_map: &HashMap<RequestId, SlaveMessage>,
+  expected_res_map: &HashMap<RequestId, NetworkMessage>,
 ) -> Result<(), String> {
   let mut res_map = HashMap::new();
-  for (_, slave_msgs) in sim.get_responses() {
-    for slave_msg in slave_msgs {
-      match slave_msg {
-        SlaveMessage::Admin(admin_msg) => {
-          res_map.insert(admin_msg.meta.request_id.clone(), slave_msg.clone());
+  for (_, msgs) in sim.get_responses() {
+    for msg in msgs {
+      match msg {
+        NetworkMessage::Admin(AdminMessage::AdminResponse { res }) => {
+          let rid = match res {
+            AdminResponse::Insert { rid, .. } => rid,
+            AdminResponse::Read { rid, .. } => rid,
+          };
+          res_map.insert(rid.clone(), msg.clone());
         }
         _ => {}
       }
@@ -126,35 +132,44 @@ fn test1(sim: &mut Simulation) -> Result<(), String> {
   let timestamp = Timestamp(2);
   let from_eid = EndpointId::from("c0");
   let to_eid = EndpointId::from("s0");
-  sim.add_admin_msg(
+  let rid = sim.mk_request_id();
+  sim.add_msg(
+    NetworkMessage::Slave(SlaveMessage::AdminRequest {
+      req: AdminRequest::Insert {
+        rid,
+        path: path.clone(),
+        key: key.clone(),
+        value: value.clone(),
+        timestamp: timestamp.clone(),
+      },
+    }),
     &from_eid,
     &to_eid,
-    AdminPayload::Request(AdminRequest::Insert {
-      path: path.clone(),
-      key: key.clone(),
-      value: value.clone(),
-      timestamp: timestamp.clone(),
-    }),
   );
   sim.simulate_all();
 
   let mut expected_res_map = HashMap::new();
+
+  let rid = sim.mk_request_id();
   add_req_res(
     sim,
     &from_eid,
     &to_eid,
     AdminRequest::Read {
+      rid: rid.clone(),
       path: path.clone(),
       key: key.clone(),
       timestamp: timestamp.clone(),
     },
     AdminResponse::Read {
+      rid: rid.clone(),
       result: Ok(Some(Row {
         key: key.clone(),
         val: value.clone(),
       })),
     },
     &mut expected_res_map,
+    rid,
   );
   sim.simulate_all();
 

@@ -6,118 +6,129 @@ use serde::{Deserialize, Serialize};
 /// These are PODs that are used for Threads to communicate with
 /// each other. This includes communication over the network, as
 /// well as across threads on the same machine.
+///
+/// The model we use is that each Thread Type has its own Thread Message
+/// ADT. We have several Thread Types, including Client, Admin, Slave,
+/// and Tablet.
 
 // -------------------------------------------------------------------------------------------------
-//  Admin messages
+// The Client Thread Message
 // -------------------------------------------------------------------------------------------------
-
-/// Client Request
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ClientRequest {}
-
-/// Client Response
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ClientResponse {}
 
 /// Client Message
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ClientMessage {
-  Request(ClientRequest),
-  Response(ClientResponse),
+pub enum ClientMessage {}
+
+// -------------------------------------------------------------------------------------------------
+//  Admin Thread Message
+// -------------------------------------------------------------------------------------------------
+/// The Admin Thread is used for system administrators to do back-door
+/// operations on the rUniversal.
+
+/// Admin Response
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum AdminResponse {
+  Insert {
+    rid: RequestId,
+    result: Result<(), String>,
+  },
+  Read {
+    rid: RequestId,
+    result: Result<Option<Row>, String>,
+  },
+}
+
+/// Admin Message
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum AdminMessage {
+  AdminResponse { res: AdminResponse },
 }
 
 // -------------------------------------------------------------------------------------------------
-//  Admin messages
+//  Slave Thread Message
 // -------------------------------------------------------------------------------------------------
-/// These are message send by the Admin, for debugging,
-/// development, and testing.
 
 /// Admin Request
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum AdminRequest {
   Insert {
+    rid: RequestId,
     path: TabletPath,
     key: PrimaryKey,
     value: Vec<Option<ColumnValue>>,
     timestamp: Timestamp,
   },
   Read {
+    rid: RequestId,
     path: TabletPath,
     key: PrimaryKey,
     timestamp: Timestamp,
   },
 }
 
-/// Admin Response
+/// Client Request
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum AdminResponse {
-  Insert { result: Result<(), String> },
-  Read { result: Result<Option<Row>, String> },
-}
-
-/// Admin Payload
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum AdminPayload {
-  Request(AdminRequest),
-  Response(AdminResponse),
-}
-
-/// Admin Metadata
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AdminMeta {
-  pub request_id: RequestId,
-}
-
-/// Admin Message
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AdminMessage {
-  pub meta: AdminMeta,
-  pub payload: AdminPayload,
-}
-
-// -------------------------------------------------------------------------------------------------
-//  Slave Message
-// -------------------------------------------------------------------------------------------------
+pub enum ClientRequest {}
 
 /// Message that go into the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveMessage {
-  Client(ClientMessage),
-  Admin(AdminMessage),
+  AdminRequest { req: AdminRequest },
+  ClientRequest { req: ClientRequest },
 }
 
 // -------------------------------------------------------------------------------------------------
-//  Miscellaneous
+//  Tablet Thread Message
 // -------------------------------------------------------------------------------------------------
 
 /// Message that go into the Tablet's handler.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletMessage {
-  Input {
-    /// The endpoint that send the message
-    eid: EndpointId,
-    /// The message that was sent.
-    msg: SlaveMessage,
-  },
+  AdminRequest { eid: EndpointId, req: AdminRequest },
+  ClientRequest { eid: EndpointId, req: ClientRequest },
 }
 
+// -------------------------------------------------------------------------------------------------
+//  Actions
+// -------------------------------------------------------------------------------------------------
+/// These messages aren't like the others. These are the actions returned
+/// by the thread's Handle Functions, which are pure functions. These actions
+/// are effectively how the Handle Functions do side-effects without actually
+/// doing it in the function.
+
 /// Message that come out of the Slave's handler
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum SlaveAction {
   Forward {
     shape: TabletShape,
     msg: TabletMessage,
   },
   Send {
-    /// Endpoint to send the message to.
     eid: EndpointId,
-    /// The message to send.
-    msg: SlaveMessage,
+    msg: NetworkMessage,
   },
 }
 
 /// Message that come out of the Tablet's handler
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum TabletAction {
-  Send { eid: EndpointId, msg: SlaveMessage },
+  Send {
+    eid: EndpointId,
+    msg: NetworkMessage,
+  },
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Miscellaneous
+// -------------------------------------------------------------------------------------------------
+
+/// A union of all messages that would need to be transferred over the
+/// network. We don't send ClientMessages directly to the client because if we
+/// introduce a bug where we accidentally send an Admin message to the client,
+/// then that bug might not get caught; deserialization might work.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum NetworkMessage {
+  Admin(AdminMessage),
+  Client(ClientMessage),
+  Slave(SlaveMessage),
 }

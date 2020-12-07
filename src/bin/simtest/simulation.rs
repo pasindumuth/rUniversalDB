@@ -4,7 +4,8 @@ use runiversal::common::lang::rvec;
 use runiversal::common::rand::RandGen;
 use runiversal::model::common::{EndpointId, RequestId, Schema, TabletShape};
 use runiversal::model::message::{
-  AdminMessage, AdminMeta, AdminPayload, SlaveAction, SlaveMessage, TabletAction, TabletMessage,
+  AdminMessage, AdminRequest, NetworkMessage, SlaveAction, SlaveMessage, TabletAction,
+  TabletMessage,
 };
 use runiversal::slave::slave::{SlaveSideEffects, SlaveState};
 use runiversal::tablet::tablet::{TabletSideEffects, TabletState};
@@ -17,7 +18,7 @@ pub struct Simulation {
   client_eids: Vec<EndpointId>,
   /// Message queues between nodes. This field contains contains 2 queues (in for
   /// each direction) for every pair of client EndpointIds and slave Endpoints.
-  queues: HashMap<EndpointId, HashMap<EndpointId, VecDeque<SlaveMessage>>>,
+  queues: HashMap<EndpointId, HashMap<EndpointId, VecDeque<NetworkMessage>>>,
   /// We use pairs of endpoints as identifiers of a queue.
   /// This field contain all queue IDs where the queue is non-empty
   nonempty_queues: Vec<(EndpointId, EndpointId)>,
@@ -27,7 +28,7 @@ pub struct Simulation {
   next_int: i32,
   true_timestamp: i64,
   /// Accumulated client responses for each client.
-  client_msgs_received: HashMap<EndpointId, Vec<SlaveMessage>>,
+  client_msgs_received: HashMap<EndpointId, Vec<NetworkMessage>>,
 }
 
 pub fn slave_id(i: &i32) -> EndpointId {
@@ -120,7 +121,7 @@ impl Simulation {
   //  Const getters
   // -----------------------------------------------------------------------------------------------
 
-  pub fn get_responses(&self) -> &HashMap<EndpointId, Vec<SlaveMessage>> {
+  pub fn get_responses(&self) -> &HashMap<EndpointId, Vec<NetworkMessage>> {
     return &self.client_msgs_received;
   }
 
@@ -129,7 +130,7 @@ impl Simulation {
   // -----------------------------------------------------------------------------------------------
 
   /// Add a message between two nodes in the network.
-  pub fn add_msg(&mut self, msg: SlaveMessage, from_eid: &EndpointId, to_eid: &EndpointId) {
+  pub fn add_msg(&mut self, msg: NetworkMessage, from_eid: &EndpointId, to_eid: &EndpointId) {
     let queue = self
       .queues
       .get_mut(from_eid)
@@ -144,7 +145,7 @@ impl Simulation {
   }
 
   /// Poll a message between two nodes in the network.
-  pub fn poll_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) -> Option<SlaveMessage> {
+  pub fn poll_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) -> Option<NetworkMessage> {
     let queue = self
       .queues
       .get_mut(from_eid)
@@ -220,7 +221,13 @@ impl Simulation {
   pub fn deliver_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) {
     if let Some(msg) = self.poll_msg(from_eid, to_eid) {
       if self.slave_states.contains_key(to_eid) {
-        self.run_slave_message(msg, from_eid, to_eid);
+        match msg {
+          NetworkMessage::Slave(slave_msg) => self.run_slave_message(slave_msg, from_eid, to_eid),
+          _ => panic!(
+            "Endpoint {:?} is a Slave but received a non-SlaveMessage {:?} ",
+            to_eid, msg
+          ),
+        }
       } else if self.client_msgs_received.contains_key(to_eid) {
         if let Some(msgs) = self.client_msgs_received.get_mut(to_eid) {
           msgs.push(msg);
@@ -270,24 +277,9 @@ impl Simulation {
     }
   }
 
-  pub fn add_admin_msg(
-    &mut self,
-    from_eid: &EndpointId,
-    to_eid: &EndpointId,
-    payload: AdminPayload,
-  ) -> RequestId {
+  pub fn mk_request_id(&mut self) -> RequestId {
     let request_id = RequestId(self.next_int.to_string());
     self.next_int += 1;
-    self.add_msg(
-      SlaveMessage::Admin(AdminMessage {
-        meta: AdminMeta {
-          request_id: request_id.clone(),
-        },
-        payload,
-      }),
-      from_eid,
-      to_eid,
-    );
     return request_id;
   }
 }
