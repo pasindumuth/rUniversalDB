@@ -1,9 +1,31 @@
-%start sql_statement
+%start root
+
+%left     OR
+%left     AND
+%nonassoc LTE LT GTE GT E
+
 %%
-sql_statement -> SqlStmt
-  : 'SELECT' iden_list 'FROM' iden
+
+root -> Root
+  : sql_stmt        { Root::SqlStmt($1) }
+  | expr            { Root::Test(Test::ValExpr($1)) }
+  ;
+
+sql_stmt -> SqlStmt
+  : select_stmt
     {
-      SqlStmt::Select(SelectStmt {col_names: $2, table_name: $4})
+      SqlStmt::Select($1)
+    }
+  ;
+
+select_stmt -> SelectStmt
+  : 'SELECT' iden_list 'FROM' iden 'WHERE' expr
+    {
+      SelectStmt {
+        col_names: $2,
+        table_name: $4,
+        where_clause: $6,
+      }
     }
   ;
 
@@ -19,6 +41,75 @@ iden_list -> Vec<String>
     }
   ;
 
+expr -> ValExpr
+  : expr 'AND' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::And,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | expr 'OR' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::Or,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | expr 'LTE' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::LTE,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | expr 'LT' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::LT,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | expr 'GTE' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::GTE,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | expr 'GT' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::GT,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | expr 'E' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::E,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | literal                       { ValExpr::Literal($1) }
+  | iden                          { ValExpr::Column($1) }
+  | '(' select_stmt ')'           { ValExpr::Subquery(Box::new($2)) }
+  ;
+
+literal -> Literal
+  : quoted_string  { Literal::String($1) }
+  | int            { Literal::Int($1) }
+  | bool           { Literal::Bool($1) }
+  | null           { Literal::Null }
+  ;
+
 iden -> String
   : "identifier"
     {
@@ -26,6 +117,31 @@ iden -> String
     }
   ;
 
+quoted_string -> String
+  : "quoted_string"
+    {
+      let s = $lexer.span_str($1.as_ref().unwrap().span());
+      s[1..s.len() - 1].to_string()
+    }
+  ;
+
+int -> String
+  : 'INT'
+    {
+      $lexer.span_str($1.as_ref().unwrap().span()).to_string()
+    }
+  ;
+
+bool -> bool
+  : 'TRUE'  { true }
+  | 'FALSE' { false }
+  ;
+
+
+null -> ()
+  : 'NULL' { () }
+  ;
+
 %%
 
-use runiversal::model::sqlast::{SqlStmt, SelectStmt};
+use crate::model::sqlast::*;

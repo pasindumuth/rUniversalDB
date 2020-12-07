@@ -3,7 +3,6 @@ use crate::model::common::{
   TransactionId,
 };
 use crate::model::sqlast::{SelectStmt, SqlStmt};
-use rand::prelude::ThreadRng;
 use serde::{Deserialize, Serialize};
 
 /// These are PODs that are used for Threads to communicate with
