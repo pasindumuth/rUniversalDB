@@ -11,13 +11,11 @@ fn parse_root(l: &String) -> Option<Root> {
   let lexer = lexerdef.lexer(l);
   // Pass the lexer to the parser and lex and parse the input.
   let (res, errs) = sql_y::parse(&lexer);
-  // TODO: Figure out how to turn off this error correction....
-  // Also, test Select Subquery.
-  for e in errs {
-    println!("{}", e.pp(&lexer, &sql_y::token_epp));
+  if errs.len() > 0 {
+    None
+  } else {
+    res
   }
-
-  return res;
 }
 
 fn parse_test(l: &String) -> Option<Test> {
@@ -36,7 +34,7 @@ pub fn parse_sql(l: &String) -> Option<SqlStmt> {
 
 #[cfg(test)]
 mod tests {
-  use crate::model::sqlast::{BinaryOp, Literal, Root, Test, ValExpr};
+  use crate::model::sqlast::{BinaryOp, Literal, Root, SelectStmt, SqlStmt, Test, ValExpr};
   use crate::sql::parser::{parse_sql, parse_test};
 
   /// This test makes sure that all literals in a expression are
@@ -128,9 +126,12 @@ mod tests {
     );
   }
 
+  /// This tests makes sure that expressions get parsed according to
+  /// operator precedence and associativity rules.
   #[test]
   fn binary_op_assoc_test() {
-    // This assert checks to make sure that AND is bound tighter than OR.
+    // This assert checks to make sure that AND is bound tighter than OR,
+    // despite coming as the second binary operator.
     assert_eq!(
       parse_test(&"TRUE OR TRUE AND FALSE".to_string()),
       Some(Test::ValExpr(ValExpr::BinaryExpr {
@@ -141,6 +142,86 @@ mod tests {
           lhs: Box::new(ValExpr::Literal(Literal::Bool(true))),
           rhs: Box::new(ValExpr::Literal(Literal::Bool(false))),
         }),
+      }))
+    );
+    assert_eq!(
+      parse_test(&"FALSE < 2 AND 3 = \"hello\"".to_string()),
+      Some(Test::ValExpr(ValExpr::BinaryExpr {
+        op: BinaryOp::And,
+        lhs: Box::new(ValExpr::BinaryExpr {
+          op: BinaryOp::LT,
+          lhs: Box::new(ValExpr::Literal(Literal::Bool(false))),
+          rhs: Box::new(ValExpr::Literal(Literal::Int("2".to_string()))),
+        }),
+        rhs: Box::new(ValExpr::BinaryExpr {
+          op: BinaryOp::E,
+          lhs: Box::new(ValExpr::Literal(Literal::Int("3".to_string()))),
+          rhs: Box::new(ValExpr::Literal(Literal::String("hello".to_string()))),
+        }),
+      }))
+    );
+    assert_eq!(parse_test(&"1 < 1 = 1".to_string()), None);
+    assert_eq!(parse_test(&"1 <= 1 = 1".to_string()), None);
+    assert_eq!(parse_test(&"1 = 1 = 1".to_string()), None);
+    assert_eq!(parse_test(&"1 > 1 = 1".to_string()), None);
+    assert_eq!(parse_test(&"1 >= 1 = 1".to_string()), None);
+  }
+
+  /// This test checks to see if Select Queries are being parse properly.
+  #[test]
+  fn select_parse_test() {
+    assert_eq!(
+      parse_sql(&"SELECT key, val FROM table WHERE key = 123".to_string()),
+      Some(SqlStmt::Select(SelectStmt {
+        col_names: vec!["key".to_string(), "val".to_string()],
+        table_name: "table".to_string(),
+        where_clause: ValExpr::BinaryExpr {
+          op: BinaryOp::E,
+          lhs: Box::new(ValExpr::Column("key".to_string())),
+          rhs: Box::new(ValExpr::Literal(Literal::Int("123".to_string()))),
+        }
+      }))
+    );
+    let sql = "SELECT key, val
+               FROM table
+               WHERE key = 123";
+    assert_eq!(
+      parse_sql(&sql.to_string()),
+      Some(SqlStmt::Select(SelectStmt {
+        col_names: vec!["key".to_string(), "val".to_string()],
+        table_name: "table".to_string(),
+        where_clause: ValExpr::BinaryExpr {
+          op: BinaryOp::E,
+          lhs: Box::new(ValExpr::Column("key".to_string())),
+          rhs: Box::new(ValExpr::Literal(Literal::Int("123".to_string()))),
+        }
+      }))
+    );
+    // This Select Query contains a Subquery
+    let sql = "SELECT key1, val
+               FROM table1
+               WHERE key1 =
+                (SELECT key2
+                 FROM table2
+                 WHERE key2 = \"Bob\")";
+    assert_eq!(
+      parse_sql(&sql.to_string()),
+      Some(SqlStmt::Select(SelectStmt {
+        col_names: vec!["key1".to_string(), "val".to_string()],
+        table_name: "table1".to_string(),
+        where_clause: ValExpr::BinaryExpr {
+          op: BinaryOp::E,
+          lhs: Box::new(ValExpr::Column("key1".to_string())),
+          rhs: Box::new(ValExpr::Subquery(Box::from(SelectStmt {
+            col_names: vec!["key2".to_string()],
+            table_name: "table2".to_string(),
+            where_clause: ValExpr::BinaryExpr {
+              op: BinaryOp::E,
+              lhs: Box::new(ValExpr::Column("key2".to_string())),
+              rhs: Box::new(ValExpr::Literal(Literal::String("Bob".to_string()))),
+            }
+          }))),
+        }
       }))
     );
   }
