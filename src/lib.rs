@@ -1,3 +1,4 @@
+#[macro_use]
 pub mod common;
 pub mod model;
 pub mod net;
