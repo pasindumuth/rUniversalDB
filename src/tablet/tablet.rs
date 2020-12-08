@@ -45,55 +45,64 @@ impl TabletState {
     msg: TabletMessage,
   ) {
     match &msg {
-      TabletMessage::AdminRequest { eid, req } => {
-        match req {
-          AdminRequest::Insert {
-            rid,
-            key,
-            value,
-            timestamp,
-            ..
-          } => {
-            let row = Row {
-              key: key.clone(),
-              val: value.clone(),
-            };
-            let result = self.relational_tablet.insert_row(&row, *timestamp);
-            side_effects.add(TabletAction::Send {
-              eid: eid.clone(),
-              msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
-                res: AdminResponse::Insert {
-                  rid: rid.clone(),
-                  result,
-                },
-              }),
-            });
-          }
-          AdminRequest::Read {
-            rid,
-            key,
-            timestamp,
-            ..
-          } => {
-            let result = self.relational_tablet.read_row(&key, *timestamp);
-            side_effects.add(TabletAction::Send {
-              eid: eid.clone(),
-              msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
-                res: AdminResponse::Read {
-                  rid: rid.clone(),
-                  result,
-                },
-              }),
-            });
-          }
-          _ => panic!("The message {:?} shouldn't be forwarded here.", msg),
-        };
-      }
       TabletMessage::ClientRequest { .. } => {
-        panic!("Can't handle client messages yet.");
+        panic!("Client messages not supported yet.");
       }
+      TabletMessage::AdminRequest { eid, req } => match req {
+        AdminRequest::Insert {
+          rid,
+          key,
+          value,
+          timestamp,
+          ..
+        } => {
+          let row = Row {
+            key: key.clone(),
+            val: value.clone(),
+          };
+          let result = self.relational_tablet.insert_row(&row, *timestamp);
+          side_effects.add(TabletAction::Send {
+            eid: eid.clone(),
+            msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
+              res: AdminResponse::Insert {
+                rid: rid.clone(),
+                result,
+              },
+            }),
+          });
+        }
+        AdminRequest::Read {
+          rid,
+          key,
+          timestamp,
+          ..
+        } => {
+          let result = self.relational_tablet.read_row(&key, *timestamp);
+          side_effects.add(TabletAction::Send {
+            eid: eid.clone(),
+            msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
+              res: AdminResponse::Read {
+                rid: rid.clone(),
+                result,
+              },
+            }),
+          });
+        }
+        AdminRequest::SqlQuery { .. } => {
+          panic!("Tablets should not get SQL statements {:?}.", msg);
+        }
+      },
       TabletMessage::SelectPrepare(_) => {
-        panic!("Preparing is not supported yet.");
+        panic!("SelectPrepare is not supported yet.");
+      }
+      TabletMessage::WritePrepare(_) => {
+        panic!("WritePrepare is not supported yet.");
+      }
+      TabletMessage::WriteCommit(_) => {
+        panic!("WriteCommit is not supported yet.");
+      }
+      TabletMessage::WriteAbort(_) => {
+        panic!("WriteAbort is not supported yet.");
       }
     }
   }

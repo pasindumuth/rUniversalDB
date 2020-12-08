@@ -2,7 +2,7 @@ use crate::model::common::{
   ColumnValue, EndpointId, PrimaryKey, RequestId, Row, TabletPath, TabletShape, Timestamp,
   TransactionId,
 };
-use crate::model::sqlast::{SelectStmt, SqlStmt};
+use crate::model::sqlast::{SelectStmt, SqlStmt, UpdateStmt};
 use serde::{Deserialize, Serialize};
 
 /// These are PODs that are used for Threads to communicate with
@@ -92,11 +92,11 @@ pub enum ClientRequest {}
 /// Message that go into the Slave's handler
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveMessage {
-  AdminRequest {
-    req: AdminRequest,
-  },
   ClientRequest {
     req: ClientRequest,
+  },
+  AdminRequest {
+    req: AdminRequest,
   },
   /// A Select Multi-Phase Commit (MPC) is done by having a Slave
   /// Thread be the Transaction Coordinator and Tablets (generally
@@ -113,10 +113,49 @@ pub enum SlaveMessage {
     /// `None` if the Partial Query failed.
     view_o: Option<Vec<Row>>,
   },
+  /// The Prepare Response for the Write Query 2PC algorithm, sent
+  /// from Tablets Threads (RMs) to the Slave Thread (TM)
+  WritePrepared {
+    /// Tablet Shape of the sending Tablet Thread
+    tablet: TabletShape,
+    /// Transaction ID
+    tid: TransactionId,
+  },
+  /// The Commit Response for the Write Query 2PC algorithm.
+  WriteCommitted {
+    /// Tablet Shape of the sending Tablet Thread
+    tablet: TabletShape,
+    /// Transaction ID
+    tid: TransactionId,
+  },
+  /// The Aborted message for the Write Query 2PC algorithm. This can be
+  /// sent in place of a WritePrepared message, but is always sent as the
+  /// response for when the TM send out an Abort message to the RMs.
+  WriteAborted {
+    /// Tablet Shape of the sending Tablet Thread
+    tablet: TabletShape,
+    /// Transaction ID
+    tid: TransactionId,
+  },
   /// A Forwarding Wrapper for a Tablet's SelectPrepare.
   FW_SelectPrepare {
     tablet: TabletShape,
     msg: SelectPrepare,
+  },
+  /// A Forwarding Wrapper for a Tablet's WritePrepare.
+  FW_WritePrepare {
+    tablet: TabletShape,
+    msg: WritePrepare,
+  },
+  /// A Forwarding Wrapper for a Tablet's WriteCommit.
+  FW_WriteCommit {
+    tablet: TabletShape,
+    msg: WriteCommit,
+  },
+  /// A Forwarding Wrapper for a Tablet's WriteAbort.
+  FW_WriteAbort {
+    tablet: TabletShape,
+    msg: WriteAbort,
   },
 }
 
@@ -125,7 +164,7 @@ pub enum SlaveMessage {
 // -------------------------------------------------------------------------------------------------
 
 /// The Prepare message sent from a Slave (the TM) to a Tablet
-/// (an RM) during the Select MPC algorithm.
+/// (an RM) during the Select Query 1PC algorithm.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SelectPrepare {
   pub tm_eid: EndpointId,
@@ -134,12 +173,48 @@ pub struct SelectPrepare {
   pub timestamp: Timestamp,
 }
 
+/// Holds the ASTs for all Write-related queries, namely
+/// Insert, Update, and Delete SQL statements.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum WriteQuery {
+  Update(UpdateStmt),
+}
+
+/// The Prepare message sent from a Slave (the TM) to a Tablet
+/// (an RM) during the Write Query 2PC algorithm.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WritePrepare {
+  pub tm_eid: EndpointId,
+  pub tid: TransactionId,
+  pub write_query: WriteQuery,
+  pub timestamp: Timestamp,
+}
+
+/// The Commit message sent from a Slave (the TM) to a Tablet
+/// (an RM) during the Write Query 2PC algorithm.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WriteCommit {
+  pub tm_eid: EndpointId,
+  pub tid: TransactionId,
+}
+
+/// The Abort message sent from a Slave (the TM) to a Tablet
+/// (an RM) during the Write Query 2PC algorithm.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WriteAbort {
+  pub tm_eid: EndpointId,
+  pub tid: TransactionId,
+}
+
 /// Message that go into the Tablet's handler.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletMessage {
   AdminRequest { eid: EndpointId, req: AdminRequest },
   ClientRequest { eid: EndpointId, req: ClientRequest },
   SelectPrepare(SelectPrepare),
+  WritePrepare(WritePrepare),
+  WriteCommit(WriteCommit),
+  WriteAbort(WriteAbort),
 }
 
 // -------------------------------------------------------------------------------------------------

@@ -30,8 +30,38 @@ pub struct SelectTask {
   pub req_meta: RequestMeta,
 }
 
+/// The phase for the Write 2PC algorithm.
+#[derive(Debug, Clone)]
+pub enum WritePhase {
+  /// The Preparing phase, where the Slave waits for the Tablets
+  /// to send back a Prepared (or Aborted) message.
+  Preparing,
+  /// The Committing Phase, where a the Slave is waiting for all
+  /// Tablets to finish Committing.
+  Committing,
+  /// The Aborting Phase, where a the Slave is waiting for all
+  /// Tablets to finish Aborting.
+  Aborting,
+}
+
+/// This is a 2PC task for managing a Write Query.
+#[derive(Debug, Clone)]
+pub struct WriteTask {
+  /// The set of Tablets in the 2PC
+  pub tablets: Vec<(EndpointId, TabletShape)>,
+  /// The set of Tablets that haven't responded to the current phase yet.
+  pub pending_tablets: HashSet<(EndpointId, TabletShape)>,
+  /// The tablets which successfully sent a Prepare message.
+  pub prepared_tablets: HashSet<(EndpointId, TabletShape)>,
+  /// The current phase of the MPC.
+  pub phase: WritePhase,
+  /// The endpoint which the SELECT Query originated from.
+  pub req_meta: RequestMeta,
+}
+
 /// These are network tasks that are managed by the Slave
 #[derive(Debug, Clone)]
 pub enum NetworkTask {
   Select(SelectTask),
+  Write(WriteTask),
 }
