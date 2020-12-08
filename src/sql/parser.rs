@@ -34,7 +34,9 @@ pub fn parse_sql(l: &String) -> Option<SqlStmt> {
 
 #[cfg(test)]
 mod tests {
-  use crate::model::sqlast::{BinaryOp, Literal, Root, SelectStmt, SqlStmt, Test, ValExpr};
+  use crate::model::sqlast::{
+    BinaryOp, Literal, Root, SelectStmt, SqlStmt, Test, UpdateStmt, ValExpr,
+  };
   use crate::sql::parser::{parse_sql, parse_test};
 
   /// This test makes sure that all literals in a expression are
@@ -71,7 +73,7 @@ mod tests {
     assert_eq!(
       parse_test(&"TRUE AND FALSE".to_string()),
       Some(Test::ValExpr(ValExpr::BinaryExpr {
-        op: BinaryOp::And,
+        op: BinaryOp::AND,
         lhs: Box::new(ValExpr::Literal(Literal::Bool(true))),
         rhs: Box::new(ValExpr::Literal(Literal::Bool(false))),
       }))
@@ -79,7 +81,7 @@ mod tests {
     assert_eq!(
       parse_test(&"TRUE OR FALSE".to_string()),
       Some(Test::ValExpr(ValExpr::BinaryExpr {
-        op: BinaryOp::Or,
+        op: BinaryOp::OR,
         lhs: Box::new(ValExpr::Literal(Literal::Bool(true))),
         rhs: Box::new(ValExpr::Literal(Literal::Bool(false))),
       }))
@@ -124,6 +126,38 @@ mod tests {
         rhs: Box::new(ValExpr::Literal(Literal::Int("2".to_string()))),
       }))
     );
+    assert_eq!(
+      parse_test(&"1 + 2".to_string()),
+      Some(Test::ValExpr(ValExpr::BinaryExpr {
+        op: BinaryOp::PLUS,
+        lhs: Box::new(ValExpr::Literal(Literal::Int("1".to_string()))),
+        rhs: Box::new(ValExpr::Literal(Literal::Int("2".to_string()))),
+      }))
+    );
+    assert_eq!(
+      parse_test(&"1 * 2".to_string()),
+      Some(Test::ValExpr(ValExpr::BinaryExpr {
+        op: BinaryOp::TIMES,
+        lhs: Box::new(ValExpr::Literal(Literal::Int("1".to_string()))),
+        rhs: Box::new(ValExpr::Literal(Literal::Int("2".to_string()))),
+      }))
+    );
+    assert_eq!(
+      parse_test(&"1 - 2".to_string()),
+      Some(Test::ValExpr(ValExpr::BinaryExpr {
+        op: BinaryOp::MINUS,
+        lhs: Box::new(ValExpr::Literal(Literal::Int("1".to_string()))),
+        rhs: Box::new(ValExpr::Literal(Literal::Int("2".to_string()))),
+      }))
+    );
+    assert_eq!(
+      parse_test(&"1 / 2".to_string()),
+      Some(Test::ValExpr(ValExpr::BinaryExpr {
+        op: BinaryOp::DIV,
+        lhs: Box::new(ValExpr::Literal(Literal::Int("1".to_string()))),
+        rhs: Box::new(ValExpr::Literal(Literal::Int("2".to_string()))),
+      }))
+    );
   }
 
   /// This tests makes sure that expressions get parsed according to
@@ -135,10 +169,10 @@ mod tests {
     assert_eq!(
       parse_test(&"TRUE OR TRUE AND FALSE".to_string()),
       Some(Test::ValExpr(ValExpr::BinaryExpr {
-        op: BinaryOp::Or,
+        op: BinaryOp::OR,
         lhs: Box::new(ValExpr::Literal(Literal::Bool(true))),
         rhs: Box::new(ValExpr::BinaryExpr {
-          op: BinaryOp::And,
+          op: BinaryOp::AND,
           lhs: Box::new(ValExpr::Literal(Literal::Bool(true))),
           rhs: Box::new(ValExpr::Literal(Literal::Bool(false))),
         }),
@@ -147,7 +181,7 @@ mod tests {
     assert_eq!(
       parse_test(&"FALSE < 2 AND 3 = \"hello\"".to_string()),
       Some(Test::ValExpr(ValExpr::BinaryExpr {
-        op: BinaryOp::And,
+        op: BinaryOp::AND,
         lhs: Box::new(ValExpr::BinaryExpr {
           op: BinaryOp::LT,
           lhs: Box::new(ValExpr::Literal(Literal::Bool(false))),
@@ -167,7 +201,7 @@ mod tests {
     assert_eq!(parse_test(&"1 >= 1 = 1".to_string()), None);
   }
 
-  /// This test checks to see if Select Queries are being parse properly.
+  /// This test checks to see if Select Statements are being parse properly.
   #[test]
   fn select_parse_test() {
     assert_eq!(
@@ -219,6 +253,73 @@ mod tests {
               op: BinaryOp::E,
               lhs: Box::new(ValExpr::Column("key2".to_string())),
               rhs: Box::new(ValExpr::Literal(Literal::String("Bob".to_string()))),
+            }
+          }))),
+        }
+      }))
+    );
+  }
+
+  /// This test checks to see if Update Statements are being parse properly.
+  #[test]
+  fn update_parse_test() {
+    let sql = "UPDATE table
+               SET val = val + 1
+               WHERE key < 3";
+    assert_eq!(
+      parse_sql(&sql.to_string()),
+      Some(SqlStmt::Update(UpdateStmt {
+        table_name: "table".to_string(),
+        set_col: "val".to_string(),
+        set_val: ValExpr::BinaryExpr {
+          op: BinaryOp::PLUS,
+          lhs: Box::new(ValExpr::Column("val".to_string())),
+          rhs: Box::new(ValExpr::Literal(Literal::Int("1".to_string()))),
+        },
+        where_clause: ValExpr::BinaryExpr {
+          op: BinaryOp::LT,
+          lhs: Box::new(ValExpr::Column("key".to_string())),
+          rhs: Box::new(ValExpr::Literal(Literal::Int("3".to_string()))),
+        }
+      }))
+    );
+    // Advanced Update Statement with Subqueries
+    let sql = "UPDATE table
+               SET val = val + (SELECT key2
+                                FROM table2
+                                WHERE key2 = \"Bob\")
+               WHERE key =
+                (SELECT key3
+                 FROM table3
+                 WHERE key3 AND val3)";
+    assert_eq!(
+      parse_sql(&sql.to_string()),
+      Some(SqlStmt::Update(UpdateStmt {
+        table_name: "table".to_string(),
+        set_col: "val".to_string(),
+        set_val: ValExpr::BinaryExpr {
+          op: BinaryOp::PLUS,
+          lhs: Box::new(ValExpr::Column("val".to_string())),
+          rhs: Box::new(ValExpr::Subquery(Box::from(SelectStmt {
+            col_names: vec!["key2".to_string()],
+            table_name: "table2".to_string(),
+            where_clause: ValExpr::BinaryExpr {
+              op: BinaryOp::E,
+              lhs: Box::new(ValExpr::Column("key2".to_string())),
+              rhs: Box::new(ValExpr::Literal(Literal::String("Bob".to_string()))),
+            }
+          }))),
+        },
+        where_clause: ValExpr::BinaryExpr {
+          op: BinaryOp::E,
+          lhs: Box::new(ValExpr::Column("key".to_string())),
+          rhs: Box::new(ValExpr::Subquery(Box::from(SelectStmt {
+            col_names: vec!["key3".to_string()],
+            table_name: "table3".to_string(),
+            where_clause: ValExpr::BinaryExpr {
+              op: BinaryOp::AND,
+              lhs: Box::new(ValExpr::Column("key3".to_string())),
+              rhs: Box::new(ValExpr::Column("val3".to_string())),
             }
           }))),
         }

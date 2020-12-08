@@ -1,8 +1,10 @@
 %start root
 
-%left     OR
-%left     AND
+%left      OR
+%left      AND
 %nonassoc LTE LT GTE GT E
+%left      '+' '-'
+%left      '*' '/'
 
 %%
 
@@ -12,10 +14,8 @@ root -> Root
   ;
 
 sql_stmt -> SqlStmt
-  : select_stmt
-    {
-      SqlStmt::Select($1)
-    }
+  : select_stmt     { SqlStmt::Select($1) }
+  | update_stmt     { SqlStmt::Update($1) }
   ;
 
 select_stmt -> SelectStmt
@@ -25,6 +25,18 @@ select_stmt -> SelectStmt
         col_names: $2,
         table_name: $4,
         where_clause: $6,
+      }
+    }
+  ;
+
+update_stmt -> UpdateStmt
+  : 'UPDATE' iden 'SET' iden 'E' expr 'WHERE' expr
+    {
+      UpdateStmt {
+        table_name: $2,
+        set_col: $4,
+        set_val: $6,
+        where_clause: $8,
       }
     }
   ;
@@ -45,7 +57,7 @@ expr -> ValExpr
   : expr 'AND' expr
     {
       ValExpr::BinaryExpr {
-        op: BinaryOp::And,
+        op: BinaryOp::AND,
         lhs: Box::new($1),
         rhs: Box::new($3),
       }
@@ -53,7 +65,7 @@ expr -> ValExpr
   | expr 'OR' expr
     {
       ValExpr::BinaryExpr {
-        op: BinaryOp::Or,
+        op: BinaryOp::OR,
         lhs: Box::new($1),
         rhs: Box::new($3),
       }
@@ -94,6 +106,38 @@ expr -> ValExpr
     {
       ValExpr::BinaryExpr {
         op: BinaryOp::E,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | expr '+' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::PLUS,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | expr '-' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::MINUS,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | expr '*' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::TIMES,
+        lhs: Box::new($1),
+        rhs: Box::new($3),
+      }
+    }
+  | expr '/' expr
+    {
+      ValExpr::BinaryExpr {
+        op: BinaryOp::DIV,
         lhs: Box::new($1),
         rhs: Box::new($3),
       }

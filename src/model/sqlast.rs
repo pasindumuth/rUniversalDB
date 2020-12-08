@@ -27,7 +27,7 @@ pub enum Test {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SqlStmt {
   Select(SelectStmt),
-  // Update(UpdateStmt),
+  Update(UpdateStmt),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -51,13 +51,17 @@ pub struct UpdateStmt {
 /// between ValExprs.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum BinaryOp {
-  And,
-  Or,
+  AND,
+  OR,
   LT,
   LTE,
   E,
   GT,
   GTE,
+  PLUS,
+  TIMES,
+  MINUS,
+  DIV,
 }
 
 /// This AST type represents a literal, like a quoted string,

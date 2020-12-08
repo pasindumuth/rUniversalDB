@@ -123,6 +123,7 @@ impl SlaveState {
               }),
             );
           }
+          SqlStmt::Update(_) => panic!("Can't handle update yet."),
         },
       },
       SlaveMessage::ClientRequest { .. } => {
