@@ -66,8 +66,9 @@ impl RelationalTablet {
           return false;
         }
       }
+      return true;
     }
-    return true;
+    return false;
   }
 
   /// Inserts the row into the RelationalTablet. This method first checks
@@ -120,6 +121,19 @@ impl RelationalTablet {
     }
 
     return Ok(());
+  }
+
+  /// TODO: Write this
+  /// This function generally only updates a subset of the value
+  /// columns. The other Value columns remain unchanged, including
+  /// their `lat`s.
+  pub fn insert_partial_val(
+    &mut self,
+    _key: PrimaryKey,
+    _partial_val: Vec<(ColumnName, Option<ColumnValue>)>,
+    _timestamp: Timestamp,
+  ) -> Result<(), String> {
+    panic!("TODO: implement.")
   }
 
   /// This function returns an error if the key doesn't conform

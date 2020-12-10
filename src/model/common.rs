@@ -96,6 +96,16 @@ pub struct Timestamp(pub u64);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TransactionId(pub String);
 
+/// A Wrapper over TransactionId for Select Queries, for just a
+/// little extra type safety.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SelectQueryId(pub TransactionId);
+
+/// A Wrapper over TransactionId for Write Queries (INSERT, UPDATE, and
+/// DELETE), for just a little extra type safety.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WriteQueryId(pub TransactionId);
+
 // -------------------------------------------------------------------------------------------------
 //  Implementations
 // -------------------------------------------------------------------------------------------------

@@ -137,6 +137,15 @@ pub enum SlaveMessage {
     /// Transaction ID
     tid: TransactionId,
   },
+  /// This is a request to perform a subquery. This is simply a Select
+  /// Query, but it was sent by a Tablet.
+  SubqueryRequest {
+    /// Tablet Shape of the sending Tablet.
+    tablet: TabletShape,
+    tid: TransactionId,
+    select_stmt: SelectStmt,
+    timestamp: Timestamp,
+  },
   /// A Forwarding Wrapper for a Tablet's SelectPrepare.
   FW_SelectPrepare {
     tablet: TabletShape,
@@ -156,6 +165,11 @@ pub enum SlaveMessage {
   FW_WriteAbort {
     tablet: TabletShape,
     msg: WriteAbort,
+  },
+  /// A Forwarding Wrapper for a Tablet's SubqueryRequest.
+  FW_SubqueryResponse {
+    tablet: TabletShape,
+    msg: SubqueryResponse,
   },
 }
 
@@ -206,6 +220,14 @@ pub struct WriteAbort {
   pub tid: TransactionId,
 }
 
+/// A Subquery response sent from the Slave executing it to the
+/// Tablet which requested it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SubqueryResponse {
+  pub tid: TransactionId,
+  pub result: Result<Vec<Row>, String>,
+}
+
 /// Message that go into the Tablet's handler.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletMessage {
@@ -215,6 +237,7 @@ pub enum TabletMessage {
   WritePrepare(WritePrepare),
   WriteCommit(WriteCommit),
   WriteAbort(WriteAbort),
+  SubqueryResponse(SubqueryResponse),
 }
 
 // -------------------------------------------------------------------------------------------------

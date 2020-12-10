@@ -1,18 +1,29 @@
-use crate::model::common::{EndpointId, RequestId, Row, TabletShape};
+use crate::model::common::{EndpointId, RequestId, Row, TabletShape, TransactionId};
 use std::collections::HashSet;
 
 /// Network Tasks are generally used to maintain state
 /// during an operations where nodes have to send messages
 /// back and forth multiple times across the network.
 
-/// Holds onto the necessary metadata of a request so that it can
-/// be responded long after the request was deleted from memory.
+/// Holds onto the necessary metadata of a request so that
+/// it can be responded at some later point.
 #[derive(Debug, Clone)]
-pub struct RequestMeta {
-  /// The EndpointId of the original sender.
-  pub origin_eid: EndpointId,
-  /// The RequestId of the original request.
-  pub rid: RequestId,
+pub enum SelectRequestMeta {
+  Admin {
+    /// The EndpointId of the original sender.
+    origin_eid: EndpointId,
+    /// The RequestId of the original request.
+    rid: RequestId,
+  },
+  Tablet {
+    /// The EndpointId of the original sender.
+    origin_eid: EndpointId,
+    /// The TabletShape to forward to.
+    tablet: TabletShape,
+    /// The Transaction ID of the Select Query. Select Queries
+    /// sent by Tablets create a `tid` so it can track things.
+    tid: TransactionId,
+  },
 }
 
 /// This is a 1PC task for managing a Select Query. It's only
@@ -27,7 +38,17 @@ pub struct SelectTask {
   /// already responded.
   pub view: Vec<Row>,
   /// The endpoint which the SELECT Query originated from.
-  pub req_meta: RequestMeta,
+  pub req_meta: SelectRequestMeta,
+}
+
+/// Holds onto the necessary metadata of a request so that
+/// it can be responded at some later point.
+#[derive(Debug, Clone)]
+pub struct WriteRequestMeta {
+  /// The EndpointId of the original sender.
+  pub origin_eid: EndpointId,
+  /// The RequestId of the original request.
+  pub rid: RequestId,
 }
 
 /// The phase for the Write 2PC algorithm.
@@ -56,7 +77,7 @@ pub struct WriteTask {
   /// The current phase of the MPC.
   pub phase: WritePhase,
   /// The endpoint which the SELECT Query originated from.
-  pub req_meta: RequestMeta,
+  pub req_meta: WriteRequestMeta,
 }
 
 /// These are network tasks that are managed by the Slave

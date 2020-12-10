@@ -1,13 +1,15 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{
-  EndpointId, Schema, TabletKeyRange, TabletPath, TabletShape, Timestamp, TransactionId,
+  EndpointId, Row, Schema, TabletKeyRange, TabletPath, TabletShape, Timestamp, TransactionId,
 };
 use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SelectPrepare, SlaveAction,
-  SlaveMessage, TabletMessage, WriteAbort, WriteCommit, WritePrepare, WriteQuery,
+  SlaveMessage, SubqueryResponse, TabletMessage, WriteAbort, WriteCommit, WritePrepare, WriteQuery,
 };
 use crate::model::sqlast::{SelectStmt, SqlStmt};
-use crate::slave::network_task::{NetworkTask, RequestMeta, SelectTask, WritePhase, WriteTask};
+use crate::slave::network_task::{
+  NetworkTask, SelectRequestMeta, SelectTask, WritePhase, WriteRequestMeta, WriteTask,
+};
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -112,7 +114,7 @@ impl SlaveState {
                 tablets: mpc_tablets,
                 pending_tablets,
                 view: vec![],
-                req_meta: RequestMeta {
+                req_meta: SelectRequestMeta::Admin {
                   origin_eid: from_eid.clone(),
                   rid: rid.clone(),
                 },
@@ -144,7 +146,7 @@ impl SlaveState {
                 pending_tablets,
                 prepared_tablets: Default::default(),
                 phase: WritePhase::Preparing,
-                req_meta: RequestMeta {
+                req_meta: WriteRequestMeta {
                   origin_eid: from_eid.clone(),
                   rid: rid.clone(),
                 },
@@ -167,37 +169,29 @@ impl SlaveState {
           select_task.pending_tablets.remove(&eid_tablet);
           if let Some(view) = view_o {
             // This means that Partial Query was successful and we
-            // should continue on with the SelectTask. If all pending
-            // tablets have replied, then send a success message back to
-            // the client.
+            // should continue on with the SelectTask.
             for row in view {
               select_task.view.push(row.clone());
             }
             if select_task.pending_tablets.is_empty() {
-              side_effects.add(SlaveAction::Send {
-                eid: select_task.req_meta.origin_eid.clone(),
-                msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
-                  res: AdminResponse::SqlQuery {
-                    rid: select_task.req_meta.rid.clone(),
-                    result: Ok(select_task.view.clone()),
-                  },
-                }),
-              });
+              // If all pending tablets have replied, then send a success
+              // message back to the client.
+              send_select_response(
+                side_effects,
+                &select_task.req_meta,
+                Ok(select_task.view.clone()),
+              );
               self.tasks.remove(tid);
             }
           } else {
             // This means the Partial Query failed, meaning the whole
             // Select Query was a failure. We may respond to the client now
             // and deleted this SelectTask.
-            side_effects.add(SlaveAction::Send {
-              eid: select_task.req_meta.origin_eid.clone(),
-              msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
-                res: AdminResponse::SqlQuery {
-                  rid: select_task.req_meta.rid.clone(),
-                  result: Err("One of the Partial Transactions failed".to_string()),
-                },
-              }),
-            });
+            send_select_response(
+              side_effects,
+              &select_task.req_meta,
+              Err("One of the Partial Transactions failed".to_string()),
+            );
             self.tasks.remove(tid);
           }
         }
@@ -307,6 +301,44 @@ impl SlaveState {
           }
         }
       }
+      SlaveMessage::SubqueryRequest {
+        tablet,
+        tid,
+        select_stmt,
+        timestamp,
+      } => {
+        let table = &select_stmt.table_name;
+        // These are the tablets that will engage in MPC.
+        let mpc_tablets = get_tablets(&table, &self.tablet_config);
+        let pending_tablets = mpc_tablets.iter().map(|i| i.clone()).collect();
+        for (eid, tablet) in &mpc_tablets {
+          side_effects.add(SlaveAction::Send {
+            eid: eid.clone(),
+            msg: NetworkMessage::Slave(SlaveMessage::FW_SelectPrepare {
+              tablet: tablet.clone(),
+              msg: SelectPrepare {
+                tm_eid: self.this_eid.clone(),
+                tid: tid.clone(),
+                select_query: select_stmt.clone(),
+                timestamp: *timestamp,
+              },
+            }),
+          });
+        }
+        self.tasks.insert(
+          tid.clone(),
+          NetworkTask::Select(SelectTask {
+            tablets: mpc_tablets,
+            pending_tablets,
+            view: vec![],
+            req_meta: SelectRequestMeta::Tablet {
+              origin_eid: from_eid.clone(),
+              tid: tid.clone(),
+              tablet: tablet.clone(),
+            },
+          }),
+        );
+      }
       SlaveMessage::FW_SelectPrepare { tablet, msg } => {
         side_effects.add(SlaveAction::Forward {
           tablet: tablet.clone(),
@@ -331,6 +363,51 @@ impl SlaveState {
           msg: TabletMessage::WriteAbort(msg.clone()),
         });
       }
+      SlaveMessage::FW_SubqueryResponse { tablet, msg } => {
+        side_effects.add(SlaveAction::Forward {
+          tablet: tablet.clone(),
+          msg: TabletMessage::SubqueryResponse(msg.clone()),
+        });
+      }
+    }
+  }
+}
+
+/// Pattern matches against `req_meta`, which describes
+/// who the initiator of the Select Query was, and then send them
+/// an appropriate response with the given `result`.
+fn send_select_response(
+  side_effects: &mut SlaveSideEffects,
+  req_meta: &SelectRequestMeta,
+  result: Result<Vec<Row>, String>,
+) {
+  match req_meta {
+    SelectRequestMeta::Admin { origin_eid, rid } => {
+      side_effects.add(SlaveAction::Send {
+        eid: origin_eid.clone(),
+        msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
+          res: AdminResponse::SqlQuery {
+            rid: rid.clone(),
+            result,
+          },
+        }),
+      });
+    }
+    SelectRequestMeta::Tablet {
+      origin_eid,
+      tablet,
+      tid,
+    } => {
+      side_effects.add(SlaveAction::Send {
+        eid: origin_eid.clone(),
+        msg: NetworkMessage::Slave(SlaveMessage::FW_SubqueryResponse {
+          tablet: tablet.clone(),
+          msg: SubqueryResponse {
+            tid: tid.clone(),
+            result,
+          },
+        }),
+      });
     }
   }
 }
