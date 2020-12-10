@@ -1,6 +1,6 @@
 use crate::model::common::{
-  ColumnValue, EndpointId, PrimaryKey, RequestId, Row, TabletPath, TabletShape, Timestamp,
-  TransactionId,
+  ColumnValue, EndpointId, PrimaryKey, RequestId, Row, SelectQueryId, TabletPath, TabletShape,
+  Timestamp, TransactionId, WriteQueryId,
 };
 use crate::model::sqlast::{SelectStmt, SqlStmt, UpdateStmt};
 use serde::{Deserialize, Serialize};
@@ -108,7 +108,7 @@ pub enum SlaveMessage {
     /// Tablet Shape of the sending Tablet Thread
     tablet: TabletShape,
     /// Transaction ID
-    tid: TransactionId,
+    sid: SelectQueryId,
     /// The View returned for the Select Query.
     /// `None` if the Partial Query failed.
     view_o: Option<Vec<Row>>,
@@ -119,14 +119,14 @@ pub enum SlaveMessage {
     /// Tablet Shape of the sending Tablet Thread
     tablet: TabletShape,
     /// Transaction ID
-    tid: TransactionId,
+    wid: WriteQueryId,
   },
   /// The Commit Response for the Write Query 2PC algorithm.
   WriteCommitted {
     /// Tablet Shape of the sending Tablet Thread
     tablet: TabletShape,
-    /// Transaction ID
-    tid: TransactionId,
+    /// Transaction ID of the Write Query.
+    wid: WriteQueryId,
   },
   /// The Aborted message for the Write Query 2PC algorithm. This can be
   /// sent in place of a WritePrepared message, but is always sent as the
@@ -134,15 +134,15 @@ pub enum SlaveMessage {
   WriteAborted {
     /// Tablet Shape of the sending Tablet Thread
     tablet: TabletShape,
-    /// Transaction ID
-    tid: TransactionId,
+    /// Transaction ID of the Write Query.
+    wid: WriteQueryId,
   },
   /// This is a request to perform a subquery. This is simply a Select
   /// Query, but it was sent by a Tablet.
   SubqueryRequest {
     /// Tablet Shape of the sending Tablet.
     tablet: TabletShape,
-    tid: TransactionId,
+    sid: SelectQueryId,
     select_stmt: SelectStmt,
     timestamp: Timestamp,
   },
@@ -182,7 +182,7 @@ pub enum SlaveMessage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SelectPrepare {
   pub tm_eid: EndpointId,
-  pub tid: TransactionId,
+  pub sid: SelectQueryId,
   pub select_query: SelectStmt,
   pub timestamp: Timestamp,
 }
@@ -199,7 +199,7 @@ pub enum WriteQuery {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct WritePrepare {
   pub tm_eid: EndpointId,
-  pub tid: TransactionId,
+  pub wid: WriteQueryId,
   pub write_query: WriteQuery,
   pub timestamp: Timestamp,
 }
@@ -209,7 +209,7 @@ pub struct WritePrepare {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct WriteCommit {
   pub tm_eid: EndpointId,
-  pub tid: TransactionId,
+  pub wid: WriteQueryId,
 }
 
 /// The Abort message sent from a Slave (the TM) to a Tablet
@@ -217,14 +217,14 @@ pub struct WriteCommit {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct WriteAbort {
   pub tm_eid: EndpointId,
-  pub tid: TransactionId,
+  pub wid: WriteQueryId,
 }
 
 /// A Subquery response sent from the Slave executing it to the
 /// Tablet which requested it.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SubqueryResponse {
-  pub tid: TransactionId,
+  pub sid: SelectQueryId,
   pub result: Result<Vec<Row>, String>,
 }
 

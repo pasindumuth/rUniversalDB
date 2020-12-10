@@ -1,9 +1,11 @@
-use crate::model::common::{EndpointId, RequestId, Row, TabletShape, TransactionId};
+use crate::model::common::{EndpointId, RequestId, Row, SelectQueryId, TabletShape, TransactionId};
 use std::collections::HashSet;
 
 /// Network Tasks are generally used to maintain state
 /// during an operations where nodes have to send messages
-/// back and forth multiple times across the network.
+/// back and forth multiple times across the network. There
+/// are 2 types of Network Tasks, SelectTasks for Select
+/// Queries, and WriteTasks for Write Queries.
 
 /// Holds onto the necessary metadata of a request so that
 /// it can be responded at some later point.
@@ -21,8 +23,8 @@ pub enum SelectRequestMeta {
     /// The TabletShape to forward to.
     tablet: TabletShape,
     /// The Transaction ID of the Select Query. Select Queries
-    /// sent by Tablets create a `tid` so it can track things.
-    tid: TransactionId,
+    /// sent by Tablets create a `sid` so it can track things.
+    sid: SelectQueryId,
   },
 }
 
@@ -78,11 +80,4 @@ pub struct WriteTask {
   pub phase: WritePhase,
   /// The endpoint which the SELECT Query originated from.
   pub req_meta: WriteRequestMeta,
-}
-
-/// These are network tasks that are managed by the Slave
-#[derive(Debug, Clone)]
-pub enum NetworkTask {
-  Select(SelectTask),
-  Write(WriteTask),
 }

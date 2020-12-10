@@ -1,6 +1,7 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{
-  EndpointId, Row, Schema, TabletKeyRange, TabletPath, TabletShape, Timestamp, TransactionId,
+  EndpointId, Row, Schema, SelectQueryId, TabletKeyRange, TabletPath, TabletShape, Timestamp,
+  TransactionId, WriteQueryId,
 };
 use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SelectPrepare, SlaveAction,
@@ -8,7 +9,7 @@ use crate::model::message::{
 };
 use crate::model::sqlast::{SelectStmt, SqlStmt};
 use crate::slave::network_task::{
-  NetworkTask, SelectRequestMeta, SelectTask, WritePhase, WriteRequestMeta, WriteTask,
+  SelectRequestMeta, SelectTask, WritePhase, WriteRequestMeta, WriteTask,
 };
 use std::collections::HashMap;
 
@@ -33,7 +34,8 @@ impl SlaveSideEffects {
 pub struct SlaveState {
   pub rand_gen: RandGen,
   pub this_eid: EndpointId,
-  tasks: HashMap<TransactionId, NetworkTask>,
+  select_tasks: HashMap<SelectQueryId, SelectTask>,
+  write_tasks: HashMap<WriteQueryId, WriteTask>,
   tablet_config: HashMap<EndpointId, Vec<TabletShape>>,
 }
 
@@ -46,7 +48,8 @@ impl SlaveState {
     SlaveState {
       rand_gen,
       this_eid,
-      tasks: HashMap::new(),
+      select_tasks: HashMap::new(),
+      write_tasks: HashMap::new(),
       tablet_config,
     }
   }
@@ -101,16 +104,16 @@ impl SlaveState {
                   tablet: tablet.clone(),
                   msg: SelectPrepare {
                     tm_eid: self.this_eid.clone(),
-                    tid: tid.clone(),
+                    sid: SelectQueryId(tid.clone()),
                     select_query: select_stmt.clone(),
                     timestamp: *timestamp,
                   },
                 }),
               });
             }
-            self.tasks.insert(
-              tid.clone(),
-              NetworkTask::Select(SelectTask {
+            self.select_tasks.insert(
+              SelectQueryId(tid.clone()),
+              SelectTask {
                 tablets: mpc_tablets,
                 pending_tablets,
                 view: vec![],
@@ -118,7 +121,7 @@ impl SlaveState {
                   origin_eid: from_eid.clone(),
                   rid: rid.clone(),
                 },
-              }),
+              },
             );
           }
           SqlStmt::Update(update_stmt) => {
@@ -132,16 +135,16 @@ impl SlaveState {
                   tablet: tablet.clone(),
                   msg: WritePrepare {
                     tm_eid: self.this_eid.clone(),
-                    tid: tid.clone(),
+                    wid: WriteQueryId(tid.clone()),
                     write_query: WriteQuery::Update(update_stmt.clone()),
                     timestamp: *timestamp,
                   },
                 }),
               });
             }
-            self.tasks.insert(
-              tid.clone(),
-              NetworkTask::Write(WriteTask {
+            self.write_tasks.insert(
+              WriteQueryId(tid.clone()),
+              WriteTask {
                 tablets: mpc_tablets,
                 pending_tablets,
                 prepared_tablets: Default::default(),
@@ -150,19 +153,17 @@ impl SlaveState {
                   origin_eid: from_eid.clone(),
                   rid: rid.clone(),
                 },
-              }),
+              },
             );
           }
         },
       },
       SlaveMessage::SelectPrepared {
         tablet,
-        tid,
+        sid,
         view_o,
       } => {
-        if let Some(task) = self.tasks.get_mut(tid) {
-          let select_task = cast!(NetworkTask::Select, task)
-            .expect("We shouldn't get a SelectPrepared message for task: {:?}");
+        if let Some(select_task) = self.select_tasks.get_mut(sid) {
           // We assume that that there are no duplicate message here.
           let eid_tablet = (from_eid.clone(), tablet.clone());
           assert!(select_task.pending_tablets.contains(&eid_tablet));
@@ -181,7 +182,7 @@ impl SlaveState {
                 &select_task.req_meta,
                 Ok(select_task.view.clone()),
               );
-              self.tasks.remove(tid);
+              self.select_tasks.remove(sid);
             }
           } else {
             // This means the Partial Query failed, meaning the whole
@@ -192,14 +193,12 @@ impl SlaveState {
               &select_task.req_meta,
               Err("One of the Partial Transactions failed".to_string()),
             );
-            self.tasks.remove(tid);
+            self.select_tasks.remove(sid);
           }
         }
       }
-      SlaveMessage::WritePrepared { tablet, tid } => {
-        if let Some(task) = self.tasks.get_mut(tid) {
-          let write_task = cast!(NetworkTask::Write, task)
-            .expect("We shouldn't get a WritePrepared message for task: {:?}");
+      SlaveMessage::WritePrepared { tablet, wid } => {
+        if let Some(write_task) = self.write_tasks.get_mut(wid) {
           // We assume that that there are no duplicate message here.
           let eid_tablet = (from_eid.clone(), tablet.clone());
           assert!(write_task.pending_tablets.contains(&eid_tablet));
@@ -219,7 +218,7 @@ impl SlaveState {
                     tablet: tablet.clone(),
                     msg: WriteAbort {
                       tm_eid: self.this_eid.clone(),
-                      tid: tid.clone(),
+                      wid: wid.clone(),
                     },
                   }),
                 });
@@ -247,7 +246,7 @@ impl SlaveState {
                     tablet: tablet.clone(),
                     msg: WriteCommit {
                       tm_eid: self.this_eid.clone(),
-                      tid: tid.clone(),
+                      wid: wid.clone(),
                     },
                   }),
                 });
@@ -269,10 +268,8 @@ impl SlaveState {
           }
         }
       }
-      SlaveMessage::WriteCommitted { tablet, tid } => {
-        if let Some(task) = self.tasks.get_mut(tid) {
-          let write_task = cast!(NetworkTask::Write, task)
-            .expect("We shouldn't get a WriteCommitted message for task: {:?}");
+      SlaveMessage::WriteCommitted { tablet, wid } => {
+        if let Some(write_task) = self.write_tasks.get_mut(wid) {
           // We assume that that there are no duplicate message here.
           let eid_tablet = (from_eid.clone(), tablet.clone());
           assert!(write_task.pending_tablets.contains(&eid_tablet));
@@ -281,14 +278,12 @@ impl SlaveState {
             // This means we are finished commit. The origin will already
             // have been responded to. Now, we just need to remove the
             // Network task.
-            self.tasks.remove(tid);
+            self.write_tasks.remove(wid);
           }
         }
       }
-      SlaveMessage::WriteAborted { tablet, tid } => {
-        if let Some(task) = self.tasks.get_mut(tid) {
-          let write_task = cast!(NetworkTask::Write, task)
-            .expect("We shouldn't get a WriteAborted message for task: {:?}");
+      SlaveMessage::WriteAborted { tablet, wid } => {
+        if let Some(write_task) = self.write_tasks.get_mut(wid) {
           // We assume that that there are no duplicate message here.
           let eid_tablet = (from_eid.clone(), tablet.clone());
           assert!(write_task.pending_tablets.contains(&eid_tablet));
@@ -297,13 +292,13 @@ impl SlaveState {
             // This means we are finished commit. The origin will already
             // have been responded to. Now, we just need to remove the
             // Network task.
-            self.tasks.remove(tid);
+            self.write_tasks.remove(wid);
           }
         }
       }
       SlaveMessage::SubqueryRequest {
         tablet,
-        tid,
+        sid,
         select_stmt,
         timestamp,
       } => {
@@ -318,25 +313,25 @@ impl SlaveState {
               tablet: tablet.clone(),
               msg: SelectPrepare {
                 tm_eid: self.this_eid.clone(),
-                tid: tid.clone(),
+                sid: sid.clone(),
                 select_query: select_stmt.clone(),
                 timestamp: *timestamp,
               },
             }),
           });
         }
-        self.tasks.insert(
-          tid.clone(),
-          NetworkTask::Select(SelectTask {
+        self.select_tasks.insert(
+          sid.clone(),
+          SelectTask {
             tablets: mpc_tablets,
             pending_tablets,
             view: vec![],
             req_meta: SelectRequestMeta::Tablet {
               origin_eid: from_eid.clone(),
-              tid: tid.clone(),
+              sid: sid.clone(),
               tablet: tablet.clone(),
             },
-          }),
+          },
         );
       }
       SlaveMessage::FW_SelectPrepare { tablet, msg } => {
@@ -396,14 +391,14 @@ fn send_select_response(
     SelectRequestMeta::Tablet {
       origin_eid,
       tablet,
-      tid,
+      sid,
     } => {
       side_effects.add(SlaveAction::Send {
         eid: origin_eid.clone(),
         msg: NetworkMessage::Slave(SlaveMessage::FW_SubqueryResponse {
           tablet: tablet.clone(),
           msg: SubqueryResponse {
-            tid: tid.clone(),
+            sid: sid.clone(),
             result,
           },
         }),
