@@ -1,4 +1,4 @@
-use crate::model::common::SelectQueryId;
+use crate::model::common::{ColumnName, SelectQueryId};
 use crate::model::sqlast::SelectStmt;
 use serde::{Deserialize, Serialize};
 
@@ -6,27 +6,69 @@ use serde::{Deserialize, Serialize};
 /// is used in the Transaction Processor to Evaluate a SQL Transaction,
 /// rather than parse it.
 
+/// EvalSqlStmt will actually just be a bunch of states in a state
+/// machine, where there are many starts points, end points, and
+/// paths. There are 2 types of expressions in this system. There
+/// is PreEvalExpr, which hold Subquery(Box<SelectStmt>), and there
+/// are SubqueryId(SelectQueryId). We will have an EvalSqlTask that
+/// holds one state at a time and all necessary SelectQueryIds,
+/// and their returned values so that we can do a State Transition.
+/// The set of `pending_subqueries` in `EvalSqlTask` initially
+/// encompasses all SubqueryIds in all PostEvalExpr of the current
+/// state.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum EvalSqlStmt {
-  Select(EvalSelectStmt),
-  Update(EvalUpdateStmt),
+  Select1(EvalSelectStmt1),
+  Select2(EvalSelectStmt2),
+  Select3(EvalSelectStmt3),
+  Update1(EvalUpdateStmt1),
+  Update2(EvalUpdateStmt2),
+  Update3(EvalUpdateStmt3),
+  Update4(EvalUpdateStmt4),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct EvalSelectStmt {
-  pub col_names: Vec<String>,
-  pub table_name: String,
-  pub where_clause: EvalExpr,
+pub struct EvalSelectStmt1 {
+  pub col_names: Vec<ColumnName>,
+  pub where_clause: PreEvalExpr,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct EvalUpdateStmt {
-  pub table_name: String,
-  /// For now, we only support one column with one value (which
-  /// can generally be an expression).
-  pub set_col: String,
-  pub set_val: EvalExpr,
-  pub where_clause: EvalExpr,
+pub struct EvalSelectStmt2 {
+  pub col_names: Vec<ColumnName>,
+  pub where_clause: PostEvalExpr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct EvalSelectStmt3 {
+  pub col_names: Vec<ColumnName>,
+  pub where_clause: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct EvalUpdateStmt1 {
+  pub set_col: ColumnName,
+  pub set_val: PreEvalExpr,
+  pub where_clause: PreEvalExpr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct EvalUpdateStmt2 {
+  pub set_col: ColumnName,
+  pub set_val: PreEvalExpr,
+  pub where_clause: PostEvalExpr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct EvalUpdateStmt3 {
+  pub set_col: ColumnName,
+  pub set_val: PostEvalExpr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct EvalUpdateStmt4 {
+  pub set_col: ColumnName,
+  pub set_val: EvalLiteral,
 }
 
 /// This represnts common binary operations that can appear
@@ -50,30 +92,36 @@ pub enum EvalBinaryOp {
 /// int, decimal number, or NULL. Notice that column-values are no
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum EvalLiteral {
-  String(String),
+  Int(i32),
   Bool(bool),
+  String(String),
   Null,
 }
 
-/// This AST type represents expressions that evaluate to
-/// a value. This includes binary operations between literal types.
-/// column values, and even subqueries (which, at runtime, must evalute
-/// to a single value).
+/// Used before Subqueries have been sent out.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum EvalExpr {
+pub enum PreEvalExpr {
   BinaryExpr {
     op: EvalBinaryOp,
-    lhs: Box<EvalExpr>,
-    rhs: Box<EvalExpr>,
+    lhs: Box<PreEvalExpr>,
+    rhs: Box<PreEvalExpr>,
   },
   Literal(EvalLiteral),
-  /// For now, we don't assume it's possible to define symbol aliases
-  /// using `AS`. No colum names are qualified with a `.` before it.
-  Column(String),
   /// Holds a Subquery from the SQL AST. This, and the the SubqueryId
   /// Variant, are the key differentiators of EvalSqlStmt structure
   /// and the SqlStmt.
   Subquery(Box<SelectStmt>),
+}
+
+/// Used after Subqueries have been sent out.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum PostEvalExpr {
+  BinaryExpr {
+    op: EvalBinaryOp,
+    lhs: Box<PostEvalExpr>,
+    rhs: Box<PostEvalExpr>,
+  },
+  Literal(EvalLiteral),
   /// The SelectQueryId for when the Subquery is in the process of being
   /// processed.
   SubqueryId(SelectQueryId),

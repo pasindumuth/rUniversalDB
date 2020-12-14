@@ -205,9 +205,11 @@ fn main() {
     let tablet_shape = tablet_shape.clone();
     let static_schema = static_schema.clone();
     let net_conn_map = net_conn_map.clone();
+    let endpoint_id = endpoint_id.clone();
     thread::spawn(move || {
       start_tablet_thread(
         tablet_shape,
+        endpoint_id,
         static_schema,
         RandGen { rng },
         tablet_receiver,

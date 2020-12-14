@@ -68,9 +68,9 @@ pub enum BinaryOp {
 /// int, decimal number, or NULL.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Literal {
-  String(String),
   Int(String),
   Bool(bool),
+  String(String),
   Null,
 }
 

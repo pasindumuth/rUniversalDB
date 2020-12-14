@@ -94,6 +94,7 @@ impl Simulation {
               rng: Box::new(XorShiftRng::from_seed(seed)),
             },
             shape.clone(),
+            eid.clone(),
             static_schema.clone(),
           ),
         );

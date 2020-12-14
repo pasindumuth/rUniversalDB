@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex};
 
 pub fn start_tablet_thread(
   this_shape: TabletShape,
+  this_slave_eid: EndpointId,
   static_schema: Schema,
   rand_gen: RandGen,
   receiver: Receiver<TabletMessage>,
   net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
 ) {
-  let mut state = TabletState::new(rand_gen, this_shape.clone(), static_schema);
   println!("Starting Tablet Thread {:?}", this_shape);
+  let mut state = TabletState::new(rand_gen, this_shape, this_slave_eid, static_schema);
   loop {
     // Receive the Tablet message.
     let msg = receiver.recv().unwrap();

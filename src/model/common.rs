@@ -41,6 +41,7 @@ pub enum ColumnType {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ColumnValue {
   Int(i32),
+  Bool(bool),
   String(String),
   Unit,
 }
@@ -94,7 +95,7 @@ pub struct Timestamp(pub u64);
 /// and Write Queries, but not Partial Queries (the Partial Queries for
 /// a single Full Query uses the same TransactionId).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TransactionId(pub String);
+pub struct TransactionId(pub [u8; 8]);
 
 /// A Wrapper over TransactionId for Select Queries, for just a
 /// little extra type safety.
@@ -127,11 +128,5 @@ impl EndpointId {
 impl RequestId {
   pub fn from(eid: &str) -> RequestId {
     RequestId(eid.to_string())
-  }
-}
-
-impl TransactionId {
-  pub fn from(eid: &str) -> TransactionId {
-    TransactionId(eid.to_string())
   }
 }

@@ -30,6 +30,10 @@ impl RelationalTablet {
     }
   }
 
+  pub fn schema(&self) -> &Schema {
+    &self.schema
+  }
+
   /// Returns false if the types don't match, and true otherwise.
   fn check_type_match(value: Option<&ColumnValue>, col_type: &ColumnType) -> bool {
     match (value, col_type) {
@@ -127,12 +131,58 @@ impl RelationalTablet {
   /// This function generally only updates a subset of the value
   /// columns. The other Value columns remain unchanged, including
   /// their `lat`s.
-  pub fn insert_partial_val(
+  pub fn insert_partial_vals(
     &mut self,
     _key: PrimaryKey,
     _partial_val: Vec<(ColumnName, Option<ColumnValue>)>,
-    _timestamp: Timestamp,
+    _timestamp: &Timestamp,
   ) -> Result<(), String> {
+    panic!("TODO: implement.")
+  }
+
+  /// TODO: Write this
+  /// Returns if the column name exists in the schema or not.
+  pub fn col_name_exists(&self, _val_col: &ColumnName) -> Option<ColumnType> {
+    panic!("TODO: implement.")
+  }
+
+  /// TODO: Write this
+  /// Returns if the ColumnValue's type matches that of the ColumnValue
+  pub fn type_matches(col_val: &ColumnValue, col_type: &ColumnType) -> bool {
+    panic!("TODO: implement.")
+  }
+
+  /// TODO: Write this
+  /// This function generally only updates a subset of the value
+  /// columns. The other Value columns remain unchanged, including
+  /// their `lat`s.
+  pub fn insert_partial_val(
+    &mut self,
+    _key: PrimaryKey,
+    _val_col: ColumnName,
+    _val: Option<ColumnValue>,
+    _timestamp: &Timestamp,
+  ) -> Result<(), String> {
+    panic!("TODO: implement.")
+  }
+
+  /// TODO: Write this
+  /// This is a dumb function. It doesn't check if the ColumnName
+  /// is actually part of the schema. It just appends col_name to key,
+  /// and does a lookup in the mvm. Thus, whether the ColumnName in
+  /// the Schema exists must be checked before.
+  pub fn get_partial_val(
+    &self,
+    _key: &PrimaryKey,
+    _col_name: &ColumnName,
+    _timestamp: &Timestamp,
+  ) -> Option<ColumnValue> {
+    panic!("TODO: implement.")
+  }
+
+  /// TODO: Write this
+  /// This is essentially a snapshot read of all keys at the timestmap given.
+  pub fn get_keys(&self, _timestamp: &Timestamp) -> Vec<PrimaryKey> {
     panic!("TODO: implement.")
   }
 
