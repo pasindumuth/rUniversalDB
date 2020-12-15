@@ -94,17 +94,17 @@ pub struct Timestamp(pub u64);
 /// A transaction Id that's globally unique. This includes all Select Queries
 /// and Write Queries, but not Partial Queries (the Partial Queries for
 /// a single Full Query uses the same TransactionId).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TransactionId(pub [u8; 8]);
 
 /// A Wrapper over TransactionId for Select Queries, for just a
 /// little extra type safety.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SelectQueryId(pub TransactionId);
 
 /// A Wrapper over TransactionId for Write Queries (INSERT, UPDATE, and
 /// DELETE), for just a little extra type safety.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WriteQueryId(pub TransactionId);
 
 // -------------------------------------------------------------------------------------------------

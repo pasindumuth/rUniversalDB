@@ -1,4 +1,5 @@
 use crate::model::common::{EndpointId, RequestId, Row, SelectQueryId, TabletShape, TransactionId};
+use crate::model::message::SubqueryPathLeg1;
 use std::collections::HashSet;
 
 /// Network Tasks are generally used to maintain state
@@ -22,6 +23,9 @@ pub enum SelectRequestMeta {
     origin_eid: EndpointId,
     /// The TabletShape to forward to.
     tablet: TabletShape,
+    /// The path which the SubqueryResponse must be routed back
+    /// to in the receiving Tablet.
+    subquery_path: SubqueryPathLeg1,
     /// The Transaction ID of the Select Query. Select Queries
     /// sent by Tablets create a `sid` so it can track things.
     sid: SelectQueryId,

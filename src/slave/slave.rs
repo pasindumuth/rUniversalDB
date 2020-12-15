@@ -299,6 +299,7 @@ impl SlaveState {
       SlaveMessage::SubqueryRequest {
         tablet,
         sid,
+        subquery_path,
         select_stmt,
         timestamp,
       } => {
@@ -328,8 +329,9 @@ impl SlaveState {
             view: vec![],
             req_meta: SelectRequestMeta::Tablet {
               origin_eid: from_eid.clone(),
-              sid: sid.clone(),
               tablet: tablet.clone(),
+              subquery_path: subquery_path.clone(),
+              sid: sid.clone(),
             },
           },
         );
@@ -391,6 +393,7 @@ fn send_select_response(
     SelectRequestMeta::Tablet {
       origin_eid,
       tablet,
+      subquery_path,
       sid,
     } => {
       side_effects.add(SlaveAction::Send {
@@ -399,6 +402,7 @@ fn send_select_response(
           tablet: tablet.clone(),
           msg: SubqueryResponse {
             sid: sid.clone(),
+            subquery_path: subquery_path.clone(),
             result,
           },
         }),

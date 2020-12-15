@@ -4,12 +4,14 @@ use crate::model::common::{
   TabletShape, Timestamp, TransactionId, WriteQueryId,
 };
 use crate::model::evalast::{
-  EvalBinaryOp, EvalLiteral, EvalSelectStmt1, EvalSelectStmt2, EvalSelectStmt3, EvalSqlStmt,
-  EvalUpdateStmt1, EvalUpdateStmt2, EvalUpdateStmt3, EvalUpdateStmt4, PostEvalExpr, PreEvalExpr,
+  EvalBinaryOp, EvalLiteral, EvalSelect, EvalSelectStmt1, EvalSelectStmt2, EvalSelectStmt3,
+  EvalUpdate, EvalUpdateStmt1, EvalUpdateStmt2, EvalUpdateStmt3, EvalUpdateStmt4, PostEvalExpr,
+  PreEvalExpr,
 };
 use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SelectPrepare, SlaveMessage,
-  TabletAction, TabletMessage, WritePrepare, WriteQuery,
+  SubqueryPathLeg1, SubqueryPathLeg2, SubqueryPathLeg3, SubqueryResponse, TabletAction,
+  TabletMessage, WritePrepare, WriteQuery,
 };
 use crate::model::sqlast::ValExpr::{BinaryExpr, Subquery};
 use crate::model::sqlast::{BinaryOp, Literal, SelectStmt, SqlStmt, UpdateStmt, ValExpr};
@@ -69,10 +71,19 @@ type SelectView = BTreeMap<PrimaryKey, Vec<Option<ColumnValue>>>;
 /// This is used for evaluating a SQL statement asynchronously,
 /// holding the necessary metadata at all points.
 #[derive(Debug)]
-struct EvalSqlTask {
-  eval_expr: EvalSqlStmt,
-  pending_subqueries: Vec<(SelectQueryId, SelectStmt)>,
-  complete_subqueries: Vec<(SelectQueryId, Vec<Row>)>,
+struct EvalUpdateTask {
+  eval_expr: EvalUpdate,
+  pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
+  complete_subqueries: BTreeMap<SelectQueryId, Vec<Row>>,
+}
+
+/// This is used for evaluating a SQL statement asynchronously,
+/// holding the necessary metadata at all points.
+#[derive(Debug)]
+struct EvalSelectTask {
+  eval_expr: EvalSelect,
+  pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
+  complete_subqueries: BTreeMap<SelectQueryId, Vec<Row>>,
 }
 
 /// What's going on? Okay, so what does a subquery result look like?
@@ -86,10 +97,10 @@ struct CombinationStatus {
   /// Fields controlling verification of the Write Queries only.
   write_view: View,
   current_write: Option<WriteQueryId>,
-  write_row_tasks: HashMap<PrimaryKey, EvalSqlTask>,
+  write_row_tasks: HashMap<PrimaryKey, EvalUpdateTask>,
 
   /// Fields controlling verification of the Select Queries only.
-  select_row_tasks: HashMap<SelectQueryId, (SelectView, HashMap<PrimaryKey, EvalSqlTask>)>,
+  select_row_tasks: HashMap<SelectQueryId, (SelectView, HashMap<PrimaryKey, EvalSelectTask>)>,
 }
 
 /// This is used to control
@@ -101,6 +112,30 @@ struct PropertyVerificationStatus {
   selects: BTreeMap<Timestamp, Vec<SelectQueryId>>,
   select_views: HashMap<SelectQueryId, (SelectView, HashSet<Vec<WriteQueryId>>)>,
   combos_verified: HashSet<Vec<WriteQueryId>>,
+}
+
+// Usually, we use WriteQueryIds to refer to WriteQueries. This object
+// is what a WriteQueryId refers to in the TabletState.
+#[derive(Debug, Clone)]
+struct WriteQueryMetadata {
+  // The Timestamp of the write.
+  timestamp: Timestamp,
+  // EndpoingId of the TM for the write.
+  tm_eid: EndpointId,
+  // The actuay Write Query.
+  write_query: WriteQuery,
+}
+
+// Usually, we use SelectQueryIds to refer to SelectQueries. This object
+// is what a SelectQueryId refers to in the TabletState.
+#[derive(Debug, Clone)]
+struct SelectQueryMetadata {
+  // The Timestamp of the select.
+  timestamp: Timestamp,
+  // EndpoingId of the TM for the select.
+  tm_eid: EndpointId,
+  // The actuay Select Query.
+  select_stmt: SelectStmt,
 }
 
 #[derive(Debug)]
@@ -116,9 +151,9 @@ pub struct TabletState {
   /// other fields. We also store other metadata associated with the
   /// Write Query, name the timestamp and the TM eid is managing the
   /// transaction.
-  write_query_map: HashMap<WriteQueryId, (Timestamp, EndpointId, WriteQuery)>,
+  write_query_map: HashMap<WriteQueryId, WriteQueryMetadata>,
   /// Similarly, this the repository of all Select Queries.
-  select_query_map: HashMap<SelectQueryId, (Timestamp, EndpointId, SelectStmt)>,
+  select_query_map: HashMap<SelectQueryId, SelectQueryMetadata>,
 
   /// Below, we hold the core Transaction data. Note that we use
   /// a BTreeMap for maps that are keyed by timestamps, since we
@@ -234,8 +269,8 @@ impl TabletState {
       TabletMessage::WriteAbort(_) => {
         panic!("WriteAbort is not supported yet.");
       }
-      TabletMessage::SubqueryResponse(_) => {
-        panic!("SubqueryResponse is not supported yet.");
+      TabletMessage::SubqueryResponse(subquery_res) => {
+        side_effects.append(self.handle_subquery_response(subquery_res));
       }
     }
   }
@@ -285,8 +320,13 @@ impl TabletState {
     status.selects = self.already_reached_selects.clone();
     self.write_query_map.insert(
       wid.clone(),
-      (timestamp.clone(), tm_eid.clone(), write_query.clone()),
+      WriteQueryMetadata {
+        timestamp: timestamp.clone(),
+        tm_eid: tm_eid.clone(),
+        write_query: write_query.clone(),
+      },
     );
+
     // Construct the `combos` and update `combo_status_map` accordingly
     for mut combo_as_map in create_combos(&self.committed_writes, &self.already_reached_writes) {
       // This code block constructions the CombinationStatus.
@@ -294,6 +334,7 @@ impl TabletState {
       if let Ok(effects) = add_combo(
         &mut self.rand_gen,
         &mut status,
+        StatusPath::WriteStatus { wid: wid.clone() },
         &combo_as_map.values().cloned().collect(),
         &self.relational_tablet,
         &self.write_query_map,
@@ -318,41 +359,20 @@ impl TabletState {
       self
         .already_reached_writes
         .insert(timestamp.clone(), wid.clone());
-      let mut writes_to_delete: Vec<(EndpointId, WriteQueryId, Timestamp)> = Vec::new();
-      for (cur_wid, status) in self.writes_being_verified.iter_mut() {
-        for mut combo_as_map in create_combos(&self.committed_writes, &self.already_reached_writes)
-        {
-          // This code block constructs the CombinationStatus.
-          let (cur_timestamp, cur_tm_eid, _) = self.write_query_map.get(&cur_wid).unwrap();
-          combo_as_map.insert(cur_timestamp.clone(), cur_wid.clone());
-          if let Ok(effects) = add_combo(
-            &mut self.rand_gen,
-            status,
-            &combo_as_map.values().cloned().collect(),
-            &self.relational_tablet,
-            &self.write_query_map,
-            &self.select_query_map,
-            &self.this_slave_eid,
-            &self.this_tablet,
-          ) {
-            side_effects.append(effects);
-          } else {
-            // The verification failed, so abort the write and clean up all
-            // data structures where the write appears.
-            writes_to_delete.push((cur_tm_eid.clone(), cur_wid.clone(), cur_timestamp.clone()));
-          }
-        }
-      }
-      // We delete the writes separately from the loop above to avoid
-      // double-mutable borrows of `writes_to_delete`.
-      for (cur_tm_eid, cur_wid, cur_timestamp) in &writes_to_delete {
-        side_effects.add(write_aborted(cur_tm_eid, cur_wid, &self.this_tablet));
-        self.non_reached_writes.remove(cur_timestamp);
-        self.writes_being_verified.remove(cur_wid);
-        self.write_query_map.remove(cur_wid);
-      }
       // Send a response back to the TM.
-      write_prepared(tm_eid, wid, &self.this_tablet);
+      side_effects.add(write_prepared(tm_eid, wid, &self.this_tablet));
+      side_effects.append(add_new_combos(
+        &mut self.rand_gen,
+        &mut self.non_reached_writes,
+        &mut self.writes_being_verified,
+        &mut self.write_query_map,
+        &self.already_reached_writes,
+        &self.committed_writes,
+        &self.relational_tablet,
+        &self.select_query_map,
+        &self.this_slave_eid,
+        &self.this_tablet,
+      ));
     } else {
       // The PropertyVerificationStatus is not done. So add it
       // to non_reached_writes.
@@ -361,6 +381,194 @@ impl TabletState {
         .insert(timestamp.clone(), wid.clone());
       self.writes_being_verified.insert(wid.clone(), status);
     }
+    return side_effects;
+  }
+
+  /// This was taken out into it's own function so that we can handle the failure
+  /// case easily (rather than mutating the main side-effects variable, we just
+  /// return one instead).
+  fn handle_subquery_response(&mut self, subquery_res: &SubqueryResponse) -> TabletSideEffects {
+    let SubqueryResponse {
+      sid,
+      subquery_path,
+      result,
+    } = subquery_res;
+    let mut side_effects = TabletSideEffects::new();
+    (|| -> Option<()> {
+      match subquery_path {
+        SubqueryPathLeg1::Write {
+          wid: orig_wid,
+          leg2,
+        } => {
+          let status = self.writes_being_verified.get_mut(orig_wid)?;
+          let mut combo_status = status.combo_status_map.get_mut(&leg2.combo)?;
+          match &leg2.leg3 {
+            SubqueryPathLeg3::Write { wid: cur_wid, key } => {
+              if combo_status.current_write.as_ref() == Some(cur_wid) {
+                let write_meta = self.write_query_map.get(cur_wid).unwrap().clone();
+                let task = combo_status.write_row_tasks.get_mut(key)?;
+                task.pending_subqueries.remove(sid)?;
+                let subquery_ret = if let Ok(subquery_ret) = result.clone() {
+                  subquery_ret
+                } else {
+                  // Here, we need to abort the whole transaction. Get rid of the
+                  // the whole PropertyVerificationStatus.
+                  self.non_reached_writes.remove(&write_meta.timestamp);
+                  self.writes_being_verified.remove(orig_wid);
+                  self.write_query_map.remove(orig_wid);
+                  side_effects.add(write_aborted(
+                    &write_meta.tm_eid,
+                    orig_wid,
+                    &self.this_tablet,
+                  ));
+                  return Some(());
+                };
+                task.complete_subqueries.insert(sid.clone(), subquery_ret);
+                if task.pending_subqueries.is_empty() {
+                  // Continue processing the EvalTask
+                  let (eval_update, context) = if let Ok(eval_update) = eval_update_graph(
+                    &mut self.rand_gen,
+                    task.eval_expr.clone(),
+                    task.complete_subqueries.clone(),
+                  ) {
+                    eval_update
+                  } else {
+                    // Here, we need to abort the whole transaction. Get rid of the
+                    // the whole PropertyVerificationStatus.
+                    self.non_reached_writes.remove(&write_meta.timestamp);
+                    self.writes_being_verified.remove(orig_wid);
+                    self.write_query_map.remove(orig_wid);
+                    side_effects.add(write_aborted(
+                      &write_meta.tm_eid,
+                      orig_wid,
+                      &self.this_tablet,
+                    ));
+                    return Some(());
+                  };
+                  let task_done = match eval_update {
+                    EvalUpdate::Update4(EvalUpdateStmt4 { set_col, set_val }) => {
+                      // This means the Update for the row completed
+                      // without the need for subqueries.
+                      table_insert(
+                        &mut combo_status.write_view,
+                        &key,
+                        &set_col,
+                        set_val,
+                        &write_meta.timestamp,
+                      );
+                      true
+                    }
+                    _ => {
+                      // This means we must perform async subqueries.
+                      send(
+                        &mut side_effects,
+                        &self.this_slave_eid,
+                        &self.this_tablet,
+                        SubqueryPathLeg1::Write {
+                          wid: orig_wid.clone(),
+                          leg2: SubqueryPathLeg2 {
+                            combo: combo_status.combo.clone(),
+                            leg3: SubqueryPathLeg3::Write {
+                              wid: cur_wid.clone(),
+                              key: key.clone(),
+                            },
+                          },
+                        },
+                        &context,
+                        &write_meta.timestamp,
+                      );
+                      task.eval_expr = eval_update;
+                      task.pending_subqueries = context;
+                      task.complete_subqueries = BTreeMap::new();
+                      false
+                    }
+                  };
+                  if task_done {
+                    combo_status.write_row_tasks.remove(key).unwrap();
+                    if combo_status.write_row_tasks.is_empty() {
+                      // This means that that combo_status.current_write
+                      // is done. Now, we need to move onto the next write.
+                      let next_wid_index = combo_status
+                        .combo
+                        .iter()
+                        .position(|x| x == cur_wid)
+                        .unwrap()
+                        + 1;
+                      let effects = if let Ok(effects) = continue_combo(
+                        &mut self.rand_gen,
+                        &mut status.select_views,
+                        &mut status.combos_verified,
+                        &mut combo_status,
+                        &status.selects,
+                        next_wid_index as i32,
+                        StatusPath::WriteStatus {
+                          wid: orig_wid.clone(),
+                        },
+                        &self.write_query_map,
+                        &self.select_query_map,
+                        &self.this_slave_eid,
+                        &self.this_tablet,
+                      ) {
+                        effects
+                      } else {
+                        // Here, we need to abort the whole transaction. Get rid of the
+                        // the whole PropertyVerificationStatus.
+                        self.non_reached_writes.remove(&write_meta.timestamp);
+                        self.writes_being_verified.remove(orig_wid);
+                        self.write_query_map.remove(orig_wid);
+                        side_effects.add(write_aborted(
+                          &write_meta.tm_eid,
+                          orig_wid,
+                          &self.this_tablet,
+                        ));
+                        return Some(());
+                      };
+                      side_effects.append(effects);
+                      if status.combos_verified.len() == status.combo_status_map.len() {
+                        // We managed to verify all combos in the PropertyVerificationStatus.
+                        // This means we are finished the transaction. So, add to
+                        // already_reached_writes and update all associated
+                        // PropertyVerificationStatuses accordingly.
+                        self.non_reached_writes.remove(&write_meta.timestamp);
+                        self.writes_being_verified.remove(orig_wid);
+                        self
+                          .already_reached_writes
+                          .insert(write_meta.timestamp.clone(), orig_wid.clone());
+                        // Send a response back to the TM.
+                        side_effects.add(write_prepared(
+                          &write_meta.tm_eid,
+                          orig_wid,
+                          &self.this_tablet,
+                        ));
+                        side_effects.append(add_new_combos(
+                          &mut self.rand_gen,
+                          &mut self.non_reached_writes,
+                          &mut self.writes_being_verified,
+                          &mut self.write_query_map,
+                          &self.already_reached_writes,
+                          &self.committed_writes,
+                          &self.relational_tablet,
+                          &self.select_query_map,
+                          &self.this_slave_eid,
+                          &self.this_tablet,
+                        ));
+                      }
+                    }
+                  }
+                };
+              }
+            }
+            SubqueryPathLeg3::Select { sid, key } => {
+              let (view, tasks) = combo_status.select_row_tasks.get_mut(sid)?;
+              let task = tasks.get_mut(key)?;
+              // Modifiy the task with the (sid, subquery_result)
+            }
+          };
+        }
+        SubqueryPathLeg1::Select { sid, leg2 } => panic!("TODO: implement"),
+      }
+      Some(())
+    })();
     return side_effects;
   }
 }
@@ -400,13 +608,83 @@ enum VerificationFailure {
   VerificationFailure,
 }
 
+// Useful stuff for creating SubquerypathLeg1, which is necessary stuff.
+#[derive(Debug, Clone)]
+enum StatusPath {
+  SelectStatus { sid: SelectQueryId },
+  WriteStatus { wid: WriteQueryId },
+}
+
+fn make_path(status_path: StatusPath, leg2: SubqueryPathLeg2) -> SubqueryPathLeg1 {
+  match status_path {
+    StatusPath::SelectStatus { sid } => SubqueryPathLeg1::Select { sid, leg2 },
+    StatusPath::WriteStatus { wid } => SubqueryPathLeg1::Write { wid, leg2 },
+  }
+}
+
+fn add_new_combos(
+  rand_gen: &mut RandGen,
+  non_reached_writes: &mut BTreeMap<Timestamp, WriteQueryId>,
+  writes_being_verified: &mut HashMap<WriteQueryId, PropertyVerificationStatus>,
+  write_query_map: &mut HashMap<WriteQueryId, WriteQueryMetadata>,
+  already_reached_writes: &BTreeMap<Timestamp, WriteQueryId>,
+  committed_writes: &BTreeMap<Timestamp, WriteQueryId>,
+  relational_tablet: &RelationalTablet,
+  select_query_map: &HashMap<SelectQueryId, SelectQueryMetadata>,
+  this_slave_eid: &EndpointId,
+  this_tablet: &TabletShape,
+) -> TabletSideEffects {
+  let mut side_effects = TabletSideEffects::new();
+  let mut writes_to_delete: Vec<(EndpointId, WriteQueryId, Timestamp)> = Vec::new();
+  for (cur_wid, status) in writes_being_verified.iter_mut() {
+    for mut combo_as_map in create_combos(committed_writes, already_reached_writes) {
+      // This code block constructs the CombinationStatus.
+      let cur_write_meta = write_query_map.get(&cur_wid).unwrap();
+      combo_as_map.insert(cur_write_meta.timestamp.clone(), cur_wid.clone());
+      if let Ok(effects) = add_combo(
+        rand_gen,
+        status,
+        StatusPath::WriteStatus {
+          wid: cur_wid.clone(),
+        },
+        &combo_as_map.values().cloned().collect(),
+        relational_tablet,
+        write_query_map,
+        select_query_map,
+        this_slave_eid,
+        this_tablet,
+      ) {
+        side_effects.append(effects);
+      } else {
+        // The verification failed, so abort the write and clean up all
+        // data structures where the write appears.
+        writes_to_delete.push((
+          cur_write_meta.tm_eid.clone(),
+          cur_wid.clone(),
+          cur_write_meta.timestamp.clone(),
+        ));
+      }
+    }
+  }
+  // We delete the writes separately from the loop above to avoid
+  // double-mutable borrows of `writes_to_delete`.
+  for (cur_tm_eid, cur_wid, cur_timestamp) in &writes_to_delete {
+    side_effects.add(write_aborted(cur_tm_eid, cur_wid, this_tablet));
+    non_reached_writes.remove(cur_timestamp);
+    writes_being_verified.remove(cur_wid);
+    write_query_map.remove(cur_wid);
+  }
+  side_effects
+}
+
 fn add_combo(
   rand_gen: &mut RandGen,
   status: &mut PropertyVerificationStatus,
+  status_path: StatusPath,
   combo: &Vec<WriteQueryId>,
   relational_tablet: &RelationalTablet,
-  write_query_map: &HashMap<WriteQueryId, (Timestamp, EndpointId, WriteQuery)>,
-  select_query_map: &HashMap<SelectQueryId, (Timestamp, EndpointId, SelectStmt)>,
+  write_query_map: &HashMap<WriteQueryId, WriteQueryMetadata>,
+  select_query_map: &HashMap<SelectQueryId, SelectQueryMetadata>,
   this_slave_eid: &EndpointId,
   this_tablet: &TabletShape,
 ) -> Result<TabletSideEffects, VerificationFailure> {
@@ -416,58 +694,118 @@ fn add_combo(
     combo: Vec::<WriteQueryId>::new(),
     write_view: RelationalTablet::new(relational_tablet.schema().clone()),
     current_write: None,
-    write_row_tasks: HashMap::<PrimaryKey, EvalSqlTask>::new(),
-    select_row_tasks: HashMap::<SelectQueryId, (SelectView, HashMap<PrimaryKey, EvalSqlTask>)>::new(
-    ),
+    write_row_tasks: HashMap::<PrimaryKey, EvalUpdateTask>::new(),
+    select_row_tasks:
+      HashMap::<SelectQueryId, (SelectView, HashMap<PrimaryKey, EvalSelectTask>)>::new(),
   };
   combo_status.combo = combo.clone();
-  // Iterate over the Write Queries and update the `write_view` accordingly.
+  side_effects.append(continue_combo(
+    rand_gen,
+    &mut status.select_views,
+    &mut status.combos_verified,
+    &mut combo_status,
+    &status.selects,
+    0,
+    status_path,
+    write_query_map,
+    select_query_map,
+    this_slave_eid,
+    this_tablet,
+  )?);
+  status.combo_status_map.insert(combo.clone(), combo_status);
+  Ok(side_effects)
+}
+
+fn continue_combo(
+  rand_gen: &mut RandGen,
+  select_views: &mut HashMap<SelectQueryId, (SelectView, HashSet<Vec<WriteQueryId>>)>,
+  combos_verified: &mut HashSet<Vec<WriteQueryId>>,
+  combo_status: &mut CombinationStatus,
+  selects: &BTreeMap<Timestamp, Vec<SelectQueryId>>,
+  wid_index: i32,
+  status_path: StatusPath,
+  write_query_map: &HashMap<WriteQueryId, WriteQueryMetadata>,
+  select_query_map: &HashMap<SelectQueryId, SelectQueryMetadata>,
+  this_slave_eid: &EndpointId,
+  this_tablet: &TabletShape,
+) -> Result<TabletSideEffects, VerificationFailure> {
+  assert!(0 <= wid_index && wid_index <= combo_status.combo.len() as i32);
+  let lower_bound = if wid_index == 0 {
+    Unbounded
+  } else {
+    let wid = combo_status.combo.get((wid_index - 1) as usize).unwrap();
+    Included(write_query_map.get(wid).unwrap().timestamp)
+  };
+  let mut side_effects = TabletSideEffects::new();
   let mut upper_bound = Unbounded;
-  for cur_wid in &combo_status.combo {
+  // Iterate over the Write Queries and update the `write_view` accordingly.
+  for cur_wid in &combo_status.combo[wid_index as usize..] {
     combo_status.current_write = Some(cur_wid.clone());
-    let (timestamp, _, write_query) = write_query_map.get(cur_wid).unwrap().clone();
-    let mut key_write_row_tasks: HashMap<PrimaryKey, EvalSqlTask> = HashMap::new();
-    match write_query {
+    let write_meta = write_query_map.get(cur_wid).unwrap().clone();
+    let mut key_write_row_tasks: HashMap<PrimaryKey, EvalUpdateTask> = HashMap::new();
+    match &write_meta.write_query {
       WriteQuery::Update(update_stmt) => {
         assert_eq!(update_stmt.table_name, this_tablet.path.path);
-        for key in combo_status.write_view.get_keys(&timestamp) {
-          let res = create_update_task(
+        for key in combo_status.write_view.get_keys(&write_meta.timestamp) {
+          if let Ok((eval_update, context)) = eval_update_graph(
             rand_gen,
-            update_stmt.clone(),
-            &combo_status.write_view,
-            &key,
-            &timestamp,
-          );
-          match res {
-            Ok(eval) => {
-              match eval.eval_expr {
-                EvalSqlStmt::Update4(EvalUpdateStmt4 { set_col, set_val }) => {
-                  // This means the Update for the row completed
-                  // without the need for subqueries.
-                  table_insert(
-                    &mut combo_status.write_view,
-                    &key,
-                    &set_col,
-                    set_val,
-                    &timestamp,
-                  );
-                }
-                _ => {
-                  // This means we must perform async subqueries.
-                  send(
-                    &mut side_effects,
-                    this_slave_eid,
-                    this_tablet,
-                    &eval.pending_subqueries,
-                    &timestamp,
-                  );
-                  key_write_row_tasks.insert(key.clone(), eval);
-                }
+            EvalUpdate::Update1(
+              if let Ok(eval_update) = start_eval_update_stmt(
+                update_stmt.clone(),
+                &combo_status.write_view,
+                &key,
+                &write_meta.timestamp,
+              ) {
+                eval_update
+              } else {
+                return Err(VerificationFailure::VerificationFailure);
+              },
+            ),
+            BTreeMap::new(),
+          ) {
+            match eval_update {
+              EvalUpdate::Update4(EvalUpdateStmt4 { set_col, set_val }) => {
+                // This means the Update for the row completed
+                // without the need for subqueries.
+                table_insert(
+                  &mut combo_status.write_view,
+                  &key,
+                  &set_col,
+                  set_val,
+                  &write_meta.timestamp,
+                );
+              }
+              _ => {
+                // This means we must perform async subqueries.
+                send(
+                  &mut side_effects,
+                  this_slave_eid,
+                  this_tablet,
+                  make_path(
+                    status_path.clone(),
+                    SubqueryPathLeg2 {
+                      combo: combo_status.combo.clone(),
+                      leg3: SubqueryPathLeg3::Write {
+                        wid: cur_wid.clone(),
+                        key: key.clone(),
+                      },
+                    },
+                  ),
+                  &context,
+                  &write_meta.timestamp,
+                );
+                key_write_row_tasks.insert(
+                  key.clone(),
+                  EvalUpdateTask {
+                    eval_expr: eval_update.clone(),
+                    pending_subqueries: context,
+                    complete_subqueries: Default::default(),
+                  },
+                );
               }
             }
-            Err(_) => {
-              return Err(VerificationFailure::VerificationFailure);
-            }
+          } else {
+            return Err(VerificationFailure::VerificationFailure);
           }
         }
       }
@@ -476,62 +814,87 @@ fn add_combo(
       // This means that we can't continue applying writes, since
       // we are now blocked by subqueries.
       combo_status.write_row_tasks = key_write_row_tasks;
-      upper_bound = Excluded(timestamp);
+      upper_bound = Excluded(write_meta.timestamp);
       break;
     } else {
       // This means we continue applying writes, moving on.
       combo_status.current_write = None;
     }
   }
-  for (_, selects) in status.selects.range((Unbounded, upper_bound)) {
+  for (_, selects) in selects.range((lower_bound, upper_bound)) {
     for select_id in selects {
       // This is a new select_id that we must start handling.
-      let (timestamp, _, select_stmt) = select_query_map.get(select_id).unwrap().clone();
+      let select_query_meta = select_query_map.get(select_id).unwrap().clone();
       let mut view = SelectView::new();
-      let mut key_read_row_tasks = HashMap::<PrimaryKey, EvalSqlTask>::new();
-      for key in combo_status.write_view.get_keys(&timestamp) {
-        let res = create_select_task(
+      let mut key_read_row_tasks = HashMap::<PrimaryKey, EvalSelectTask>::new();
+      for key in combo_status
+        .write_view
+        .get_keys(&select_query_meta.timestamp)
+      {
+        // The selects here must be valid so this should never
+        // return an error. Thus, we may just unwrap.
+        let (eval_select, context) = eval_select_graph(
           rand_gen,
-          select_stmt.clone(),
-          &combo_status.write_view,
-          &key,
-          &timestamp,
-        );
-        match res {
-          Ok(eval) => {
-            match eval.eval_expr {
-              EvalSqlStmt::Select3(EvalSelectStmt3 {
-                col_names,
-                where_clause,
-              }) => {
-                if where_clause {
-                  // This means we should add the row into the SelectView. Easy.
-                  let mut view_row = Vec::new();
-                  for col_name in col_names {
-                    view_row.push(
-                      combo_status
-                        .write_view
-                        .get_partial_val(&key, &col_name, &timestamp),
-                    );
-                  }
-                  view.insert(key, view_row);
-                }
+          EvalSelect::Select1(
+            if let Ok(eval_select) = start_eval_select_stmt(
+              select_query_meta.select_stmt.clone(),
+              &combo_status.write_view,
+              &key,
+              &select_query_meta.timestamp,
+            ) {
+              eval_select
+            } else {
+              return Err(VerificationFailure::VerificationFailure);
+            },
+          ),
+          BTreeMap::new(),
+        )
+        .unwrap();
+        match eval_select {
+          EvalSelect::Select3(EvalSelectStmt3 {
+            col_names,
+            where_clause,
+          }) => {
+            if where_clause {
+              // This means we should add the row into the SelectView. Easy.
+              let mut view_row = Vec::new();
+              for col_name in col_names {
+                view_row.push(combo_status.write_view.get_partial_val(
+                  &key,
+                  &col_name,
+                  &select_query_meta.timestamp,
+                ));
               }
-              _ => {
-                // This means we must perform async subqueries.
-                send(
-                  &mut side_effects,
-                  this_slave_eid,
-                  this_tablet,
-                  &eval.pending_subqueries,
-                  &timestamp,
-                );
-                key_read_row_tasks.insert(key.clone(), eval);
-              }
+              view.insert(key, view_row);
             }
           }
-          Err(_) => {
-            panic!("A Select in already_reached_selects should never be invalid.")
+          _ => {
+            // This means we must perform async subqueries.
+            send(
+              &mut side_effects,
+              this_slave_eid,
+              this_tablet,
+              make_path(
+                status_path.clone(),
+                SubqueryPathLeg2 {
+                  combo: combo_status.combo.clone(),
+                  leg3: SubqueryPathLeg3::Select {
+                    sid: select_id.clone(),
+                    key: key.clone(),
+                  },
+                },
+              ),
+              &context,
+              &select_query_meta.timestamp,
+            );
+            key_read_row_tasks.insert(
+              key.clone(),
+              EvalSelectTask {
+                eval_expr: eval_select.clone(),
+                pending_subqueries: context,
+                complete_subqueries: Default::default(),
+              },
+            );
           }
         }
       }
@@ -540,19 +903,19 @@ fn add_combo(
           .select_row_tasks
           .insert(select_id.clone(), (view, key_read_row_tasks));
       } else {
-        if let Some((select_view, combo_ids)) = status.select_views.get_mut(&select_id) {
+        if let Some((select_view, combo_ids)) = select_views.get_mut(&select_id) {
           if select_view != &view {
             //  End everything and return an error
             return Err(VerificationFailure::VerificationFailure);
           } else {
-            combo_ids.insert(combo.clone());
+            combo_ids.insert(combo_status.combo.clone());
           }
         } else {
-          status.select_views.insert(
+          select_views.insert(
             select_id.clone(),
             (
               view.clone(),
-              HashSet::from_iter(vec![combo.clone()].into_iter()),
+              HashSet::from_iter(vec![combo_status.combo.clone()].into_iter()),
             ),
           );
         }
@@ -561,9 +924,8 @@ fn add_combo(
   }
   if combo_status.select_row_tasks.is_empty() && combo_status.write_row_tasks.is_empty() {
     // This means that the combo status is actually finished.
-    status.combos_verified.insert(combo.clone());
+    combos_verified.insert(combo_status.combo.clone());
   }
-  status.combo_status_map.insert(combo.clone(), combo_status);
   Ok(side_effects)
 }
 
@@ -571,7 +933,8 @@ fn send(
   side_effects: &mut TabletSideEffects,
   this_slave_eid: &EndpointId,
   this_tablet: &TabletShape,
-  subqueries: &Vec<(SelectQueryId, SelectStmt)>,
+  subquery_path: SubqueryPathLeg1,
+  subqueries: &BTreeMap<SelectQueryId, SelectStmt>,
   timestamp: &Timestamp,
 ) {
   // Send the subqueries to the Slave Thread that owns
@@ -583,6 +946,7 @@ fn send(
       msg: NetworkMessage::Slave(SlaveMessage::SubqueryRequest {
         tablet: this_tablet.clone(),
         sid: subquery_id.clone(),
+        subquery_path: subquery_path.clone(),
         select_stmt: select_stmt.clone(),
         timestamp: *timestamp,
       }),
@@ -590,61 +954,35 @@ fn send(
   }
 }
 
-fn create_update_task(
+/// I hypothesize this will be the master interface for
+/// evaluating EvalSelect.
+fn eval_select_graph(
   rand_gen: &mut RandGen,
-  update_stmt: UpdateStmt,
-  write_view: &RelationalTablet,
-  key: &PrimaryKey,
-  timestamp: &Timestamp,
-) -> Result<EvalSqlTask, EvalErr> {
-  let eval_update_1 = start_eval_update_stmt(update_stmt, write_view, key, timestamp)?;
-  let (eval_update_2, subqueries) = eval_update_stmt_1_to_2(eval_update_1, rand_gen)?;
-  if subqueries.len() > 0 {
-    return Ok(EvalSqlTask {
-      eval_expr: EvalSqlStmt::Update2(eval_update_2),
-      pending_subqueries: subqueries,
-      complete_subqueries: Default::default(),
-    });
-  }
-  // If there are no subqueries, continue.
-  let (eval_update_3, subqueries) = eval_update_stmt_2_to_3(eval_update_2, rand_gen, &Vec::new())?;
-  if subqueries.len() > 0 {
-    return Ok(EvalSqlTask {
-      eval_expr: EvalSqlStmt::Update3(eval_update_3),
-      pending_subqueries: subqueries,
-      complete_subqueries: Default::default(),
-    });
-  }
-  // If there are no subqueries, continue.
-  return Ok(EvalSqlTask {
-    eval_expr: EvalSqlStmt::Update4(finish_eval_update_stmt(eval_update_3, &Vec::new())?),
-    pending_subqueries: Default::default(),
-    complete_subqueries: Default::default(),
-  });
+  eval_select: EvalSelect,
+  context: BTreeMap<SelectQueryId, Vec<Row>>,
+) -> Result<(EvalSelect, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
+  match eval_select {
+    EvalSelect::Select1(eval_select_1) => panic!("TODO: implement"),
+    EvalSelect::Select2(eval_select_2) => panic!("TODO: implement"),
+    EvalSelect::Select3(eval_select_3) => panic!("TODO: implement"),
+  };
+  Err(ColumnDNE)
 }
 
-fn create_select_task(
+/// I hypothesize this will be the master interface for
+/// evaluating EvalUpdate.
+fn eval_update_graph(
   rand_gen: &mut RandGen,
-  select_stmt: SelectStmt,
-  write_view: &RelationalTablet,
-  key: &PrimaryKey,
-  timestamp: &Timestamp,
-) -> Result<EvalSqlTask, EvalErr> {
-  let eval_select_1 = start_eval_select_stmt(select_stmt, write_view, key, timestamp)?;
-  let (eval_select_2, subqueries) = eval_select_stmt_1_to_2(eval_select_1, rand_gen)?;
-  if subqueries.len() > 0 {
-    return Ok(EvalSqlTask {
-      eval_expr: EvalSqlStmt::Select2(eval_select_2),
-      pending_subqueries: subqueries,
-      complete_subqueries: Default::default(),
-    });
-  }
-  // If there are no subqueries, continue.
-  return Ok(EvalSqlTask {
-    eval_expr: EvalSqlStmt::Select3(finish_eval_select_stmt(eval_select_2, &Vec::new())?),
-    pending_subqueries: Default::default(),
-    complete_subqueries: Default::default(),
-  });
+  eval_update: EvalUpdate,
+  context: BTreeMap<SelectQueryId, Vec<Row>>,
+) -> Result<(EvalUpdate, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
+  match eval_update {
+    EvalUpdate::Update1(eval_update_1) => panic!("TODO: implement"),
+    EvalUpdate::Update2(eval_update_2) => panic!("TODO: implement"),
+    EvalUpdate::Update3(eval_update_3) => panic!("TODO: implement"),
+    EvalUpdate::Update4(eval_update_4) => panic!("TODO: implement"),
+  };
+  Err(ColumnDNE)
 }
 
 fn lookup<K: PartialEq + Eq, V: Clone>(vec: &Vec<(K, V)>, key: &K) -> Option<V> {
@@ -668,6 +1006,7 @@ fn table_insert(
 
 /// Errors that can occur when evaluating columns while transforming
 /// an AST into an EvalAST.
+#[derive(Debug)]
 enum EvalErr {
   ColumnDNE,
   TypeError,
@@ -690,7 +1029,7 @@ fn start_eval_update_stmt(
 fn eval_update_stmt_1_to_2(
   update_stmt: EvalUpdateStmt1,
   rand_gen: &mut RandGen,
-) -> Result<(EvalUpdateStmt2, Vec<(SelectQueryId, SelectStmt)>), EvalErr> {
+) -> Result<(EvalUpdateStmt2, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
   panic!("TODO: implement");
 }
 
@@ -698,7 +1037,7 @@ fn eval_update_stmt_2_to_3(
   update_stmt: EvalUpdateStmt2,
   rand_gen: &mut RandGen,
   context: &Vec<(SelectQueryId, EvalLiteral)>,
-) -> Result<(EvalUpdateStmt3, Vec<(SelectQueryId, SelectStmt)>), EvalErr> {
+) -> Result<(EvalUpdateStmt3, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
   panic!("TODO: implement");
 }
 
@@ -726,7 +1065,7 @@ fn start_eval_select_stmt(
 fn eval_select_stmt_1_to_2(
   select_stmt: EvalSelectStmt1,
   rand_gen: &mut RandGen,
-) -> Result<(EvalSelectStmt2, Vec<(SelectQueryId, SelectStmt)>), EvalErr> {
+) -> Result<(EvalSelectStmt2, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
   panic!("TODO: implement");
 }
 

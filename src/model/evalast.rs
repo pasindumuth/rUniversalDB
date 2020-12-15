@@ -1,26 +1,34 @@
 use crate::model::common::{ColumnName, SelectQueryId};
-use crate::model::sqlast::SelectStmt;
+use crate::model::sqlast::{SelectStmt, UpdateStmt};
 use serde::{Deserialize, Serialize};
 
 /// This module holds a similar datastructure to sqlast, except this
 /// is used in the Transaction Processor to Evaluate a SQL Transaction,
 /// rather than parse it.
 
-/// EvalSqlStmt will actually just be a bunch of states in a state
+/// EvalStmt will actually just be a bunch of states in a state
 /// machine, where there are many starts points, end points, and
 /// paths. There are 2 types of expressions in this system. There
 /// is PreEvalExpr, which hold Subquery(Box<SelectStmt>), and there
-/// are SubqueryId(SelectQueryId). We will have an EvalSqlTask that
+/// are SubqueryId(SelectQueryId). We will have an EvalTask that
 /// holds one state at a time and all necessary SelectQueryIds,
 /// and their returned values so that we can do a State Transition.
-/// The set of `pending_subqueries` in `EvalSqlTask` initially
+/// The set of `pending_subqueries` in `EvalTask` initially
 /// encompasses all SubqueryIds in all PostEvalExpr of the current
 /// state.
+
+/// Creating an EvalSelectStmt1 is done during the column
+/// reading phase, which is distinct from all these phases,
+/// which are only about waiting for Subquery results.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum EvalSqlStmt {
+pub enum EvalSelect {
   Select1(EvalSelectStmt1),
   Select2(EvalSelectStmt2),
   Select3(EvalSelectStmt3),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum EvalUpdate {
   Update1(EvalUpdateStmt1),
   Update2(EvalUpdateStmt2),
   Update3(EvalUpdateStmt3),
@@ -108,7 +116,7 @@ pub enum PreEvalExpr {
   },
   Literal(EvalLiteral),
   /// Holds a Subquery from the SQL AST. This, and the the SubqueryId
-  /// Variant, are the key differentiators of EvalSqlStmt structure
+  /// Variant, are the key differentiators of EvalStmt structure
   /// and the SqlStmt.
   Subquery(Box<SelectStmt>),
 }
