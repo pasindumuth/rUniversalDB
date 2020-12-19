@@ -9,9 +9,9 @@ use crate::model::evalast::{
   PreEvalExpr,
 };
 use crate::model::message::{
-  AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SelectPrepare, SlaveMessage,
-  SubqueryPathLeg1, SubqueryPathLeg2, SubqueryPathLeg3, SubqueryResponse, TabletAction,
-  TabletMessage, WritePrepare, WriteQuery,
+  AdminMessage, AdminRequest, AdminResponse, FromCombo, FromProp, FromRoot, NetworkMessage,
+  SelectPrepare, SlaveMessage, SubqueryResponse, TabletAction, TabletMessage, WritePrepare,
+  WriteQuery,
 };
 use crate::model::sqlast::ValExpr::{BinaryExpr, Subquery};
 use crate::model::sqlast::{BinaryOp, Literal, SelectStmt, SqlStmt, UpdateStmt, ValExpr};
@@ -348,6 +348,7 @@ impl TabletState {
         // data structures where the write appears.
         side_effects.add(write_aborted(tm_eid, wid, &self.this_tablet));
         self.write_query_map.remove(wid);
+        return side_effects;
       }
     }
 
@@ -356,16 +357,12 @@ impl TabletState {
       // This means we are finished the transaction. So, add to
       // already_reached_writes and update all associated
       // PropertyVerificationStatuses accordingly.
-      self
-        .already_reached_writes
-        .insert(timestamp.clone(), wid.clone());
-      // Send a response back to the TM.
-      side_effects.add(write_prepared(tm_eid, wid, &self.this_tablet));
       side_effects.append(add_new_combos(
         &mut self.rand_gen,
         &mut self.non_reached_writes,
         &mut self.writes_being_verified,
         &mut self.write_query_map,
+        &wid,
         &self.already_reached_writes,
         &self.committed_writes,
         &self.relational_tablet,
@@ -373,6 +370,11 @@ impl TabletState {
         &self.this_slave_eid,
         &self.this_tablet,
       ));
+      self
+        .already_reached_writes
+        .insert(timestamp.clone(), wid.clone());
+      // Send a response back to the TM.
+      side_effects.add(write_prepared(tm_eid, wid, &self.this_tablet));
     } else {
       // The PropertyVerificationStatus is not done. So add it
       // to non_reached_writes.
@@ -396,16 +398,18 @@ impl TabletState {
     let mut side_effects = TabletSideEffects::new();
     (|| -> Option<()> {
       match subquery_path {
-        SubqueryPathLeg1::Write {
+        FromRoot::Write {
           wid: orig_wid,
-          leg2,
+          from_prop,
         } => {
+          // This Subquery is destined for a Write Query
           let status = self.writes_being_verified.get_mut(orig_wid)?;
-          let mut combo_status = status.combo_status_map.get_mut(&leg2.combo)?;
-          match &leg2.leg3 {
-            SubqueryPathLeg3::Write { wid: cur_wid, key } => {
+          let orig_write_meta = self.write_query_map.get(orig_wid).unwrap().clone();
+          let mut combo_status = status.combo_status_map.get_mut(&from_prop.combo)?;
+          match &from_prop.from_combo {
+            FromCombo::Write { wid: cur_wid, key } => {
+              // This Subquery is destined for a Write Query in the the combo
               if combo_status.current_write.as_ref() == Some(cur_wid) {
-                let write_meta = self.write_query_map.get(cur_wid).unwrap().clone();
                 let task = combo_status.write_row_tasks.get_mut(key)?;
                 task.pending_subqueries.remove(sid)?;
                 let subquery_ret = if let Ok(subquery_ret) = result.clone() {
@@ -413,11 +417,11 @@ impl TabletState {
                 } else {
                   // Here, we need to abort the whole transaction. Get rid of the
                   // the whole PropertyVerificationStatus.
-                  self.non_reached_writes.remove(&write_meta.timestamp);
+                  self.non_reached_writes.remove(&orig_write_meta.timestamp);
                   self.writes_being_verified.remove(orig_wid);
                   self.write_query_map.remove(orig_wid);
                   side_effects.add(write_aborted(
-                    &write_meta.tm_eid,
+                    &orig_write_meta.tm_eid,
                     orig_wid,
                     &self.this_tablet,
                   ));
@@ -435,11 +439,11 @@ impl TabletState {
                   } else {
                     // Here, we need to abort the whole transaction. Get rid of the
                     // the whole PropertyVerificationStatus.
-                    self.non_reached_writes.remove(&write_meta.timestamp);
+                    self.non_reached_writes.remove(&orig_write_meta.timestamp);
                     self.writes_being_verified.remove(orig_wid);
                     self.write_query_map.remove(orig_wid);
                     side_effects.add(write_aborted(
-                      &write_meta.tm_eid,
+                      &orig_write_meta.tm_eid,
                       orig_wid,
                       &self.this_tablet,
                     ));
@@ -448,13 +452,13 @@ impl TabletState {
                   let task_done = match eval_update {
                     EvalUpdate::Update4(EvalUpdateStmt4 { set_col, set_val }) => {
                       // This means the Update for the row completed
-                      // without the need for subqueries.
+                      // without the need for any more subqueries.
                       table_insert(
                         &mut combo_status.write_view,
                         &key,
                         &set_col,
                         set_val,
-                        &write_meta.timestamp,
+                        &self.write_query_map.get(cur_wid).unwrap().timestamp,
                       );
                       true
                     }
@@ -464,18 +468,18 @@ impl TabletState {
                         &mut side_effects,
                         &self.this_slave_eid,
                         &self.this_tablet,
-                        SubqueryPathLeg1::Write {
+                        FromRoot::Write {
                           wid: orig_wid.clone(),
-                          leg2: SubqueryPathLeg2 {
+                          from_prop: FromProp {
                             combo: combo_status.combo.clone(),
-                            leg3: SubqueryPathLeg3::Write {
+                            from_combo: FromCombo::Write {
                               wid: cur_wid.clone(),
                               key: key.clone(),
                             },
                           },
                         },
                         &context,
-                        &write_meta.timestamp,
+                        &self.write_query_map.get(cur_wid).unwrap().timestamp,
                       );
                       task.eval_expr = eval_update;
                       task.pending_subqueries = context;
@@ -513,11 +517,11 @@ impl TabletState {
                       } else {
                         // Here, we need to abort the whole transaction. Get rid of the
                         // the whole PropertyVerificationStatus.
-                        self.non_reached_writes.remove(&write_meta.timestamp);
+                        self.non_reached_writes.remove(&orig_write_meta.timestamp);
                         self.writes_being_verified.remove(orig_wid);
                         self.write_query_map.remove(orig_wid);
                         side_effects.add(write_aborted(
-                          &write_meta.tm_eid,
+                          &orig_write_meta.tm_eid,
                           orig_wid,
                           &self.this_tablet,
                         ));
@@ -529,27 +533,28 @@ impl TabletState {
                         // This means we are finished the transaction. So, add to
                         // already_reached_writes and update all associated
                         // PropertyVerificationStatuses accordingly.
-                        self.non_reached_writes.remove(&write_meta.timestamp);
+                        self.non_reached_writes.remove(&orig_write_meta.timestamp);
                         self.writes_being_verified.remove(orig_wid);
-                        self
-                          .already_reached_writes
-                          .insert(write_meta.timestamp.clone(), orig_wid.clone());
-                        // Send a response back to the TM.
-                        side_effects.add(write_prepared(
-                          &write_meta.tm_eid,
-                          orig_wid,
-                          &self.this_tablet,
-                        ));
                         side_effects.append(add_new_combos(
                           &mut self.rand_gen,
                           &mut self.non_reached_writes,
                           &mut self.writes_being_verified,
                           &mut self.write_query_map,
+                          orig_wid,
                           &self.already_reached_writes,
                           &self.committed_writes,
                           &self.relational_tablet,
                           &self.select_query_map,
                           &self.this_slave_eid,
+                          &self.this_tablet,
+                        ));
+                        self
+                          .already_reached_writes
+                          .insert(orig_write_meta.timestamp.clone(), orig_wid.clone());
+                        // Send a response back to the TM.
+                        side_effects.add(write_prepared(
+                          &orig_write_meta.tm_eid,
+                          orig_wid,
                           &self.this_tablet,
                         ));
                       }
@@ -558,14 +563,15 @@ impl TabletState {
                 };
               }
             }
-            SubqueryPathLeg3::Select { sid, key } => {
+            FromCombo::Select { sid, key } => {
               let (view, tasks) = combo_status.select_row_tasks.get_mut(sid)?;
               let task = tasks.get_mut(key)?;
               // Modifiy the task with the (sid, subquery_result)
+              panic!("TODO: implement")
             }
           };
         }
-        SubqueryPathLeg1::Select { sid, leg2 } => panic!("TODO: implement"),
+        FromRoot::Select { sid, from_prop } => panic!("TODO: implement"),
       }
       Some(())
     })();
@@ -608,25 +614,33 @@ enum VerificationFailure {
   VerificationFailure,
 }
 
-// Useful stuff for creating SubquerypathLeg1, which is necessary stuff.
+// Useful stuff for creating FromRoot, which is necessary stuff.
 #[derive(Debug, Clone)]
 enum StatusPath {
   SelectStatus { sid: SelectQueryId },
   WriteStatus { wid: WriteQueryId },
 }
 
-fn make_path(status_path: StatusPath, leg2: SubqueryPathLeg2) -> SubqueryPathLeg1 {
+fn make_path(status_path: StatusPath, from_prop: FromProp) -> FromRoot {
   match status_path {
-    StatusPath::SelectStatus { sid } => SubqueryPathLeg1::Select { sid, leg2 },
-    StatusPath::WriteStatus { wid } => SubqueryPathLeg1::Write { wid, leg2 },
+    StatusPath::SelectStatus { sid } => FromRoot::Select { sid, from_prop },
+    StatusPath::WriteStatus { wid } => FromRoot::Write { wid, from_prop },
   }
 }
 
+/// This function is called when a successful Write Query, `wid`, has been removed from
+/// `writes_being_verified`, but before it is added into `already_reached_writes`.
+/// This functions creates `combo_status`s for all existing `writes_being_verified`,
+/// where each of the new combos have `wid` present in there. Since this process
+/// might cause some Write Queries being verified to fail, this function also deletes
+/// those Write queries out of `non_reached_writes`, `writes_being_verified`, and
+/// `write_query_map`, and creates TM responses with the failures.
 fn add_new_combos(
   rand_gen: &mut RandGen,
   non_reached_writes: &mut BTreeMap<Timestamp, WriteQueryId>,
   writes_being_verified: &mut HashMap<WriteQueryId, PropertyVerificationStatus>,
   write_query_map: &mut HashMap<WriteQueryId, WriteQueryMetadata>,
+  wid: &WriteQueryId,
   already_reached_writes: &BTreeMap<Timestamp, WriteQueryId>,
   committed_writes: &BTreeMap<Timestamp, WriteQueryId>,
   relational_tablet: &RelationalTablet,
@@ -634,6 +648,7 @@ fn add_new_combos(
   this_slave_eid: &EndpointId,
   this_tablet: &TabletShape,
 ) -> TabletSideEffects {
+  let write_meta = write_query_map.get(wid).unwrap();
   let mut side_effects = TabletSideEffects::new();
   let mut writes_to_delete: Vec<(EndpointId, WriteQueryId, Timestamp)> = Vec::new();
   for (cur_wid, status) in writes_being_verified.iter_mut() {
@@ -641,6 +656,7 @@ fn add_new_combos(
       // This code block constructs the CombinationStatus.
       let cur_write_meta = write_query_map.get(&cur_wid).unwrap();
       combo_as_map.insert(cur_write_meta.timestamp.clone(), cur_wid.clone());
+      combo_as_map.insert(write_meta.timestamp.clone(), wid.clone());
       if let Ok(effects) = add_combo(
         rand_gen,
         status,
@@ -674,9 +690,15 @@ fn add_new_combos(
     writes_being_verified.remove(cur_wid);
     write_query_map.remove(cur_wid);
   }
+  panic!(
+    "I'm pretty sure there is a bug here... we need to be adding already_reached_writes\
+  for the case that the gien write is there."
+  );
   side_effects
 }
 
+/// This adds a `combo_status` to `status`, or returns a `VerificationFailure`
+/// if trying to execute `combo_status` results in a `VerificationFailure`.
 fn add_combo(
   rand_gen: &mut RandGen,
   status: &mut PropertyVerificationStatus,
@@ -716,6 +738,22 @@ fn add_combo(
   Ok(side_effects)
 }
 
+/// This assumes that all Write Queries in the `combo_status` whose index
+/// is less than `wid_index` have been executed. At this point, `write_view`,
+/// should be populated with the results of those Write Queries, and
+/// `write_row_tasks` should be empty. Also, all Select Queries that don't
+/// rely on the Write Query *prior* to `wid_index` or after it have been launched,
+/// i.e. for each Select Query, there is either a job in `select_row_tasks`,
+/// or the results of that Select Query are in `select_views`.
+///
+/// This function extends `wid_index` as far as possible, stopping only
+/// if a Write Query launches Sub Queries. In this case, `write_row_tasks`
+/// will get populated with Subqueries. If `wid_index` gets extended all
+/// the way, it's possible that the whole `combo_task` is completed, in
+/// which case we add it to `combos_verified`. These are on in the happy
+/// path, though. Ulimate, the `combo_status` can fail, like if a table
+/// constraint fails. In this clase, a `VerificationFailure` is returned,
+/// and the input mut variables could have changed.
 fn continue_combo(
   rand_gen: &mut RandGen,
   select_views: &mut HashMap<SelectQueryId, (SelectView, HashSet<Vec<WriteQueryId>>)>,
@@ -741,12 +779,18 @@ fn continue_combo(
   // Iterate over the Write Queries and update the `write_view` accordingly.
   for cur_wid in &combo_status.combo[wid_index as usize..] {
     combo_status.current_write = Some(cur_wid.clone());
-    let write_meta = write_query_map.get(cur_wid).unwrap().clone();
+    let cur_write_meta = write_query_map.get(cur_wid).unwrap().clone();
     let mut key_write_row_tasks: HashMap<PrimaryKey, EvalUpdateTask> = HashMap::new();
-    match &write_meta.write_query {
+    match &cur_write_meta.write_query {
+      // DELETEs will look very similar to updates, where we iterate through current
+      // keys. However, INSERTs will be different. We will iterate over the new keys,
+      // adding Tasks for keys that don't exist in `write_view.get_keys`. Remember,
+      // MVMs have all keys defined, mapping to Options, where taking any subset of
+      // keys for a given Write Query makes sense from it's point of view, as long
+      // as each key's task ends with writing something (could be a None, or a Some(...))
       WriteQuery::Update(update_stmt) => {
         assert_eq!(update_stmt.table_name, this_tablet.path.path);
-        for key in combo_status.write_view.get_keys(&write_meta.timestamp) {
+        for key in combo_status.write_view.get_keys(&cur_write_meta.timestamp) {
           if let Ok((eval_update, context)) = eval_update_graph(
             rand_gen,
             EvalUpdate::Update1(
@@ -754,7 +798,7 @@ fn continue_combo(
                 update_stmt.clone(),
                 &combo_status.write_view,
                 &key,
-                &write_meta.timestamp,
+                &cur_write_meta.timestamp,
               ) {
                 eval_update
               } else {
@@ -772,7 +816,7 @@ fn continue_combo(
                   &key,
                   &set_col,
                   set_val,
-                  &write_meta.timestamp,
+                  &cur_write_meta.timestamp,
                 );
               }
               _ => {
@@ -783,16 +827,16 @@ fn continue_combo(
                   this_tablet,
                   make_path(
                     status_path.clone(),
-                    SubqueryPathLeg2 {
+                    FromProp {
                       combo: combo_status.combo.clone(),
-                      leg3: SubqueryPathLeg3::Write {
+                      from_combo: FromCombo::Write {
                         wid: cur_wid.clone(),
                         key: key.clone(),
                       },
                     },
                   ),
                   &context,
-                  &write_meta.timestamp,
+                  &cur_write_meta.timestamp,
                 );
                 key_write_row_tasks.insert(
                   key.clone(),
@@ -814,7 +858,7 @@ fn continue_combo(
       // This means that we can't continue applying writes, since
       // we are now blocked by subqueries.
       combo_status.write_row_tasks = key_write_row_tasks;
-      upper_bound = Excluded(write_meta.timestamp);
+      upper_bound = Excluded(cur_write_meta.timestamp);
       break;
     } else {
       // This means we continue applying writes, moving on.
@@ -876,9 +920,9 @@ fn continue_combo(
               this_tablet,
               make_path(
                 status_path.clone(),
-                SubqueryPathLeg2 {
+                FromProp {
                   combo: combo_status.combo.clone(),
-                  leg3: SubqueryPathLeg3::Select {
+                  from_combo: FromCombo::Select {
                     sid: select_id.clone(),
                     key: key.clone(),
                   },
@@ -929,17 +973,17 @@ fn continue_combo(
   Ok(side_effects)
 }
 
+/// Send the subqueries to the Slave Thread that owns
+/// this Tablet Thread so that it can execute the
+/// Subqueries and send the results back here.
 fn send(
   side_effects: &mut TabletSideEffects,
   this_slave_eid: &EndpointId,
   this_tablet: &TabletShape,
-  subquery_path: SubqueryPathLeg1,
+  subquery_path: FromRoot,
   subqueries: &BTreeMap<SelectQueryId, SelectStmt>,
   timestamp: &Timestamp,
 ) {
-  // Send the subqueries to the Slave Thread that owns
-  // this Tablet Thread so that it can execute the
-  // subqueries and send it back here.
   for (subquery_id, select_stmt) in subqueries {
     side_effects.add(TabletAction::Send {
       eid: this_slave_eid.clone(),

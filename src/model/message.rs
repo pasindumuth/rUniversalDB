@@ -143,7 +143,7 @@ pub enum SlaveMessage {
     /// Tablet Shape of the sending Tablet.
     tablet: TabletShape,
     sid: SelectQueryId,
-    subquery_path: SubqueryPathLeg1,
+    subquery_path: FromRoot,
     select_stmt: SelectStmt,
     timestamp: Timestamp,
   },
@@ -226,7 +226,7 @@ pub struct WriteAbort {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SubqueryResponse {
   pub sid: SelectQueryId,
-  pub subquery_path: SubqueryPathLeg1,
+  pub subquery_path: FromRoot,
   pub result: Result<Vec<Row>, String>,
 }
 
@@ -290,25 +290,25 @@ pub enum NetworkMessage {
 /// This describes the EvalTask the Subquery is from. This
 /// is useful for routing the responce back to the source.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum SubqueryPathLeg1 {
+pub enum FromRoot {
   Write {
     wid: WriteQueryId,
-    leg2: SubqueryPathLeg2,
+    from_prop: FromProp,
   },
   Select {
     sid: SelectQueryId,
-    leg2: SubqueryPathLeg2,
+    from_prop: FromProp,
   },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct SubqueryPathLeg2 {
+pub struct FromProp {
   pub combo: Vec<WriteQueryId>,
-  pub leg3: SubqueryPathLeg3,
+  pub from_combo: FromCombo,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum SubqueryPathLeg3 {
+pub enum FromCombo {
   Write { wid: WriteQueryId, key: PrimaryKey },
   Select { sid: SelectQueryId, key: PrimaryKey },
 }
