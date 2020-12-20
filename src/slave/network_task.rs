@@ -1,4 +1,6 @@
-use crate::model::common::{EndpointId, RequestId, Row, SelectQueryId, TabletShape, TransactionId};
+use crate::model::common::{
+  EndpointId, RequestId, Row, SelectQueryId, SelectView, TabletShape, TransactionId,
+};
 use crate::model::message::FromRoot;
 use std::collections::HashSet;
 
@@ -42,7 +44,7 @@ pub struct SelectTask {
   pub pending_tablets: HashSet<(EndpointId, TabletShape)>,
   /// Currently constructed View from the Tablets that
   /// already responded.
-  pub view: Vec<Row>,
+  pub view: SelectView,
   /// The endpoint which the SELECT Query originated from.
   pub req_meta: SelectRequestMeta,
 }

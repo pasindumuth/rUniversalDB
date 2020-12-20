@@ -1,6 +1,6 @@
 use crate::model::common::{
-  ColumnValue, EndpointId, PrimaryKey, RequestId, Row, SelectQueryId, TabletPath, TabletShape,
-  Timestamp, TransactionId, WriteQueryId,
+  ColumnValue, EndpointId, PrimaryKey, RequestId, Row, SelectQueryId, SelectView, TabletPath,
+  TabletShape, Timestamp, TransactionId, WriteQueryId,
 };
 use crate::model::sqlast::{SelectStmt, SqlStmt, UpdateStmt};
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ pub enum AdminResponse {
   },
   SqlQuery {
     rid: RequestId,
-    result: Result<Vec<Row>, String>,
+    result: Result<SelectView, String>,
   },
 }
 
@@ -111,7 +111,7 @@ pub enum SlaveMessage {
     sid: SelectQueryId,
     /// The View returned for the Select Query.
     /// `None` if the Partial Query failed.
-    view_o: Option<Vec<Row>>,
+    view_o: Option<SelectView>,
   },
   /// The Prepare Response for the Write Query 2PC algorithm, sent
   /// from Tablets Threads (RMs) to the Slave Thread (TM)
@@ -227,7 +227,7 @@ pub struct WriteAbort {
 pub struct SubqueryResponse {
   pub sid: SelectQueryId,
   pub subquery_path: FromRoot,
-  pub result: Result<Vec<Row>, String>,
+  pub result: Result<SelectView, String>,
 }
 
 /// Message that go into the Tablet's handler.
@@ -288,7 +288,7 @@ pub enum NetworkMessage {
 }
 
 /// This describes the EvalTask the Subquery is from. This
-/// is useful for routing the responce back to the source.
+/// is useful for routing the response back to the source.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum FromRoot {
   Write {
@@ -309,6 +309,24 @@ pub struct FromProp {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum FromCombo {
-  Write { wid: WriteQueryId, key: PrimaryKey },
-  Select { sid: SelectQueryId, key: PrimaryKey },
+  Write {
+    wid: WriteQueryId,
+    from_task: FromWriteTask,
+  },
+  Select {
+    sid: SelectQueryId,
+    from_task: FromSelectTask,
+  },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum FromWriteTask {
+  UpdateTask { key: PrimaryKey },
+  InsertTask { key: PrimaryKey },
+  InsertSelectTask,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum FromSelectTask {
+  SelectTask { key: PrimaryKey },
 }

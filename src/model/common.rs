@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// These are common PODs that form the core data objects
 /// of the system.
@@ -73,6 +74,13 @@ pub struct Row {
   pub key: PrimaryKey,
   pub val: Vec<Option<ColumnValue>>,
 }
+
+// -------------------------------------------------------------------------------------------------
+//  Transaction Data Structures
+// -------------------------------------------------------------------------------------------------
+
+pub type WriteDiff = Vec<(PrimaryKey, Option<Vec<(ColumnName, Option<ColumnValue>)>>)>;
+pub type SelectView = BTreeMap<PrimaryKey, Vec<(ColumnName, Option<ColumnValue>)>>;
 
 // -------------------------------------------------------------------------------------------------
 //  Miscellaneous

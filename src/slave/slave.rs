@@ -1,7 +1,7 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{
-  EndpointId, Row, Schema, SelectQueryId, TabletKeyRange, TabletPath, TabletShape, Timestamp,
-  TransactionId, WriteQueryId,
+  EndpointId, Row, Schema, SelectQueryId, SelectView, TabletKeyRange, TabletPath, TabletShape,
+  Timestamp, TransactionId, WriteQueryId,
 };
 use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SelectPrepare, SlaveAction,
@@ -11,7 +11,7 @@ use crate::model::sqlast::{SelectStmt, SqlStmt};
 use crate::slave::network_task::{
   SelectRequestMeta, SelectTask, WritePhase, WriteRequestMeta, WriteTask,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug)]
 pub struct SlaveSideEffects {
@@ -116,7 +116,7 @@ impl SlaveState {
               SelectTask {
                 tablets: mpc_tablets,
                 pending_tablets,
-                view: vec![],
+                view: BTreeMap::new(),
                 req_meta: SelectRequestMeta::Admin {
                   origin_eid: from_eid.clone(),
                   rid: rid.clone(),
@@ -171,8 +171,8 @@ impl SlaveState {
           if let Some(view) = view_o {
             // This means that Partial Query was successful and we
             // should continue on with the SelectTask.
-            for row in view {
-              select_task.view.push(row.clone());
+            for (key, values) in view {
+              select_task.view.insert(key.clone(), values.clone());
             }
             if select_task.pending_tablets.is_empty() {
               // If all pending tablets have replied, then send a success
@@ -260,7 +260,7 @@ impl SlaveState {
                 msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
                   res: AdminResponse::SqlQuery {
                     rid: write_task.req_meta.rid.clone(),
-                    result: Ok(vec![]),
+                    result: Ok(BTreeMap::new()),
                   },
                 }),
               });
@@ -326,7 +326,7 @@ impl SlaveState {
           SelectTask {
             tablets: mpc_tablets,
             pending_tablets,
-            view: vec![],
+            view: BTreeMap::new(),
             req_meta: SelectRequestMeta::Tablet {
               origin_eid: from_eid.clone(),
               tablet: tablet.clone(),
@@ -376,7 +376,7 @@ impl SlaveState {
 fn send_select_response(
   side_effects: &mut SlaveSideEffects,
   req_meta: &SelectRequestMeta,
-  result: Result<Vec<Row>, String>,
+  result: Result<SelectView, String>,
 ) {
   match req_meta {
     SelectRequestMeta::Admin { origin_eid, rid } => {
