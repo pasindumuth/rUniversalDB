@@ -232,17 +232,8 @@ impl TabletState {
           panic!("Tablets should not get SQL statements {:?}.", msg);
         }
       },
-      TabletMessage::SelectPrepare(SelectPrepare {
-        tm_eid,
-        sid,
-        select_query,
-        timestamp,
-      }) => {
-        panic!("SelectPrepare is not supported yet.");
-        // now what? Well, I should probably start implementing....
-        // this. SelectPrepare? Nah, implement writing first, idk.
-        // it just feels like it makes more sense. Just do updates.
-        // The timestamp should be distinct from all other writes.
+      TabletMessage::SelectPrepare(select_prepare) => {
+        side_effects.append(self.handle_select_prepare(select_prepare));
       }
       TabletMessage::WritePrepare(write_prepare) => {
         side_effects.append(self.handle_write_prepare(write_prepare));
@@ -257,6 +248,140 @@ impl TabletState {
         side_effects.append(self.handle_subquery_response(subquery_res));
       }
     }
+  }
+
+  fn handle_select_prepare(&mut self, select_prepare: &SelectPrepare) -> TabletSideEffects {
+    let SelectPrepare {
+      tm_eid,
+      sid,
+      select_query,
+      timestamp,
+    } = select_prepare;
+    let mut side_effects = TabletSideEffects::new();
+    // Create the PropertyVerificationStatus
+    let mut status = PropertyVerificationStatus {
+      combo_status_map: HashMap::<Vec<WriteQueryId>, CombinationStatus>::new(),
+      selects: BTreeMap::<Timestamp, Vec<SelectQueryId>>::new(),
+      select_views: HashMap::<SelectQueryId, (SelectView, HashSet<Vec<WriteQueryId>>)>::new(),
+      combos_verified: HashSet::<Vec<WriteQueryId>>::new(),
+    };
+    // There is only one Select Query whose invariance to different
+    // combinations of Write that we need to verify, and that Select
+    // Query is the one we are testing.
+    status.selects.insert(timestamp.clone(), vec![sid.clone()]);
+    self.select_query_map.insert(
+      sid.clone(),
+      SelectQueryMetadata {
+        timestamp: timestamp.clone(),
+        tm_eid: tm_eid.clone(),
+        select_stmt: select_query.clone(),
+      },
+    );
+
+    // Get the already_reached_writes with timestamp <= `timestamp`
+    let mut sub_already_reached_writes = BTreeMap::new();
+    for (write_timestamp, wid) in self
+      .already_reached_writes
+      .range((Unbounded, Included(timestamp)))
+    {
+      sub_already_reached_writes.insert(write_timestamp.clone(), wid.clone());
+    }
+
+    // Get the comitted_writes with timestamp <= `timestamp`
+    let mut sub_committed_writes = BTreeMap::new();
+    for (write_timestamp, wid) in self
+      .committed_writes
+      .range((Unbounded, Included(timestamp)))
+    {
+      sub_committed_writes.insert(write_timestamp.clone(), wid.clone());
+    }
+
+    // Construct the `combos` and update `combo_status_map` accordingly
+    for mut combo_as_map in create_combos(&sub_committed_writes, &sub_already_reached_writes) {
+      // This code block constructions the CombinationStatus.
+      if let Ok(effects) = add_combo(
+        &mut self.rand_gen,
+        &mut status,
+        StatusPath::SelectStatus { sid: sid.clone() },
+        &combo_as_map.values().cloned().collect(),
+        &self.relational_tablet,
+        &self.write_query_map,
+        &self.select_query_map,
+        &self.this_slave_eid,
+        &self.this_tablet,
+      ) {
+        side_effects.append(effects);
+      } else {
+        // The verification failed, so abort the write and clean up all
+        // data structures where the write appears.
+        side_effects.add(select_aborted(tm_eid, sid, &self.this_tablet));
+        self.select_query_map.remove(sid);
+        return side_effects;
+      }
+    }
+
+    if status.combos_verified.len() == status.combo_status_map.len() {
+      // We managed to verify all combos in the PropertyVerificationStatus.
+      // This means we are finished the transaction. So, add to
+      // already_reached_selects and update all associated
+      // PropertyVerificationStatuses accordingly. Here, this means
+      // we need to update every element of writes_being_verified
+      // to include this new select. This operation will result in all
+      // `combos_verified` to be emptied and to perform some Selects there.
+      for (wid, prop_status) in &mut self.writes_being_verified {
+        // Add the new Select into `selects`
+        if let Some(selects) = prop_status.selects.get_mut(timestamp) {
+          selects.push(sid.clone());
+        } else {
+          prop_status
+            .selects
+            .insert(timestamp.clone(), vec![sid.clone()]);
+        }
+        prop_status.combos_verified.clear();
+        // Start executing another Select for each combo.
+        for (_, combo_status) in prop_status.combo_status_map.iter_mut() {
+          // This is a new select_id that we must start handling.
+          side_effects.append(
+            if let Ok(effects) = add_combo_select(
+              &mut self.rand_gen,
+              &mut prop_status.select_views,
+              combo_status,
+              &StatusPath::WriteStatus { wid: wid.clone() },
+              sid,
+              &self.select_query_map,
+              &self.this_slave_eid,
+              &self.this_tablet,
+            ) {
+              effects
+            } else {
+              // The verification failed, so abort the write and clean up all
+              // data structures where the write appears.
+              side_effects.add(select_aborted(tm_eid, sid, &self.this_tablet));
+              self.select_query_map.remove(sid);
+              return side_effects;
+            },
+          );
+          if combo_status.select_tasks.is_empty() && combo_status.current_write.is_none() {
+            // This means that the combo status is finished (again).
+            prop_status
+              .combos_verified
+              .insert(combo_status.combo.clone());
+          }
+        }
+      }
+    } else {
+      // The PropertyVerificationStatus is not done. So add it
+      // to non_reached_selects.
+      if let Some(select_ids) = self.non_reached_selects.get_mut(timestamp) {
+        select_ids.push(sid.clone());
+      } else {
+        self
+          .non_reached_selects
+          .insert(timestamp.clone(), vec![sid.clone()]);
+      }
+      self.selects_being_verified.insert(sid.clone(), status);
+    }
+    return side_effects;
   }
 
   /// This was taken out into it's own function so that we can handle the failure
@@ -287,14 +412,7 @@ impl TabletState {
         }),
       });
     }
-
-    // NOTE: The pattern I'm using here, when creating a default version for a complex
-    // state structure, is that I need to be able to build up these structure incrementally.
-    // I can't be juggling like 40 variables and then assemble them in the end, hoping that
-    // they have all the desired properties. It's better to start off with a default struct.
-    // Every time this struct changes, we maintain some subset of properties. Then, we can
-    // audit the code to make sure that by the end of this code, all properties for this
-    // struct (as specified in our high-level design) is met.
+    // Create the PropertyVerificationStatus
     let mut status = PropertyVerificationStatus {
       combo_status_map: HashMap::<Vec<WriteQueryId>, CombinationStatus>::new(),
       selects: BTreeMap::<Timestamp, Vec<SelectQueryId>>::new(),
@@ -340,7 +458,10 @@ impl TabletState {
       // We managed to verify all combos in the PropertyVerificationStatus.
       // This means we are finished the transaction. So, add to
       // already_reached_writes and update all associated
-      // PropertyVerificationStatuses accordingly.
+      // PropertyVerificationStatuses accordingly. Here, this means
+      // we need to add new CombinationStatuses to elements in
+      // writes_being_verified.
+      panic!("Do this for selects_being_verified as well");
       side_effects.append(add_new_combos(
         &mut self.rand_gen,
         &mut self.non_reached_writes,
@@ -587,6 +708,21 @@ fn write_prepared(
     msg: NetworkMessage::Slave(SlaveMessage::WritePrepared {
       tablet: this_tablet.clone(),
       wid: wid.clone(),
+    }),
+  }
+}
+
+fn select_aborted(
+  tm_eid: &EndpointId,
+  sid: &SelectQueryId,
+  this_tablet: &TabletShape,
+) -> TabletAction {
+  TabletAction::Send {
+    eid: tm_eid.clone(),
+    msg: NetworkMessage::Slave(SlaveMessage::SelectPrepared {
+      tablet: this_tablet.clone(),
+      sid: sid.clone(),
+      view_o: None,
     }),
   }
 }
@@ -856,107 +992,141 @@ fn continue_combo(
   for (_, selects) in selects.range((lower_bound, upper_bound)) {
     for select_id in selects {
       // This is a new select_id that we must start handling.
-      let select_query_meta = select_query_map.get(select_id).unwrap().clone();
-      let mut view = SelectView::new();
-      let mut select_tasks = BTreeMap::<PrimaryKey, Holder<SelectKeyTask>>::new();
-      for key in combo_status
-        .write_view
-        .get_keys(&select_query_meta.timestamp)
-      {
-        // The selects here must be valid so this should never
-        // return an error. Thus, we may just unwrap.
-        let (select_key_task, context) = start_eval_select_key_task(
-          select_query_meta.select_stmt.clone(),
-          &combo_status.write_view,
-          &key,
-          &select_query_meta.timestamp,
-        )
-        .unwrap();
-        match select_key_task {
-          SelectKeyTask::Done(done_task) => {
-            // This means we should add the row into the SelectView. Easy.
-            let mut view_row = Vec::new();
-            for sel_col in done_task.sel_cols {
-              view_row.push((
-                sel_col.clone(),
-                combo_status.write_view.get_partial_val(
-                  &key,
-                  &sel_col,
-                  &select_query_meta.timestamp,
-                ),
-              ));
-            }
-            view.insert(key, view_row);
-          }
-          SelectKeyTask::None(_) => {
-            // The WHERE clause evaluated to false, so do nothing.
-          }
-          _ => {
-            // This means that the UpdateKeyTask requires subqueries
-            // to execute, so it is not complete.
-            let mut subq = BTreeMap::<SelectQueryId, (FromRoot, SelectStmt)>::new();
-            for (select_id, select_stmt) in context {
-              subq.insert(
-                select_id.clone(),
-                (
-                  make_path(
-                    status_path.clone(),
-                    FromProp {
-                      combo: combo_status.combo.clone(),
-                      from_combo: FromCombo::Select {
-                        sid: select_id,
-                        from_task: FromSelectTask::SelectTask { key: key.clone() },
-                      },
-                    },
-                  ),
-                  select_stmt,
-                ),
-              );
-            }
-            send(
-              &mut side_effects,
-              this_slave_eid,
-              this_tablet,
-              &subq,
-              &select_query_meta.timestamp,
-            );
-            select_tasks.insert(key.clone(), Holder::from(select_key_task));
-          }
-        }
-      }
-      if !select_tasks.is_empty() {
-        // This means we must create a SelectTask and hold in
-        // the combo_status.
-        combo_status.select_tasks.insert(
-          select_id.clone(),
-          Holder::from(SelectQueryTask::SelectTask(SelectTask {
-            tasks: select_tasks,
-            select_view: view,
-          })),
-        );
-      } else {
-        if let Some((select_view, combo_ids)) = select_views.get_mut(&select_id) {
-          if select_view != &view {
-            //  End everything and return an error
-            return Err(VerificationFailure::VerificationFailure);
-          } else {
-            combo_ids.insert(combo_status.combo.clone());
-          }
+      side_effects.append(
+        if let Ok(effects) = add_combo_select(
+          rand_gen,
+          select_views,
+          combo_status,
+          &status_path,
+          select_id,
+          select_query_map,
+          this_slave_eid,
+          this_tablet,
+        ) {
+          effects
         } else {
-          select_views.insert(
-            select_id.clone(),
-            (
-              view.clone(),
-              HashSet::from_iter(vec![combo_status.combo.clone()].into_iter()),
-            ),
-          );
-        }
-      }
+          return Err(VerificationFailure::VerificationFailure);
+        },
+      );
     }
   }
   if combo_status.select_tasks.is_empty() && combo_status.current_write.is_none() {
     // This means that the combo status is actually finished.
     combos_verified.insert(combo_status.combo.clone());
+  }
+  Ok(side_effects)
+}
+
+/// This function adds the given Select Query to the given
+/// `combo_status`, executing it as far as it will go, potentially
+/// adding it to `select_views` if it completes. Note that this function
+/// doesn't check for completion of the `combo_status` in any way.
+fn add_combo_select(
+  rand_gen: &mut RandGen,
+  select_views: &mut HashMap<SelectQueryId, (SelectView, HashSet<Vec<WriteQueryId>>)>,
+  combo_status: &mut CombinationStatus,
+  status_path: &StatusPath,
+  select_id: &SelectQueryId,
+  select_query_map: &HashMap<SelectQueryId, SelectQueryMetadata>,
+  this_slave_eid: &EndpointId,
+  this_tablet: &TabletShape,
+) -> Result<TabletSideEffects, VerificationFailure> {
+  let select_query_meta = select_query_map.get(select_id).unwrap().clone();
+  // Get the Select Query
+  let mut side_effects = TabletSideEffects::new();
+  let mut view = SelectView::new();
+  let mut select_tasks = BTreeMap::<PrimaryKey, Holder<SelectKeyTask>>::new();
+  for key in combo_status
+    .write_view
+    .get_keys(&select_query_meta.timestamp)
+  {
+    // The selects here must be valid so this should never
+    // return an error. Thus, we may just unwrap.
+    let (select_key_task, context) = start_eval_select_key_task(
+      rand_gen,
+      select_query_meta.select_stmt.clone(),
+      &combo_status.write_view,
+      &key,
+      &select_query_meta.timestamp,
+    )
+    .unwrap();
+    match select_key_task {
+      SelectKeyTask::Done(done_task) => {
+        // This means we should add the row into the SelectView. Easy.
+        let mut view_row = Vec::new();
+        for sel_col in done_task.sel_cols {
+          view_row.push((
+            sel_col.clone(),
+            combo_status
+              .write_view
+              .get_partial_val(&key, &sel_col, &select_query_meta.timestamp),
+          ));
+        }
+        view.insert(key, view_row);
+      }
+      SelectKeyTask::None(_) => {
+        // The WHERE clause evaluated to false, so do nothing.
+      }
+      _ => {
+        // This means that the UpdateKeyTask requires subqueries
+        // to execute, so it is not complete.
+        let mut subq = BTreeMap::<SelectQueryId, (FromRoot, SelectStmt)>::new();
+        for (select_id, select_stmt) in context {
+          subq.insert(
+            select_id.clone(),
+            (
+              make_path(
+                status_path.clone(),
+                FromProp {
+                  combo: combo_status.combo.clone(),
+                  from_combo: FromCombo::Select {
+                    sid: select_id,
+                    from_task: FromSelectTask::SelectTask { key: key.clone() },
+                  },
+                },
+              ),
+              select_stmt,
+            ),
+          );
+        }
+        send(
+          &mut side_effects,
+          this_slave_eid,
+          this_tablet,
+          &subq,
+          &select_query_meta.timestamp,
+        );
+        select_tasks.insert(key.clone(), Holder::from(select_key_task));
+      }
+    }
+  }
+  if !select_tasks.is_empty() {
+    // This means we must create a SelectTask and hold in
+    // the combo_status.
+    combo_status.select_tasks.insert(
+      select_id.clone(),
+      Holder::from(SelectQueryTask::SelectTask(SelectTask {
+        tasks: select_tasks,
+        select_view: view,
+      })),
+    );
+  } else {
+    if let Some((select_view, combo_ids)) = select_views.get_mut(&select_id) {
+      if select_view != &view {
+        //  End everything and return an error
+        return Err(VerificationFailure::VerificationFailure);
+      } else {
+        combo_ids.insert(combo_status.combo.clone());
+      }
+    } else {
+      select_views.insert(
+        select_id.clone(),
+        (
+          view.clone(),
+          HashSet::from_iter(vec![combo_status.combo.clone()].into_iter()),
+        ),
+      );
+    }
   }
   Ok(side_effects)
 }
@@ -1147,6 +1317,7 @@ fn start_eval_update_key_task(
 /// we construct EvalUpdateStmt with all subqueries in tact, i.e. they
 /// aren't turned into SubqueryIds yet.
 fn start_eval_select_key_task(
+  rand_gen: &mut RandGen,
   select_stmt: SelectStmt,
   rel_tab: &RelationalTablet,
   key: &PrimaryKey,
