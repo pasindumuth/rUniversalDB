@@ -455,23 +455,22 @@ impl TabletState {
     }
 
     if status.combos_verified.len() == status.combo_status_map.len() {
-      // We managed to verify all combos in the PropertyVerificationStatus.
-      // This means we are finished the transaction. So, add to
-      // already_reached_writes and update all associated
-      // PropertyVerificationStatuses accordingly. Here, this means
-      // we need to add new CombinationStatuses to elements in
-      // writes_being_verified.
-      panic!("Do this for selects_being_verified as well");
+      // We managed to verify all combos in the
+      // PropertyVerificationStatus. This means we are finished
+      // the transaction, so we need to add new combo_statuses to
+      // writes_being_verified and selects_being_verified.
       side_effects.append(add_new_combos(
         &mut self.rand_gen,
         &mut self.non_reached_writes,
         &mut self.writes_being_verified,
         &mut self.write_query_map,
+        &mut self.non_reached_selects,
+        &mut self.selects_being_verified,
+        &mut self.select_query_map,
         &wid,
         &self.already_reached_writes,
         &self.committed_writes,
         &self.relational_tablet,
-        &self.select_query_map,
         &self.this_slave_eid,
         &self.this_tablet,
       ));
@@ -650,11 +649,13 @@ impl TabletState {
                       &mut self.non_reached_writes,
                       &mut self.writes_being_verified,
                       &mut self.write_query_map,
+                      &mut self.non_reached_selects,
+                      &mut self.selects_being_verified,
+                      &mut self.select_query_map,
                       orig_wid,
                       &self.already_reached_writes,
                       &self.committed_writes,
                       &self.relational_tablet,
-                      &self.select_query_map,
                       &self.this_slave_eid,
                       &self.this_tablet,
                     ));
@@ -751,25 +752,30 @@ fn make_path(status_path: StatusPath, from_prop: FromProp) -> FromRoot {
 /// This function is called when a successful Write Query, `wid`, has been removed from
 /// `writes_being_verified`, but before it is added into `already_reached_writes`.
 /// This functions creates `combo_status`s for all existing `writes_being_verified`,
-/// where each of the new combos have `wid` present in there. Since this process
-/// might cause some Write Queries being verified to fail, this function also deletes
-/// those Write queries out of `non_reached_writes`, `writes_being_verified`, and
-/// `write_query_map`, and creates TM responses with the failures.
+/// and all `selects_being_verified`, where each of the new combos have `wid` present
+/// in there. Since this process might cause some Queries being verified to fail, this
+/// function also deletes those Queries out of `non_reached_writes`, `writes_being_verified`,
+/// and `write_query_map`, or from the `non_reached_selects`, `selects_being_verified`, and
+/// `select_query_map`, and creates TM responses with the failures.
 fn add_new_combos(
   rand_gen: &mut RandGen,
   non_reached_writes: &mut BTreeMap<Timestamp, WriteQueryId>,
   writes_being_verified: &mut HashMap<WriteQueryId, PropertyVerificationStatus>,
   write_query_map: &mut HashMap<WriteQueryId, WriteQueryMetadata>,
+  non_reached_selects: &mut BTreeMap<Timestamp, Vec<SelectQueryId>>,
+  selects_being_verified: &mut HashMap<SelectQueryId, PropertyVerificationStatus>,
+  select_query_map: &mut HashMap<SelectQueryId, SelectQueryMetadata>,
   wid: &WriteQueryId,
   already_reached_writes: &BTreeMap<Timestamp, WriteQueryId>,
   committed_writes: &BTreeMap<Timestamp, WriteQueryId>,
   relational_tablet: &RelationalTablet,
-  select_query_map: &HashMap<SelectQueryId, SelectQueryMetadata>,
   this_slave_eid: &EndpointId,
   this_tablet: &TabletShape,
 ) -> TabletSideEffects {
-  let write_meta = write_query_map.get(wid).unwrap();
+  let write_meta = write_query_map.get(wid).unwrap().clone();
   let mut side_effects = TabletSideEffects::new();
+  // Add combos to all writes_being_verified, deleting any if they
+  // become invalidated.
   let mut writes_to_delete: Vec<(EndpointId, WriteQueryId, Timestamp)> = Vec::new();
   for (cur_wid, status) in writes_being_verified.iter_mut() {
     for mut combo_as_map in create_combos(committed_writes, already_reached_writes) {
@@ -810,10 +816,54 @@ fn add_new_combos(
     writes_being_verified.remove(cur_wid);
     write_query_map.remove(cur_wid);
   }
-  panic!(
-    "I'm pretty sure there is a bug here... we need to be adding already_reached_writes\
-  for the case that the gien write is there."
-  );
+  // Add combos to all selects_being_verified, deleting any if they
+  // become invalidated.
+  let mut selects_to_delete: Vec<(EndpointId, SelectQueryId, Timestamp)> = Vec::new();
+  for (cur_sid, status) in selects_being_verified.iter_mut() {
+    for mut combo_as_map in create_combos(committed_writes, already_reached_writes) {
+      // This code block constructs the CombinationStatus.
+      let cur_select_meta = select_query_map.get(&cur_sid).unwrap();
+      combo_as_map.insert(write_meta.timestamp.clone(), wid.clone());
+      if let Ok(effects) = add_combo(
+        rand_gen,
+        status,
+        StatusPath::SelectStatus {
+          sid: cur_sid.clone(),
+        },
+        &combo_as_map.values().cloned().collect(),
+        relational_tablet,
+        write_query_map,
+        select_query_map,
+        this_slave_eid,
+        this_tablet,
+      ) {
+        side_effects.append(effects);
+      } else {
+        // The verification failed, so abort the Select Query and clean up all
+        // data structures where the Select appears.
+        selects_to_delete.push((
+          cur_select_meta.tm_eid.clone(),
+          cur_sid.clone(),
+          cur_select_meta.timestamp.clone(),
+        ));
+      }
+    }
+  }
+  // We delete the Select Query separately from the loop above to avoid
+  // double-mutable borrows of `selects_to_delete`.
+  for (cur_tm_eid, cur_sid, cur_timestamp) in &selects_to_delete {
+    side_effects.add(select_aborted(cur_tm_eid, cur_sid, this_tablet));
+    // Calling unwrap here should not be a problem, since we  know cur_sid
+    // *must* be in `non_reached_selects` at `cur_timestamp`
+    let selects = non_reached_selects.get_mut(cur_timestamp).unwrap();
+    let select_index = selects.iter().position(|sid| sid == cur_sid).unwrap();
+    selects.remove(select_index);
+    if selects.is_empty() {
+      non_reached_selects.remove(cur_timestamp);
+    }
+    selects_being_verified.remove(cur_sid);
+    select_query_map.remove(cur_sid);
+  }
   side_effects
 }
 
