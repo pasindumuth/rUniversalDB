@@ -327,7 +327,7 @@ impl TabletState {
       // PropertyVerificationStatuses accordingly. Here, this means
       // we need to update every element of writes_being_verified
       // to include this new select. This operation will result in all
-      // `combos_verified` to be emptied and to perform some Selects there.
+      // `combos_verified` first being emptied.
       for (wid, prop_status) in &mut self.writes_being_verified {
         // Add the new Select into `selects`
         if let Some(selects) = prop_status.selects.get_mut(timestamp) {
@@ -508,237 +508,41 @@ impl TabletState {
         } => {
           // This Subquery is destined for a Write Query
           let orig_write_meta = self.write_query_map.get(orig_wid).unwrap().clone();
-          let subquery_ret = if let Ok(subquery_ret) = result.clone() {
-            subquery_ret
-          } else {
-            // Here, we need to abort the whole transaction. Get rid of the
-            // the whole PropertyVerificationStatus.
-            self.non_reached_writes.remove(&orig_write_meta.timestamp);
-            self.writes_being_verified.remove(orig_wid);
-            self.write_query_map.remove(orig_wid);
-            side_effects.add(write_aborted(
-              &orig_write_meta.tm_eid,
-              orig_wid,
-              &self.this_tablet,
-            ));
-            return Some(());
-          };
-          let status = self.writes_being_verified.get_mut(orig_wid)?;
+          let mut status = self.writes_being_verified.get_mut(orig_wid)?;
           let mut combo_status = status.combo_status_map.get_mut(&from_prop.combo)?;
-          match &from_prop.from_combo {
-            FromCombo::Write {
-              wid: cur_wid,
-              from_task,
-            } => {
-              // This Subquery is destined for a Write Query in the combo
-              let mut current_write = combo_status.current_write.as_mut()?;
-              if &current_write.wid == cur_wid {
-                let context = if let Ok(context) = eval_write_graph(
-                  &mut self.rand_gen,
-                  &mut current_write.write_task,
-                  &from_task,
-                  &sid,
-                  &subquery_ret,
-                  &combo_status.write_view,
-                ) {
-                  context
-                } else {
-                  // Here, we need to abort the whole transaction. Get rid of the
-                  // the whole PropertyVerificationStatus.
-                  self.non_reached_writes.remove(&orig_write_meta.timestamp);
-                  self.writes_being_verified.remove(orig_wid);
-                  self.write_query_map.remove(orig_wid);
-                  side_effects.add(write_aborted(
-                    &orig_write_meta.tm_eid,
-                    orig_wid,
-                    &self.this_tablet,
-                  ));
-                  return Some(());
-                };
-                let task_done = match &current_write.write_task.val {
-                  WriteQueryTask::WriteDoneTask(diff) => {
-                    // This means the Update for the row completed
-                    // without the need for any more subqueries.
-                    table_insert_diff(
-                      &mut combo_status.write_view,
-                      &diff,
-                      &self.write_query_map.get(cur_wid).unwrap().timestamp,
-                    );
-                    true
-                  }
-                  _ => {
-                    // This means that the UpdateKeyTask requires subqueries
-                    // to execute, so it is not complete.
-                    let mut subq = BTreeMap::<SelectQueryId, (FromRoot, SelectStmt)>::new();
-                    for (select_id, (from_task, select_stmt)) in context {
-                      subq.insert(
-                        select_id,
-                        (
-                          FromRoot::Write {
-                            wid: orig_wid.clone(),
-                            from_prop: FromProp {
-                              combo: combo_status.combo.clone(),
-                              from_combo: FromCombo::Write {
-                                wid: cur_wid.clone(),
-                                from_task,
-                              },
-                            },
-                          },
-                          select_stmt,
-                        ),
-                      );
-                    }
-                    send(
-                      &mut side_effects,
-                      &self.this_slave_eid,
-                      &self.this_tablet,
-                      &subq,
-                      &self.write_query_map.get(cur_wid).unwrap().timestamp,
-                    );
-                    false
-                  }
-                };
-                if task_done {
-                  // This means that that combo_status.current_write
-                  // is done. Now, we need to move onto the next write.
-                  let next_wid_index = combo_status
-                    .combo
-                    .iter()
-                    .position(|x| x == cur_wid)
-                    .unwrap()
-                    + 1;
-                  let effects = if let Ok(effects) = continue_combo(
-                    &mut self.rand_gen,
-                    &mut status.select_views,
-                    &mut status.combos_verified,
-                    &mut combo_status,
-                    &status.selects,
-                    next_wid_index as i32,
-                    StatusPath::WriteStatus {
-                      wid: orig_wid.clone(),
-                    },
-                    &self.write_query_map,
-                    &self.select_query_map,
-                    &self.this_slave_eid,
-                    &self.this_tablet,
-                  ) {
-                    effects
-                  } else {
-                    // Here, we need to abort the whole transaction. Get rid of the
-                    // the whole PropertyVerificationStatus.
-                    self.non_reached_writes.remove(&orig_write_meta.timestamp);
-                    self.writes_being_verified.remove(orig_wid);
-                    self.write_query_map.remove(orig_wid);
-                    side_effects.add(write_aborted(
-                      &orig_write_meta.tm_eid,
-                      orig_wid,
-                      &self.this_tablet,
-                    ));
-                    return Some(());
-                  };
-                  side_effects.append(effects);
-                };
-              }
-            }
-            FromCombo::Select {
-              sid: cur_sid,
-              from_task,
-            } => {
-              // How do we implement this? Well, we need to dig into the right
-              // SelectQueryTask, match the path. Simply forwarding should do.
-              let mut select_task = combo_status.select_tasks.get_mut(cur_sid)?;
-              let context = if let Ok(context) = eval_select_graph(
-                &mut self.rand_gen,
-                &mut select_task,
-                &from_task,
-                &cur_sid,
-                &subquery_ret,
-                &combo_status.write_view,
-              ) {
-                context
-              } else {
-                // Here, we need to abort the whole transaction. Get rid of the
-                // the whole PropertyVerificationStatus.
-                self.non_reached_writes.remove(&orig_write_meta.timestamp);
-                self.writes_being_verified.remove(orig_wid);
-                self.write_query_map.remove(orig_wid);
-                side_effects.add(write_aborted(
-                  &orig_write_meta.tm_eid,
-                  orig_wid,
-                  &self.this_tablet,
-                ));
-                return Some(());
-              };
-              match &select_task.val {
-                SelectQueryTask::SelectDoneTask(view) => {
-                  // This means the Update for the row completed without the need
-                  // for any more subqueries. Thus, we finish up the Select Query,
-                  // checking to see if it matches what's in prop_status, and then
-                  // removing it from combo_status.select_tasks.
-                  if let Some((select_view, combo_ids)) = status.select_views.get_mut(&cur_sid) {
-                    if select_view != view {
-                      // Here, we need to abort the whole transaction. Get rid of the
-                      // the whole PropertyVerificationStatus.
-                      self.non_reached_writes.remove(&orig_write_meta.timestamp);
-                      self.writes_being_verified.remove(orig_wid);
-                      self.write_query_map.remove(orig_wid);
-                      side_effects.add(write_aborted(
-                        &orig_write_meta.tm_eid,
-                        orig_wid,
-                        &self.this_tablet,
-                      ));
-                      return Some(());
-                    } else {
-                      combo_ids.insert(combo_status.combo.clone());
-                    }
-                  } else {
-                    status.select_views.insert(
-                      cur_sid.clone(),
-                      (
-                        view.clone(),
-                        HashSet::from_iter(vec![combo_status.combo.clone()].into_iter()),
-                      ),
-                    );
-                  }
-                  combo_status.select_tasks.remove(cur_sid);
-                  if combo_status.select_tasks.is_empty() && combo_status.current_write.is_none() {
-                    // This means that the combo status is actually finished.
-                    status.combos_verified.insert(combo_status.combo.clone());
-                  }
-                }
-                _ => {
-                  // This means that the UpdateKeyTask requires subqueries
-                  // to execute, so it is not complete.
-                  let mut subq = BTreeMap::<SelectQueryId, (FromRoot, SelectStmt)>::new();
-                  for (select_id, (from_task, select_stmt)) in context {
-                    subq.insert(
-                      select_id,
-                      (
-                        FromRoot::Write {
-                          wid: orig_wid.clone(),
-                          from_prop: FromProp {
-                            combo: combo_status.combo.clone(),
-                            from_combo: FromCombo::Select {
-                              sid: cur_sid.clone(),
-                              from_task,
-                            },
-                          },
-                        },
-                        select_stmt,
-                      ),
-                    );
-                  }
-                  send(
-                    &mut side_effects,
-                    &self.this_slave_eid,
-                    &self.this_tablet,
-                    &subq,
-                    &self.select_query_map.get(cur_sid).unwrap().timestamp,
-                  );
-                }
-              };
-            }
-          };
+          side_effects.append(
+            if let Ok(effects) = handle_subquery_response_prop(
+              &mut self.rand_gen,
+              &mut status.select_views,
+              &mut status.combos_verified,
+              combo_status,
+              &status.selects,
+              &sid,
+              &StatusPath::WriteStatus {
+                wid: orig_wid.clone(),
+              },
+              &from_prop,
+              result.clone(),
+              &self.write_query_map,
+              &self.select_query_map,
+              &self.this_slave_eid,
+              &self.this_tablet,
+            )? {
+              effects
+            } else {
+              // Here, we need to abort the whole transaction. Get rid of the
+              // the whole PropertyVerificationStatus.
+              self.non_reached_writes.remove(&orig_write_meta.timestamp);
+              self.writes_being_verified.remove(orig_wid);
+              self.write_query_map.remove(orig_wid);
+              side_effects.add(write_aborted(
+                &orig_write_meta.tm_eid,
+                orig_wid,
+                &self.this_tablet,
+              ));
+              return Some(());
+            },
+          );
           // Check if we managed to verify all combos in the
           // PropertyVerificationStatus. This means we are finished the
           // transaction. So, add to already_reached_writes and update all
@@ -960,6 +764,211 @@ fn add_new_combos(
     select_query_map.remove(cur_sid);
   }
   side_effects
+}
+
+/// This functions routes the given Subquery Response, whose ID was `sid`
+/// and whose result was `result`, down to where it belongs in the
+/// `combo_status`. It's possible that the Subquery is no longer relevent
+/// for the `combo_status`; i.e. the task (WriteQueryTask or SelectQueryTask)
+/// that issued the Subquery had disappeared for some reason. This is okay;
+/// we just return a None when this happens. Otherwise, we return either
+/// `TabletSideEffects` containing any new subqueries, or a `VerificationFailure`
+/// indicating that we just discovered the Query that owns this `combo_status`
+/// cannot be completed.
+fn handle_subquery_response_prop(
+  rand_gen: &mut RandGen,
+  select_views: &mut HashMap<SelectQueryId, (SelectView, HashSet<Vec<WriteQueryId>>)>,
+  combos_verified: &mut HashSet<Vec<WriteQueryId>>,
+  combo_status: &mut CombinationStatus,
+  selects: &BTreeMap<Timestamp, Vec<SelectQueryId>>,
+  sid: &SelectQueryId,
+  status_path: &StatusPath,
+  from_prop: &FromProp,
+  result: Result<SelectView, String>,
+  write_query_map: &HashMap<WriteQueryId, WriteQueryMetadata>,
+  select_query_map: &HashMap<SelectQueryId, SelectQueryMetadata>,
+  this_slave_eid: &EndpointId,
+  this_tablet: &TabletShape,
+) -> Option<Result<TabletSideEffects, VerificationFailure>> {
+  let mut side_effects = TabletSideEffects::new();
+  let subquery_ret = if let Ok(subquery_ret) = result.clone() {
+    subquery_ret
+  } else {
+    return Some(Err(VerificationFailure::VerificationFailure));
+  };
+  match &from_prop.from_combo {
+    FromCombo::Write {
+      wid: cur_wid,
+      from_task,
+    } => {
+      // This Subquery is destined for a Write Query in the combo
+      let mut current_write = combo_status.current_write.as_mut()?;
+      if &current_write.wid == cur_wid {
+        let context = if let Ok(context) = eval_write_graph(
+          rand_gen,
+          &mut current_write.write_task,
+          &from_task,
+          &sid,
+          &subquery_ret,
+          &combo_status.write_view,
+        ) {
+          context
+        } else {
+          return Some(Err(VerificationFailure::VerificationFailure));
+        };
+        let task_done = match &current_write.write_task.val {
+          WriteQueryTask::WriteDoneTask(diff) => {
+            // This means the Update for the row completed
+            // without the need for any more subqueries.
+            table_insert_diff(
+              &mut combo_status.write_view,
+              &diff,
+              &write_query_map.get(cur_wid).unwrap().timestamp,
+            );
+            true
+          }
+          _ => {
+            // This means that the UpdateKeyTask requires subqueries
+            // to execute, so it is not complete.
+            let mut subq = BTreeMap::<SelectQueryId, (FromRoot, SelectStmt)>::new();
+            for (select_id, (from_task, select_stmt)) in context {
+              subq.insert(
+                select_id,
+                (
+                  make_path(
+                    status_path.clone(),
+                    FromProp {
+                      combo: combo_status.combo.clone(),
+                      from_combo: FromCombo::Write {
+                        wid: cur_wid.clone(),
+                        from_task,
+                      },
+                    },
+                  ),
+                  select_stmt,
+                ),
+              );
+            }
+            send(
+              &mut side_effects,
+              &this_slave_eid,
+              &this_tablet,
+              &subq,
+              &write_query_map.get(cur_wid).unwrap().timestamp,
+            );
+            false
+          }
+        };
+        if task_done {
+          // This means that that combo_status.current_write
+          // is done. Now, we need to move onto the next write.
+          let next_wid_index = combo_status
+            .combo
+            .iter()
+            .position(|x| x == cur_wid)
+            .unwrap()
+            + 1;
+          let effects = if let Ok(effects) = continue_combo(
+            rand_gen,
+            select_views,
+            combos_verified,
+            combo_status,
+            selects,
+            next_wid_index as i32,
+            status_path.clone(),
+            &write_query_map,
+            &select_query_map,
+            &this_slave_eid,
+            &this_tablet,
+          ) {
+            effects
+          } else {
+            return Some(Err(VerificationFailure::VerificationFailure));
+          };
+          side_effects.append(effects);
+        };
+      }
+    }
+    FromCombo::Select {
+      sid: cur_sid,
+      from_task,
+    } => {
+      // How do we implement this? Well, we need to dig into the right
+      // SelectQueryTask, match the path. Simply forwarding should do.
+      let mut select_task = combo_status.select_tasks.get_mut(cur_sid)?;
+      let context = if let Ok(context) = eval_select_graph(
+        rand_gen,
+        &mut select_task,
+        &from_task,
+        &cur_sid,
+        &subquery_ret,
+        &combo_status.write_view,
+      ) {
+        context
+      } else {
+        return Some(Err(VerificationFailure::VerificationFailure));
+      };
+      match &select_task.val {
+        SelectQueryTask::SelectDoneTask(view) => {
+          // This means the Update for the row completed without the need
+          // for any more subqueries. Thus, we finish up the Select Query,
+          // checking to see if it matches what's in prop_status, and then
+          // removing it from combo_status.select_tasks.
+          if let Some((select_view, combo_ids)) = select_views.get_mut(&cur_sid) {
+            if select_view != view {
+              return Some(Err(VerificationFailure::VerificationFailure));
+            } else {
+              combo_ids.insert(combo_status.combo.clone());
+            }
+          } else {
+            select_views.insert(
+              cur_sid.clone(),
+              (
+                view.clone(),
+                HashSet::from_iter(vec![combo_status.combo.clone()].into_iter()),
+              ),
+            );
+          }
+          combo_status.select_tasks.remove(cur_sid);
+          if combo_status.select_tasks.is_empty() && combo_status.current_write.is_none() {
+            // This means that the combo status is actually finished.
+            combos_verified.insert(combo_status.combo.clone());
+          }
+        }
+        _ => {
+          // This means that the UpdateKeyTask requires subqueries
+          // to execute, so it is not complete.
+          let mut subq = BTreeMap::<SelectQueryId, (FromRoot, SelectStmt)>::new();
+          for (select_id, (from_task, select_stmt)) in context {
+            subq.insert(
+              select_id,
+              (
+                make_path(
+                  status_path.clone(),
+                  FromProp {
+                    combo: combo_status.combo.clone(),
+                    from_combo: FromCombo::Select {
+                      sid: cur_sid.clone(),
+                      from_task,
+                    },
+                  },
+                ),
+                select_stmt,
+              ),
+            );
+          }
+          send(
+            &mut side_effects,
+            &this_slave_eid,
+            &this_tablet,
+            &subq,
+            &select_query_map.get(cur_sid).unwrap().timestamp,
+          );
+        }
+      };
+    }
+  };
+  Some(Ok(side_effects))
 }
 
 /// This adds a `combo_status` to `status`, or returns a `VerificationFailure`
