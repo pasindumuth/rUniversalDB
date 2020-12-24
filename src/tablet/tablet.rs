@@ -11,7 +11,7 @@ use crate::model::evalast::{
 use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, FromCombo, FromProp, FromRoot, FromSelectTask,
   FromWriteTask, NetworkMessage, SelectPrepare, SlaveMessage, SubqueryResponse, TabletAction,
-  TabletMessage, WriteCommit, WritePrepare, WriteQuery,
+  TabletMessage, WriteAbort, WriteCommit, WritePrepare, WriteQuery,
 };
 use crate::model::sqlast::ValExpr::{BinaryExpr, Subquery};
 use crate::model::sqlast::{BinaryOp, Literal, SelectStmt, SqlStmt, UpdateStmt, ValExpr};
@@ -245,8 +245,8 @@ impl TabletState {
       TabletMessage::WriteCommit(write_commit) => {
         side_effects.append(self.handle_write_commit(write_commit));
       }
-      TabletMessage::WriteAbort(_) => {
-        panic!("WriteAbort is not supported yet.");
+      TabletMessage::WriteAbort(write_abort) => {
+        side_effects.append(self.handle_write_abort(write_abort));
       }
       TabletMessage::SubqueryResponse(subquery_res) => {
         side_effects.append(self.handle_subquery_response(subquery_res));
@@ -486,18 +486,19 @@ impl TabletState {
       .already_reached_writes
       .remove(&orig_write_meta.timestamp)
       .unwrap();
-
     self
       .committed_writes
       .insert(orig_write_meta.timestamp.clone(), orig_wid.clone());
-
     // Removed completed write_query from the writes_being_verified.
+    self.writes_being_verified.remove(&orig_wid);
+
+    // Remove all combo_statuses in writes_being_verified that assume that this write
+    // fails. Since we now know it doesn't, those combo_statuses are irrelevent. For every
+    // prop_status, remove them from the combo_status_map, combos_verified, and select_views.
     let wids: Vec<WriteQueryId> = self.writes_being_verified.keys().cloned().collect();
     for wid in wids {
       if let Some(prop_status) = self.writes_being_verified.get_mut(&wid) {
         let combos: Vec<Vec<WriteQueryId>> = prop_status.combo_status_map.keys().cloned().collect();
-        // First, remove all irrelevent combos from the prop_status. Remove
-        // it from the combo_status_map, combos_verified, and select_views.
         for combo in combos {
           if !combo.contains(&orig_wid) {
             prop_status.combo_status_map.remove(&combo).unwrap();
@@ -536,13 +537,12 @@ impl TabletState {
       }
     }
 
+    // Similar to the above, remove all such combo_statuses from selects_being_verified.
     let sids: Vec<SelectQueryId> = self.selects_being_verified.keys().cloned().collect();
     for sid in sids {
       if let Some(prop_status) = self.selects_being_verified.get_mut(&sid) {
         let sid = sid.clone();
         let combos: Vec<Vec<WriteQueryId>> = prop_status.combo_status_map.keys().cloned().collect();
-        // First, remove all irrelevent combos from the prop_status. Remove
-        // it from the combo_status_map, combos_verified, and select_views.
         for combo in combos {
           if !combo.contains(&orig_wid) {
             prop_status.combo_status_map.remove(&combo).unwrap();
@@ -552,8 +552,7 @@ impl TabletState {
             }
           }
         }
-        // By removing irrelevent combos, we may have just completed the
-        // prop_status. We defer completion to avoid double mutable borrows.
+        // By removing irrelevent combos, we may have just completed the prop_status.
         if prop_status.combos_verified.len() == prop_status.combo_status_map.len() {
           let select_view = prop_status.select_views.get(&sid).unwrap().0.clone();
           let select_meta = self.select_query_map.get(&sid).unwrap();
@@ -586,6 +585,123 @@ impl TabletState {
     }
 
     side_effects.add(write_committed(tm_eid, orig_wid, &self.this_tablet));
+    return side_effects;
+  }
+
+  /// This is very similar to a write commit, except we remove combos_status
+  /// that *contain* the aborted rwrite, instead of combo_statuses that don't.
+  fn handle_write_abort(&mut self, write_abort: &WriteAbort) -> TabletSideEffects {
+    let WriteAbort {
+      tm_eid,
+      wid: orig_wid,
+    } = write_abort;
+    let mut side_effects = TabletSideEffects::new();
+    // Get and remove the associated write query.
+    let orig_write_meta = if let Some(write_query) = self.write_query_map.remove(orig_wid) {
+      write_query.clone()
+    } else {
+      return side_effects;
+    };
+
+    // Remove the write from already_reached_writes.
+    self
+      .already_reached_writes
+      .remove(&orig_write_meta.timestamp)
+      .unwrap();
+
+    // Remove all combo_statuses in writes_being_verified that assume that this write
+    // succeeds. Since we now know it doesn't, those combo_statuses are irrelevent. For every
+    // prop_status, remove them from the combo_status_map, combos_verified, and select_views.
+    let wids: Vec<WriteQueryId> = self.writes_being_verified.keys().cloned().collect();
+    for wid in wids {
+      if let Some(prop_status) = self.writes_being_verified.get_mut(&wid) {
+        let combos: Vec<Vec<WriteQueryId>> = prop_status.combo_status_map.keys().cloned().collect();
+        for combo in combos {
+          if combo.contains(&orig_wid) {
+            prop_status.combo_status_map.remove(&combo).unwrap();
+            prop_status.combos_verified.remove(&combo);
+            for (_, (_, confirmed_combos)) in &mut prop_status.select_views {
+              confirmed_combos.remove(&combo);
+            }
+          }
+        }
+        // By removing irrelevent combos, we may have just completed the prop_status.
+        if prop_status.combos_verified.len() == prop_status.combo_status_map.len() {
+          let write_meta = self.write_query_map.get(&wid).unwrap().clone();
+          self.non_reached_writes.remove(&write_meta.timestamp);
+          self.writes_being_verified.remove(&wid);
+          side_effects.append(handle_write_query_completion(
+            &mut self.rand_gen,
+            &mut self.non_reached_writes,
+            &mut self.writes_being_verified,
+            &mut self.write_query_map,
+            &mut self.non_reached_selects,
+            &mut self.selects_being_verified,
+            &mut self.select_query_map,
+            &wid,
+            &self.already_reached_writes,
+            &self.committed_writes,
+            &self.relational_tablet,
+            &self.this_slave_eid,
+            &self.this_tablet,
+          ));
+          self
+            .already_reached_writes
+            .insert(write_meta.timestamp.clone(), wid.clone());
+          // Send a response back to the TM.
+          side_effects.add(write_prepared(&write_meta.tm_eid, &wid, &self.this_tablet));
+        }
+      }
+    }
+
+    // Similar to the above, remove all such combo_statuses from selects_being_verified.
+    let sids: Vec<SelectQueryId> = self.selects_being_verified.keys().cloned().collect();
+    for sid in sids {
+      if let Some(prop_status) = self.selects_being_verified.get_mut(&sid) {
+        let sid = sid.clone();
+        let combos: Vec<Vec<WriteQueryId>> = prop_status.combo_status_map.keys().cloned().collect();
+        for combo in combos {
+          if !combo.contains(&orig_wid) {
+            prop_status.combo_status_map.remove(&combo).unwrap();
+            prop_status.combos_verified.remove(&combo);
+            for (_, (_, confirmed_combos)) in &mut prop_status.select_views {
+              confirmed_combos.remove(&combo);
+            }
+          }
+        }
+        // By removing irrelevent combos, we may have just completed the prop_status.
+        if prop_status.combos_verified.len() == prop_status.combo_status_map.len() {
+          let select_view = prop_status.select_views.get(&sid).unwrap().0.clone();
+          let select_meta = self.select_query_map.get(&sid).unwrap();
+          remove_select(&mut self.non_reached_selects, &select_meta.timestamp, &sid);
+          self.selects_being_verified.remove(&sid);
+          side_effects.append(handle_select_query_completion(
+            &mut self.rand_gen,
+            &mut self.writes_being_verified,
+            &mut self.non_reached_writes,
+            &mut self.write_query_map,
+            &sid,
+            &select_meta.timestamp,
+            &self.select_query_map,
+            &self.this_slave_eid,
+            &self.this_tablet,
+          ));
+          add_select(
+            &mut self.already_reached_selects,
+            &select_meta.timestamp,
+            &sid,
+          );
+          side_effects.add(select_prepared(
+            &select_meta.tm_eid,
+            &sid,
+            &self.this_tablet,
+            select_view,
+          ));
+        }
+      }
+    }
+
+    side_effects.add(write_aborted(tm_eid, orig_wid, &self.this_tablet));
     return side_effects;
   }
 
