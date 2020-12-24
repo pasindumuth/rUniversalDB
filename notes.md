@@ -27,14 +27,3 @@ docker run -it --name=universal3 --ip 172.19.0.6 --network=runiversal-net runive
 docker run -it --name=universal4 --ip 172.19.0.7 --network=runiversal-net runiversal cargo run 4 172.19.0.7 172.19.0.3 172.19.0.4 172.19.0.5 172.19.0.6
 
 docker run -it --name=client --network=runiversal-net runiversal cargo run --bin client 172.19.0.3 1610
-
-
-name_list -> Vec<String>
-    : name
-      {
-        vec![$1.to_string()]
-      }
-    | name_list ',' name
-      {
-        $1.push($2.to_string())
-      }
