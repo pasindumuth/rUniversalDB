@@ -6,7 +6,7 @@ use crate::model::common::{
 use crate::model::evalast::{
   EvalBinaryOp, EvalLiteral, Holder, PostEvalExpr, PreEvalExpr, SelectKeyTask, SelectQueryTask,
   UpdateKeyDoneTask, UpdateKeyEvalConstraintsTask, UpdateKeyEvalValTask, UpdateKeyEvalWhereTask,
-  UpdateKeyNoneTask, UpdateKeyTask, WriteQueryTask,
+  UpdateKeyNoneTask, UpdateKeyStartTask, UpdateKeyTask, WriteQueryTask,
 };
 use crate::model::message::{FromSelectTask, FromWriteTask};
 use crate::model::sqlast::{BinaryOp, Literal, SelectStmt, UpdateStmt, ValExpr};
@@ -106,7 +106,7 @@ pub fn continue_update_key_task(
 ) -> Result<BTreeMap<SelectQueryId, SelectStmt>, EvalErr> {
   match &mut update_key_task.val {
     UpdateKeyTask::Start(task) => {
-      let (post_expr, subqueries) = replace_sub(rand_gen, &task.set_val);
+      let (post_expr, subqueries) = pre_to_post_expr(rand_gen, &task.set_val);
       update_key_task.val = UpdateKeyTask::EvalWhere(UpdateKeyEvalWhereTask {
         set_col: task.set_col.clone(),
         set_val: task.set_val.clone(),
@@ -121,10 +121,10 @@ pub fn continue_update_key_task(
       if task.pending_subqueries.is_empty() {
         // This means we are finished waiting for subqueries to arrive;
         // we may start evaluating the expressions.
-        match eval_expr(&task.complete_subqueries, &task.where_clause)? {
+        match evalulate_expr(&task.complete_subqueries, &task.where_clause)? {
           EvalLiteral::Bool(where_val) => {
             if where_val {
-              let (post_expr, subqueries) = replace_sub(rand_gen, &task.set_val);
+              let (post_expr, subqueries) = pre_to_post_expr(rand_gen, &task.set_val);
               update_key_task.val = UpdateKeyTask::EvalVal(UpdateKeyEvalValTask {
                 set_col: task.set_col.clone(),
                 set_val: post_expr,
@@ -145,10 +145,10 @@ pub fn continue_update_key_task(
       if task.pending_subqueries.is_empty() {
         // This means we are finished waiting for subqueries to arrive;
         // we may start evaluating the expressions.
-        let (post_exprs, subqueries) = replace_subs(rand_gen, &task.table_constraints);
+        let (post_exprs, subqueries) = pre_to_post_exprs(rand_gen, &task.table_constraints);
         update_key_task.val = UpdateKeyTask::EvalConstraints(UpdateKeyEvalConstraintsTask {
           set_col: task.set_col.clone(),
-          set_val: eval_expr(&task.complete_subqueries, &task.set_val)?,
+          set_val: evalulate_expr(&task.complete_subqueries, &task.set_val)?,
           table_constraints: post_exprs,
           pending_subqueries: subqueries,
           complete_subqueries: Default::default(),
@@ -160,7 +160,7 @@ pub fn continue_update_key_task(
       if task.pending_subqueries.is_empty() {
         // This means we are finished waiting for subqueries to arrive;
         // we may start evaluating the expressions.
-        let constraint_vals = eval_exprs(&task.complete_subqueries, &task.table_constraints)?;
+        let constraint_vals = evaluate_exprs(&task.complete_subqueries, &task.table_constraints)?;
         for constraint_val in constraint_vals {
           match constraint_val {
             EvalLiteral::Bool(val) => {
@@ -186,38 +186,6 @@ pub fn continue_update_key_task(
     }
   }
   Ok(BTreeMap::new())
-}
-
-fn eval_exprs(
-  subquery_vals: &BTreeMap<SelectQueryId, SelectView>,
-  exprs: &Vec<PostEvalExpr>,
-) -> Result<Vec<EvalLiteral>, EvalErr> {
-  let mut evaluated = Vec::new();
-  for expr in exprs {
-    evaluated.push(eval_expr(subquery_vals, expr)?);
-  }
-  Ok(evaluated)
-}
-
-fn eval_expr(
-  subquery_vals: &BTreeMap<SelectQueryId, SelectView>,
-  expr: &PostEvalExpr,
-) -> Result<EvalLiteral, EvalErr> {
-  panic!("TODO: implement");
-}
-
-fn replace_subs(
-  rand_gen: &mut RandGen,
-  pre_exprs: &Vec<PreEvalExpr>,
-) -> (Vec<PostEvalExpr>, BTreeMap<SelectQueryId, SelectStmt>) {
-  panic!("Implement");
-}
-
-fn replace_sub(
-  rand_gen: &mut RandGen,
-  pre_expr: &PreEvalExpr,
-) -> (PostEvalExpr, BTreeMap<SelectQueryId, SelectStmt>) {
-  panic!("Implement");
 }
 
 /// This function adds the adds the `subquery` at the location of
@@ -278,14 +246,26 @@ pub fn eval_write_graph(
   Ok(BTreeMap::new())
 }
 
-/// Trivially converts an `EvalLiteral` to `Option<ColumnValue>`.
-fn convert(eval_lit: EvalLiteral) -> Option<ColumnValue> {
-  match eval_lit {
-    EvalLiteral::Int(i32) => Some(ColumnValue::Int(i32)),
-    EvalLiteral::Bool(bool) => Some(ColumnValue::Bool(bool)),
-    EvalLiteral::String(string) => Some(ColumnValue::String(string)),
-    EvalLiteral::Null => None,
-  }
+/// This function takes all ColumnNames in the `update_stmt`, replaces
+/// them with their values from `rel_tab` (from the row with key `key`
+/// at `timestamp`). We do this deeply, including subqueries. Then
+/// we construct EvalUpdateStmt with all subqueries in tact, i.e. they
+/// aren't turned into SubqueryIds yet.
+pub fn start_eval_update_key_task(
+  rand_gen: &mut RandGen,
+  update_stmt: &UpdateStmt,
+  rel_tab: &RelationalTablet,
+  key: &PrimaryKey,
+  timestamp: &Timestamp,
+) -> Result<(UpdateKeyTask, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
+  let mut task = Holder::from(UpdateKeyTask::Start(UpdateKeyStartTask {
+    set_col: verify_col(&update_stmt.set_col, rel_tab)?,
+    set_val: val_to_pre_expr(&update_stmt.set_val, rel_tab, key, timestamp)?,
+    where_clause: val_to_pre_expr(&update_stmt.where_clause, rel_tab, key, timestamp)?,
+    table_constraints: vec![],
+  }));
+  let context = continue_update_key_task(rand_gen, &mut task, rel_tab)?;
+  return Ok((task.val, context));
 }
 
 /// I hypothesize this will be the master interface for
@@ -305,48 +285,6 @@ pub fn eval_select_graph(
   Err(EvalErr::ColumnDNE)
 }
 
-fn lookup<K: PartialEq + Eq, V: Clone>(vec: &Vec<(K, V)>, key: &K) -> Option<V> {
-  for (k, v) in vec {
-    if k == key {
-      return Some(v.clone());
-    }
-  }
-  return None;
-}
-
-pub fn table_insert(
-  rel_tab: &mut RelationalTablet,
-  key: &PrimaryKey,
-  col_name: &ColumnName,
-  val: EvalLiteral,
-  timestamp: &Timestamp,
-) {
-  panic!("TODO: implement")
-}
-
-pub fn table_insert_diff(rel_tab: &mut RelationalTablet, diff: &WriteDiff, timestamp: &Timestamp) {
-  panic!("TODO: implement")
-}
-
-/// This function takes all ColumnNames in the `update_stmt`, replaces
-/// them with their values from `rel_tab` (from the row with key `key`
-/// at `timestamp`). We do this deeply, including subqueries. Then
-/// we construct EvalUpdateStmt with all subqueries in tact, i.e. they
-/// aren't turned into SubqueryIds yet.
-pub fn start_eval_update_key_task(
-  rand_gen: &mut RandGen,
-  update_stmt: UpdateStmt,
-  rel_tab: &RelationalTablet,
-  key: &PrimaryKey,
-  timestamp: &Timestamp,
-) -> Result<(UpdateKeyTask, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
-  panic!(
-    "TODO: implement. This will likely use eval_update_key_task to help\
-  move the UpdateKeyTask as far forward as possible. Also, we should return the\
-  FromTask paths for each subquery."
-  );
-}
-
 /// This function takes all ColumnNames in the `update_stmt`, replaces
 /// them with their values from `rel_tab` (from the row with key `key`
 /// at `timestamp`). We do this deeply, including subqueries. Then
@@ -363,6 +301,114 @@ pub fn start_eval_select_key_task(
     "TODO: implement. This will likely use eval_update_key_task to help\
   move the UpdateKeyTask as far forward as possible."
   );
+}
+
+/// This function performs a traveral of the expression tree in `expr`,
+/// stopping at `Subquery`s, and replacing `Column` nodes with the actual
+/// value of the column in the given `rel_tab` for the given `key` and
+/// `timestamp`.  
+fn val_to_pre_expr(
+  expr: &ValExpr,
+  rel_tab: &RelationalTablet,
+  key: &PrimaryKey,
+  timestamp: &Timestamp,
+) -> Result<PreEvalExpr, EvalErr> {
+  panic!("TODO: implement")
+}
+
+fn val_to_pre_exprs(
+  exprs: &Vec<ValExpr>,
+  rel_tab: &RelationalTablet,
+  key: &PrimaryKey,
+  timestamp: &Timestamp,
+) -> Result<Vec<PreEvalExpr>, EvalErr> {
+  trans_res(exprs, |expr| val_to_pre_expr(expr, rel_tab, key, timestamp));
+}
+
+/// This function replaces all instances of `Subquery`s in `pre_expr`
+/// with randomly generated `SubqueryId`s, and then returns
+/// those subqueries along with their `SubqueryId`s.
+fn pre_to_post_expr(
+  rand_gen: &mut RandGen,
+  pre_expr: &PreEvalExpr,
+) -> (PostEvalExpr, BTreeMap<SelectQueryId, SelectStmt>) {
+  panic!("Implement");
+}
+
+fn pre_to_post_exprs(
+  rand_gen: &mut RandGen,
+  pre_exprs: &Vec<PreEvalExpr>,
+) -> (Vec<PostEvalExpr>, BTreeMap<SelectQueryId, SelectStmt>) {
+  panic!("Implement");
+}
+
+/// This function evaluates the given `expr`. The `subquery_vals`
+/// that are provided must be sufficient to finish `expr`, otherwise
+/// we throw an error.
+fn evalulate_expr(
+  subquery_vals: &BTreeMap<SelectQueryId, SelectView>,
+  expr: &PostEvalExpr,
+) -> Result<EvalLiteral, EvalErr> {
+  panic!("TODO: implement");
+}
+
+fn evaluate_exprs(
+  subquery_vals: &BTreeMap<SelectQueryId, SelectView>,
+  exprs: &Vec<PostEvalExpr>,
+) -> Result<Vec<EvalLiteral>, EvalErr> {
+  trans_res(exprs, |expr| evalulate_expr(subquery_vals, expr))
+}
+
+/// Trivially converts an `EvalLiteral` to `Option<ColumnValue>`.
+fn convert(eval_lit: EvalLiteral) -> Option<ColumnValue> {
+  match eval_lit {
+    EvalLiteral::Int(i32) => Some(ColumnValue::Int(i32)),
+    EvalLiteral::Bool(bool) => Some(ColumnValue::Bool(bool)),
+    EvalLiteral::String(string) => Some(ColumnValue::String(string)),
+    EvalLiteral::Null => None,
+  }
+}
+
+fn verify_col(col_name: &String, rel_tab: &RelationalTablet) -> Result<ColumnName, EvalErr> {
+  panic!("TODO: implement")
+}
+
+pub fn table_insert(
+  rel_tab: &mut RelationalTablet,
+  key: &PrimaryKey,
+  col_name: &ColumnName,
+  val: EvalLiteral,
+  timestamp: &Timestamp,
+) {
+  panic!("TODO: implement")
+}
+
+pub fn table_insert_diff(rel_tab: &mut RelationalTablet, diff: &WriteDiff, timestamp: &Timestamp) {
+  panic!("TODO: implement")
+}
+
+fn trans_res<T, V, F: Fn(&T) -> Result<V, EvalErr>>(
+  vals: &Vec<T>,
+  f: F,
+) -> Result<Vec<V>, EvalErr> {
+  let mut trans_vals = Vec::new();
+  for val in vals {
+    trans_vals.push(f(val)?);
+  }
+  return Ok(trans_vals);
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Miscellaneous
+// -------------------------------------------------------------------------------------------------
+
+fn lookup<K: PartialEq + Eq, V: Clone>(vec: &Vec<(K, V)>, key: &K) -> Option<V> {
+  for (k, v) in vec {
+    if k == key {
+      return Some(v.clone());
+    }
+  }
+  return None;
 }
 
 /// This function evaluates the `EvalExpr`. This function replaces any `Subquery`
@@ -488,13 +534,15 @@ fn evaluate_columns(
   }
 
   let mut subqueries = Vec::new();
-  let eval_expr = evaluate_columns_r(rand_gen, &mut subqueries, expr, rel_tab, key, timestamp)?;
-  return Ok((eval_expr, subqueries));
+  let evalulate_expr =
+    evaluate_columns_r(rand_gen, &mut subqueries, expr, rel_tab, key, timestamp)?;
+  return Ok((evalulate_expr, subqueries));
 }
 
 /// Suppose `col_name` is a column name in the schema of `rel_tab`. This
 /// function finds all instances of `col_name` in `expr` and replaces it
-/// with the value of that column in `rel_tab` for the row keyed by `key`.
+/// with the value of that column in `rel_tab` for the row keyed by `key`
+/// at the given `timestamp`.
 fn replace_column(
   key: &PrimaryKey,
   timestamp: &Timestamp,

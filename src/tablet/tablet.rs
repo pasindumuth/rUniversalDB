@@ -1530,7 +1530,7 @@ fn continue_combo(
         for key in combo_status.write_view.get_keys(&cur_write_meta.timestamp) {
           let (update_key_task, context) = if let Ok(update_task) = start_eval_update_key_task(
             rand_gen,
-            update_stmt.clone(),
+            &update_stmt,
             &combo_status.write_view,
             &key,
             &cur_write_meta.timestamp,
