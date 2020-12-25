@@ -35,7 +35,7 @@ pub fn parse_sql(l: &String) -> Option<SqlStmt> {
 #[cfg(test)]
 mod tests {
   use crate::model::sqlast::{
-    BinaryOp, Literal, Root, SelectStmt, SqlStmt, Test, UpdateStmt, ValExpr,
+    BinaryOp, Literal, SelectStmt, SqlStmt, Test, UpdateStmt, ValExpr,
   };
   use crate::sql::parser::{parse_sql, parse_test};
 

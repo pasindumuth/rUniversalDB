@@ -4,7 +4,7 @@ use runiversal::common::lang::rvec;
 use runiversal::common::rand::RandGen;
 use runiversal::model::common::{EndpointId, RequestId, Schema, TabletShape};
 use runiversal::model::message::{
-  AdminMessage, AdminRequest, NetworkMessage, SlaveAction, SlaveMessage, TabletAction,
+  NetworkMessage, SlaveAction, SlaveMessage, TabletAction,
   TabletMessage,
 };
 use runiversal::slave::slave::{SlaveSideEffects, SlaveState};

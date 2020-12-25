@@ -7,7 +7,7 @@ use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SelectPrepare, SlaveAction,
   SlaveMessage, SubqueryResponse, TabletMessage, WriteAbort, WriteCommit, WritePrepare, WriteQuery,
 };
-use crate::model::sqlast::{SelectStmt, SqlStmt};
+use crate::model::sqlast::{SqlStmt};
 use crate::slave::network_task::{
   SelectRequestMeta, SelectTask, WritePhase, WriteRequestMeta, WriteTask,
 };

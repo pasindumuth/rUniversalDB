@@ -148,7 +148,7 @@ impl RelationalTablet {
 
   /// TODO: Write this
   /// Returns if the ColumnValue's type matches that of the ColumnValue
-  pub fn type_matches(col_val: &ColumnValue, col_type: &ColumnType) -> bool {
+  pub fn type_matches(_col_val: &ColumnValue, _col_type: &ColumnType) -> bool {
     panic!("TODO: implement.")
   }
 

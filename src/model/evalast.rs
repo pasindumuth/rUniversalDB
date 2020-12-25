@@ -1,7 +1,7 @@
 use crate::model::common::{
-  ColumnName, ColumnValue, PrimaryKey, Row, SelectQueryId, SelectView, WriteDiff,
+  ColumnName, PrimaryKey, Row, SelectQueryId, SelectView, WriteDiff,
 };
-use crate::model::sqlast::{SelectStmt, UpdateStmt};
+use crate::model::sqlast::{SelectStmt};
 use serde::export::fmt::Debug;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -90,25 +90,58 @@ pub struct SelectTask {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum UpdateKeyTask {
   Start(UpdateKeyStartTask),
+  EvalWhere(UpdateKeyEvalWhereTask),
+  EvalVal(UpdateKeyEvalValTask),
+  EvalConstraints(UpdateKeyEvalConstraintsTask),
   None(UpdateKeyNoneTask),
   Done(UpdateKeyDoneTask),
 }
 
+/// We start an UPDATE Query with this task.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct UpdateKeyStartTask {
   pub set_col: ColumnName,
   pub set_val: PreEvalExpr,
   pub where_clause: PreEvalExpr,
   pub table_constraints: Vec<PreEvalExpr>,
+}
+
+/// We always perform this task to evaluate the where clause.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct UpdateKeyEvalWhereTask {
+  pub set_col: ColumnName,
+  pub set_val: PreEvalExpr,
+  pub where_clause: PostEvalExpr,
+  pub table_constraints: Vec<PreEvalExpr>,
   pub pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
-  pub complete_subqueries: BTreeMap<SelectQueryId, Vec<Row>>,
+  pub complete_subqueries: BTreeMap<SelectQueryId, SelectView>,
+}
+
+/// If the WHERE clause evaluates to true, we do this.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct UpdateKeyEvalValTask {
+  pub set_col: ColumnName,
+  pub set_val: PostEvalExpr,
+  pub table_constraints: Vec<PreEvalExpr>,
+  pub pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
+  pub complete_subqueries: BTreeMap<SelectQueryId, SelectView>,
+}
+
+/// If the `set_val` evaluates successful, we check to see that
+/// the table constraints hold.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct UpdateKeyEvalConstraintsTask {
+  pub set_col: ColumnName,
+  pub table_constraints: Vec<PostEvalExpr>,
+  pub pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
+  pub complete_subqueries: BTreeMap<SelectQueryId, SelectView>,
 }
 
 /// We get here if the WHERE clause evaluated to false.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct UpdateKeyNoneTask {}
 
-/// This Trivial Task indicates everything was good.
+/// If the table constraints all evaluate to true, then we get here.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct UpdateKeyDoneTask {
   pub set_col: ColumnName,
