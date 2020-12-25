@@ -1599,6 +1599,7 @@ fn continue_combo(
             wid: cur_wid.clone(),
             write_task: Holder::from(WriteQueryTask::UpdateTask(UpdateTask {
               key_tasks: update_key_tasks,
+              key_vals: vec![],
             })),
           });
           break;

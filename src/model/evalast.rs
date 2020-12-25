@@ -1,7 +1,7 @@
 use crate::model::common::{
-  ColumnName, PrimaryKey, Row, SelectQueryId, SelectView, WriteDiff,
+  ColumnName, ColumnValue, PrimaryKey, Row, SelectQueryId, SelectView, WriteDiff,
 };
-use crate::model::sqlast::{SelectStmt};
+use crate::model::sqlast::SelectStmt;
 use serde::export::fmt::Debug;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -132,6 +132,7 @@ pub struct UpdateKeyEvalValTask {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct UpdateKeyEvalConstraintsTask {
   pub set_col: ColumnName,
+  pub set_val: EvalLiteral,
   pub table_constraints: Vec<PostEvalExpr>,
   pub pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
   pub complete_subqueries: BTreeMap<SelectQueryId, SelectView>,
@@ -151,6 +152,7 @@ pub struct UpdateKeyDoneTask {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct UpdateTask {
   pub key_tasks: BTreeMap<PrimaryKey, Holder<UpdateKeyTask>>,
+  pub key_vals: WriteDiff,
 }
 
 // -------------------------------------------------------------------------------------------------
