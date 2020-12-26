@@ -14,7 +14,7 @@ use crate::model::message::{FromSelectTask, FromWriteTask};
 use crate::model::sqlast::{BinaryOp, InsertStmt, Literal, SelectStmt, UpdateStmt, ValExpr};
 use crate::storage::relational_tablet::RelationalTablet;
 use rand::Rng;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Errors that can occur when evaluating columns while transforming
 /// an AST into an EvalAST.
@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 pub enum EvalErr {
   ColumnDNE,
   TypeError,
+  NullError,
+  ArithmeticError,
   ConstraintViolation,
   MalformedSQL,
 }
@@ -106,7 +108,7 @@ pub fn eval_update_key_task(
 /// This takes in a UpdateKeyTask and continues to evaluate it. For each
 /// variant, it looks to see if there are any pending queries left and
 /// moves the `update_key_task` to the next Task.
-pub fn continue_update_key_task(
+fn continue_update_key_task(
   rand_gen: &mut RandGen,
   update_key_task: &mut Holder<UpdateKeyTask>,
   rel_tab: &RelationalTablet,
@@ -360,17 +362,13 @@ pub fn start_eval_insert_row_task(
   index: usize,
 ) -> Result<(InsertRowTask, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
   let insert_row = insert_stmt.insert_vals.get(index).unwrap();
-  if insert_stmt.col_names.len() != insert_row.len() {
-    return Err(EvalErr::MalformedSQL);
-  } else {
-    let mut task = Holder::from(InsertRowTask::Start(InsertRowStartTask {
-      insert_cols: verify_cols(&insert_stmt.col_names, rel_tab)?,
-      insert_vals: val_to_pre_exprs_no_col(&insert_row)?,
-      table_constraints: vec![],
-    }));
-    let context = continue_insert_row_task(rand_gen, &mut task, rel_tab)?;
-    return Ok((task.val, context));
-  }
+  let mut task = Holder::from(InsertRowTask::Start(InsertRowStartTask {
+    insert_cols: verify_cols(&insert_stmt.col_names, rel_tab)?,
+    insert_vals: val_to_pre_exprs_no_col(&insert_row)?,
+    table_constraints: vec![],
+  }));
+  let context = continue_insert_row_task(rand_gen, &mut task, rel_tab)?;
+  return Ok((task.val, context));
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -403,7 +401,7 @@ pub fn eval_write_graph(
               key.clone(),
               Some(vec![(
                 done_task.set_col.clone(),
-                convert(done_task.set_val.clone()),
+                from_lit(done_task.set_val.clone()),
               )]),
             ));
             // Remove the key task because it is done.
@@ -434,9 +432,10 @@ pub fn eval_write_graph(
             // insert should take place.
             col_vals_into_diff(
               &mut task.key_vals,
+              rel_tab,
               &done_task.insert_cols,
               done_task.insert_vals.clone(),
-            );
+            )?;
             // Remove the row task because it is done.
             task.tasks.remove(index).unwrap();
             if task.key_vals.is_empty() {
@@ -454,7 +453,7 @@ pub fn eval_write_graph(
         }
       }
     }
-    (FromWriteTask::InsertSelectTask, WriteQueryTask::InsertSelectTask(task)) => {
+    (FromWriteTask::InsertSelectTask, WriteQueryTask::InsertSelectTask(_)) => {
       panic!("TODO: implement")
     }
     _ => {
@@ -678,6 +677,8 @@ fn pre_to_post_expr(
   panic!("Implement");
 }
 
+/// This function calls `pre_to_post_expr` for each element in `pre_exprs`,
+/// merging the subqueries produced by each before returning it.
 fn pre_to_post_exprs(
   rand_gen: &mut RandGen,
   pre_exprs: &Vec<PreEvalExpr>,
@@ -686,13 +687,80 @@ fn pre_to_post_exprs(
 }
 
 /// This function evaluates the given `expr`. The `subquery_vals`
-/// that are provided must be sufficient to finish `expr`, otherwise
-/// we throw an error.
+/// should be sufficient to finish `expr` (we throw a fatal error if
+/// it isn't). We throw an EvalErr for things like Type mismatches,
+/// diving by zero, etc.
+///
+/// The BinaryOp evaluation is very simple; it doesn't even implement
+/// the SQL standard properly yet (NULL's are treated right).
 fn evaluate_expr(
-  subquery_vals: &BTreeMap<SelectQueryId, SelectView>,
+  sub_vals: &BTreeMap<SelectQueryId, SelectView>,
   expr: &PostEvalExpr,
 ) -> Result<EvalLiteral, EvalErr> {
-  panic!("TODO: implement");
+  match expr {
+    PostEvalExpr::BinaryExpr { op, lhs, rhs } => {
+      let elhs = evaluate_expr(sub_vals, &lhs)?;
+      let erhs = evaluate_expr(sub_vals, &rhs)?;
+      match op {
+        EvalBinaryOp::AND => match (elhs, erhs) {
+          (EvalLiteral::Bool(lbool), EvalLiteral::Bool(rbool)) => {
+            Ok(EvalLiteral::Bool(lbool && rbool))
+          }
+          _ => Err(EvalErr::TypeError),
+        },
+        EvalBinaryOp::OR => match (elhs, erhs) {
+          (EvalLiteral::Bool(lbool), EvalLiteral::Bool(rbool)) => {
+            Ok(EvalLiteral::Bool(lbool || rbool))
+          }
+          _ => Err(EvalErr::TypeError),
+        },
+        EvalBinaryOp::LT => match (elhs, erhs) {
+          (EvalLiteral::Int(lint), EvalLiteral::Int(rint)) => Ok(EvalLiteral::Bool(lint < rint)),
+          _ => Err(EvalErr::TypeError),
+        },
+        EvalBinaryOp::LTE => match (elhs, erhs) {
+          (EvalLiteral::Int(lint), EvalLiteral::Int(rint)) => Ok(EvalLiteral::Bool(lint <= rint)),
+          _ => Err(EvalErr::TypeError),
+        },
+        EvalBinaryOp::E => Ok(EvalLiteral::Bool(elhs == erhs)),
+        EvalBinaryOp::GT => match (elhs, erhs) {
+          (EvalLiteral::Int(lint), EvalLiteral::Int(rint)) => Ok(EvalLiteral::Bool(lint > rint)),
+          _ => Err(EvalErr::TypeError),
+        },
+        EvalBinaryOp::GTE => match (elhs, erhs) {
+          (EvalLiteral::Int(lint), EvalLiteral::Int(rint)) => Ok(EvalLiteral::Bool(lint >= rint)),
+          _ => Err(EvalErr::TypeError),
+        },
+        EvalBinaryOp::PLUS => match (elhs, erhs) {
+          (EvalLiteral::Int(lint), EvalLiteral::Int(rint)) => Ok(EvalLiteral::Int(lint + rint)),
+          _ => Err(EvalErr::TypeError),
+        },
+        EvalBinaryOp::TIMES => match (elhs, erhs) {
+          (EvalLiteral::Int(lint), EvalLiteral::Int(rint)) => Ok(EvalLiteral::Int(lint * rint)),
+          _ => Err(EvalErr::TypeError),
+        },
+        EvalBinaryOp::MINUS => match (elhs, erhs) {
+          (EvalLiteral::Int(lint), EvalLiteral::Int(rint)) => Ok(EvalLiteral::Int(lint - rint)),
+          _ => Err(EvalErr::TypeError),
+        },
+      }
+    }
+    PostEvalExpr::Literal(literal) => Ok(literal.clone()),
+    PostEvalExpr::SubqueryId(sub_sid) => {
+      // The sub_sid should be in the sub_vals passed in.
+      let sub_val = sub_vals.get(sub_sid).unwrap().clone();
+      // There should only be one row returned from the subquery.
+      if sub_val.len() != 1 {
+        return Err(EvalErr::ArithmeticError);
+      }
+      let (_, col_vals) = sub_val.iter().next().unwrap();
+      // There should only be one column value in the row returned.
+      if col_vals.len() != 1 {
+        return Err(EvalErr::ArithmeticError);
+      }
+      Ok(to_lit(col_vals.first().unwrap().1.clone()))
+    }
+  }
 }
 
 fn evaluate_exprs(
@@ -702,7 +770,7 @@ fn evaluate_exprs(
   trans_res(exprs, |expr| evaluate_expr(subquery_vals, expr))
 }
 
-/// This function verfies that the `col_name` is in the
+/// This function verifies that the `col_name` is in the
 /// schema of the `rel_tab`.
 fn verify_col(col_name: &String, rel_tab: &RelationalTablet) -> Result<ColumnName, EvalErr> {
   panic!("TODO: implement")
@@ -714,15 +782,10 @@ fn verify_cols(
 ) -> Result<Vec<ColumnName>, EvalErr> {
   trans_res(col_names, |col_name| verify_col(col_name, rel_tab))
 }
-/// Trivially converts an `EvalLiteral` to `Option<ColumnValue>`.
-fn convert(eval_lit: EvalLiteral) -> Option<ColumnValue> {
-  match eval_lit {
-    EvalLiteral::Int(i32) => Some(ColumnValue::Int(i32)),
-    EvalLiteral::Bool(bool) => Some(ColumnValue::Bool(bool)),
-    EvalLiteral::String(string) => Some(ColumnValue::String(string)),
-    EvalLiteral::Null => None,
-  }
-}
+
+// -------------------------------------------------------------------------------------------------
+//  Relational Tablet Modifers
+// -------------------------------------------------------------------------------------------------
 
 /// The following two functions, `table_insert_call` and `table_insert_row`
 /// are used during UPDATE and INSERT key/row task processing during the
@@ -739,29 +802,146 @@ pub fn table_insert_cell(
   val: EvalLiteral,
   timestamp: &Timestamp,
 ) {
-  panic!("TODO: implement")
+  rel_tab.insert_partial_val(key.clone(), col_name.clone(), from_lit(val), timestamp);
 }
 
+/// This function takes the `col_names` and `col_vals`, constructs a PrimaryKey
+/// and value according to the schema of `rel_tab`, and inserts this key-value
+/// pair into `rel_tab`. Importantly, we assume that by this point, `verify_insert`
+/// was already called, so we assume that we have the gaurantees provided there.
+/// Note that an error might be thrown when we try to construct the PrimaryKey
+/// and we realize one of the elements in there is NULL.
 pub fn table_insert_row(
   rel_tab: &mut RelationalTablet,
   col_names: &Vec<ColumnName>,
   col_vals: Vec<EvalLiteral>,
   timestamp: &Timestamp,
-) {
-  panic!("TODO: implement")
+) -> Result<(), EvalErr> {
+  assert_eq!(col_names.len(), col_vals.len());
+  let mut col_name_val_map: HashMap<ColumnName, Option<ColumnValue>> = HashMap::new();
+  for (col_name, col_val) in col_names.iter().zip(col_vals.iter()) {
+    col_name_val_map.insert(col_name.clone(), from_lit(col_val.clone()));
+  }
+  let mut key = PrimaryKey { cols: vec![] };
+  for (_, key_col_name) in &rel_tab.schema().key_cols {
+    // Due to `verify_insert`, we may use `unwrap` without concern.
+    if let Some(key_col_val) = col_name_val_map.remove(key_col_name).unwrap() {
+      key.cols.push(key_col_val);
+    } else {
+      // This cannot evaluate to NULL because all column values in a
+      // Primary Key must be present.
+      return Err(EvalErr::NullError);
+    }
+  }
+  let mut partial_val = vec![];
+  for (col_name, col_val) in col_name_val_map {
+    partial_val.push((col_name, col_val));
+  }
+  rel_tab.insert_partial_vals(key, partial_val, timestamp);
+  Ok(())
 }
 
+/// This functions inserts the key-value pairs in `diff` into the
+/// `rel_tab` and the given `timestamp`.
 pub fn table_insert_diff(rel_tab: &mut RelationalTablet, diff: &WriteDiff, timestamp: &Timestamp) {
-  panic!("TODO: implement")
+  for (key, partial_vals) in diff {
+    rel_tab.insert_row_diff(key.clone(), partial_vals.clone(), timestamp);
+  }
 }
 
+/// This function takes the `col_names` and `col_vals`, constructs a PrimaryKey
+/// and value according to the schema of `rel_tab`, and inserts this key-value
+/// pair into `diff`. Importantly, we assume that by this point, `verify_insert`
+/// was already called, so we assume that we have the gaurantees provided there.
+/// Note that an error might be thrown when we try to construct the PrimaryKey
+/// and we realize one of the elements in there is NULL.
 fn col_vals_into_diff(
   diff: &mut WriteDiff,
+  rel_tab: &RelationalTablet,
   col_names: &Vec<ColumnName>,
   col_vals: Vec<EvalLiteral>,
-) {
-  panic!("TODO: implement")
+) -> Result<(), EvalErr> {
+  assert_eq!(col_names.len(), col_vals.len());
+  let mut col_name_val_map: HashMap<ColumnName, Option<ColumnValue>> = HashMap::new();
+  for (col_name, col_val) in col_names.iter().zip(col_vals.iter()) {
+    col_name_val_map.insert(col_name.clone(), from_lit(col_val.clone()));
+  }
+  let mut key = PrimaryKey { cols: vec![] };
+  for (_, key_col_name) in &rel_tab.schema().key_cols {
+    // Due to `verify_insert`, we may use `unwrap` without concern.
+    if let Some(key_col_val) = col_name_val_map.remove(key_col_name).unwrap() {
+      key.cols.push(key_col_val);
+    } else {
+      // This cannot evaluate to NULL because all column values in a
+      // Primary Key must be present.
+      return Err(EvalErr::NullError);
+    }
+  }
+  let mut partial_val = vec![];
+  for (col_name, col_val) in col_name_val_map {
+    partial_val.push((col_name, col_val));
+  }
+  diff.push((key, Some(partial_val)));
+  Ok(())
 }
+
+fn from_lit(eval_lit: EvalLiteral) -> Option<ColumnValue> {
+  match eval_lit {
+    EvalLiteral::Int(i32) => Some(ColumnValue::Int(i32)),
+    EvalLiteral::Bool(bool) => Some(ColumnValue::Bool(bool)),
+    EvalLiteral::String(string) => Some(ColumnValue::String(string)),
+    EvalLiteral::Null => None,
+  }
+}
+
+/// Trivially converts an `Option<ColumnValue>` to `EvalLiteral`.
+fn to_lit(col_val: Option<ColumnValue>) -> EvalLiteral {
+  match col_val {
+    Some(ColumnValue::Int(i32)) => EvalLiteral::Int(i32),
+    Some(ColumnValue::Bool(bool)) => EvalLiteral::Bool(bool),
+    Some(ColumnValue::String(string)) => EvalLiteral::String(string),
+    None => EvalLiteral::Null,
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
+//  SQL Verification functions
+// -------------------------------------------------------------------------------------------------
+
+/// This function verifies 3 things: the `insert_stmt`'s `col_names` are part of the
+/// schema of `rel_tab`, that `col_names` spans the PrimaryKey columns in the schema,
+/// and that every tuple in the VALUES clause has the same length as `col_names`.
+/// Notably, this function doesn't do type checking of the expression; that
+/// can only be at runtime.
+pub fn verify_insert(rel_tab: &RelationalTablet, insert_stmt: &InsertStmt) -> Result<(), EvalErr> {
+  let col_names: Vec<ColumnName> = insert_stmt
+    .col_names
+    .iter()
+    .map(|col_name| ColumnName(col_name.clone()))
+    .collect();
+  // We first verify that the columns provided are part of the schema.
+  if !rel_tab.col_names_exists(&col_names) {
+    return Err(EvalErr::MalformedSQL);
+  }
+  // Next, we verify that the given set of columns span the PrimaryKey columns.
+  for (_, key_col_name) in &rel_tab.schema().key_cols {
+    if !col_names.contains(key_col_name) {
+      return Err(EvalErr::MalformedSQL);
+    }
+  }
+  // Finally, we verify that all tuples to be inserted have the same number
+  // of elements as `col_names`; the columns to be inserted to.
+  for insert_val in &insert_stmt.insert_vals {
+    if insert_val.len() != col_names.len() {
+      return Err(EvalErr::MalformedSQL);
+    }
+  }
+  Ok(())
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Container Utilities
+// -------------------------------------------------------------------------------------------------
 
 fn trans_res<T, V, F: Fn(&T) -> Result<V, EvalErr>>(
   vals: &Vec<T>,
@@ -774,10 +954,6 @@ fn trans_res<T, V, F: Fn(&T) -> Result<V, EvalErr>>(
   return Ok(trans_vals);
 }
 
-// -------------------------------------------------------------------------------------------------
-//  Miscellaneous
-// -------------------------------------------------------------------------------------------------
-
 fn lookup<K: PartialEq + Eq, V: Clone>(vec: &Vec<(K, V)>, key: &K) -> Option<V> {
   for (k, v) in vec {
     if k == key {
@@ -787,48 +963,9 @@ fn lookup<K: PartialEq + Eq, V: Clone>(vec: &Vec<(K, V)>, key: &K) -> Option<V> 
   return None;
 }
 
-/// This function evaluates the `EvalExpr`. This function replaces any `Subquery`
-/// variants with a `SubqueryId` by sending out the actual subquery for execution.
-/// It returns either another `EvalExpr` if we still need to wait for Subqueries
-/// to execute, or a `Literal` if the valuation of `expr` is complete.
-///
-/// This adds whatever subqueries are necessary to evaluate the subqueries.
-/// This should be errors. type errors.
-fn evaluate_expr2(
-  context: &Vec<(SelectQueryId, EvalLiteral)>,
-  expr: PostEvalExpr,
-) -> Result<EvalLiteral, EvalErr> {
-  match expr {
-    PostEvalExpr::BinaryExpr { op, lhs, rhs } => {
-      let elhs = evaluate_expr2(context, *lhs)?;
-      let erhs = evaluate_expr2(context, *rhs)?;
-      match op {
-        EvalBinaryOp::AND => panic!("TODO: implement."),
-        EvalBinaryOp::OR => panic!("TODO: implement."),
-        EvalBinaryOp::LT => panic!("TODO: implement."),
-        EvalBinaryOp::LTE => panic!("TODO: implement."),
-        EvalBinaryOp::E => panic!("TODO: implement."),
-        EvalBinaryOp::GT => panic!("TODO: implement."),
-        EvalBinaryOp::GTE => panic!("TODO: implement."),
-        EvalBinaryOp::PLUS => panic!("TODO: implement."),
-        EvalBinaryOp::TIMES => panic!("TODO: implement."),
-        EvalBinaryOp::MINUS => panic!("TODO: implement."),
-        EvalBinaryOp::DIV => panic!("TODO: implement."),
-      }
-    }
-    PostEvalExpr::Literal(literal) => Ok(literal),
-    PostEvalExpr::SubqueryId(subquery_id) => {
-      // The subquery_id here must certainly be in the `context`,
-      // since this function can only be called when all subqueries
-      // have been answered. Reach into and it and return it.
-      if let Some(val) = lookup(context, &subquery_id) {
-        Ok(val.clone())
-      } else {
-        panic!("subquery_id {:?} must exist in {:?}", subquery_id, context)
-      }
-    }
-  }
-}
+// -------------------------------------------------------------------------------------------------
+//  Miscellaneous
+// -------------------------------------------------------------------------------------------------
 
 /// This Transforms the `expr` into a EvalExpr. It replaces all Subqueries with
 /// Box<SelectStmt>, where if a column in the main query appears in the subquery,
@@ -868,7 +1005,7 @@ fn evaluate_columns(
       }),
       ValExpr::Column(col) => {
         let col_name = ColumnName(col.clone());
-        if let Some(_) = rel_tab.col_name_exists(&col_name) {
+        if rel_tab.col_name_exists(&col_name) {
           // If the column name actually exists in the current tablet's
           // schema, we replace the column name with the column value.
           Ok(PostEvalExpr::Literal(
@@ -876,9 +1013,6 @@ fn evaluate_columns(
               Some(ColumnValue::Int(int)) => EvalLiteral::Int(int),
               Some(ColumnValue::String(string)) => EvalLiteral::String(string.to_string()),
               Some(ColumnValue::Bool(boolean)) => EvalLiteral::Bool(boolean),
-              Some(ColumnValue::Unit) => {
-                panic!("The Unit ColumnValue should never appear for a cell in the table.")
-              }
               None => EvalLiteral::Null,
             },
           ))
@@ -934,16 +1068,13 @@ fn replace_column(
     ValExpr::Literal(literal) => ValExpr::Literal(literal.clone()),
     ValExpr::Column(col) => {
       let col_name = ColumnName(col.clone());
-      if let Some(_) = rel_tab.col_name_exists(&col_name) {
+      if rel_tab.col_name_exists(&col_name) {
         // If the column name exists in the current tablet's schema,
         // we replace the column name with the column value.
         ValExpr::Literal(match rel_tab.get_partial_val(key, &col_name, timestamp) {
           Some(ColumnValue::Int(int)) => Literal::Int(int.to_string()),
           Some(ColumnValue::String(string)) => Literal::String(string.to_string()),
           Some(ColumnValue::Bool(boolean)) => Literal::Bool(boolean),
-          Some(ColumnValue::Unit) => {
-            panic!("The Unit ColumnValue should never appear for a cell in the table.")
-          }
           None => Literal::Null,
         })
       } else {
@@ -981,6 +1112,5 @@ fn convert_op(op: &BinaryOp) -> EvalBinaryOp {
     BinaryOp::PLUS => EvalBinaryOp::PLUS,
     BinaryOp::TIMES => EvalBinaryOp::TIMES,
     BinaryOp::MINUS => EvalBinaryOp::MINUS,
-    BinaryOp::DIV => EvalBinaryOp::DIV,
   }
 }

@@ -170,14 +170,6 @@ expr -> ValExpr
         rhs: Box::new($3),
       }
     }
-  | expr '/' expr
-    {
-      ValExpr::BinaryExpr {
-        op: BinaryOp::DIV,
-        lhs: Box::new($1),
-        rhs: Box::new($3),
-      }
-    }
   | literal                       { ValExpr::Literal($1) }
   | iden                          { ValExpr::Column($1) }
   | '(' select_stmt ')'           { ValExpr::Subquery(Box::new($2)) }

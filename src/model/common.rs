@@ -35,6 +35,7 @@ pub struct TabletShape {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
   Int,
+  Bool,
   String,
 }
 
@@ -44,7 +45,6 @@ pub enum ColumnValue {
   Int(i32),
   Bool(bool),
   String(String),
-  Unit,
 }
 
 /// The name of a column.
@@ -80,6 +80,8 @@ pub struct Row {
 // -------------------------------------------------------------------------------------------------
 
 pub type WriteDiff = Vec<(PrimaryKey, Option<Vec<(ColumnName, Option<ColumnValue>)>>)>;
+/// Here, even if the PrimaryKey columns aren't being selected, we still map the
+/// columns values selected by each row form the PrimaryKey of that row.
 pub type SelectView = BTreeMap<PrimaryKey, Vec<(ColumnName, Option<ColumnValue>)>>;
 
 // -------------------------------------------------------------------------------------------------

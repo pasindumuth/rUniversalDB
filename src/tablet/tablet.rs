@@ -18,6 +18,7 @@ use crate::storage::relational_tablet::RelationalTablet;
 use crate::tablet::expression::{
   eval_select_graph, eval_write_graph, start_eval_insert_row_task, start_eval_select_key_task,
   start_eval_update_key_task, table_insert_cell, table_insert_diff, table_insert_row,
+  verify_insert,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
@@ -1609,6 +1610,11 @@ fn continue_combo(
       }
       WriteQuery::Insert(insert_stmt) => {
         assert_eq!(insert_stmt.table_name, this_tablet.path.path);
+        // First do some validation of the insert_stmt.
+        if verify_insert(&combo_status.write_view, &insert_stmt).is_err() {
+          return Err(VerificationFailure::VerificationFailure);
+        }
+        // Next, construct the insert_row_tasks.
         let mut insert_row_tasks = BTreeMap::<usize, Holder<InsertRowTask>>::new();
         for index in 0..insert_stmt.insert_vals.len() {
           let (insert_row_task, context) = if let Ok(insert_task) =
@@ -1625,12 +1631,16 @@ fn continue_combo(
               // directly into the write_view and avoid creating a temporary
               // WriteDiff (since there is a chance we can avoid a WriteDiff
               // altogether).
-              table_insert_row(
+              if table_insert_row(
                 &mut combo_status.write_view,
                 &done_task.insert_cols,
                 done_task.insert_vals,
                 &cur_write_meta.timestamp,
-              );
+              )
+              .is_err()
+              {
+                return Err(VerificationFailure::VerificationFailure);
+              };
             }
             _ => {
               // This means that the InsertRowTask requires subqueries

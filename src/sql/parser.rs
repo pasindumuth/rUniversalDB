@@ -150,14 +150,6 @@ mod tests {
         rhs: Box::new(ValExpr::Literal(Literal::Int("2".to_string()))),
       }))
     );
-    assert_eq!(
-      parse_test(&"1 / 2".to_string()),
-      Some(Test::ValExpr(ValExpr::BinaryExpr {
-        op: BinaryOp::DIV,
-        lhs: Box::new(ValExpr::Literal(Literal::Int("1".to_string()))),
-        rhs: Box::new(ValExpr::Literal(Literal::Int("2".to_string()))),
-      }))
-    );
   }
 
   /// This tests makes sure that expressions get parsed according to
@@ -340,7 +332,7 @@ mod tests {
       parse_sql(&sql.to_string()),
       Some(SqlStmt::Insert(InsertStmt {
         table_name: "table".to_string(),
-        cols: vec!["col1".to_string(), "col2".to_string()],
+        col_names: vec!["col1".to_string(), "col2".to_string()],
         insert_vals: vec![
           vec![
             ValExpr::Literal(Literal::Int("1".to_string())),

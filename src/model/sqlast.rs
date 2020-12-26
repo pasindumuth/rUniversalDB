@@ -70,7 +70,6 @@ pub enum BinaryOp {
   PLUS,
   TIMES,
   MINUS,
-  DIV,
 }
 
 /// This AST type represents a literal, like a quoted string,

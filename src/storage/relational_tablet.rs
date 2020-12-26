@@ -1,4 +1,3 @@
-use crate::model::common::ColumnValue::Unit;
 use crate::model::common::{
   ColumnName, ColumnType, ColumnValue, PrimaryKey, Row, Schema, Timestamp,
 };
@@ -16,9 +15,46 @@ use crate::storage::multiversion_map::MultiVersionMap;
 /// Value Column - A column of a non-Primary Key column when a given
 ///                Row is understood.
 
+/// These are the values that the MVM maps to. The only difference between
+/// this an `ColumnValue` is the presence of `Unit`, which is a special value
+/// used to indicate that a row itself is present. We don't want to include `Unit`
+/// in `ColumnValue` because it's not a SQL type.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StorageValue {
+  Int(i32),
+  Bool(bool),
+  String(String),
+  Unit,
+}
+
+/// We define a convenient conversion function from
+/// StorageValue to ColumnValue.
+impl StorageValue {
+  fn convert(self) -> ColumnValue {
+    match self {
+      StorageValue::Int(i32) => ColumnValue::Int(i32),
+      StorageValue::Bool(bool) => ColumnValue::Bool(bool),
+      StorageValue::String(string) => ColumnValue::String(string),
+      StorageValue::Unit => panic!("Cannot convert `Unit` StorageValue to ColumnValue."),
+    }
+  }
+}
+
+/// We define a convenient conversion function from
+/// ColumnValue to StorageValue.
+impl ColumnValue {
+  fn convert(self) -> StorageValue {
+    match self {
+      ColumnValue::Int(i32) => StorageValue::Int(i32),
+      ColumnValue::Bool(bool) => StorageValue::Bool(bool),
+      ColumnValue::String(string) => StorageValue::String(string),
+    }
+  }
+}
+
 #[derive(Debug)]
 pub struct RelationalTablet {
-  mvm: MultiVersionMap<(PrimaryKey, Option<ColumnName>), ColumnValue>,
+  mvm: MultiVersionMap<(PrimaryKey, Option<ColumnName>), StorageValue>,
   schema: Schema,
 }
 
@@ -39,6 +75,7 @@ impl RelationalTablet {
     match (value, col_type) {
       (Some(ColumnValue::Int(_)), ColumnType::Int) => true,
       (Some(ColumnValue::String(_)), ColumnType::String) => true,
+      (Some(ColumnValue::Bool(_)), ColumnType::Bool) => true,
       (None, _) => true,
       _ => false,
     }
@@ -100,7 +137,10 @@ impl RelationalTablet {
         // Since the row doesn't exist at `timestamp`, that means
         // neither to any of the value cells. Since we can both introduce
         // the row and write to the value cells, we can perform the insert.
-        self.mvm.write(&mvm_key, Some(Unit), timestamp).unwrap();
+        self
+          .mvm
+          .write(&mvm_key, Some(StorageValue::Unit), timestamp)
+          .unwrap();
       }
     } else {
       // Although the row is present at `timestamp`, we must make sure
@@ -121,28 +161,50 @@ impl RelationalTablet {
     let zipped = self.schema.val_cols.iter().zip(&row.val);
     for ((_, col_name), val) in zipped {
       let mvm_key = (row.key.clone(), Some(col_name.clone()));
-      self.mvm.write(&mvm_key, val.clone(), timestamp).unwrap();
+      self
+        .mvm
+        .write(&mvm_key, val.clone().map(|v| v.convert()), timestamp)
+        .unwrap();
     }
 
     return Ok(());
   }
 
-  /// TODO: Write this
   /// This function generally only updates a subset of the value
   /// columns. The other Value columns remain unchanged, including
-  /// their `lat`s.
+  /// their `lat`s. The caller of this function must know what
+  /// they're doing; trying to write into the past is a fatal error.
   pub fn insert_partial_vals(
     &mut self,
     _key: PrimaryKey,
     _partial_val: Vec<(ColumnName, Option<ColumnValue>)>,
     _timestamp: &Timestamp,
-  ) -> Result<(), String> {
+  ) {
+    panic!("TODO: implement.")
+  }
+
+  /// This too ins a dumb function that doesn't do any schema checks, etc.
+  /// It just sees if the `partial_val` is present. If it isn't, then the
+  /// `key` is deleted. And if it is, the specific updates in the
+  /// `partial_val` is applied to the relational tablet.
+  pub fn insert_row_diff(
+    &mut self,
+    _key: PrimaryKey,
+    _partial_val: Option<Vec<(ColumnName, Option<ColumnValue>)>>,
+    _timestamp: &Timestamp,
+  ) {
+    panic!("TODO: implement");
+  }
+
+  /// TODO: Write this
+  /// Returns if the column name exists in the schema or not.
+  pub fn col_name_exists(&self, _val_col: &ColumnName) -> bool {
     panic!("TODO: implement.")
   }
 
   /// TODO: Write this
   /// Returns if the column name exists in the schema or not.
-  pub fn col_name_exists(&self, _val_col: &ColumnName) -> Option<ColumnType> {
+  pub fn col_names_exists(&self, _val_cols: &Vec<ColumnName>) -> bool {
     panic!("TODO: implement.")
   }
 
@@ -162,7 +224,7 @@ impl RelationalTablet {
     _val_col: ColumnName,
     _val: Option<ColumnValue>,
     _timestamp: &Timestamp,
-  ) -> Result<(), String> {
+  ) {
     panic!("TODO: implement.")
   }
 
@@ -209,7 +271,10 @@ impl RelationalTablet {
       }
       return Ok(Some(Row {
         key: key.clone(),
-        val: val_col_values,
+        val: val_col_values
+          .iter()
+          .map(|v| v.clone().map(|v| v.convert()))
+          .collect(),
       }));
     }
   }
