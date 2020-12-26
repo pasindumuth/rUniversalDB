@@ -4,7 +4,8 @@ use crate::model::common::{
   WriteDiff,
 };
 use crate::model::evalast::{
-  EvalBinaryOp, EvalLiteral, Holder, PostEvalExpr, PreEvalExpr, SelectKeyTask, SelectQueryTask,
+  EvalBinaryOp, EvalLiteral, Holder, PostEvalExpr, PreEvalExpr, SelectKeyDoneTask,
+  SelectKeyEvalWhereTask, SelectKeyNoneTask, SelectKeyStartTask, SelectKeyTask, SelectQueryTask,
   UpdateKeyDoneTask, UpdateKeyEvalConstraintsTask, UpdateKeyEvalValTask, UpdateKeyEvalWhereTask,
   UpdateKeyNoneTask, UpdateKeyStartTask, UpdateKeyTask, WriteQueryTask,
 };
@@ -106,7 +107,7 @@ pub fn continue_update_key_task(
 ) -> Result<BTreeMap<SelectQueryId, SelectStmt>, EvalErr> {
   match &mut update_key_task.val {
     UpdateKeyTask::Start(task) => {
-      let (post_expr, subqueries) = pre_to_post_expr(rand_gen, &task.set_val);
+      let (post_expr, subqueries) = pre_to_post_expr(rand_gen, &task.where_clause);
       update_key_task.val = UpdateKeyTask::EvalWhere(UpdateKeyEvalWhereTask {
         set_col: task.set_col.clone(),
         set_val: task.set_val.clone(),
@@ -121,7 +122,7 @@ pub fn continue_update_key_task(
       if task.pending_subqueries.is_empty() {
         // This means we are finished waiting for subqueries to arrive;
         // we may start evaluating the expressions.
-        match evalulate_expr(&task.complete_subqueries, &task.where_clause)? {
+        match evaluate_expr(&task.complete_subqueries, &task.where_clause)? {
           EvalLiteral::Bool(where_val) => {
             if where_val {
               let (post_expr, subqueries) = pre_to_post_expr(rand_gen, &task.set_val);
@@ -148,7 +149,7 @@ pub fn continue_update_key_task(
         let (post_exprs, subqueries) = pre_to_post_exprs(rand_gen, &task.table_constraints);
         update_key_task.val = UpdateKeyTask::EvalConstraints(UpdateKeyEvalConstraintsTask {
           set_col: task.set_col.clone(),
-          set_val: evalulate_expr(&task.complete_subqueries, &task.set_val)?,
+          set_val: evaluate_expr(&task.complete_subqueries, &task.set_val)?,
           table_constraints: post_exprs,
           pending_subqueries: subqueries,
           complete_subqueries: Default::default(),
@@ -195,13 +196,13 @@ pub fn continue_update_key_task(
 /// table constriants), then we return an Err instead.
 pub fn eval_write_graph(
   rand_gen: &mut RandGen,
-  write_query_task: &mut Holder<WriteQueryTask>,
+  write_task: &mut Holder<WriteQueryTask>,
   path: &FromWriteTask,
   sub_sid: &SelectQueryId,
   subquery_ret: &SelectView,
   rel_tab: &RelationalTablet,
 ) -> Result<BTreeMap<SelectQueryId, (FromWriteTask, SelectStmt)>, EvalErr> {
-  match (&path, &mut write_query_task.val) {
+  match (&path, &mut write_task.val) {
     (FromWriteTask::UpdateTask { key }, WriteQueryTask::UpdateTask(task)) => {
       if let Some(update_key_task) = task.key_tasks.get_mut(key) {
         let subqueries =
@@ -217,9 +218,11 @@ pub fn eval_write_graph(
                 convert(done_task.set_val.clone()),
               )]),
             ));
-            if task.key_vals.len() == task.key_tasks.len() {
-              // This means the Task is finished.
-              write_query_task.val = WriteQueryTask::WriteDoneTask(task.key_vals.clone());
+            // Remove the key task because it is done.
+            task.key_tasks.remove(key).unwrap();
+            if task.key_vals.is_empty() {
+              // This means that the whole Write Task is finished as well.
+              write_task.val = WriteQueryTask::WriteDoneTask(task.key_vals.clone());
             }
           }
           _ => {
@@ -239,7 +242,7 @@ pub fn eval_write_graph(
       panic!("TODO: implement")
     }
     _ => {
-      // Ignore all other combination of `path` and `write_query_task`;
+      // Ignore all other combination of `path` and `write_task`;
       // those shouldn't result in any transitions.
     }
   }
@@ -268,8 +271,88 @@ pub fn start_eval_update_key_task(
   return Ok((task.val, context));
 }
 
-/// I hypothesize this will be the master interface for
-/// evaluating EvalSelect.
+pub fn eval_select_key_task(
+  rand_gen: &mut RandGen,
+  select_key_task: &mut Holder<SelectKeyTask>,
+  sub_sid: &SelectQueryId,
+  subquery_ret: &SelectView,
+  rel_tab: &RelationalTablet,
+) -> Result<BTreeMap<SelectQueryId, SelectStmt>, EvalErr> {
+  match &mut select_key_task.val {
+    SelectKeyTask::Start(_) => {
+      // No subqueries should ever really come here.. if it does, it
+      // should indicate a bug in our implementation. However, logically
+      // we should just ignore such messages, so that is what we do.
+    }
+    SelectKeyTask::EvalWhere(task) => {
+      if let Some(_) = task.pending_subqueries.remove(sub_sid) {
+        // The subquery is indeed relevent to this task.
+        task
+          .complete_subqueries
+          .insert(sub_sid.clone(), subquery_ret.clone());
+        return continue_select_key_task(rand_gen, select_key_task, rel_tab);
+      }
+    }
+    SelectKeyTask::None(_) => {
+      // Do nothing.
+    }
+    SelectKeyTask::Done(_) => {
+      // Do nothing.
+    }
+  }
+  Ok(BTreeMap::new())
+}
+
+/// This takes in a UpdateKeyTask and continues to evaluate it. For each
+/// variant, it looks to see if there are any pending queries left and
+/// moves the `update_key_task` to the next Task.
+pub fn continue_select_key_task(
+  rand_gen: &mut RandGen,
+  select_key_task: &mut Holder<SelectKeyTask>,
+  rel_tab: &RelationalTablet,
+) -> Result<BTreeMap<SelectQueryId, SelectStmt>, EvalErr> {
+  match &mut select_key_task.val {
+    SelectKeyTask::Start(task) => {
+      let (post_expr, subqueries) = pre_to_post_expr(rand_gen, &task.where_clause);
+      select_key_task.val = SelectKeyTask::EvalWhere(SelectKeyEvalWhereTask {
+        sel_cols: task.sel_cols.clone(),
+        where_clause: post_expr,
+        pending_subqueries: subqueries,
+        complete_subqueries: Default::default(),
+      });
+      return continue_select_key_task(rand_gen, select_key_task, rel_tab);
+    }
+    SelectKeyTask::EvalWhere(task) => {
+      if task.pending_subqueries.is_empty() {
+        // This means we are finished waiting for subqueries to arrive;
+        // we may start evaluating the expressions.
+        match evaluate_expr(&task.complete_subqueries, &task.where_clause)? {
+          EvalLiteral::Bool(where_val) => {
+            if where_val {
+              select_key_task.val = SelectKeyTask::Done(SelectKeyDoneTask {
+                sel_cols: task.sel_cols.clone(),
+              });
+            } else {
+              select_key_task.val = SelectKeyTask::None(SelectKeyNoneTask {});
+            }
+          }
+          _ => return Err(EvalErr::TypeError),
+        };
+      }
+    }
+    SelectKeyTask::None(_) => {
+      // Do nothing.
+    }
+    SelectKeyTask::Done(_) => {
+      // Do nothing.
+    }
+  }
+  Ok(BTreeMap::new())
+}
+
+/// This function routes the given subquery `sub_sid` down to the specific
+/// sub task indicated by `path` and executes the given `select_task` as far
+/// as it will go.
 pub fn eval_select_graph(
   rand_gen: &mut RandGen,
   select_task: &mut Holder<SelectQueryTask>,
@@ -278,9 +361,43 @@ pub fn eval_select_graph(
   subquery_ret: &SelectView,
   rel_tab: &RelationalTablet,
 ) -> Result<BTreeMap<SelectQueryId, (FromSelectTask, SelectStmt)>, EvalErr> {
-  match &select_task.val {
-    SelectQueryTask::SelectTask(task) => panic!("TODO: implement"),
-    SelectQueryTask::SelectDoneTask(task) => panic!("TODO: implement"),
+  match (&path, &mut select_task.val) {
+    (FromSelectTask::SelectTask { key }, SelectQueryTask::SelectTask(task)) => {
+      if let Some(update_key_task) = task.key_tasks.get_mut(key) {
+        let subqueries =
+          eval_select_key_task(rand_gen, update_key_task, sub_sid, subquery_ret, rel_tab)?;
+        match &mut update_key_task.val {
+          SelectKeyTask::Done(done_task) => {
+            // This means we should add the row into the SelectView. Easy.
+            let mut view_row = Vec::new();
+            for sel_col in &done_task.sel_cols {
+              view_row.push((
+                sel_col.clone(),
+                rel_tab.get_partial_val(&key, &sel_col, &task.timestamp),
+              ));
+            }
+            task.select_view.insert(key.clone(), view_row);
+            // Remove the key task because it is done.
+            task.key_tasks.remove(key).unwrap();
+            if task.key_tasks.is_empty() {
+              // This means that the whole Select Task is finished as well.
+              select_task.val = SelectQueryTask::SelectDoneTask(task.select_view.clone());
+            }
+          }
+          _ => {
+            let mut context = BTreeMap::<SelectQueryId, (FromSelectTask, SelectStmt)>::new();
+            for (sid, select_stmt) in subqueries {
+              context.insert(sid, (path.clone(), select_stmt));
+            }
+            return Ok(context);
+          }
+        }
+      }
+    }
+    _ => {
+      // Ignore all other combination of `path` and `select_query_task`;
+      // those shouldn't result in any transitions.
+    }
   };
   Err(EvalErr::ColumnDNE)
 }
@@ -288,8 +405,7 @@ pub fn eval_select_graph(
 /// This function takes all ColumnNames in the `update_stmt`, replaces
 /// them with their values from `rel_tab` (from the row with key `key`
 /// at `timestamp`). We do this deeply, including subqueries. Then
-/// we construct EvalUpdateStmt with all subqueries in tact, i.e. they
-/// aren't turned into SubqueryIds yet.
+/// we construct a SelectKeyTask.
 pub fn start_eval_select_key_task(
   rand_gen: &mut RandGen,
   select_stmt: SelectStmt,
@@ -297,16 +413,19 @@ pub fn start_eval_select_key_task(
   key: &PrimaryKey,
   timestamp: &Timestamp,
 ) -> Result<(SelectKeyTask, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
-  panic!(
-    "TODO: implement. This will likely use eval_update_key_task to help\
-  move the UpdateKeyTask as far forward as possible."
-  );
+  let mut task = Holder::from(SelectKeyTask::Start(SelectKeyStartTask {
+    sel_cols: verify_cols(&select_stmt.col_names, rel_tab)?,
+    where_clause: val_to_pre_expr(&select_stmt.where_clause, rel_tab, key, timestamp)?,
+  }));
+  let context = continue_select_key_task(rand_gen, &mut task, rel_tab)?;
+  return Ok((task.val, context));
 }
 
 /// This function performs a traveral of the expression tree in `expr`,
-/// stopping at `Subquery`s, and replacing `Column` nodes with the actual
-/// value of the column in the given `rel_tab` for the given `key` and
-/// `timestamp`.  
+/// deeply substituting `Column` nodes with the actual value of the
+/// column using the given `rel_tab` for the given `key` and `timestamp`.
+/// If the `Column` node is in a Subquery, then the replaced value is a
+/// sqlast type.  
 fn val_to_pre_expr(
   expr: &ValExpr,
   rel_tab: &RelationalTablet,
@@ -322,7 +441,7 @@ fn val_to_pre_exprs(
   key: &PrimaryKey,
   timestamp: &Timestamp,
 ) -> Result<Vec<PreEvalExpr>, EvalErr> {
-  trans_res(exprs, |expr| val_to_pre_expr(expr, rel_tab, key, timestamp));
+  trans_res(exprs, |expr| val_to_pre_expr(expr, rel_tab, key, timestamp))
 }
 
 /// This function replaces all instances of `Subquery`s in `pre_expr`
@@ -345,7 +464,7 @@ fn pre_to_post_exprs(
 /// This function evaluates the given `expr`. The `subquery_vals`
 /// that are provided must be sufficient to finish `expr`, otherwise
 /// we throw an error.
-fn evalulate_expr(
+fn evaluate_expr(
   subquery_vals: &BTreeMap<SelectQueryId, SelectView>,
   expr: &PostEvalExpr,
 ) -> Result<EvalLiteral, EvalErr> {
@@ -356,9 +475,21 @@ fn evaluate_exprs(
   subquery_vals: &BTreeMap<SelectQueryId, SelectView>,
   exprs: &Vec<PostEvalExpr>,
 ) -> Result<Vec<EvalLiteral>, EvalErr> {
-  trans_res(exprs, |expr| evalulate_expr(subquery_vals, expr))
+  trans_res(exprs, |expr| evaluate_expr(subquery_vals, expr))
 }
 
+/// This function verfies that the `col_name` is in the
+/// schema of the `rel_tab`.
+fn verify_col(col_name: &String, rel_tab: &RelationalTablet) -> Result<ColumnName, EvalErr> {
+  panic!("TODO: implement")
+}
+
+fn verify_cols(
+  col_names: &Vec<String>,
+  rel_tab: &RelationalTablet,
+) -> Result<Vec<ColumnName>, EvalErr> {
+  trans_res(col_names, |col_name| verify_col(col_name, rel_tab))
+}
 /// Trivially converts an `EvalLiteral` to `Option<ColumnValue>`.
 fn convert(eval_lit: EvalLiteral) -> Option<ColumnValue> {
   match eval_lit {
@@ -367,10 +498,6 @@ fn convert(eval_lit: EvalLiteral) -> Option<ColumnValue> {
     EvalLiteral::String(string) => Some(ColumnValue::String(string)),
     EvalLiteral::Null => None,
   }
-}
-
-fn verify_col(col_name: &String, rel_tab: &RelationalTablet) -> Result<ColumnName, EvalErr> {
-  panic!("TODO: implement")
 }
 
 pub fn table_insert(
@@ -418,14 +545,14 @@ fn lookup<K: PartialEq + Eq, V: Clone>(vec: &Vec<(K, V)>, key: &K) -> Option<V> 
 ///
 /// This adds whatever subqueries are necessary to evaluate the subqueries.
 /// This should be errors. type errors.
-fn evaluate_expr(
+fn evaluate_expr2(
   context: &Vec<(SelectQueryId, EvalLiteral)>,
   expr: PostEvalExpr,
 ) -> Result<EvalLiteral, EvalErr> {
   match expr {
     PostEvalExpr::BinaryExpr { op, lhs, rhs } => {
-      let elhs = evaluate_expr(context, *lhs)?;
-      let erhs = evaluate_expr(context, *rhs)?;
+      let elhs = evaluate_expr2(context, *lhs)?;
+      let erhs = evaluate_expr2(context, *rhs)?;
       match op {
         EvalBinaryOp::AND => panic!("TODO: implement."),
         EvalBinaryOp::OR => panic!("TODO: implement."),
@@ -534,9 +661,9 @@ fn evaluate_columns(
   }
 
   let mut subqueries = Vec::new();
-  let evalulate_expr =
+  let evaluate_expr2 =
     evaluate_columns_r(rand_gen, &mut subqueries, expr, rel_tab, key, timestamp)?;
-  return Ok((evalulate_expr, subqueries));
+  return Ok((evaluate_expr2, subqueries));
 }
 
 /// Suppose `col_name` is a column name in the schema of `rel_tab`. This

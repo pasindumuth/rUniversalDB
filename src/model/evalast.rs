@@ -1,5 +1,5 @@
 use crate::model::common::{
-  ColumnName, ColumnValue, PrimaryKey, Row, SelectQueryId, SelectView, WriteDiff,
+  ColumnName, ColumnValue, PrimaryKey, Row, SelectQueryId, SelectView, Timestamp, WriteDiff,
 };
 use crate::model::sqlast::SelectStmt;
 use serde::export::fmt::Debug;
@@ -55,15 +55,23 @@ pub enum SelectQueryTask {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SelectKeyTask {
   Start(SelectKeyStartTask),
+  EvalWhere(SelectKeyEvalWhereTask),
   None(SelectKeyNoneTask),
   Done(SelectKeyDoneTask),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SelectKeyStartTask {
+  pub sel_cols: Vec<ColumnName>,
   pub where_clause: PreEvalExpr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SelectKeyEvalWhereTask {
+  pub sel_cols: Vec<ColumnName>,
+  pub where_clause: PostEvalExpr,
   pub pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
-  pub complete_subqueries: BTreeMap<SelectQueryId, Vec<Row>>,
+  pub complete_subqueries: BTreeMap<SelectQueryId, SelectView>,
 }
 
 /// We get here if the WHERE clause evaluated to false.
@@ -78,8 +86,9 @@ pub struct SelectKeyDoneTask {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SelectTask {
-  pub tasks: BTreeMap<PrimaryKey, Holder<SelectKeyTask>>,
+  pub key_tasks: BTreeMap<PrimaryKey, Holder<SelectKeyTask>>,
   pub select_view: SelectView,
+  pub timestamp: Timestamp,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -173,7 +182,7 @@ pub struct InsertKeyStartTask {
   pub insert_vals: Vec<Vec<PreEvalExpr>>,
   pub table_constraints: Vec<PreEvalExpr>,
   pub pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
-  pub complete_subqueries: BTreeMap<SelectQueryId, Vec<Row>>,
+  pub complete_subqueries: BTreeMap<SelectQueryId, SelectView>,
 }
 
 /// This states indicates that the WHERE clause evaluated
@@ -206,7 +215,7 @@ pub struct InsertSelectTask {
   pub subquery: PreEvalExpr,
   pub table_constraints: Vec<PreEvalExpr>,
   pub pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
-  pub complete_subqueries: BTreeMap<SelectQueryId, Vec<Row>>,
+  pub complete_subqueries: BTreeMap<SelectQueryId, SelectView>,
 }
 
 // -------------------------------------------------------------------------------------------------

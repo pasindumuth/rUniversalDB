@@ -1724,8 +1724,9 @@ fn add_combo_select(
     combo_status.select_tasks.insert(
       orig_sid.clone(),
       Holder::from(SelectQueryTask::SelectTask(SelectTask {
-        tasks: select_tasks,
+        key_tasks: select_tasks,
         select_view: view,
+        timestamp: orig_select_meta.timestamp.clone(),
       })),
     );
   } else {
