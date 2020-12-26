@@ -1,13 +1,13 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{
-  EndpointId, Row, Schema, SelectQueryId, SelectView, TabletKeyRange, TabletPath, TabletShape,
-  Timestamp, TransactionId, WriteQueryId,
+  EndpointId, RequestId, Row, Schema, SelectQueryId, SelectView, TabletKeyRange, TabletPath,
+  TabletShape, Timestamp, TransactionId, WriteQueryId,
 };
 use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SelectPrepare, SlaveAction,
   SlaveMessage, SubqueryResponse, TabletMessage, WriteAbort, WriteCommit, WritePrepare, WriteQuery,
 };
-use crate::model::sqlast::SqlStmt;
+use crate::model::sqlast::{SqlStmt, UpdateStmt};
 use crate::slave::network_task::{
   SelectRequestMeta, SelectTask, WritePhase, WriteRequestMeta, WriteTask,
 };
@@ -124,39 +124,24 @@ impl SlaveState {
               },
             );
           }
-          SqlStmt::Update(update_stmt) => {
-            let table = &update_stmt.table_name;
-            let mpc_tablets = get_tablets(table, &self.tablet_config);
-            let pending_tablets = mpc_tablets.iter().map(|i| i.clone()).collect();
-            for (eid, tablet) in &mpc_tablets {
-              side_effects.add(SlaveAction::Send {
-                eid: eid.clone(),
-                msg: NetworkMessage::Slave(SlaveMessage::FW_WritePrepare {
-                  tablet: tablet.clone(),
-                  msg: WritePrepare {
-                    tm_eid: self.this_eid.clone(),
-                    wid: WriteQueryId(tid.clone()),
-                    write_query: WriteQuery::Update(update_stmt.clone()),
-                    timestamp: *timestamp,
-                  },
-                }),
-              });
-            }
-            self.write_tasks.insert(
-              WriteQueryId(tid.clone()),
-              WriteTask {
-                tablets: mpc_tablets,
-                pending_tablets,
-                prepared_tablets: Default::default(),
-                phase: WritePhase::Preparing,
-                req_meta: WriteRequestMeta {
-                  origin_eid: from_eid.clone(),
-                  rid: rid.clone(),
-                },
-              },
-            );
-          }
-          _ => panic!("TODO: implement"),
+          SqlStmt::Update(update_stmt) => self.start_write_task(
+            side_effects,
+            &update_stmt.table_name,
+            rid,
+            from_eid,
+            tid,
+            timestamp,
+            &WriteQuery::Update(update_stmt.clone()),
+          ),
+          SqlStmt::Insert(insert_stmt) => self.start_write_task(
+            side_effects,
+            &insert_stmt.table_name,
+            rid,
+            from_eid,
+            tid,
+            timestamp,
+            &WriteQuery::Insert(insert_stmt.clone()),
+          ),
         },
       },
       SlaveMessage::SelectPrepared {
@@ -368,6 +353,50 @@ impl SlaveState {
         });
       }
     }
+  }
+
+  /// This function finds all tablets that hold data for the given
+  /// `table_name`, which is the table that the `write_query` touches,
+  /// and then includes each of them in a 2PC by creating a `WriteTask`.
+  fn start_write_task(
+    &mut self,
+    side_effects: &mut SlaveSideEffects,
+    table_name: &String,
+    rid: &RequestId,
+    from_eid: &EndpointId,
+    tid: &TransactionId,
+    timestamp: &Timestamp,
+    write_query: &WriteQuery,
+  ) {
+    let mpc_tablets = get_tablets(table_name, &self.tablet_config);
+    let pending_tablets = mpc_tablets.iter().map(|i| i.clone()).collect();
+    for (eid, tablet) in &mpc_tablets {
+      side_effects.add(SlaveAction::Send {
+        eid: eid.clone(),
+        msg: NetworkMessage::Slave(SlaveMessage::FW_WritePrepare {
+          tablet: tablet.clone(),
+          msg: WritePrepare {
+            tm_eid: self.this_eid.clone(),
+            wid: WriteQueryId(tid.clone()),
+            write_query: write_query.clone(),
+            timestamp: *timestamp,
+          },
+        }),
+      });
+    }
+    self.write_tasks.insert(
+      WriteQueryId(tid.clone()),
+      WriteTask {
+        tablets: mpc_tablets,
+        pending_tablets,
+        prepared_tablets: Default::default(),
+        phase: WritePhase::Preparing,
+        req_meta: WriteRequestMeta {
+          origin_eid: from_eid.clone(),
+          rid: rid.clone(),
+        },
+      },
+    );
   }
 }
 

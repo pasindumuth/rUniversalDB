@@ -52,7 +52,7 @@ pub struct UpdateStmt {
 pub struct InsertStmt {
   // For now, we only support INSERT INTO ... VALUEs.
   pub table_name: String,
-  pub cols: Vec<String>,
+  pub col_names: Vec<String>,
   pub insert_vals: Vec<Vec<ValExpr>>,
 }
 

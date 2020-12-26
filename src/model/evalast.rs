@@ -170,38 +170,53 @@ pub struct UpdateTask {
 // The Types in this section are used for evaluating INSERT INTO ... VALUES statements.
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum InsertKeyTask {
-  Start(InsertKeyStartTask),
-  None(InsertKeyNoneTask),
-  Done(InsertKeyDoneTask),
+pub enum InsertRowTask {
+  Start(InsertRowStartTask),
+  EvalVal(InsertRowEvalValTask),
+  EvalConstraints(InsertRowEvalConstraintsTask),
+  Done(InsertRowDoneTask),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct InsertKeyStartTask {
+pub struct InsertRowStartTask {
   pub insert_cols: Vec<ColumnName>,
-  pub insert_vals: Vec<Vec<PreEvalExpr>>,
+  pub insert_vals: Vec<PreEvalExpr>,
+  pub table_constraints: Vec<PreEvalExpr>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InsertRowEvalValTask {
+  pub insert_cols: Vec<ColumnName>,
+  pub insert_vals: Vec<PostEvalExpr>,
   pub table_constraints: Vec<PreEvalExpr>,
   pub pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
   pub complete_subqueries: BTreeMap<SelectQueryId, SelectView>,
 }
 
-/// This states indicates that the WHERE clause evaluated
-/// to false and nothing should be updated.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct InsertKeyNoneTask {}
+pub struct InsertRowEvalConstraintsTask {
+  pub insert_cols: Vec<ColumnName>,
+  pub insert_vals: Vec<EvalLiteral>,
+  pub table_constraints: Vec<PostEvalExpr>,
+  pub pending_subqueries: BTreeMap<SelectQueryId, SelectStmt>,
+  pub complete_subqueries: BTreeMap<SelectQueryId, SelectView>,
+}
 
 /// This state indicates that the WHERE clause evaluated
 /// true, and that columns `set_col` should be set to value
 /// `set_val`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct InsertKeyDoneTask {
+pub struct InsertRowDoneTask {
   pub insert_cols: Vec<ColumnName>,
-  pub insert_vals: Vec<Vec<EvalLiteral>>,
+  pub insert_vals: Vec<EvalLiteral>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct InsertTask {
-  pub tasks: BTreeMap<PrimaryKey, Holder<InsertKeyTask>>,
+  // The index of a InsertRowTask is the same as the position that
+  // it appears in the VALUES clause of the SQL statement.
+  pub tasks: BTreeMap<usize, Holder<InsertRowTask>>,
+  pub key_vals: WriteDiff,
 }
 
 // -------------------------------------------------------------------------------------------------

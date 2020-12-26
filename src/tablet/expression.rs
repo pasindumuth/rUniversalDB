@@ -4,13 +4,14 @@ use crate::model::common::{
   WriteDiff,
 };
 use crate::model::evalast::{
-  EvalBinaryOp, EvalLiteral, Holder, PostEvalExpr, PreEvalExpr, SelectKeyDoneTask,
-  SelectKeyEvalWhereTask, SelectKeyNoneTask, SelectKeyStartTask, SelectKeyTask, SelectQueryTask,
-  UpdateKeyDoneTask, UpdateKeyEvalConstraintsTask, UpdateKeyEvalValTask, UpdateKeyEvalWhereTask,
-  UpdateKeyNoneTask, UpdateKeyStartTask, UpdateKeyTask, WriteQueryTask,
+  EvalBinaryOp, EvalLiteral, Holder, InsertRowDoneTask, InsertRowEvalConstraintsTask,
+  InsertRowEvalValTask, InsertRowStartTask, InsertRowTask, PostEvalExpr, PreEvalExpr,
+  SelectKeyDoneTask, SelectKeyEvalWhereTask, SelectKeyNoneTask, SelectKeyStartTask, SelectKeyTask,
+  SelectQueryTask, UpdateKeyDoneTask, UpdateKeyEvalConstraintsTask, UpdateKeyEvalValTask,
+  UpdateKeyEvalWhereTask, UpdateKeyNoneTask, UpdateKeyStartTask, UpdateKeyTask, WriteQueryTask,
 };
 use crate::model::message::{FromSelectTask, FromWriteTask};
-use crate::model::sqlast::{BinaryOp, Literal, SelectStmt, UpdateStmt, ValExpr};
+use crate::model::sqlast::{BinaryOp, InsertStmt, Literal, SelectStmt, UpdateStmt, ValExpr};
 use crate::storage::relational_tablet::RelationalTablet;
 use rand::Rng;
 use std::collections::BTreeMap;
@@ -22,6 +23,7 @@ pub enum EvalErr {
   ColumnDNE,
   TypeError,
   ConstraintViolation,
+  MalformedSQL,
 }
 
 /// We have Tasks, and then we have Task Enums. Tasks are structs, and Task
@@ -44,6 +46,10 @@ pub enum EvalErr {
 ///
 /// It might be possible to rename "Tasks" to State somehow, since
 /// that actually makes sense.
+
+// -------------------------------------------------------------------------------------------------
+//  Update Task
+// -------------------------------------------------------------------------------------------------
 
 /// This function looks at the `UpdateKeyTask`'s own context and tries
 /// to evaluate it as far as possible.
@@ -113,10 +119,15 @@ pub fn continue_update_key_task(
         set_val: task.set_val.clone(),
         where_clause: post_expr,
         table_constraints: task.table_constraints.clone(),
-        pending_subqueries: subqueries,
+        pending_subqueries: subqueries.clone(),
         complete_subqueries: Default::default(),
       });
-      return continue_update_key_task(rand_gen, update_key_task, rel_tab);
+      if subqueries.is_empty() {
+        // If there are no subqueries, we may continue.
+        return continue_update_key_task(rand_gen, update_key_task, rel_tab);
+      } else {
+        return Ok(subqueries);
+      }
     }
     UpdateKeyTask::EvalWhere(task) => {
       if task.pending_subqueries.is_empty() {
@@ -130,16 +141,21 @@ pub fn continue_update_key_task(
                 set_col: task.set_col.clone(),
                 set_val: post_expr,
                 table_constraints: task.table_constraints.clone(),
-                pending_subqueries: subqueries,
+                pending_subqueries: subqueries.clone(),
                 complete_subqueries: Default::default(),
               });
+              if subqueries.is_empty() {
+                // If there are no subqueries, we may continue.
+                return continue_update_key_task(rand_gen, update_key_task, rel_tab);
+              } else {
+                return Ok(subqueries);
+              }
             } else {
               update_key_task.val = UpdateKeyTask::None(UpdateKeyNoneTask {});
             }
           }
           _ => return Err(EvalErr::TypeError),
         };
-        return continue_update_key_task(rand_gen, update_key_task, rel_tab);
       }
     }
     UpdateKeyTask::EvalVal(task) => {
@@ -151,10 +167,15 @@ pub fn continue_update_key_task(
           set_col: task.set_col.clone(),
           set_val: evaluate_expr(&task.complete_subqueries, &task.set_val)?,
           table_constraints: post_exprs,
-          pending_subqueries: subqueries,
+          pending_subqueries: subqueries.clone(),
           complete_subqueries: Default::default(),
         });
-        return continue_update_key_task(rand_gen, update_key_task, rel_tab);
+        if subqueries.is_empty() {
+          // If there are no subqueries, we may continue.
+          return continue_update_key_task(rand_gen, update_key_task, rel_tab);
+        } else {
+          return Ok(subqueries);
+        }
       }
     }
     UpdateKeyTask::EvalConstraints(task) => {
@@ -188,6 +209,173 @@ pub fn continue_update_key_task(
   }
   Ok(BTreeMap::new())
 }
+
+/// This function takes all ColumnNames in the `update_stmt`, replaces
+/// them with their values from `rel_tab` (from the row with key `key`
+/// at `timestamp`). We do this deeply, including subqueries. Then
+/// we construct EvalUpdateStmt with all subqueries in tact, i.e. they
+/// aren't turned into SubqueryIds yet.
+pub fn start_eval_update_key_task(
+  rand_gen: &mut RandGen,
+  update_stmt: &UpdateStmt,
+  rel_tab: &RelationalTablet,
+  key: &PrimaryKey,
+  timestamp: &Timestamp,
+) -> Result<(UpdateKeyTask, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
+  let mut task = Holder::from(UpdateKeyTask::Start(UpdateKeyStartTask {
+    set_col: verify_col(&update_stmt.set_col, rel_tab)?,
+    set_val: val_to_pre_expr(&update_stmt.set_val, rel_tab, key, timestamp)?,
+    where_clause: val_to_pre_expr(&update_stmt.where_clause, rel_tab, key, timestamp)?,
+    table_constraints: vec![],
+  }));
+  let context = continue_update_key_task(rand_gen, &mut task, rel_tab)?;
+  return Ok((task.val, context));
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Insert Task
+// -------------------------------------------------------------------------------------------------
+
+/// This function looks at the `InsertRowTask`'s own context and tries
+/// to evaluate it as far as possible.
+pub fn eval_insert_row_task(
+  rand_gen: &mut RandGen,
+  insert_row_task: &mut Holder<InsertRowTask>,
+  sub_sid: &SelectQueryId,
+  subquery_ret: &SelectView,
+  rel_tab: &RelationalTablet,
+) -> Result<BTreeMap<SelectQueryId, SelectStmt>, EvalErr> {
+  match &mut insert_row_task.val {
+    InsertRowTask::Start(_) => {
+      // No subqueries should ever really come here.. if it does, it
+      // should indicate a bug in our implementation. However, logically
+      // we should just ignore such messages, so that is what we do.
+    }
+    InsertRowTask::EvalVal(task) => {
+      if let Some(_) = task.pending_subqueries.remove(sub_sid) {
+        // The subquery is indeed relevent to this task.
+        task
+          .complete_subqueries
+          .insert(sub_sid.clone(), subquery_ret.clone());
+        return continue_insert_row_task(rand_gen, insert_row_task, rel_tab);
+      }
+    }
+    InsertRowTask::EvalConstraints(task) => {
+      if let Some(_) = task.pending_subqueries.remove(sub_sid) {
+        // The subquery is indeed relevent to this task.
+        task
+          .complete_subqueries
+          .insert(sub_sid.clone(), subquery_ret.clone());
+        return continue_insert_row_task(rand_gen, insert_row_task, rel_tab);
+      }
+    }
+    InsertRowTask::Done(_) => {
+      // Do nothing.
+    }
+  }
+  Ok(BTreeMap::new())
+}
+
+/// This takes in a InsertRowTask and continues to evaluate it. For each
+/// variant, it looks to see if there are any pending queries left and
+/// moves the `insert_row_task` to the next Task.
+pub fn continue_insert_row_task(
+  rand_gen: &mut RandGen,
+  insert_row_task: &mut Holder<InsertRowTask>,
+  rel_tab: &RelationalTablet,
+) -> Result<BTreeMap<SelectQueryId, SelectStmt>, EvalErr> {
+  match &mut insert_row_task.val {
+    InsertRowTask::Start(task) => {
+      let (post_exprs, subqueries) = pre_to_post_exprs(rand_gen, &task.insert_vals);
+      insert_row_task.val = InsertRowTask::EvalVal(InsertRowEvalValTask {
+        insert_cols: task.insert_cols.clone(),
+        insert_vals: post_exprs,
+        table_constraints: task.table_constraints.clone(),
+        pending_subqueries: subqueries.clone(),
+        complete_subqueries: Default::default(),
+      });
+      if subqueries.is_empty() {
+        // If there are no subqueries, we may continue.
+        return continue_insert_row_task(rand_gen, insert_row_task, rel_tab);
+      } else {
+        return Ok(subqueries);
+      }
+    }
+    InsertRowTask::EvalVal(task) => {
+      if task.pending_subqueries.is_empty() {
+        // This means we are finished waiting for subqueries to arrive;
+        // we may start evaluating the expressions.
+        let (post_exprs, subqueries) = pre_to_post_exprs(rand_gen, &task.table_constraints);
+        insert_row_task.val = InsertRowTask::EvalConstraints(InsertRowEvalConstraintsTask {
+          insert_cols: task.insert_cols.clone(),
+          insert_vals: evaluate_exprs(&task.complete_subqueries, &task.insert_vals)?,
+          table_constraints: post_exprs,
+          pending_subqueries: subqueries.clone(),
+          complete_subqueries: Default::default(),
+        });
+        if subqueries.is_empty() {
+          // If there are no subqueries, we may continue.
+          return continue_insert_row_task(rand_gen, insert_row_task, rel_tab);
+        } else {
+          return Ok(subqueries);
+        }
+      }
+    }
+    InsertRowTask::EvalConstraints(task) => {
+      if task.pending_subqueries.is_empty() {
+        // This means we are finished waiting for subqueries to arrive;
+        // we may start evaluating the expressions.
+        let constraint_vals = evaluate_exprs(&task.complete_subqueries, &task.table_constraints)?;
+        for constraint_val in constraint_vals {
+          match constraint_val {
+            EvalLiteral::Bool(val) => {
+              if !val {
+                // A Table constraint was violated, so we return an EvalErr.
+                return Err(EvalErr::ConstraintViolation);
+              }
+            }
+            _ => return Err(EvalErr::TypeError),
+          }
+        }
+        insert_row_task.val = InsertRowTask::Done(InsertRowDoneTask {
+          insert_cols: task.insert_cols.clone(),
+          insert_vals: task.insert_vals.clone(),
+        });
+      }
+    }
+    InsertRowTask::Done(_) => {
+      // Do nothing.
+    }
+  }
+  Ok(BTreeMap::new())
+}
+
+/// This function verifies that all `col_names` are actual columns in the
+/// `rel_tab`'s schema, and then procudes an InsertRowTask for the `index`th
+/// value in the VALUES list in the `update_stmt`.
+pub fn start_eval_insert_row_task(
+  rand_gen: &mut RandGen,
+  insert_stmt: &InsertStmt,
+  rel_tab: &RelationalTablet,
+  index: usize,
+) -> Result<(InsertRowTask, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
+  let insert_row = insert_stmt.insert_vals.get(index).unwrap();
+  if insert_stmt.col_names.len() != insert_row.len() {
+    return Err(EvalErr::MalformedSQL);
+  } else {
+    let mut task = Holder::from(InsertRowTask::Start(InsertRowStartTask {
+      insert_cols: verify_cols(&insert_stmt.col_names, rel_tab)?,
+      insert_vals: val_to_pre_exprs_no_col(&insert_row)?,
+      table_constraints: vec![],
+    }));
+    let context = continue_insert_row_task(rand_gen, &mut task, rel_tab)?;
+    return Ok((task.val, context));
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Write Query Task
+// -------------------------------------------------------------------------------------------------
 
 /// This function adds the adds the `subquery` at the location of
 /// `path`, and then executes things as far as they will go. If
@@ -235,8 +423,36 @@ pub fn eval_write_graph(
         }
       }
     }
-    (FromWriteTask::InsertTask { key }, WriteQueryTask::InsertTask(task)) => {
-      panic!("TODO: implement")
+    (FromWriteTask::InsertTask { index }, WriteQueryTask::InsertTask(task)) => {
+      if let Some(insert_row_task) = task.tasks.get_mut(index) {
+        let subqueries =
+          eval_insert_row_task(rand_gen, insert_row_task, sub_sid, subquery_ret, rel_tab)?;
+        match &mut insert_row_task.val {
+          InsertRowTask::Done(done_task) => {
+            // This means the InsertRowTask for the row completed
+            // without the need for Subqueries, and that an
+            // insert should take place.
+            col_vals_into_diff(
+              &mut task.key_vals,
+              &done_task.insert_cols,
+              done_task.insert_vals.clone(),
+            );
+            // Remove the row task because it is done.
+            task.tasks.remove(index).unwrap();
+            if task.key_vals.is_empty() {
+              // This means that the whole Write Task is finished as well.
+              write_task.val = WriteQueryTask::WriteDoneTask(task.key_vals.clone());
+            }
+          }
+          _ => {
+            let mut context = BTreeMap::<SelectQueryId, (FromWriteTask, SelectStmt)>::new();
+            for (sid, select_stmt) in subqueries {
+              context.insert(sid, (path.clone(), select_stmt));
+            }
+            return Ok(context);
+          }
+        }
+      }
     }
     (FromWriteTask::InsertSelectTask, WriteQueryTask::InsertSelectTask(task)) => {
       panic!("TODO: implement")
@@ -249,27 +465,9 @@ pub fn eval_write_graph(
   Ok(BTreeMap::new())
 }
 
-/// This function takes all ColumnNames in the `update_stmt`, replaces
-/// them with their values from `rel_tab` (from the row with key `key`
-/// at `timestamp`). We do this deeply, including subqueries. Then
-/// we construct EvalUpdateStmt with all subqueries in tact, i.e. they
-/// aren't turned into SubqueryIds yet.
-pub fn start_eval_update_key_task(
-  rand_gen: &mut RandGen,
-  update_stmt: &UpdateStmt,
-  rel_tab: &RelationalTablet,
-  key: &PrimaryKey,
-  timestamp: &Timestamp,
-) -> Result<(UpdateKeyTask, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
-  let mut task = Holder::from(UpdateKeyTask::Start(UpdateKeyStartTask {
-    set_col: verify_col(&update_stmt.set_col, rel_tab)?,
-    set_val: val_to_pre_expr(&update_stmt.set_val, rel_tab, key, timestamp)?,
-    where_clause: val_to_pre_expr(&update_stmt.where_clause, rel_tab, key, timestamp)?,
-    table_constraints: vec![],
-  }));
-  let context = continue_update_key_task(rand_gen, &mut task, rel_tab)?;
-  return Ok((task.val, context));
-}
+// -------------------------------------------------------------------------------------------------
+//  Select Task
+// -------------------------------------------------------------------------------------------------
 
 pub fn eval_select_key_task(
   rand_gen: &mut RandGen,
@@ -317,10 +515,15 @@ pub fn continue_select_key_task(
       select_key_task.val = SelectKeyTask::EvalWhere(SelectKeyEvalWhereTask {
         sel_cols: task.sel_cols.clone(),
         where_clause: post_expr,
-        pending_subqueries: subqueries,
+        pending_subqueries: subqueries.clone(),
         complete_subqueries: Default::default(),
       });
-      return continue_select_key_task(rand_gen, select_key_task, rel_tab);
+      if subqueries.is_empty() {
+        // If there are no subqueries, we may continue.
+        return continue_select_key_task(rand_gen, select_key_task, rel_tab);
+      } else {
+        return Ok(subqueries);
+      }
     }
     SelectKeyTask::EvalWhere(task) => {
       if task.pending_subqueries.is_empty() {
@@ -349,6 +552,29 @@ pub fn continue_select_key_task(
   }
   Ok(BTreeMap::new())
 }
+
+/// This function takes all ColumnNames in the `update_stmt`, replaces
+/// them with their values from `rel_tab` (from the row with key `key`
+/// at `timestamp`). We do this deeply, including subqueries. Then
+/// we construct a SelectKeyTask.
+pub fn start_eval_select_key_task(
+  rand_gen: &mut RandGen,
+  select_stmt: SelectStmt,
+  rel_tab: &RelationalTablet,
+  key: &PrimaryKey,
+  timestamp: &Timestamp,
+) -> Result<(SelectKeyTask, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
+  let mut task = Holder::from(SelectKeyTask::Start(SelectKeyStartTask {
+    sel_cols: verify_cols(&select_stmt.col_names, rel_tab)?,
+    where_clause: val_to_pre_expr(&select_stmt.where_clause, rel_tab, key, timestamp)?,
+  }));
+  let context = continue_select_key_task(rand_gen, &mut task, rel_tab)?;
+  return Ok((task.val, context));
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Select Query Task
+// -------------------------------------------------------------------------------------------------
 
 /// This function routes the given subquery `sub_sid` down to the specific
 /// sub task indicated by `path` and executes the given `select_task` as far
@@ -402,30 +628,28 @@ pub fn eval_select_graph(
   Err(EvalErr::ColumnDNE)
 }
 
-/// This function takes all ColumnNames in the `update_stmt`, replaces
-/// them with their values from `rel_tab` (from the row with key `key`
-/// at `timestamp`). We do this deeply, including subqueries. Then
-/// we construct a SelectKeyTask.
-pub fn start_eval_select_key_task(
-  rand_gen: &mut RandGen,
-  select_stmt: SelectStmt,
-  rel_tab: &RelationalTablet,
-  key: &PrimaryKey,
-  timestamp: &Timestamp,
-) -> Result<(SelectKeyTask, BTreeMap<SelectQueryId, SelectStmt>), EvalErr> {
-  let mut task = Holder::from(SelectKeyTask::Start(SelectKeyStartTask {
-    sel_cols: verify_cols(&select_stmt.col_names, rel_tab)?,
-    where_clause: val_to_pre_expr(&select_stmt.where_clause, rel_tab, key, timestamp)?,
-  }));
-  let context = continue_select_key_task(rand_gen, &mut task, rel_tab)?;
-  return Ok((task.val, context));
+// -------------------------------------------------------------------------------------------------
+//  Expression Transformations
+// -------------------------------------------------------------------------------------------------
+
+/// Function transforms a `ValExpr` into a `PreEvalExpr`, where the
+/// `ValExpr` doesn't refer to any column values. These sorts of expressions
+/// are common place in INSERT queries where there is no existing table row
+/// that's in the picture. If we find a `Column` (that's not underneath a
+/// Subquery), then we return an EvalErr.
+fn val_to_pre_expr_no_col(expr: &ValExpr) -> Result<PreEvalExpr, EvalErr> {
+  panic!("TODO: implement")
+}
+
+fn val_to_pre_exprs_no_col(exprs: &Vec<ValExpr>) -> Result<Vec<PreEvalExpr>, EvalErr> {
+  trans_res(exprs, |expr| val_to_pre_expr_no_col(expr))
 }
 
 /// This function performs a traveral of the expression tree in `expr`,
 /// deeply substituting `Column` nodes with the actual value of the
 /// column using the given `rel_tab` for the given `key` and `timestamp`.
 /// If the `Column` node is in a Subquery, then the replaced value is a
-/// sqlast type.  
+/// sqlast type.
 fn val_to_pre_expr(
   expr: &ValExpr,
   rel_tab: &RelationalTablet,
@@ -500,7 +724,15 @@ fn convert(eval_lit: EvalLiteral) -> Option<ColumnValue> {
   }
 }
 
-pub fn table_insert(
+/// The following two functions, `table_insert_call` and `table_insert_row`
+/// are used during UPDATE and INSERT key/row task processing during the
+/// initial construction of the Update/Insert Task so that if the key/row
+/// task succeeds, it's inserted directly into the `rel_tab`. However, if
+/// we don't complete the Update/Insert Task, the remaining key/row Task
+/// results are put into a `WriteDiff` where it is merged into `rel_tab`
+/// at some future point via a call to `tablet_insert_diff`.
+
+pub fn table_insert_cell(
   rel_tab: &mut RelationalTablet,
   key: &PrimaryKey,
   col_name: &ColumnName,
@@ -510,7 +742,24 @@ pub fn table_insert(
   panic!("TODO: implement")
 }
 
+pub fn table_insert_row(
+  rel_tab: &mut RelationalTablet,
+  col_names: &Vec<ColumnName>,
+  col_vals: Vec<EvalLiteral>,
+  timestamp: &Timestamp,
+) {
+  panic!("TODO: implement")
+}
+
 pub fn table_insert_diff(rel_tab: &mut RelationalTablet, diff: &WriteDiff, timestamp: &Timestamp) {
+  panic!("TODO: implement")
+}
+
+fn col_vals_into_diff(
+  diff: &mut WriteDiff,
+  col_names: &Vec<ColumnName>,
+  col_vals: Vec<EvalLiteral>,
+) {
   panic!("TODO: implement")
 }
 

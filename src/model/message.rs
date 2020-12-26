@@ -2,7 +2,7 @@ use crate::model::common::{
   ColumnValue, EndpointId, PrimaryKey, RequestId, Row, SelectQueryId, SelectView, TabletPath,
   TabletShape, Timestamp, TransactionId, WriteQueryId,
 };
-use crate::model::sqlast::{SelectStmt, SqlStmt, UpdateStmt};
+use crate::model::sqlast::{InsertStmt, SelectStmt, SqlStmt, UpdateStmt};
 use serde::{Deserialize, Serialize};
 
 /// These are PODs that are used for Threads to communicate with
@@ -193,6 +193,7 @@ pub struct SelectPrepare {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum WriteQuery {
   Update(UpdateStmt),
+  Insert(InsertStmt),
 }
 
 /// The Prepare message sent from a Slave (the TM) to a Tablet
@@ -321,8 +322,14 @@ pub enum FromCombo {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum FromWriteTask {
-  UpdateTask { key: PrimaryKey },
-  InsertTask { key: PrimaryKey },
+  UpdateTask {
+    key: PrimaryKey,
+  },
+  InsertTask {
+    /// This index is the position of the expresion in the VALUES clause
+    /// that the Subquery is destined to.
+    index: usize,
+  },
   InsertSelectTask,
 }
 

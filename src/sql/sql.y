@@ -47,7 +47,7 @@ insert_stmt -> InsertStmt
     {
       InsertStmt {
         table_name: $3,
-        cols: $5,
+        col_names: $5,
         insert_vals: $8,
       }
     }

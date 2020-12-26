@@ -4,9 +4,9 @@ use crate::model::common::{
   TabletPath, TabletShape, Timestamp, TransactionId, WriteDiff, WriteQueryId,
 };
 use crate::model::evalast::{
-  EvalBinaryOp, EvalLiteral, Holder, InsertKeyTask, PostEvalExpr, PreEvalExpr, SelectKeyDoneTask,
-  SelectKeyTask, SelectQueryTask, SelectTask, UpdateKeyNoneTask, UpdateKeyStartTask, UpdateKeyTask,
-  UpdateTask, WriteQueryTask,
+  EvalBinaryOp, EvalLiteral, Holder, InsertRowTask, InsertTask, PostEvalExpr, PreEvalExpr,
+  SelectKeyDoneTask, SelectKeyTask, SelectQueryTask, SelectTask, UpdateKeyNoneTask,
+  UpdateKeyStartTask, UpdateKeyTask, UpdateTask, WriteQueryTask,
 };
 use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, FromCombo, FromProp, FromRoot, FromSelectTask,
@@ -16,8 +16,8 @@ use crate::model::message::{
 use crate::model::sqlast::{BinaryOp, Literal, SelectStmt, SqlStmt, UpdateStmt, ValExpr};
 use crate::storage::relational_tablet::RelationalTablet;
 use crate::tablet::expression::{
-  eval_select_graph, eval_write_graph, start_eval_select_key_task, start_eval_update_key_task,
-  table_insert, table_insert_diff,
+  eval_select_graph, eval_write_graph, start_eval_insert_row_task, start_eval_select_key_task,
+  start_eval_update_key_task, table_insert_cell, table_insert_diff, table_insert_row,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
@@ -1541,10 +1541,12 @@ fn continue_combo(
           };
           match update_key_task {
             UpdateKeyTask::Done(done_task) => {
-              // This means the UpdateKeyTask for the row completed
-              // without the need for Subqueries, and that an
-              // update should take place.
-              table_insert(
+              // This means the InsertRowTask for the row completed
+              // without the need for Subqueries. In this case, we insert
+              // directly into the write_view and avoid creating a temporary
+              // WriteDiff (since there is a chance we can avoid a WriteDiff
+              // altogether).
+              table_insert_cell(
                 &mut combo_status.write_view,
                 &key,
                 &done_task.set_col,
@@ -1599,6 +1601,79 @@ fn continue_combo(
             wid: cur_wid.clone(),
             write_task: Holder::from(WriteQueryTask::UpdateTask(UpdateTask {
               key_tasks: update_key_tasks,
+              key_vals: vec![],
+            })),
+          });
+          break;
+        }
+      }
+      WriteQuery::Insert(insert_stmt) => {
+        assert_eq!(insert_stmt.table_name, this_tablet.path.path);
+        let mut insert_row_tasks = BTreeMap::<usize, Holder<InsertRowTask>>::new();
+        for index in 0..insert_stmt.insert_vals.len() {
+          let (insert_row_task, context) = if let Ok(insert_task) =
+            start_eval_insert_row_task(rand_gen, &insert_stmt, &combo_status.write_view, index)
+          {
+            insert_task
+          } else {
+            return Err(VerificationFailure::VerificationFailure);
+          };
+          match insert_row_task {
+            InsertRowTask::Done(done_task) => {
+              // This means the InsertRowTask for the row completed
+              // without the need for Subqueries. In this case, we insert
+              // directly into the write_view and avoid creating a temporary
+              // WriteDiff (since there is a chance we can avoid a WriteDiff
+              // altogether).
+              table_insert_row(
+                &mut combo_status.write_view,
+                &done_task.insert_cols,
+                done_task.insert_vals,
+                &cur_write_meta.timestamp,
+              );
+            }
+            _ => {
+              // This means that the InsertRowTask requires subqueries
+              // to execute, so it is not complete.
+              let mut subq = BTreeMap::<SelectQueryId, (FromRoot, SelectStmt)>::new();
+              for (sid, select_stmt) in context {
+                subq.insert(
+                  sid,
+                  (
+                    make_path(
+                      status_path.clone(),
+                      FromProp {
+                        combo: combo_status.combo.clone(),
+                        from_combo: FromCombo::Write {
+                          wid: cur_wid.clone(),
+                          from_task: FromWriteTask::InsertTask { index },
+                        },
+                      },
+                    ),
+                    select_stmt,
+                  ),
+                );
+              }
+              send(
+                &mut side_effects,
+                this_slave_eid,
+                this_tablet,
+                &subq,
+                &cur_write_meta.timestamp,
+              );
+              insert_row_tasks.insert(index, Holder::from(insert_row_task));
+            }
+          }
+        }
+        if !insert_row_tasks.is_empty() {
+          // This means that we can't continue applying writes, since
+          // we are now blocked by subqueries. Thus, we stop iterating
+          // over Write Queries.
+          upper_bound = Excluded(cur_write_meta.timestamp);
+          combo_status.current_write = Some(CurrentWrite {
+            wid: cur_wid.clone(),
+            write_task: Holder::from(WriteQueryTask::InsertTask(InsertTask {
+              tasks: insert_row_tasks,
               key_vals: vec![],
             })),
           });
