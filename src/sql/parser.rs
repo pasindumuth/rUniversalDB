@@ -35,7 +35,7 @@ pub fn parse_sql(l: &String) -> Option<SqlStmt> {
 #[cfg(test)]
 mod tests {
   use crate::model::sqlast::{
-    BinaryOp, Literal, SelectStmt, SqlStmt, Test, UpdateStmt, ValExpr,
+    BinaryOp, InsertStmt, Literal, SelectStmt, SqlStmt, Test, UpdateStmt, ValExpr,
   };
   use crate::sql::parser::{parse_sql, parse_test};
 
@@ -323,6 +323,42 @@ mod tests {
             }
           }))),
         }
+      }))
+    );
+  }
+
+  #[test]
+  fn insert_parse_test() {
+    // Advanced Update Statement with Subqueries
+    let sql = "INSERT INTO table (col1, col2)
+               VALUES
+                 (1, \"hello\"),
+                 ((SELECT key3
+                   FROM table3
+                   WHERE key3 AND val3), TRUE)";
+    assert_eq!(
+      parse_sql(&sql.to_string()),
+      Some(SqlStmt::Insert(InsertStmt {
+        table_name: "table".to_string(),
+        cols: vec!["col1".to_string(), "col2".to_string()],
+        insert_vals: vec![
+          vec![
+            ValExpr::Literal(Literal::Int("1".to_string())),
+            ValExpr::Literal(Literal::String("hello".to_string()))
+          ],
+          vec![
+            ValExpr::Subquery(Box::from(SelectStmt {
+              col_names: vec!["key3".to_string()],
+              table_name: "table3".to_string(),
+              where_clause: ValExpr::BinaryExpr {
+                op: BinaryOp::AND,
+                lhs: Box::new(ValExpr::Column("key3".to_string())),
+                rhs: Box::new(ValExpr::Column("val3".to_string())),
+              }
+            })),
+            ValExpr::Literal(Literal::Bool(true))
+          ]
+        ],
       }))
     );
   }

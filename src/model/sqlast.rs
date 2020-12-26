@@ -28,6 +28,7 @@ pub enum Test {
 pub enum SqlStmt {
   Select(SelectStmt),
   Update(UpdateStmt),
+  Insert(InsertStmt),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -45,6 +46,14 @@ pub struct UpdateStmt {
   pub set_col: String,
   pub set_val: ValExpr,
   pub where_clause: ValExpr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InsertStmt {
+  // For now, we only support INSERT INTO ... VALUEs.
+  pub table_name: String,
+  pub cols: Vec<String>,
+  pub insert_vals: Vec<Vec<ValExpr>>,
 }
 
 /// This represnts common binary operations that can appear

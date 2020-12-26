@@ -16,6 +16,7 @@ root -> Root
 sql_stmt -> SqlStmt
   : select_stmt     { SqlStmt::Select($1) }
   | update_stmt     { SqlStmt::Update($1) }
+  | insert_stmt     { SqlStmt::Insert($1) }
   ;
 
 select_stmt -> SelectStmt
@@ -41,12 +42,47 @@ update_stmt -> UpdateStmt
     }
   ;
 
+insert_stmt -> InsertStmt
+  : 'INSERT' 'INTO' iden '(' iden_list ')' 'VALUES' insert_vals_list
+    {
+      InsertStmt {
+        table_name: $3,
+        cols: $5,
+        insert_vals: $8,
+      }
+    }
+  ;
+
 iden_list -> Vec<String>
   : iden
     {
       vec![$1]
     }
   | iden_list ',' iden
+    {
+      $1.push($3);
+      $1
+    }
+  ;
+
+insert_vals_list -> Vec<Vec<ValExpr>>
+  : '(' insert_vals ')'
+    {
+      vec![$2]
+    }
+  | insert_vals_list ',' '(' insert_vals ')'
+    {
+      $1.push($4);
+      $1
+    }
+  ;
+
+insert_vals -> Vec<ValExpr>
+  : expr
+    {
+      vec![$1]
+    }
+  | insert_vals ',' expr
     {
       $1.push($3);
       $1
@@ -155,14 +191,14 @@ literal -> Literal
   ;
 
 iden -> String
-  : "identifier"
+  : 'identifier'
     {
       $lexer.span_str($1.as_ref().unwrap().span()).to_string()
     }
   ;
 
 quoted_string -> String
-  : "quoted_string"
+  : 'quoted_string'
     {
       let s = $lexer.span_str($1.as_ref().unwrap().span());
       s[1..s.len() - 1].to_string()
