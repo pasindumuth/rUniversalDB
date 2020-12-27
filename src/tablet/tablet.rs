@@ -1452,7 +1452,7 @@ fn add_combo(
   // This code block constructions the CombinationStatus.
   let mut combo_status = CombinationStatus {
     combo: Vec::<WriteQueryId>::new(),
-    write_view: RelationalTablet::new(relational_tablet.schema().clone()),
+    write_view: RelationalTablet::new(relational_tablet.schema.clone()),
     current_write: None,
     select_tasks: HashMap::<SelectQueryId, Holder<SelectQueryTask>>::new(),
   };

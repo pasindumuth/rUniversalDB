@@ -829,7 +829,12 @@ fn evaluate_exprs(
 /// This function verifies that the `col_name` is in the
 /// schema of the `rel_tab`.
 fn verify_col(col_name: &String, rel_tab: &RelationalTablet) -> Result<ColumnName, EvalErr> {
-  panic!("TODO: implement")
+  let col_name = ColumnName(col_name.clone());
+  if rel_tab.col_name_exists(&col_name) {
+    Ok(col_name)
+  } else {
+    return Err(EvalErr::ColumnDNE);
+  }
 }
 
 fn verify_cols(
@@ -921,7 +926,7 @@ pub fn table_insert_row(
     col_name_val_map.insert(col_name.clone(), from_lit(col_val.clone()));
   }
   let mut key = PrimaryKey { cols: vec![] };
-  for (_, key_col_name) in &rel_tab.schema().key_cols {
+  for (_, key_col_name) in &rel_tab.schema.key_cols {
     // Due to `verify_insert`, we may use `unwrap` without concern.
     if let Some(key_col_val) = col_name_val_map.remove(key_col_name).unwrap() {
       key.cols.push(key_col_val);
@@ -965,7 +970,7 @@ fn col_vals_into_diff(
     col_name_val_map.insert(col_name.clone(), from_lit(col_val.clone()));
   }
   let mut key = PrimaryKey { cols: vec![] };
-  for (_, key_col_name) in &rel_tab.schema().key_cols {
+  for (_, key_col_name) in &rel_tab.schema.key_cols {
     // Due to `verify_insert`, we may use `unwrap` without concern.
     if let Some(key_col_val) = col_name_val_map.remove(key_col_name).unwrap() {
       key.cols.push(key_col_val);
@@ -1061,7 +1066,7 @@ pub fn verify_insert(rel_tab: &RelationalTablet, insert_stmt: &InsertStmt) -> Re
     return Err(EvalErr::MalformedSQL);
   }
   // Next, we verify that the given set of columns span the PrimaryKey columns.
-  for (_, key_col_name) in &rel_tab.schema().key_cols {
+  for (_, key_col_name) in &rel_tab.schema.key_cols {
     if !col_names.contains(key_col_name) {
       return Err(EvalErr::MalformedSQL);
     }

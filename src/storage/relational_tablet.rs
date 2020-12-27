@@ -2,6 +2,7 @@ use crate::model::common::{
   ColumnName, ColumnType, ColumnValue, PrimaryKey, Row, Schema, Timestamp,
 };
 use crate::storage::multiversion_map::MultiVersionMap;
+use std::collections::HashSet;
 
 /// Terminology:
 ///
@@ -55,7 +56,7 @@ impl ColumnValue {
 #[derive(Debug)]
 pub struct RelationalTablet {
   mvm: MultiVersionMap<(PrimaryKey, Option<ColumnName>), StorageValue>,
-  schema: Schema,
+  pub schema: Schema,
 }
 
 impl RelationalTablet {
@@ -64,10 +65,6 @@ impl RelationalTablet {
       mvm: MultiVersionMap::new(),
       schema,
     }
-  }
-
-  pub fn schema(&self) -> &Schema {
-    &self.schema
   }
 
   /// Returns false if the types don't match, and true otherwise.
@@ -170,82 +167,106 @@ impl RelationalTablet {
     return Ok(());
   }
 
-  /// This function generally only updates a subset of the value
-  /// columns. The other Value columns remain unchanged, including
-  /// their `lat`s. The caller of this function must know what
-  /// they're doing; trying to write into the past is a fatal error.
-  pub fn insert_partial_vals(
-    &mut self,
-    _key: PrimaryKey,
-    _partial_val: Vec<(ColumnName, Option<ColumnValue>)>,
-    _timestamp: &Timestamp,
-  ) {
-    panic!("TODO: implement.")
-  }
-
-  /// This too ins a dumb function that doesn't do any schema checks, etc.
-  /// It just sees if the `partial_val` is present. If it isn't, then the
-  /// `key` is deleted. And if it is, the specific updates in the
-  /// `partial_val` is applied to the relational tablet.
-  pub fn insert_row_diff(
-    &mut self,
-    _key: PrimaryKey,
-    _partial_val: Option<Vec<(ColumnName, Option<ColumnValue>)>>,
-    _timestamp: &Timestamp,
-  ) {
-    panic!("TODO: implement");
-  }
-
-  /// TODO: Write this
-  /// Returns if the column name exists in the schema or not.
-  pub fn col_name_exists(&self, _val_col: &ColumnName) -> bool {
-    panic!("TODO: implement.")
-  }
-
-  /// TODO: Write this
-  /// Returns if the column name exists in the schema or not.
-  pub fn col_names_exists(&self, _val_cols: &Vec<ColumnName>) -> bool {
-    panic!("TODO: implement.")
-  }
-
-  /// TODO: Write this
-  /// Returns if the ColumnValue's type matches that of the ColumnValue
-  pub fn type_matches(_col_val: &ColumnValue, _col_type: &ColumnType) -> bool {
-    panic!("TODO: implement.")
-  }
-
-  /// TODO: Write this
-  /// This function generally only updates a subset of the value
-  /// columns. The other Value columns remain unchanged, including
-  /// their `lat`s.
+  /// This function updates a subset of the Value Columns. The other
+  /// Value Columns remain unchanged, including their `lat`s. This is a dumb
+  /// function; it doesn't check to see if `key` or `col_name` are a part
+  /// of the schema. In addition, this function may fail fatally if a
+  /// backwards write is attempted.
   pub fn insert_partial_val(
     &mut self,
-    _key: PrimaryKey,
-    _val_col: ColumnName,
-    _val: Option<ColumnValue>,
-    _timestamp: &Timestamp,
+    key: PrimaryKey,
+    col_name: ColumnName,
+    val: Option<ColumnValue>,
+    timestamp: &Timestamp,
   ) {
-    panic!("TODO: implement.")
+    self
+      .mvm
+      .write(&(key, Some(col_name)), val.map(|v| v.convert()), *timestamp)
+      .unwrap();
   }
 
-  /// TODO: Write this
+  /// Performs `insert_partial_val` for every pair in `partial_val`.
+  pub fn insert_partial_vals(
+    &mut self,
+    key: PrimaryKey,
+    partial_val: Vec<(ColumnName, Option<ColumnValue>)>,
+    timestamp: &Timestamp,
+  ) {
+    for (col_name, col_val) in partial_val {
+      self.insert_partial_val(key.clone(), col_name, col_val, timestamp);
+    }
+  }
+
+  /// Performs `insert_partial_vals` if the `partial_val_o` is present,
+  /// otherwise it deletes the row at `key`.
+  pub fn insert_row_diff(
+    &mut self,
+    key: PrimaryKey,
+    partial_val_o: Option<Vec<(ColumnName, Option<ColumnValue>)>>,
+    timestamp: &Timestamp,
+  ) {
+    if let Some(partial_val) = partial_val_o {
+      self.insert_partial_vals(key, partial_val, timestamp);
+    } else {
+      // This means we must delete the row.
+      self.mvm.write(&(key, None), None, *timestamp).unwrap();
+    }
+  }
+
+  /// Returns true iff the column name exists in the schema.
+  pub fn col_name_exists(&self, col_name: &ColumnName) -> bool {
+    for (_, name) in &self.schema.key_cols {
+      if col_name == name {
+        return true;
+      }
+    }
+    for (_, name) in &self.schema.val_cols {
+      if col_name == name {
+        return true;
+      }
+    }
+    false
+  }
+
+  /// Returns if the column names exists in the schema or not.
+  pub fn col_names_exists(&self, val_cols: &Vec<ColumnName>) -> bool {
+    for col_name in val_cols {
+      if self.col_name_exists(col_name) {
+        return true;
+      }
+    }
+    false
+  }
+
   /// This is a dumb function. It doesn't check if the ColumnName
   /// is actually part of the schema. It just appends col_name to key,
   /// and does a lookup in the mvm. Thus, whether the ColumnName in
   /// the Schema exists must be checked before.
   pub fn get_partial_val(
     &self,
-    _key: &PrimaryKey,
-    _col_name: &ColumnName,
-    _timestamp: &Timestamp,
+    key: &PrimaryKey,
+    col_name: &ColumnName,
+    timestamp: &Timestamp,
   ) -> Option<ColumnValue> {
-    panic!("TODO: implement.")
+    self
+      .mvm
+      .static_read(&(key.clone(), Some(col_name.clone())), timestamp.clone())
+      .map(|v| v.convert())
   }
 
-  /// TODO: Write this
-  /// This is essentially a snapshot read of all keys at the timestmap given.
-  pub fn get_keys(&self, _timestamp: &Timestamp) -> Vec<PrimaryKey> {
-    panic!("TODO: implement.")
+  /// This is essentially a snapshot read of all keys at the given timestamp.
+  pub fn get_keys(&self, timestamp: &Timestamp) -> Vec<PrimaryKey> {
+    let mut keys = HashSet::new();
+    for (key, _) in self.mvm.map.keys() {
+      if let Some(_) = self
+        .mvm
+        .static_read(&(key.clone(), None), timestamp.clone())
+      {
+        keys.insert(key.clone());
+      }
+    }
+
+    return keys.into_iter().collect();
   }
 
   /// This function returns an error if the key doesn't conform
