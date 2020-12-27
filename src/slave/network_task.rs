@@ -1,6 +1,4 @@
-use crate::model::common::{
-  EndpointId, RequestId, Row, SelectQueryId, SelectView, TabletShape, TransactionId,
-};
+use crate::model::common::{EndpointId, RequestId, SelectQueryId, SelectView, TabletShape};
 use crate::model::message::FromRoot;
 use std::collections::HashSet;
 

@@ -1,5 +1,5 @@
 use crate::model::common::{
-  ColumnName, ColumnValue, PrimaryKey, Row, SelectQueryId, SelectView, Timestamp, WriteDiff,
+  ColumnName, PrimaryKey, SelectQueryId, SelectView, Timestamp, WriteDiff,
 };
 use crate::model::sqlast::SelectStmt;
 use serde::export::fmt::Debug;

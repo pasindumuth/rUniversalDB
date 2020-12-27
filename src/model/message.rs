@@ -90,6 +90,7 @@ pub enum AdminRequest {
 pub enum ClientRequest {}
 
 /// Message that go into the Slave's handler
+#[allow(non_camel_case_types)]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveMessage {
   ClientRequest {

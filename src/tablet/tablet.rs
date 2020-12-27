@@ -1,19 +1,18 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{
-  ColumnName, ColumnValue, EndpointId, PrimaryKey, Row, Schema, SelectQueryId, SelectView,
-  TabletPath, TabletShape, Timestamp, TransactionId, WriteDiff, WriteQueryId,
+  EndpointId, PrimaryKey, Row, Schema, SelectQueryId, SelectView, TabletShape, Timestamp,
+  WriteQueryId,
 };
 use crate::model::evalast::{
-  EvalBinaryOp, EvalLiteral, Holder, InsertRowTask, InsertTask, PostEvalExpr, PreEvalExpr,
-  SelectKeyDoneTask, SelectKeyTask, SelectQueryTask, SelectTask, UpdateKeyNoneTask,
-  UpdateKeyStartTask, UpdateKeyTask, UpdateTask, WriteQueryTask,
+  Holder, InsertRowTask, InsertTask, SelectKeyTask, SelectQueryTask, SelectTask, UpdateKeyTask,
+  UpdateTask, WriteQueryTask,
 };
 use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, FromCombo, FromProp, FromRoot, FromSelectTask,
   FromWriteTask, NetworkMessage, SelectPrepare, SlaveMessage, SubqueryResponse, TabletAction,
   TabletMessage, WriteAbort, WriteCommit, WritePrepare, WriteQuery,
 };
-use crate::model::sqlast::{BinaryOp, Literal, SelectStmt, SqlStmt, UpdateStmt, ValExpr};
+use crate::model::sqlast::SelectStmt;
 use crate::storage::relational_tablet::RelationalTablet;
 use crate::tablet::expression::{
   eval_select_graph, eval_write_graph, start_eval_insert_row_task, start_eval_select_key_task,

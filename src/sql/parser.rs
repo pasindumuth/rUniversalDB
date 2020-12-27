@@ -1,4 +1,4 @@
-use crate::model::sqlast::{Root, SqlStmt, Test};
+use crate::model::sqlast::{Root, SqlStmt};
 use lrlex::lrlex_mod;
 use lrpar::lrpar_mod;
 
@@ -18,13 +18,6 @@ fn parse_root(l: &String) -> Option<Root> {
   }
 }
 
-fn parse_test(l: &String) -> Option<Test> {
-  match parse_root(l) {
-    Some(Root::Test(ast)) => Some(ast),
-    _ => None,
-  }
-}
-
 pub fn parse_sql(l: &String) -> Option<SqlStmt> {
   match parse_root(l) {
     Some(Root::SqlStmt(ast)) => Some(ast),
@@ -35,9 +28,16 @@ pub fn parse_sql(l: &String) -> Option<SqlStmt> {
 #[cfg(test)]
 mod tests {
   use crate::model::sqlast::{
-    BinaryOp, InsertStmt, Literal, SelectStmt, SqlStmt, Test, UpdateStmt, ValExpr,
+    BinaryOp, InsertStmt, Literal, Root, SelectStmt, SqlStmt, Test, UpdateStmt, ValExpr,
   };
-  use crate::sql::parser::{parse_sql, parse_test};
+  use crate::sql::parser::{parse_root, parse_sql};
+
+  fn parse_test(l: &String) -> Option<Test> {
+    match parse_root(l) {
+      Some(Root::Test(ast)) => Some(ast),
+      _ => None,
+    }
+  }
 
   /// This test makes sure that all literals in a expression are
   /// getting parsed properly into a singular expression containing

@@ -1095,12 +1095,3 @@ fn trans_res<T, V, F: Fn(&T) -> Result<V, EvalErr>>(
   }
   return Ok(trans_vals);
 }
-
-fn lookup<K: PartialEq + Eq, V: Clone>(vec: &Vec<(K, V)>, key: &K) -> Option<V> {
-  for (k, v) in vec {
-    if k == key {
-      return Some(v.clone());
-    }
-  }
-  return None;
-}
