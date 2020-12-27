@@ -31,6 +31,9 @@ pub enum EvalErr {
   /// If an insert is attempted but it violates table constraints.
   ConstraintViolation,
   MalformedSQL,
+  /// This could have been due to a malformed key, a column that doesn't
+  /// exist, or the value not matching the columns type.
+  InsertionFailure,
 }
 
 /// We have Tasks, and then we have Task Enums. Tasks are structs, and Task
@@ -904,16 +907,25 @@ pub fn table_insert_cell(
   col_name: &ColumnName,
   val: EvalLiteral,
   timestamp: &Timestamp,
-) {
-  rel_tab.insert_partial_val(key.clone(), col_name.clone(), from_lit(val), timestamp);
+) -> Result<(), EvalErr> {
+  if rel_tab
+    .insert_partial_val(key.clone(), col_name.clone(), from_lit(val), timestamp)
+    .is_ok()
+  {
+    Ok(())
+  } else {
+    Err(EvalErr::InsertionFailure)
+  }
 }
 
 /// This function takes the `col_names` and `col_vals`, constructs a PrimaryKey
 /// and value according to the schema of `rel_tab`, and inserts this key-value
 /// pair into `rel_tab`. Importantly, we assume that by this point, `verify_insert`
 /// was already called, so we assume that we have the gaurantees provided there.
+///
 /// Note that an error might be thrown when we try to construct the PrimaryKey
-/// and we realize one of the elements in there is NULL.
+/// and we realize one of the elements in there is NULL. It might alse thrown
+/// if the col_vals type doesn't match that of the `ColumnType` in the schema.
 pub fn table_insert_row(
   rel_tab: &mut RelationalTablet,
   col_names: &Vec<ColumnName>,
@@ -940,16 +952,50 @@ pub fn table_insert_row(
   for (col_name, col_val) in col_name_val_map {
     partial_val.push((col_name, col_val));
   }
-  rel_tab.insert_partial_vals(key, partial_val, timestamp);
-  Ok(())
+  if rel_tab
+    .insert_partial_vals(key, partial_val, timestamp)
+    .is_ok()
+  {
+    Ok(())
+  } else {
+    // We will get here if the `col_vals` doesn't match the
+    // `ColumnType` in the schema.
+    Err(EvalErr::InsertionFailure)
+  }
 }
 
 /// This functions inserts the key-value pairs in `diff` into the
 /// `rel_tab` and the given `timestamp`.
-pub fn table_insert_diff(rel_tab: &mut RelationalTablet, diff: &WriteDiff, timestamp: &Timestamp) {
+///
+/// Here, the WriteDiff must always conform to the schema.
+pub fn table_insert_diff(
+  rel_tab: &mut RelationalTablet,
+  diff: &WriteDiff,
+  timestamp: &Timestamp,
+) -> Result<(), EvalErr> {
   for (key, partial_vals) in diff {
-    rel_tab.insert_row_diff(key.clone(), partial_vals.clone(), timestamp);
+    if !rel_tab.verify_row_key(&key) {
+      // We check to see if the key conforms preemptively.
+      return Err(EvalErr::InsertionFailure);
+    }
+    if !rel_tab.is_in_key_range(&key) {
+      // It's actually okay if we find a key that isn't in
+      // the tablet's range. This happens if we are performing
+      // an INSERT.
+      continue;
+    }
+
+    if rel_tab
+      .insert_row_diff(key.clone(), partial_vals.clone(), timestamp)
+      .is_err()
+    {
+      // This will most often be because an Update didn't check that the
+      // the col_name exists, or that the EvalLiteral that Update or Insert
+      // evaluated to didn't line up with the schema.
+      return Err(EvalErr::InsertionFailure);
+    }
   }
+  Ok(())
 }
 
 /// This function takes the `col_names` and `col_vals`, constructs a PrimaryKey

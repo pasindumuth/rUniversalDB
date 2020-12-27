@@ -17,7 +17,8 @@ pub struct TabletPath {
 /// The key range that a tablet manages. The `start` and `end` are
 /// PrimaryKey types, which are convenient for splitting the key-space.
 /// If either `start` or `end` is `None`, that means there is no bound
-/// for that direction.
+/// for that direction. This is a half-open interval, where `start`
+/// is inclusive and `end` is exclusive.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TabletKeyRange {
   pub start: Option<PrimaryKey>,

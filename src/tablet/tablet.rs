@@ -158,9 +158,9 @@ impl TabletState {
   ) -> TabletState {
     TabletState {
       rand_gen,
-      this_tablet,
+      this_tablet: this_tablet.clone(),
       this_slave_eid,
-      relational_tablet: RelationalTablet::new(schema),
+      relational_tablet: RelationalTablet::new(schema, &this_tablet),
       write_query_map: Default::default(),
       select_query_map: Default::default(),
       non_reached_writes: Default::default(),
@@ -1285,11 +1285,20 @@ fn handle_subquery_response_prop(
           WriteQueryTask::WriteDoneTask(diff) => {
             // This means the Update for the row completed
             // without the need for any more subqueries.
-            table_insert_diff(
+            if table_insert_diff(
               &mut combo_status.write_view,
               &diff,
               &write_query_map.get(cur_wid).unwrap().timestamp,
-            );
+            )
+            .is_err()
+            {
+              // We could get here if any of the writes were actually
+              // malformed, like if they tried writing to columns that
+              // didn't exist (which could happen with Update, although
+              // we check against this for Inserts), or if the written
+              // types don't match.
+              panic!("Figure out how to report these issues to the user.");
+            }
             true
           }
           _ => {
@@ -1451,7 +1460,7 @@ fn add_combo(
   // This code block constructions the CombinationStatus.
   let mut combo_status = CombinationStatus {
     combo: Vec::<WriteQueryId>::new(),
-    write_view: RelationalTablet::new(relational_tablet.schema.clone()),
+    write_view: RelationalTablet::new(relational_tablet.schema.clone(), this_tablet),
     current_write: None,
     select_tasks: HashMap::<SelectQueryId, Holder<SelectQueryTask>>::new(),
   };
@@ -1546,13 +1555,21 @@ fn continue_combo(
               // directly into the write_view and avoid creating a temporary
               // WriteDiff (since there is a chance we can avoid a WriteDiff
               // altogether).
-              table_insert_cell(
+              if table_insert_cell(
                 &mut combo_status.write_view,
                 &key,
                 &done_task.set_col,
                 done_task.set_val,
                 &cur_write_meta.timestamp,
-              );
+              )
+              .is_err()
+              {
+                // This either due to set_col not being the name of a real column,
+                // or the set_val not having the right type. It can't be because
+                // the key is malromed (because it already exists in the
+                // Relational Tablet).
+                panic!("Figure out how to report these issues to the user.");
+              };
             }
             UpdateKeyTask::None(_) => {
               // This means the UpdateKeyTask for the row completed
@@ -1611,7 +1628,7 @@ fn continue_combo(
         assert_eq!(insert_stmt.table_name, this_tablet.path.path);
         // First do some validation of the insert_stmt.
         if verify_insert(&combo_status.write_view, &insert_stmt).is_err() {
-          return Err(VerificationFailure::VerificationFailure);
+          panic!("Figure out how to report these issues to the user.");
         }
         // Next, construct the insert_row_tasks.
         let mut insert_row_tasks = BTreeMap::<usize, Holder<InsertRowTask>>::new();
@@ -1638,7 +1655,7 @@ fn continue_combo(
               )
               .is_err()
               {
-                return Err(VerificationFailure::VerificationFailure);
+                panic!("Figure out how to report these issues to the user.");
               };
             }
             _ => {

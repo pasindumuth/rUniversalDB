@@ -1,5 +1,5 @@
 use crate::model::common::{
-  ColumnName, ColumnType, ColumnValue, PrimaryKey, Row, Schema, Timestamp,
+  ColumnName, ColumnType, ColumnValue, PrimaryKey, Row, Schema, TabletShape, Timestamp,
 };
 use crate::storage::multiversion_map::MultiVersionMap;
 use std::collections::HashSet;
@@ -56,25 +56,16 @@ impl ColumnValue {
 #[derive(Debug)]
 pub struct RelationalTablet {
   mvm: MultiVersionMap<(PrimaryKey, Option<ColumnName>), StorageValue>,
+  tablet_shape: TabletShape,
   pub schema: Schema,
 }
 
 impl RelationalTablet {
-  pub fn new(schema: Schema) -> RelationalTablet {
+  pub fn new(schema: Schema, tablet_shape: &TabletShape) -> RelationalTablet {
     RelationalTablet {
       mvm: MultiVersionMap::new(),
+      tablet_shape: tablet_shape.clone(),
       schema,
-    }
-  }
-
-  /// Returns false if the types don't match, and true otherwise.
-  fn check_type_match(value: Option<&ColumnValue>, col_type: &ColumnType) -> bool {
-    match (value, col_type) {
-      (Some(ColumnValue::Int(_)), ColumnType::Int) => true,
-      (Some(ColumnValue::String(_)), ColumnType::String) => true,
-      (Some(ColumnValue::Bool(_)), ColumnType::Bool) => true,
-      (None, _) => true,
-      _ => false,
     }
   }
 
@@ -86,10 +77,10 @@ impl RelationalTablet {
     return self.verify_row_key(&row.key) && self.verify_row_val(&row.val);
   }
 
-  fn verify_row_key(&self, key: &PrimaryKey) -> bool {
+  pub fn verify_row_key(&self, key: &PrimaryKey) -> bool {
     if key.cols.len() == self.schema.key_cols.len() {
       for (col_val, (col_type, _)) in key.cols.iter().zip(&self.schema.key_cols) {
-        if !RelationalTablet::check_type_match(Some(&col_val), col_type) {
+        if !check_type_match(Some(&col_val), col_type) {
           return false;
         }
       }
@@ -100,7 +91,7 @@ impl RelationalTablet {
   fn verify_row_val(&self, val: &Vec<Option<ColumnValue>>) -> bool {
     if val.len() == self.schema.val_cols.len() {
       for (col_val, (col_type, _)) in val.iter().zip(&self.schema.val_cols) {
-        if !RelationalTablet::check_type_match((&col_val).as_ref(), col_type) {
+        if !check_type_match((&col_val).as_ref(), col_type) {
           return false;
         }
       }
@@ -109,15 +100,33 @@ impl RelationalTablet {
     return false;
   }
 
+  /// Checks if `key` is in the RelationalTablet's `table_shape`'s
+  /// range.
+  pub fn is_in_key_range(&self, key: &PrimaryKey) -> bool {
+    if let Some(lower_bound) = &self.tablet_shape.range.start {
+      if key < lower_bound {
+        return false;
+      }
+    }
+    if let Some(upper_bound) = &self.tablet_shape.range.end {
+      if key >= upper_bound {
+        return false;
+      }
+    }
+    true
+  }
+
   /// Inserts the row into the RelationalTablet. This method first checks
   /// to see if the `row`'s key columns and value columns conform to the
   /// schema. Then, it inserts the row into the MultiVersionMap. If either
   /// of these steps fails, we return false, otherwise we return true.
   pub fn insert_row(&mut self, row: &Row, timestamp: Timestamp) -> Result<(), String> {
     if !self.verify_row(row) {
-      return Err(String::from(
-        "The given row does not conform to the schema.",
-      ));
+      return Err("The given row does not conform to the schema.".to_string());
+    }
+
+    if !self.is_in_key_range(&row.key) {
+      return Err("The given row's primary key isn't in the range of this tablet".to_string());
     }
 
     // If the row isn't present, and we can't make it present because
@@ -167,49 +176,81 @@ impl RelationalTablet {
     return Ok(());
   }
 
-  /// This function updates a subset of the Value Columns. The other
-  /// Value Columns remain unchanged, including their `lat`s. This is a dumb
-  /// function; it doesn't check to see if `key` or `col_name` are a part
-  /// of the schema. In addition, this function may fail fatally if a
-  /// backwards write is attempted.
+  /// Gets the ColumnType of the given col_name if it actually exists
+  /// in schema.
+  fn get_val_col_type(&self, col_name: &ColumnName) -> Option<ColumnType> {
+    for (col_type, name) in &self.schema.val_cols {
+      if name == col_name {
+        return Some(col_type.clone());
+      }
+    }
+    return None;
+  }
+
+  /// This function updates a subset of the Value Column.
+  ///
+  /// Throws an error if the primary_key isn't in line, the timestamp is
+  /// too far behind, the Value Columns don't exist, or there is a type
+  /// mismatch with the schema.
   pub fn insert_partial_val(
     &mut self,
     key: PrimaryKey,
     col_name: ColumnName,
     val: Option<ColumnValue>,
     timestamp: &Timestamp,
-  ) {
-    self
-      .mvm
-      .write(&(key, Some(col_name)), val.map(|v| v.convert()), *timestamp)
-      .unwrap();
+  ) -> Result<(), String> {
+    if !self.verify_row_key(&key) {
+      return Err("Malformed PrimarKey".to_string());
+    }
+    if !self.is_in_key_range(&key) {
+      return Err("Range error".to_string());
+    }
+    if let Some(col_type) = self.get_val_col_type(&col_name) {
+      if !check_type_match(val.as_ref(), &col_type) {
+        return Err("Set type mismatch".to_string());
+      }
+      self
+        .mvm
+        .write(&(key, Some(col_name)), val.map(|v| v.convert()), *timestamp)
+    } else {
+      return Err("Non-existant column".to_string());
+    }
   }
 
   /// Performs `insert_partial_val` for every pair in `partial_val`.
+  ///
+  /// Throws an error if the primary_key isn't in line, the timestamp is
+  /// too far behind, the Value Columns don't exist, or there is a type
+  /// mismatch with the schema.
   pub fn insert_partial_vals(
     &mut self,
     key: PrimaryKey,
     partial_val: Vec<(ColumnName, Option<ColumnValue>)>,
     timestamp: &Timestamp,
-  ) {
+  ) -> Result<(), String> {
     for (col_name, col_val) in partial_val {
-      self.insert_partial_val(key.clone(), col_name, col_val, timestamp);
+      self.insert_partial_val(key.clone(), col_name, col_val, timestamp)?;
     }
+    Ok(())
   }
 
   /// Performs `insert_partial_vals` if the `partial_val_o` is present,
   /// otherwise it deletes the row at `key`.
+  ///
+  /// Throws an error if the primary_key isn't in line, the timestamp is
+  /// too far behind, the Value Columns don't exist, or there is a type
+  /// mismatch with the schema.
   pub fn insert_row_diff(
     &mut self,
     key: PrimaryKey,
     partial_val_o: Option<Vec<(ColumnName, Option<ColumnValue>)>>,
     timestamp: &Timestamp,
-  ) {
+  ) -> Result<(), String> {
     if let Some(partial_val) = partial_val_o {
-      self.insert_partial_vals(key, partial_val, timestamp);
+      self.insert_partial_vals(key, partial_val, timestamp)
     } else {
       // This means we must delete the row.
-      self.mvm.write(&(key, None), None, *timestamp).unwrap();
+      self.mvm.write(&(key, None), None, *timestamp)
     }
   }
 
@@ -301,25 +342,49 @@ impl RelationalTablet {
   }
 }
 
+/// Returns false if the types don't match, and true otherwise.
+fn check_type_match(value: Option<&ColumnValue>, col_type: &ColumnType) -> bool {
+  match (value, col_type) {
+    (Some(ColumnValue::Int(_)), ColumnType::Int) => true,
+    (Some(ColumnValue::String(_)), ColumnType::String) => true,
+    (Some(ColumnValue::Bool(_)), ColumnType::Bool) => true,
+    (None, _) => true,
+    _ => false,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use crate::model::common::{
-    ColumnName as CN, ColumnType as CT, ColumnValue as CV, PrimaryKey, Row, Schema, Timestamp,
+    ColumnName as CN, ColumnType as CT, ColumnValue as CV, PrimaryKey, Row, Schema, TabletKeyRange,
+    TabletPath, TabletShape, Timestamp,
   };
   use crate::storage::relational_tablet::RelationalTablet;
 
   #[test]
   fn single_row_insert_test() {
-    let mut tablet = RelationalTablet::new(Schema {
-      key_cols: vec![
-        (CT::String, CN(String::from("name"))),
-        (CT::Int, CN(String::from("age"))),
-      ],
-      val_cols: vec![
-        (CT::String, CN(String::from("email"))),
-        (CT::Int, CN(String::from("income"))),
-      ],
-    });
+    let table_shape = TabletShape {
+      path: TabletPath {
+        path: "".to_string(),
+      },
+      range: TabletKeyRange {
+        start: None,
+        end: None,
+      },
+    };
+    let mut tablet = RelationalTablet::new(
+      Schema {
+        key_cols: vec![
+          (CT::String, CN(String::from("name"))),
+          (CT::Int, CN(String::from("age"))),
+        ],
+        val_cols: vec![
+          (CT::String, CN(String::from("email"))),
+          (CT::Int, CN(String::from("income"))),
+        ],
+      },
+      &table_shape,
+    );
 
     let k = PrimaryKey {
       cols: vec![CV::String(String::from("Fred")), CV::Int(20)],
