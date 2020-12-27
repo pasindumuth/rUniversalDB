@@ -1,5 +1,6 @@
 use crate::simulation::{slave_id, Simulation};
 use runiversal::common::test_config::table_shape;
+use runiversal::common::utils::mk_tid;
 use runiversal::model::common::{
   ColumnName, ColumnType, ColumnValue, EndpointId, PrimaryKey, RequestId, Row, Schema, TabletPath,
   TabletShape, Timestamp,
@@ -7,7 +8,9 @@ use runiversal::model::common::{
 use runiversal::model::message::{
   AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SlaveMessage,
 };
-use std::collections::HashMap;
+use runiversal::sql::parser::parse_sql;
+use std::collections::{BTreeMap, HashMap};
+use std::iter::FromIterator;
 
 mod simulation;
 
@@ -177,6 +180,73 @@ fn test1(sim: &mut Simulation) -> Result<(), String> {
   check_expected_res(sim, &expected_res_map)
 }
 
+fn test2(sim: &mut Simulation) -> Result<(), String> {
+  let from_eid = EndpointId::from("c0");
+  let to_eid = EndpointId::from("s0");
+
+  let insert_query = NetworkMessage::Slave(SlaveMessage::AdminRequest {
+    req: AdminRequest::SqlQuery {
+      rid: sim.mk_request_id(),
+      tid: mk_tid(&mut sim.rng),
+      sql: parse_sql(
+        &r#"
+            INSERT INTO table1 (key, value)
+            VALUES ("hello", 1)
+          "#
+        .to_string(),
+      )
+      .unwrap(),
+      timestamp: Timestamp(2),
+    },
+  });
+  sim.add_msg(insert_query, &from_eid, &to_eid);
+  sim.simulate_all();
+
+  let mut expected_res_map = HashMap::new();
+
+  let rid = sim.mk_request_id();
+  let tid = mk_tid(&mut sim.rng);
+  add_req_res(
+    sim,
+    &from_eid,
+    &to_eid,
+    AdminRequest::SqlQuery {
+      rid: rid.clone(),
+      tid: tid,
+      sql: parse_sql(
+        &r#"
+            SELECT key, value
+            FROM table1
+            WHERE TRUE
+          "#
+        .to_string(),
+      )
+      .unwrap(),
+      timestamp: Timestamp(2),
+    },
+    AdminResponse::SqlQuery {
+      rid: rid.clone(),
+      result: Ok(BTreeMap::from_iter(vec![(
+        PrimaryKey {
+          cols: vec![ColumnValue::String("hello".to_string())],
+        },
+        vec![
+          (
+            ColumnName("key".to_string()),
+            Some(ColumnValue::String("hello".to_string())),
+          ),
+          (ColumnName("value".to_string()), Some(ColumnValue::Int(1))),
+        ],
+      )])),
+    },
+    &mut expected_res_map,
+    rid,
+  );
+  sim.simulate_all();
+
+  check_expected_res(sim, &expected_res_map)
+}
+
 // -------------------------------------------------------------------------------------------------
 //  Test Driver
 // -------------------------------------------------------------------------------------------------
@@ -197,6 +267,7 @@ fn drive_test(test_num: u32, test: fn(&mut Simulation) -> Result<(), String>) {
 
 fn test_driver() {
   drive_test(1, test1);
+  drive_test(2, test2);
 }
 
 fn main() {

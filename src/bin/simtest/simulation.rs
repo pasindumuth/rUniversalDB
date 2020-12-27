@@ -4,8 +4,7 @@ use runiversal::common::lang::rvec;
 use runiversal::common::rand::RandGen;
 use runiversal::model::common::{EndpointId, RequestId, Schema, TabletShape};
 use runiversal::model::message::{
-  NetworkMessage, SlaveAction, SlaveMessage, TabletAction,
-  TabletMessage,
+  NetworkMessage, SlaveAction, SlaveMessage, TabletAction, TabletMessage,
 };
 use runiversal::slave::slave::{SlaveSideEffects, SlaveState};
 use runiversal::tablet::tablet::{TabletSideEffects, TabletState};
@@ -13,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug)]
 pub struct Simulation {
-  rng: XorShiftRng,
+  pub rng: XorShiftRng,
   slave_eids: Vec<EndpointId>,
   client_eids: Vec<EndpointId>,
   /// Message queues between nodes. This field contains contains 2 queues (in for

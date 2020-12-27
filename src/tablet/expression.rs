@@ -1,7 +1,7 @@
 use crate::common::rand::RandGen;
+use crate::common::utils::mk_tid;
 use crate::model::common::{
-  ColumnName, ColumnValue, PrimaryKey, SelectQueryId, SelectView, Timestamp, TransactionId,
-  WriteDiff,
+  ColumnName, ColumnValue, PrimaryKey, SelectQueryId, SelectView, Timestamp, WriteDiff,
 };
 use crate::model::evalast::{
   EvalBinaryOp, EvalLiteral, Holder, InsertRowDoneTask, InsertRowEvalConstraintsTask,
@@ -13,7 +13,6 @@ use crate::model::evalast::{
 use crate::model::message::{FromSelectTask, FromWriteTask};
 use crate::model::sqlast::{BinaryOp, InsertStmt, Literal, SelectStmt, UpdateStmt, ValExpr};
 use crate::storage::relational_tablet::RelationalTablet;
-use rand::Rng;
 use std::collections::{BTreeMap, HashMap};
 
 /// Errors that can occur when evaluating columns while transforming
@@ -632,7 +631,7 @@ pub fn eval_select_graph(
       // those shouldn't result in any transitions.
     }
   };
-  Err(EvalErr::ColumnDNE)
+  Ok(BTreeMap::new())
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -711,9 +710,7 @@ fn pre_to_post_expr(
       },
       PreEvalExpr::Subquery(subquery) => {
         // Create a random SubqueryId
-        let mut bytes: [u8; 8] = [0; 8];
-        rand_gen.rng.fill(&mut bytes);
-        let subquery_id = SelectQueryId(TransactionId(bytes));
+        let subquery_id = SelectQueryId(mk_tid(&mut rand_gen.rng));
         // Add the Subquery to the `subqueries` vector.
         subqueries.insert(subquery_id.clone(), *subquery);
         // Replace the subquery with the new subquery_id.

@@ -1,13 +1,13 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{
-  EndpointId, RequestId, SelectQueryId, SelectView, TabletKeyRange, TabletPath,
-  TabletShape, Timestamp, TransactionId, WriteQueryId,
+  EndpointId, RequestId, SelectQueryId, SelectView, TabletKeyRange, TabletPath, TabletShape,
+  Timestamp, TransactionId, WriteQueryId,
 };
 use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SelectPrepare, SlaveAction,
   SlaveMessage, SubqueryResponse, TabletMessage, WriteAbort, WriteCommit, WritePrepare, WriteQuery,
 };
-use crate::model::sqlast::{SqlStmt};
+use crate::model::sqlast::SqlStmt;
 use crate::slave::network_task::{
   SelectRequestMeta, SelectTask, WritePhase, WriteRequestMeta, WriteTask,
 };

@@ -209,6 +209,18 @@ impl RelationalTablet {
       if !check_type_match(val.as_ref(), &col_type) {
         return Err("Set type mismatch".to_string());
       }
+      // We first make sure that the actual row we are trying to
+      // insert to doesn't actually exist yet, that we instantiate it.
+      if self
+        .mvm
+        .static_read(&(key.clone(), None), *timestamp)
+        .is_none()
+      {
+        self
+          .mvm
+          .write(&(key.clone(), None), Some(StorageValue::Unit), *timestamp)?;
+      }
+      // Finally, update the column with the given value.
       self
         .mvm
         .write(&(key, Some(col_name)), val.map(|v| v.convert()), *timestamp)
@@ -225,10 +237,25 @@ impl RelationalTablet {
   pub fn insert_partial_vals(
     &mut self,
     key: PrimaryKey,
-    partial_val: Vec<(ColumnName, Option<ColumnValue>)>,
+    partial_vals: Vec<(ColumnName, Option<ColumnValue>)>,
     timestamp: &Timestamp,
   ) -> Result<(), String> {
-    for (col_name, col_val) in partial_val {
+    // We first make sure that the actual row we are trying to
+    // insert to doesn't actually exist yet, that we instantiate it.
+    // We can't rely on `insert_partial_val` doing this in case
+    // `partial_vals` is empty.
+    if self
+      .mvm
+      .static_read(&(key.clone(), None), *timestamp)
+      .is_none()
+    {
+      self
+        .mvm
+        .write(&(key.clone(), None), Some(StorageValue::Unit), *timestamp)?;
+    }
+    // Iterate through `partial_vals` and then insert the values
+    // accordingly
+    for (col_name, col_val) in partial_vals {
       self.insert_partial_val(key.clone(), col_name, col_val, timestamp)?;
     }
     Ok(())
@@ -289,10 +316,21 @@ impl RelationalTablet {
     col_name: &ColumnName,
     timestamp: &Timestamp,
   ) -> Option<ColumnValue> {
-    self
-      .mvm
-      .static_read(&(key.clone(), Some(col_name.clone())), timestamp.clone())
-      .map(|v| v.convert())
+    if let Some(i) = self
+      .schema
+      .key_cols
+      .iter()
+      .position(|(_, name)| col_name == name)
+    {
+      // This means that the `col_name` was a key column.
+      Some(key.cols.get(i).unwrap().clone())
+    } else {
+      // Otherwise, we try and see if `col_name` is a value column.
+      self
+        .mvm
+        .static_read(&(key.clone(), Some(col_name.clone())), timestamp.clone())
+        .map(|v| v.convert())
+    }
   }
 
   /// This is essentially a snapshot read of all keys at the given timestamp.
