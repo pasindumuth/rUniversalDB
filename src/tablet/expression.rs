@@ -20,10 +20,15 @@ use std::collections::{BTreeMap, HashMap};
 /// an AST into an EvalAST.
 #[derive(Debug)]
 pub enum EvalErr {
+  /// When a user tries to use a column that doesn't exist.
   ColumnDNE,
+  /// For when types in an expression don't match.
   TypeError,
+  /// Used if we try inserting NULL into a PrimaryKey column
   NullError,
+  /// For errors lik divide-by-zero, etc.
   ArithmeticError,
+  /// If an insert is attempted but it violates table constraints.
   ConstraintViolation,
   MalformedSQL,
 }
@@ -632,30 +637,43 @@ pub fn eval_select_graph(
 // -------------------------------------------------------------------------------------------------
 
 /// Function transforms a `ValExpr` into a `PreEvalExpr`, where the
-/// `ValExpr` doesn't refer to any column values. These sorts of expressions
-/// are common place in INSERT queries where there is no existing table row
-/// that's in the picture. If we find a `Column` (that's not underneath a
-/// Subquery), then we return an EvalErr.
+/// `ValExpr` doesn't contain any `Column` nodes (unless it's under a Subquery).
+/// These sorts of expressions are common place in INSERT queries where there
+/// is no existing table row that's in the picture. If we find a `Column`
+/// (that's not underneath a Subquery), then we return an EvalErr.
 fn val_to_pre_expr_no_col(expr: &ValExpr) -> Result<PreEvalExpr, EvalErr> {
-  panic!("TODO: implement")
+  match expr {
+    ValExpr::BinaryExpr { op, lhs, rhs } => Ok(PreEvalExpr::BinaryExpr {
+      op: convert_op(&op),
+      lhs: Box::new(val_to_pre_expr_no_col(lhs)?),
+      rhs: Box::new(val_to_pre_expr_no_col(rhs)?),
+    }),
+    ValExpr::Literal(literal) => Ok(PreEvalExpr::Literal(convert_literal(&literal)?)),
+    ValExpr::Column(_) => Err(EvalErr::ColumnDNE),
+    ValExpr::Subquery(subquery) => Ok(PreEvalExpr::Subquery(subquery.clone())),
+  }
 }
 
 fn val_to_pre_exprs_no_col(exprs: &Vec<ValExpr>) -> Result<Vec<PreEvalExpr>, EvalErr> {
   trans_res(exprs, |expr| val_to_pre_expr_no_col(expr))
 }
 
-/// This function performs a traveral of the expression tree in `expr`,
-/// deeply substituting `Column` nodes with the actual value of the
-/// column using the given `rel_tab` for the given `key` and `timestamp`.
-/// If the `Column` node is in a Subquery, then the replaced value is a
-/// sqlast type.
+/// This function first transforms the `ValExpr` into another `ValExpr` by
+/// replacing all `Column` nodes that are a part of the schema of `rel_tab`
+/// with the actual column value at the given `key` and `timestamp`. Then,
+/// we trivially this `ValExpr` to a `PreEvalExpr`. We might not be able to
+/// do this step because there might remain `Column` nodes that weren't
+/// replaced and that are not under some Subquery. This means the user sent
+/// a Query where they used an undefined column name in some expression. Thus
+/// we return a `ColumnDNE` error.
 fn val_to_pre_expr(
   expr: &ValExpr,
   rel_tab: &RelationalTablet,
   key: &PrimaryKey,
   timestamp: &Timestamp,
 ) -> Result<PreEvalExpr, EvalErr> {
-  panic!("TODO: implement")
+  // First replace the columns, and then convert to PreEvalExpr.
+  return val_to_pre_expr_no_col(&replace_columns(expr, rel_tab, key, timestamp));
 }
 
 fn val_to_pre_exprs(
@@ -668,13 +686,42 @@ fn val_to_pre_exprs(
 }
 
 /// This function replaces all instances of `Subquery`s in `pre_expr`
-/// with randomly generated `SubqueryId`s, and then returns
-/// those subqueries along with their `SubqueryId`s.
+/// with randomly generated `SubqueryId`s, and then returns the
+/// constructed `post_expr` along with the subqueries and their
+/// `SubqueryId`s.
 fn pre_to_post_expr(
   rand_gen: &mut RandGen,
   pre_expr: &PreEvalExpr,
 ) -> (PostEvalExpr, BTreeMap<SelectQueryId, SelectStmt>) {
-  panic!("Implement");
+  /// We use recursion to do this.
+  fn pre_to_post_expr_r(
+    rand_gen: &mut RandGen,
+    subqueries: &mut BTreeMap<SelectQueryId, SelectStmt>,
+    expr: PreEvalExpr,
+  ) -> PostEvalExpr {
+    match expr {
+      PreEvalExpr::Literal(literal) => PostEvalExpr::Literal(literal),
+      PreEvalExpr::BinaryExpr { op, lhs, rhs } => PostEvalExpr::BinaryExpr {
+        op,
+        lhs: Box::new(pre_to_post_expr_r(rand_gen, subqueries, *lhs)),
+        rhs: Box::new(pre_to_post_expr_r(rand_gen, subqueries, *rhs)),
+      },
+      PreEvalExpr::Subquery(subquery) => {
+        // Create a random SubqueryId
+        let mut bytes: [u8; 8] = [0; 8];
+        rand_gen.rng.fill(&mut bytes);
+        let subquery_id = SelectQueryId(TransactionId(bytes));
+        // Add the Subquery to the `subqueries` vector.
+        subqueries.insert(subquery_id.clone(), *subquery);
+        // Replace the subquery with the new subquery_id.
+        PostEvalExpr::SubqueryId(subquery_id)
+      }
+    }
+  }
+  // Call the recursive function.
+  let mut subqueries = BTreeMap::new();
+  let post_expr = pre_to_post_expr_r(rand_gen, &mut subqueries, pre_expr.clone());
+  (post_expr, subqueries)
 }
 
 /// This function calls `pre_to_post_expr` for each element in `pre_exprs`,
@@ -683,7 +730,16 @@ fn pre_to_post_exprs(
   rand_gen: &mut RandGen,
   pre_exprs: &Vec<PreEvalExpr>,
 ) -> (Vec<PostEvalExpr>, BTreeMap<SelectQueryId, SelectStmt>) {
-  panic!("Implement");
+  let mut all_subqueries = BTreeMap::new();
+  let mut post_exprs = Vec::new();
+  for pre_expr in pre_exprs {
+    let (post_expr, subqueries) = pre_to_post_expr(rand_gen, pre_expr);
+    post_exprs.push(post_expr);
+    for (sub_sid, subquery) in subqueries {
+      all_subqueries.insert(sub_sid, subquery);
+    }
+  }
+  return (post_exprs, all_subqueries);
 }
 
 /// This function evaluates the given `expr`. The `subquery_vals`
@@ -781,6 +837,48 @@ fn verify_cols(
   rel_tab: &RelationalTablet,
 ) -> Result<Vec<ColumnName>, EvalErr> {
   trans_res(col_names, |col_name| verify_col(col_name, rel_tab))
+}
+
+/// Suppose `col_name` is a column name in the schema of `rel_tab`. This
+/// function finds all instances of `col_name` in `expr` and replaces it
+/// with the value of that column in `rel_tab` for the row keyed by `key`
+/// at the given `timestamp`.
+fn replace_columns(
+  expr: &ValExpr,
+  rel_tab: &RelationalTablet,
+  key: &PrimaryKey,
+  timestamp: &Timestamp,
+) -> ValExpr {
+  match expr {
+    ValExpr::BinaryExpr { op, lhs, rhs } => ValExpr::BinaryExpr {
+      op: op.clone(),
+      lhs: Box::new(replace_columns(lhs, rel_tab, key, timestamp)),
+      rhs: Box::new(replace_columns(rhs, rel_tab, key, timestamp)),
+    },
+    ValExpr::Literal(literal) => ValExpr::Literal(literal.clone()),
+    ValExpr::Column(col) => {
+      let col_name = ColumnName(col.clone());
+      if rel_tab.col_name_exists(&col_name) {
+        // If the column name exists in the current tablet's schema,
+        // we replace the column name with the column value.
+        ValExpr::Literal(match rel_tab.get_partial_val(key, &col_name, timestamp) {
+          Some(ColumnValue::Int(int)) => Literal::Int(int.to_string()),
+          Some(ColumnValue::String(string)) => Literal::String(string.to_string()),
+          Some(ColumnValue::Bool(boolean)) => Literal::Bool(boolean),
+          None => Literal::Null,
+        })
+      } else {
+        // If the column name doesn't refer to a column in the
+        // main query, then leave it alone.
+        ValExpr::Column(col.clone())
+      }
+    }
+    ValExpr::Subquery(subquery) => ValExpr::Subquery(Box::from(SelectStmt {
+      col_names: subquery.col_names.clone(),
+      table_name: subquery.table_name.clone(),
+      where_clause: replace_columns(&subquery.where_clause, rel_tab, key, timestamp),
+    })),
+  }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -885,6 +983,11 @@ fn col_vals_into_diff(
   Ok(())
 }
 
+// -------------------------------------------------------------------------------------------------
+//  Type Conversion function
+// -------------------------------------------------------------------------------------------------
+
+/// Trivially converts an `EvalLiteral` to `Option<ColumnValue>`.
 fn from_lit(eval_lit: EvalLiteral) -> Option<ColumnValue> {
   match eval_lit {
     EvalLiteral::Int(i32) => Some(ColumnValue::Int(i32)),
@@ -901,6 +1004,40 @@ fn to_lit(col_val: Option<ColumnValue>) -> EvalLiteral {
     Some(ColumnValue::Bool(bool)) => EvalLiteral::Bool(bool),
     Some(ColumnValue::String(string)) => EvalLiteral::String(string),
     None => EvalLiteral::Null,
+  }
+}
+
+/// Converts a SQL `Literal` into `EvalLiteral`. Since `Literal` is
+/// verbatim what the user provided us, their numerical values might be
+/// malformed (i.e. too big). Thus, this function can return an error too.
+fn convert_literal(literal: &Literal) -> Result<EvalLiteral, EvalErr> {
+  match &literal {
+    Literal::String(string) => Ok(EvalLiteral::String(string.clone())),
+    Literal::Int(str) => {
+      if let Ok(int) = str.parse::<i32>() {
+        Ok(EvalLiteral::Int(int))
+      } else {
+        Err(EvalErr::ArithmeticError)
+      }
+    }
+    Literal::Bool(boolean) => Ok(EvalLiteral::Bool(boolean.clone())),
+    Literal::Null => Ok(EvalLiteral::Null),
+  }
+}
+
+/// Trivially converts `BinaryOp` to `EvalBinaryOp`.  
+fn convert_op(op: &BinaryOp) -> EvalBinaryOp {
+  match op {
+    BinaryOp::AND => EvalBinaryOp::AND,
+    BinaryOp::OR => EvalBinaryOp::OR,
+    BinaryOp::LT => EvalBinaryOp::LT,
+    BinaryOp::LTE => EvalBinaryOp::LTE,
+    BinaryOp::E => EvalBinaryOp::E,
+    BinaryOp::GT => EvalBinaryOp::GT,
+    BinaryOp::GTE => EvalBinaryOp::GTE,
+    BinaryOp::PLUS => EvalBinaryOp::PLUS,
+    BinaryOp::TIMES => EvalBinaryOp::TIMES,
+    BinaryOp::MINUS => EvalBinaryOp::MINUS,
   }
 }
 
@@ -961,156 +1098,4 @@ fn lookup<K: PartialEq + Eq, V: Clone>(vec: &Vec<(K, V)>, key: &K) -> Option<V> 
     }
   }
   return None;
-}
-
-// -------------------------------------------------------------------------------------------------
-//  Miscellaneous
-// -------------------------------------------------------------------------------------------------
-
-/// This Transforms the `expr` into a EvalExpr. It replaces all Subqueries with
-/// Box<SelectStmt>, where if a column in the main query appears in the subquery,
-/// we replace it with the evaluated value of the column. We also replace a column
-/// name with the valuated value of the column in the main query as well.
-///
-/// (Don't worry if replacing the column names is wrong. It might be, if SQL binds
-/// column names tighter to inner selects. Or SQL can throw an error. But I don't
-/// need that level of foresight here. Maybe we can have a super high-level pass
-/// that does verification later.)
-fn evaluate_columns(
-  rand_gen: &mut RandGen,
-  expr: ValExpr,
-  rel_tab: &RelationalTablet,
-  key: &PrimaryKey,
-  timestamp: &Timestamp,
-) -> Result<(PostEvalExpr, Vec<(SelectQueryId, SelectStmt)>), EvalErr> {
-  /// Recursive function here.
-  fn evaluate_columns_r(
-    rand_gen: &mut RandGen,
-    subqueries: &mut Vec<(SelectQueryId, SelectStmt)>,
-    expr: ValExpr,
-    rel_tab: &RelationalTablet,
-    key: &PrimaryKey,
-    timestamp: &Timestamp,
-  ) -> Result<PostEvalExpr, EvalErr> {
-    match expr {
-      ValExpr::Literal(literal) => Ok(PostEvalExpr::Literal(convert_literal(&literal))),
-      ValExpr::BinaryExpr { op, lhs, rhs } => Ok(PostEvalExpr::BinaryExpr {
-        op: convert_op(&op),
-        lhs: Box::new(evaluate_columns_r(
-          rand_gen, subqueries, *lhs, rel_tab, key, timestamp,
-        )?),
-        rhs: Box::new(evaluate_columns_r(
-          rand_gen, subqueries, *rhs, rel_tab, key, timestamp,
-        )?),
-      }),
-      ValExpr::Column(col) => {
-        let col_name = ColumnName(col.clone());
-        if rel_tab.col_name_exists(&col_name) {
-          // If the column name actually exists in the current tablet's
-          // schema, we replace the column name with the column value.
-          Ok(PostEvalExpr::Literal(
-            match rel_tab.get_partial_val(key, &col_name, timestamp) {
-              Some(ColumnValue::Int(int)) => EvalLiteral::Int(int),
-              Some(ColumnValue::String(string)) => EvalLiteral::String(string.to_string()),
-              Some(ColumnValue::Bool(boolean)) => EvalLiteral::Bool(boolean),
-              None => EvalLiteral::Null,
-            },
-          ))
-        } else {
-          // If the column name doesn't exist in the schema, then this query
-          // is not valid and we propagate up an error message.
-          Err(EvalErr::ColumnDNE)
-        }
-      }
-      ValExpr::Subquery(subquery) => {
-        // Create a random SubqueryId
-        let mut bytes: [u8; 8] = [0; 8];
-        rand_gen.rng.fill(&mut bytes);
-        let subquery_id = SelectQueryId(TransactionId(bytes));
-        // Add the Subquery to the `subqueries` vector.
-        subqueries.push((
-          subquery_id.clone(),
-          SelectStmt {
-            col_names: subquery.col_names.clone(),
-            table_name: subquery.table_name.clone(),
-            where_clause: replace_column(key, timestamp, rel_tab, &subquery.where_clause),
-          },
-        ));
-        // The PostEvalExpr thats should replace the ValExpr::Subquery is simply
-        // the subqueryId that was sent out to the clients.
-        Ok(PostEvalExpr::SubqueryId(subquery_id))
-      }
-    }
-  }
-
-  let mut subqueries = Vec::new();
-  let evaluate_expr2 =
-    evaluate_columns_r(rand_gen, &mut subqueries, expr, rel_tab, key, timestamp)?;
-  return Ok((evaluate_expr2, subqueries));
-}
-
-/// Suppose `col_name` is a column name in the schema of `rel_tab`. This
-/// function finds all instances of `col_name` in `expr` and replaces it
-/// with the value of that column in `rel_tab` for the row keyed by `key`
-/// at the given `timestamp`.
-fn replace_column(
-  key: &PrimaryKey,
-  timestamp: &Timestamp,
-  rel_tab: &RelationalTablet,
-  expr: &ValExpr,
-) -> ValExpr {
-  match expr {
-    ValExpr::BinaryExpr { op, lhs, rhs } => ValExpr::BinaryExpr {
-      op: op.clone(),
-      lhs: Box::new(replace_column(key, timestamp, rel_tab, lhs)),
-      rhs: Box::new(replace_column(key, timestamp, rel_tab, rhs)),
-    },
-    ValExpr::Literal(literal) => ValExpr::Literal(literal.clone()),
-    ValExpr::Column(col) => {
-      let col_name = ColumnName(col.clone());
-      if rel_tab.col_name_exists(&col_name) {
-        // If the column name exists in the current tablet's schema,
-        // we replace the column name with the column value.
-        ValExpr::Literal(match rel_tab.get_partial_val(key, &col_name, timestamp) {
-          Some(ColumnValue::Int(int)) => Literal::Int(int.to_string()),
-          Some(ColumnValue::String(string)) => Literal::String(string.to_string()),
-          Some(ColumnValue::Bool(boolean)) => Literal::Bool(boolean),
-          None => Literal::Null,
-        })
-      } else {
-        // If the column name doesn't refer to a column in the
-        // main query, then leave it alone.
-        ValExpr::Column(col.clone())
-      }
-    }
-    ValExpr::Subquery(subquery) => ValExpr::Subquery(Box::from(SelectStmt {
-      col_names: subquery.col_names.clone(),
-      table_name: subquery.table_name.clone(),
-      where_clause: replace_column(key, timestamp, rel_tab, &subquery.where_clause),
-    })),
-  }
-}
-
-fn convert_literal(literal: &Literal) -> EvalLiteral {
-  match &literal {
-    Literal::String(string) => EvalLiteral::String(string.clone()),
-    Literal::Int(str) => EvalLiteral::Int(str.parse::<i32>().unwrap()),
-    Literal::Bool(boolean) => EvalLiteral::Bool(boolean.clone()),
-    Literal::Null => EvalLiteral::Null,
-  }
-}
-
-fn convert_op(op: &BinaryOp) -> EvalBinaryOp {
-  match op {
-    BinaryOp::AND => EvalBinaryOp::AND,
-    BinaryOp::OR => EvalBinaryOp::OR,
-    BinaryOp::LT => EvalBinaryOp::LT,
-    BinaryOp::LTE => EvalBinaryOp::LTE,
-    BinaryOp::E => EvalBinaryOp::E,
-    BinaryOp::GT => EvalBinaryOp::GT,
-    BinaryOp::GTE => EvalBinaryOp::GTE,
-    BinaryOp::PLUS => EvalBinaryOp::PLUS,
-    BinaryOp::TIMES => EvalBinaryOp::TIMES,
-    BinaryOp::MINUS => EvalBinaryOp::MINUS,
-  }
 }
