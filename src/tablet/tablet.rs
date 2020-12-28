@@ -1,16 +1,15 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{
-  EndpointId, PrimaryKey, Row, Schema, SelectQueryId, SelectView, TabletShape, Timestamp,
-  WriteQueryId,
+  EndpointId, PrimaryKey, Schema, SelectQueryId, SelectView, TabletShape, Timestamp, WriteQueryId,
 };
 use crate::model::evalast::{
   Holder, InsertRowTask, InsertTask, SelectKeyTask, SelectQueryTask, SelectTask, UpdateKeyTask,
   UpdateTask, WriteQueryTask,
 };
 use crate::model::message::{
-  AdminMessage, AdminRequest, AdminResponse, FromCombo, FromProp, FromRoot, FromSelectTask,
-  FromWriteTask, NetworkMessage, SelectPrepare, SlaveMessage, SubqueryResponse, TabletAction,
-  TabletMessage, WriteAbort, WriteCommit, WritePrepare, WriteQuery,
+  FromCombo, FromProp, FromRoot, FromSelectTask, FromWriteTask, NetworkMessage, SelectPrepare,
+  SlaveMessage, SubqueryResponse, TabletAction, TabletMessage, WriteAbort, WriteCommit,
+  WritePrepare, WriteQuery,
 };
 use crate::model::sqlast::SelectStmt;
 use crate::storage::relational_tablet::RelationalTablet;
@@ -179,53 +178,6 @@ impl TabletState {
     msg: TabletMessage,
   ) {
     match &msg {
-      TabletMessage::ClientRequest { .. } => {
-        panic!("Client messages not supported yet.");
-      }
-      TabletMessage::AdminRequest { eid, req } => match req {
-        AdminRequest::Insert {
-          rid,
-          key,
-          value,
-          timestamp,
-          ..
-        } => {
-          let row = Row {
-            key: key.clone(),
-            val: value.clone(),
-          };
-          let result = self.relational_tablet.insert_row(&row, *timestamp);
-          side_effects.add(TabletAction::Send {
-            eid: eid.clone(),
-            msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
-              res: AdminResponse::Insert {
-                rid: rid.clone(),
-                result,
-              },
-            }),
-          });
-        }
-        AdminRequest::Read {
-          rid,
-          key,
-          timestamp,
-          ..
-        } => {
-          let result = self.relational_tablet.read_row(&key, *timestamp);
-          side_effects.add(TabletAction::Send {
-            eid: eid.clone(),
-            msg: NetworkMessage::Admin(AdminMessage::AdminResponse {
-              res: AdminResponse::Read {
-                rid: rid.clone(),
-                result,
-              },
-            }),
-          });
-        }
-        AdminRequest::SqlQuery { .. } => {
-          panic!("Tablets should not get SQL statements {:?}.", msg);
-        }
-      },
       TabletMessage::SelectPrepare(select_prepare) => {
         side_effects.append(self.handle_select_prepare(select_prepare));
       }

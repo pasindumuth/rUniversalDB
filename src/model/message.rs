@@ -1,6 +1,6 @@
 use crate::model::common::{
-  ColumnValue, EndpointId, PrimaryKey, RequestId, Row, SelectQueryId, SelectView, TabletPath,
-  TabletShape, Timestamp, TransactionId, WriteQueryId,
+  EndpointId, PrimaryKey, RequestId, Row, SelectQueryId, SelectView, TabletShape, Timestamp,
+  TransactionId, WriteQueryId,
 };
 use crate::model::sqlast::{InsertStmt, SelectStmt, SqlStmt, UpdateStmt};
 use serde::{Deserialize, Serialize};
@@ -64,19 +64,6 @@ pub enum AdminMessage {
 /// Admin Request
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum AdminRequest {
-  Insert {
-    rid: RequestId,
-    path: TabletPath,
-    key: PrimaryKey,
-    value: Vec<Option<ColumnValue>>,
-    timestamp: Timestamp,
-  },
-  Read {
-    rid: RequestId,
-    path: TabletPath,
-    key: PrimaryKey,
-    timestamp: Timestamp,
-  },
   SqlQuery {
     rid: RequestId,
     tid: TransactionId,
@@ -235,8 +222,6 @@ pub struct SubqueryResponse {
 /// Message that go into the Tablet's handler.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletMessage {
-  AdminRequest { eid: EndpointId, req: AdminRequest },
-  ClientRequest { eid: EndpointId, req: ClientRequest },
   SelectPrepare(SelectPrepare),
   WritePrepare(WritePrepare),
   WriteCommit(WriteCommit),

@@ -1,7 +1,7 @@
 use crate::common::rand::RandGen;
 use crate::model::common::{
-  EndpointId, RequestId, SelectQueryId, SelectView, TabletKeyRange, TabletPath, TabletShape,
-  Timestamp, TransactionId, WriteQueryId,
+  EndpointId, RequestId, SelectQueryId, SelectView, TabletShape, Timestamp, TransactionId,
+  WriteQueryId,
 };
 use crate::model::message::{
   AdminMessage, AdminRequest, AdminResponse, NetworkMessage, SelectPrepare, SlaveAction,
@@ -68,24 +68,6 @@ impl SlaveState {
         panic!("Client messages not supported yet.");
       }
       SlaveMessage::AdminRequest { req } => match req {
-        AdminRequest::Insert { path, .. } => {
-          side_effects.add(SlaveAction::Forward {
-            tablet: mk_shape(path),
-            msg: TabletMessage::AdminRequest {
-              eid: from_eid.clone(),
-              req: req.clone(),
-            },
-          });
-        }
-        AdminRequest::Read { path, .. } => {
-          side_effects.add(SlaveAction::Forward {
-            tablet: mk_shape(path),
-            msg: TabletMessage::AdminRequest {
-              eid: from_eid.clone(),
-              req: req.clone(),
-            },
-          });
-        }
         AdminRequest::SqlQuery {
           rid,
           tid,
@@ -454,17 +436,4 @@ fn get_tablets(
     }
   }
   return mpc_tablets;
-}
-
-fn mk_shape(path: &TabletPath) -> TabletShape {
-  // For now, we just assume that if we get an AdminMessage
-  // with some `path`, then this Slave has the Tablet for it
-  // and that Tablet contains the whole key space.
-  TabletShape {
-    path: path.clone(),
-    range: TabletKeyRange {
-      start: None,
-      end: None,
-    },
-  }
 }
