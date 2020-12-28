@@ -413,7 +413,7 @@ pub fn eval_write_graph(
             ));
             // Remove the key task because it is done.
             task.key_tasks.remove(key).unwrap();
-            if task.key_vals.is_empty() {
+            if task.key_tasks.is_empty() {
               // This means that the whole Write Task is finished as well.
               write_task.val = WriteQueryTask::WriteDoneTask(task.key_vals.clone());
             }
@@ -445,7 +445,7 @@ pub fn eval_write_graph(
             )?;
             // Remove the row task because it is done.
             task.tasks.remove(index).unwrap();
-            if task.key_vals.is_empty() {
+            if task.tasks.is_empty() {
               // This means that the whole Write Task is finished as well.
               write_task.val = WriteQueryTask::WriteDoneTask(task.key_vals.clone());
             }

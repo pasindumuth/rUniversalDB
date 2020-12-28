@@ -274,6 +274,7 @@ fn insert_update_select_multi_tablet(sim: &mut Simulation) -> Result<(), String>
           WHERE TRUE
         "#,
         Timestamp(4),
+        #[rustfmt::skip]
         Ok(make_view(
           (vec![cn("key")], vec![(cn("value"))]),
           vec![
@@ -313,7 +314,7 @@ fn update_complex_where(sim: &mut Simulation) -> Result<(), String> {
           SET value = 5
           WHERE key = "hello" OR key = "rello"
         "#,
-        Timestamp(4),
+        Timestamp(3),
         Ok(BTreeMap::new()),
       ),
       (
@@ -323,6 +324,7 @@ fn update_complex_where(sim: &mut Simulation) -> Result<(), String> {
           WHERE TRUE
         "#,
         Timestamp(4),
+        #[rustfmt::skip]
         Ok(make_view(
           (vec![cn("key")], vec![(cn("value"))]),
           vec![
@@ -335,6 +337,118 @@ fn update_complex_where(sim: &mut Simulation) -> Result<(), String> {
       ),
     ],
   )
+}
+
+/// This tests an UPDATE with a non-trivial WHERE clause, where only
+/// a subset of keys should be touched in different tablets.
+fn basic_subquery(sim: &mut Simulation) -> Result<(), String> {
+  exec_seq_session(
+    sim,
+    &EndpointId::from("c0"),
+    &EndpointId::from("s0"),
+    vec![
+      (
+        r#"
+          INSERT INTO table1 (key, value)
+          VALUES ("hi", 2)
+        "#,
+        Timestamp(1),
+        Ok(BTreeMap::new()),
+      ),
+      (
+        r#"
+          INSERT INTO table2 (key, value)
+          VALUES ("hello",
+            (
+              SELECT value
+              FROM table1
+              WHERE key = "hi"
+            ) + 1
+          )
+        "#,
+        Timestamp(2),
+        Ok(BTreeMap::new()),
+      ),
+      (
+        &r#"
+          SELECT key, value
+          FROM table2
+          WHERE TRUE
+        "#,
+        Timestamp(4),
+        #[rustfmt::skip]
+        Ok(make_view(
+          (vec![cn("key")], vec![(cn("value"))]),
+          vec![vec![cvs("hello"), cvi(3)]],
+        )),
+      ),
+    ],
+  );
+  Ok(())
+}
+
+/// This test does multiple subqueries over different tablets in a single
+/// INSERT statement, just being a little less trivial.
+fn multi_tablet_subquery(sim: &mut Simulation) -> Result<(), String> {
+  exec_seq_session(
+    sim,
+    &EndpointId::from("c0"),
+    &EndpointId::from("s0"),
+    vec![
+      (
+        r#"
+          INSERT INTO table3 (key, value)
+          VALUES ("aello", 1),
+                 ("hello", 2),
+                 ("kello", 3),
+                 ("rello", 4)
+        "#,
+        Timestamp(1),
+        Ok(BTreeMap::new()),
+      ),
+      (
+        r#"
+          INSERT INTO table2 (key, value)
+          VALUES ("hi", 2),
+                 ("ri", 5)
+        "#,
+        Timestamp(1),
+        Ok(BTreeMap::new()),
+      ),
+      (
+        r#"
+          INSERT INTO table1 (key, value)
+          VALUES ("hello",
+            (
+              SELECT value
+              FROM table3
+              WHERE key = "rello"
+            ) + (
+              SELECT value
+              FROM table2
+              WHERE key = "hi"
+            )
+          )
+        "#,
+        Timestamp(2),
+        Ok(BTreeMap::new()),
+      ),
+      (
+        &r#"
+          SELECT key, value
+          FROM table2
+          WHERE TRUE
+        "#,
+        Timestamp(4),
+        #[rustfmt::skip]
+            Ok(make_view(
+          (vec![cn("key")], vec![(cn("value"))]),
+          vec![vec![cvs("hello"), cvi(6)]],
+        )),
+      ),
+    ],
+  );
+  Ok(())
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -369,6 +483,8 @@ fn test_driver() {
     insert_update_select_multi_tablet,
   );
   drive_test(6, "update_complex_where", update_complex_where);
+  drive_test(7, "basic_subquery", basic_subquery);
+  drive_test(8, "multi_tablet_subquery", multi_tablet_subquery);
 }
 
 fn main() {
