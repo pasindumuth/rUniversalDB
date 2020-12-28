@@ -87,6 +87,32 @@ fn add_req_res(
   );
 }
 
+/// Adds an AdminRequest containing the following SQL statement.
+/// This just creates a random RequestId and TransactionId.
+fn add_sql_query(
+  sim: &mut Simulation,
+  from_eid: &EndpointId,
+  to_eid: &EndpointId,
+  query: &str,
+  timestamp: Timestamp,
+) {
+  let rid = sim.mk_request_id();
+  let tid = mk_tid(&mut sim.rng);
+  sim.add_msg(
+    NetworkMessage::Slave(SlaveMessage::AdminRequest {
+      req: AdminRequest::SqlQuery {
+        rid,
+        tid,
+        sql: parse_sql(&query.to_string()).unwrap(),
+        timestamp,
+      },
+    }),
+    &from_eid,
+    &to_eid,
+  );
+  sim.simulate_all();
+}
+
 /// Checks to see if the messages in expected_res_map were
 /// actually sent out by the Simulation.
 fn check_expected_res(
@@ -188,26 +214,15 @@ fn basic_insert_select(sim: &mut Simulation) -> Result<(), String> {
   let from_eid = EndpointId::from("c0");
   let to_eid = EndpointId::from("s0");
 
-  let rid = sim.mk_request_id();
-  let tid = mk_tid(&mut sim.rng);
-  sim.add_msg(
-    NetworkMessage::Slave(SlaveMessage::AdminRequest {
-      req: AdminRequest::SqlQuery {
-        rid,
-        tid,
-        sql: parse_sql(
-          &r#"
-            INSERT INTO table1 (key, value)
-            VALUES ("hello", 1)
-          "#
-          .to_string(),
-        )
-        .unwrap(),
-        timestamp: Timestamp(2),
-      },
-    }),
+  add_sql_query(
+    sim,
     &from_eid,
     &to_eid,
+    r#"
+      INSERT INTO table1 (key, value)
+      VALUES ("hello", 1)
+    "#,
+    Timestamp(2),
   );
   sim.simulate_all();
 
@@ -260,27 +275,16 @@ fn insert_select_multi_tablet(sim: &mut Simulation) -> Result<(), String> {
   let from_eid = EndpointId::from("c0");
   let to_eid = EndpointId::from("s0");
 
-  let rid = sim.mk_request_id();
-  let tid = mk_tid(&mut sim.rng);
-  sim.add_msg(
-    NetworkMessage::Slave(SlaveMessage::AdminRequest {
-      req: AdminRequest::SqlQuery {
-        rid,
-        tid,
-        sql: parse_sql(
-          &r#"
-            INSERT INTO table2 (key, value)
-            VALUES ("hello", 1),
-                   ("kello", 2)
-          "#
-          .to_string(),
-        )
-        .unwrap(),
-        timestamp: Timestamp(2),
-      },
-    }),
+  add_sql_query(
+    sim,
     &from_eid,
     &to_eid,
+    r#"
+      INSERT INTO table2 (key, value)
+      VALUES ("hello", 1),
+             ("kello", 2)
+    "#,
+    Timestamp(2),
   );
   sim.simulate_all();
 
@@ -336,6 +340,295 @@ fn insert_select_multi_tablet(sim: &mut Simulation) -> Result<(), String> {
   check_expected_res(sim, &expected_res_map)
 }
 
+/// Test a simple Update by inserting a single value and then updating it.
+fn basic_insert_update_select(sim: &mut Simulation) -> Result<(), String> {
+  let from_eid = EndpointId::from("c0");
+  let to_eid = EndpointId::from("s0");
+
+  add_sql_query(
+    sim,
+    &from_eid,
+    &to_eid,
+    r#"
+      INSERT INTO table1 (key, value)
+      VALUES ("hello", 1)
+    "#,
+    Timestamp(2),
+  );
+  sim.simulate_all();
+
+  add_sql_query(
+    sim,
+    &from_eid,
+    &to_eid,
+    r#"
+      UPDATE table1
+      SET value = 2
+      WHERE key = "hello"
+    "#,
+    Timestamp(3),
+  );
+  sim.simulate_all();
+
+  let mut expected_res_map = HashMap::new();
+
+  let rid = sim.mk_request_id();
+  let tid = mk_tid(&mut sim.rng);
+  add_req_res(
+    sim,
+    &from_eid,
+    &to_eid,
+    AdminRequest::SqlQuery {
+      rid: rid.clone(),
+      tid,
+      sql: parse_sql(
+        &r#"
+            SELECT key, value
+            FROM table1
+            WHERE TRUE
+          "#
+        .to_string(),
+      )
+      .unwrap(),
+      timestamp: Timestamp(3),
+    },
+    AdminResponse::SqlQuery {
+      rid: rid.clone(),
+      result: Ok(BTreeMap::from_iter(
+        vec![(
+          mk_key("hello"),
+          vec![
+            (CN("key".to_string()), Some(CV::String("hello".to_string()))),
+            (CN("value".to_string()), Some(CV::Int(2))),
+          ],
+        )]
+        .into_iter(),
+      )),
+    },
+    &mut expected_res_map,
+    rid,
+  );
+  sim.simulate_all();
+
+  check_expected_res(sim, &expected_res_map)
+}
+
+/// This test checks to see if multiple values can be inserted and then
+/// updated through multiple UPDATE queries.
+fn insert_update_select_multi_tablet(sim: &mut Simulation) -> Result<(), String> {
+  let from_eid = EndpointId::from("c0");
+  let to_eid = EndpointId::from("s0");
+
+  add_sql_query(
+    sim,
+    &from_eid,
+    &to_eid,
+    r#"
+      INSERT INTO table3 (key, value)
+      VALUES ("aello", 1),
+             ("hello", 2),
+             ("kello", 3),
+             ("rello", 4)
+    "#,
+    Timestamp(2),
+  );
+  sim.simulate_all();
+
+  add_sql_query(
+    sim,
+    &from_eid,
+    &to_eid,
+    r#"
+      UPDATE table3
+      SET value = 3
+      WHERE key = "hello"
+    "#,
+    Timestamp(3),
+  );
+  sim.simulate_all();
+
+  add_sql_query(
+    sim,
+    &from_eid,
+    &to_eid,
+    r#"
+      UPDATE table3
+      SET value = 4
+      WHERE key = "kello"
+    "#,
+    // Remember that the timestamp of all udates
+    // that touch the same tablet must be distinct, even
+    // if they touch different keys.
+    Timestamp(4),
+  );
+  sim.simulate_all();
+
+  let mut expected_res_map = HashMap::new();
+
+  let rid = sim.mk_request_id();
+  let tid = mk_tid(&mut sim.rng);
+  add_req_res(
+    sim,
+    &from_eid,
+    &to_eid,
+    AdminRequest::SqlQuery {
+      rid: rid.clone(),
+      tid,
+      sql: parse_sql(
+        &r#"
+            SELECT key, value
+            FROM table3
+            WHERE TRUE
+          "#
+        .to_string(),
+      )
+      .unwrap(),
+      timestamp: Timestamp(4),
+    },
+    AdminResponse::SqlQuery {
+      rid: rid.clone(),
+      result: Ok(BTreeMap::from_iter(
+        vec![
+          (
+            mk_key("aello"),
+            vec![
+              (CN("key".to_string()), Some(CV::String("aello".to_string()))),
+              (CN("value".to_string()), Some(CV::Int(1))),
+            ],
+          ),
+          (
+            mk_key("hello"),
+            vec![
+              (CN("key".to_string()), Some(CV::String("hello".to_string()))),
+              (CN("value".to_string()), Some(CV::Int(3))),
+            ],
+          ),
+          (
+            mk_key("kello"),
+            vec![
+              (CN("key".to_string()), Some(CV::String("kello".to_string()))),
+              (CN("value".to_string()), Some(CV::Int(4))),
+            ],
+          ),
+          (
+            mk_key("rello"),
+            vec![
+              (CN("key".to_string()), Some(CV::String("rello".to_string()))),
+              (CN("value".to_string()), Some(CV::Int(4))),
+            ],
+          ),
+        ]
+        .into_iter(),
+      )),
+    },
+    &mut expected_res_map,
+    rid,
+  );
+  sim.simulate_all();
+
+  check_expected_res(sim, &expected_res_map)
+}
+
+/// This tests an UPDATE with a non-trivial WHERE clause, where only
+/// a subset of keys should be touched in different tablets.
+fn update_complex_where(sim: &mut Simulation) -> Result<(), String> {
+  let from_eid = EndpointId::from("c0");
+  let to_eid = EndpointId::from("s0");
+
+  add_sql_query(
+    sim,
+    &from_eid,
+    &to_eid,
+    r#"
+      INSERT INTO table3 (key, value)
+      VALUES ("aello", 1),
+             ("hello", 2),
+             ("kello", 3),
+             ("rello", 4)
+    "#,
+    Timestamp(2),
+  );
+  sim.simulate_all();
+
+  add_sql_query(
+    sim,
+    &from_eid,
+    &to_eid,
+    r#"
+      UPDATE table3
+      SET value = 5
+      WHERE key = "hello" OR key = "rello"
+    "#,
+    Timestamp(4),
+  );
+  sim.simulate_all();
+
+  let mut expected_res_map = HashMap::new();
+
+  let rid = sim.mk_request_id();
+  let tid = mk_tid(&mut sim.rng);
+  add_req_res(
+    sim,
+    &from_eid,
+    &to_eid,
+    AdminRequest::SqlQuery {
+      rid: rid.clone(),
+      tid,
+      sql: parse_sql(
+        &r#"
+            SELECT key, value
+            FROM table3
+            WHERE TRUE
+          "#
+        .to_string(),
+      )
+      .unwrap(),
+      timestamp: Timestamp(4),
+    },
+    AdminResponse::SqlQuery {
+      rid: rid.clone(),
+      result: Ok(BTreeMap::from_iter(
+        vec![
+          (
+            mk_key("aello"),
+            vec![
+              (CN("key".to_string()), Some(CV::String("aello".to_string()))),
+              (CN("value".to_string()), Some(CV::Int(1))),
+            ],
+          ),
+          (
+            mk_key("hello"),
+            vec![
+              (CN("key".to_string()), Some(CV::String("hello".to_string()))),
+              (CN("value".to_string()), Some(CV::Int(5))),
+            ],
+          ),
+          (
+            mk_key("kello"),
+            vec![
+              (CN("key".to_string()), Some(CV::String("kello".to_string()))),
+              (CN("value".to_string()), Some(CV::Int(3))),
+            ],
+          ),
+          (
+            mk_key("rello"),
+            vec![
+              (CN("key".to_string()), Some(CV::String("rello".to_string()))),
+              (CN("value".to_string()), Some(CV::Int(5))),
+            ],
+          ),
+        ]
+        .into_iter(),
+      )),
+    },
+    &mut expected_res_map,
+    rid,
+  );
+  sim.simulate_all();
+
+  check_expected_res(sim, &expected_res_map)
+}
+
 // -------------------------------------------------------------------------------------------------
 //  Test Driver
 // -------------------------------------------------------------------------------------------------
@@ -361,6 +654,13 @@ fn test_driver() {
   drive_test(1, "basic_read_write", basic_read_write);
   drive_test(2, "basic_insert_select", basic_insert_select);
   drive_test(3, "insert_select_multi_tablet", insert_select_multi_tablet);
+  drive_test(4, "basic_insert_update_select", basic_insert_update_select);
+  drive_test(
+    5,
+    "insert_update_select_multi_tablet",
+    insert_update_select_multi_tablet,
+  );
+  drive_test(6, "update_complex_where", update_complex_where);
 }
 
 fn main() {
