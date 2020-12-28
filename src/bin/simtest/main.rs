@@ -385,6 +385,68 @@ fn multi_tablet_subquery(sim: &mut Simulation) -> Result<(), String> {
   )
 }
 
+/// This test does does a subquery in an UPDATE statement, where
+/// there will generally be many tablets touched.
+fn update_subquery(sim: &mut Simulation) -> Result<(), String> {
+  exec_seq_session(
+    sim,
+    &EndpointId::from("c0"),
+    &EndpointId::from("s0"),
+    vec![
+      (
+        r#"
+          INSERT INTO table3 (key, value)
+          VALUES ("aello", 1),
+                 ("hello", 2),
+                 ("kello", 3),
+                 ("rello", 4)
+        "#,
+        Timestamp(1),
+        Ok(BTreeMap::new()),
+      ),
+      (
+        r#"
+          INSERT INTO table2 (key, value)
+          VALUES ("hi", 2),
+                 ("ri", 5)
+        "#,
+        Timestamp(1),
+        Ok(BTreeMap::new()),
+      ),
+      (
+        r#"
+          UPDATE table3
+          SET value = value + 1
+          WHERE value = (
+            SELECT value
+            FROM table2
+            WHERE key = "hi"
+          )
+        "#,
+        Timestamp(2),
+        Ok(BTreeMap::new()),
+      ),
+      (
+        &r#"
+          SELECT key, value
+          FROM table3
+          WHERE TRUE
+        "#,
+        Timestamp(4),
+        #[rustfmt::skip] Ok(make_view(
+          (vec![cn("key")], vec![(cn("value"))]),
+          vec![
+            vec![cvs("aello"), cvi(1)],
+            vec![cvs("hello"), cvi(3)],
+            vec![cvs("kello"), cvi(3)],
+            vec![cvs("rello"), cvi(4)],
+          ],
+        )),
+      ),
+    ],
+  )
+}
+
 // -------------------------------------------------------------------------------------------------
 //  Test Driver
 // -------------------------------------------------------------------------------------------------
@@ -418,6 +480,9 @@ fn test_driver() {
   drive_test(5, "update_complex_where", update_complex_where);
   drive_test(6, "basic_subquery", basic_subquery);
   drive_test(7, "multi_tablet_subquery", multi_tablet_subquery);
+  // This test won't pass until using `key` inside a subquery refers to
+  // the subquery's table's column, not the parent query's table.
+  // drive_test(8, "update_subquery", update_subquery);
 }
 
 fn main() {
