@@ -82,8 +82,8 @@ impl Simulation {
     }
     let mut tablet_states = HashMap::new();
     for eid in &slave_eids {
+      let mut slave_tablet_states = HashMap::new();
       for shape in &tablet_config[eid] {
-        let mut slave_tablet_states = HashMap::new();
         let mut seed = [0; 16];
         rng.fill_bytes(&mut seed);
         slave_tablet_states.insert(
@@ -97,8 +97,8 @@ impl Simulation {
             static_schema.clone(),
           ),
         );
-        tablet_states.insert(eid.clone(), slave_tablet_states);
       }
+      tablet_states.insert(eid.clone(), slave_tablet_states);
     }
     let client_msgs_received = client_eids
       .iter()

@@ -12,7 +12,7 @@ use crate::model::evalast::{
 };
 use crate::model::message::{FromSelectTask, FromWriteTask};
 use crate::model::sqlast::{BinaryOp, InsertStmt, Literal, SelectStmt, UpdateStmt, ValExpr};
-use crate::storage::relational_tablet::RelationalTablet;
+use crate::storage::relational_tablet::{RelationalTablet, StorageError};
 use std::collections::{BTreeMap, HashMap};
 
 /// Errors that can occur when evaluating columns while transforming
@@ -898,6 +898,7 @@ fn replace_columns(
 /// results are put into a `WriteDiff` where it is merged into `rel_tab`
 /// at some future point via a call to `tablet_insert_diff`.
 
+/// Inserts a value into a cell in the RelationalTablet.
 pub fn table_insert_cell(
   rel_tab: &mut RelationalTablet,
   key: &PrimaryKey,
@@ -906,13 +907,46 @@ pub fn table_insert_cell(
   timestamp: &Timestamp,
 ) -> Result<(), EvalErr> {
   if rel_tab
-    .insert_partial_val(key.clone(), col_name.clone(), from_lit(val), timestamp)
+    .upsert_row(
+      key.clone(),
+      Some(vec![(col_name.clone(), from_lit(val))]),
+      timestamp,
+    )
     .is_ok()
   {
     Ok(())
   } else {
     Err(EvalErr::InsertionFailure)
   }
+}
+
+/// This functiion transforms the evaluated `col_vals` into something that
+/// can be fed into the RelationalTablet later on.
+fn make_col_vals(
+  rel_tab: &RelationalTablet,
+  col_names: &Vec<ColumnName>,
+  col_vals: Vec<EvalLiteral>,
+) -> Result<(PrimaryKey, Vec<(ColumnName, Option<ColumnValue>)>), EvalErr> {
+  assert_eq!(col_names.len(), col_vals.len());
+  let mut col_name_val_map: HashMap<ColumnName, Option<ColumnValue>> = HashMap::new();
+  for (col_name, col_val) in col_names.iter().zip(col_vals.iter()) {
+    col_name_val_map.insert(col_name.clone(), from_lit(col_val.clone()));
+  }
+  let mut key = PrimaryKey { cols: vec![] };
+  for (_, key_col_name) in &rel_tab.schema.key_cols {
+    // Due to `verify_insert`, we may use `unwrap` without concern.
+    if let Some(key_col_val) = col_name_val_map.remove(key_col_name).unwrap() {
+      key.cols.push(key_col_val);
+    } else {
+      // This cannot evaluate to NULL because all column values in a
+      return Err(EvalErr::NullError);
+    }
+  }
+  let mut partial_val = vec![];
+  for (col_name, col_val) in col_name_val_map {
+    partial_val.push((col_name, col_val));
+  }
+  Ok((key, partial_val))
 }
 
 /// This function takes the `col_names` and `col_vals`, constructs a PrimaryKey
@@ -929,35 +963,14 @@ pub fn table_insert_row(
   col_vals: Vec<EvalLiteral>,
   timestamp: &Timestamp,
 ) -> Result<(), EvalErr> {
-  assert_eq!(col_names.len(), col_vals.len());
-  let mut col_name_val_map: HashMap<ColumnName, Option<ColumnValue>> = HashMap::new();
-  for (col_name, col_val) in col_names.iter().zip(col_vals.iter()) {
-    col_name_val_map.insert(col_name.clone(), from_lit(col_val.clone()));
-  }
-  let mut key = PrimaryKey { cols: vec![] };
-  for (_, key_col_name) in &rel_tab.schema.key_cols {
-    // Due to `verify_insert`, we may use `unwrap` without concern.
-    if let Some(key_col_val) = col_name_val_map.remove(key_col_name).unwrap() {
-      key.cols.push(key_col_val);
-    } else {
-      // This cannot evaluate to NULL because all column values in a
-      // Primary Key must be present.
-      return Err(EvalErr::NullError);
-    }
-  }
-  let mut partial_val = vec![];
-  for (col_name, col_val) in col_name_val_map {
-    partial_val.push((col_name, col_val));
-  }
-  if rel_tab
-    .insert_partial_vals(key, partial_val, timestamp)
-    .is_ok()
-  {
-    Ok(())
-  } else {
-    // We will get here if the `col_vals` doesn't match the
-    // `ColumnType` in the schema.
-    Err(EvalErr::InsertionFailure)
+  let (key, partial_val) = make_col_vals(rel_tab, col_names, col_vals)?;
+  match rel_tab.upsert_row(key, Some(partial_val.clone()), timestamp) {
+    Ok(()) => Ok(()),
+    // It's okay to get  RowOutOfRange error; the row just doesn't
+    // below in this Tablet, and we just skip trying to insert it.
+    Err(StorageError::RowOutOfRange) => Ok(()),
+    // We return a Err on any other type of error.
+    _ => return Err(EvalErr::InsertionFailure),
   }
 }
 
@@ -971,25 +984,13 @@ pub fn table_insert_diff(
   timestamp: &Timestamp,
 ) -> Result<(), EvalErr> {
   for (key, partial_vals) in diff {
-    if !rel_tab.verify_row_key(&key) {
-      // We check to see if the key conforms preemptively.
-      return Err(EvalErr::InsertionFailure);
-    }
-    if !rel_tab.is_in_key_range(&key) {
-      // It's actually okay if we find a key that isn't in
-      // the tablet's range. This happens if we are performing
-      // an INSERT.
-      continue;
-    }
-
-    if rel_tab
-      .insert_row_diff(key.clone(), partial_vals.clone(), timestamp)
-      .is_err()
-    {
-      // This will most often be because an Update didn't check that the
-      // the col_name exists, or that the EvalLiteral that Update or Insert
-      // evaluated to didn't line up with the schema.
-      return Err(EvalErr::InsertionFailure);
+    match rel_tab.upsert_row(key.clone(), partial_vals.clone(), timestamp) {
+      Ok(()) => (),
+      // It's okay to get  RowOutOfRange error; the row just doesn't
+      // below in this Tablet, and we just skip trying to insert it.
+      Err(StorageError::RowOutOfRange) => (),
+      // We return a Err on any other type of error.
+      _ => return Err(EvalErr::InsertionFailure),
     }
   }
   Ok(())
@@ -1007,26 +1008,7 @@ fn col_vals_into_diff(
   col_names: &Vec<ColumnName>,
   col_vals: Vec<EvalLiteral>,
 ) -> Result<(), EvalErr> {
-  assert_eq!(col_names.len(), col_vals.len());
-  let mut col_name_val_map: HashMap<ColumnName, Option<ColumnValue>> = HashMap::new();
-  for (col_name, col_val) in col_names.iter().zip(col_vals.iter()) {
-    col_name_val_map.insert(col_name.clone(), from_lit(col_val.clone()));
-  }
-  let mut key = PrimaryKey { cols: vec![] };
-  for (_, key_col_name) in &rel_tab.schema.key_cols {
-    // Due to `verify_insert`, we may use `unwrap` without concern.
-    if let Some(key_col_val) = col_name_val_map.remove(key_col_name).unwrap() {
-      key.cols.push(key_col_val);
-    } else {
-      // This cannot evaluate to NULL because all column values in a
-      // Primary Key must be present.
-      return Err(EvalErr::NullError);
-    }
-  }
-  let mut partial_val = vec![];
-  for (col_name, col_val) in col_name_val_map {
-    partial_val.push((col_name, col_val));
-  }
+  let (key, partial_val) = make_col_vals(rel_tab, col_names, col_vals)?;
   diff.push((key, Some(partial_val)));
   Ok(())
 }

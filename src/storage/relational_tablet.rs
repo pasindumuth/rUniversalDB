@@ -28,6 +28,15 @@ pub enum StorageValue {
   Unit,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StorageError {
+  BackwardsWrite,
+  RowOutOfRange,
+  MalformedKey,
+  ColumnDNE,
+  TypeError,
+}
+
 /// We define a convenient conversion function from
 /// StorageValue to ColumnValue.
 impl StorageValue {
@@ -73,47 +82,77 @@ impl RelationalTablet {
   /// check to pass, the  Types of the elements in `row.key` and `row.value`
   /// must align with the Types of the elements in `schema.key_cols` and
   /// `schema.val_cols`.
-  fn verify_row(&self, row: &Row) -> bool {
-    return self.verify_row_key(&row.key) && self.verify_row_val(&row.val);
+  fn verify_row(&self, row: &Row) -> Result<(), StorageError> {
+    self.verify_row_key(&row.key)?;
+    self.verify_row_val(&row.val)
   }
 
-  pub fn verify_row_key(&self, key: &PrimaryKey) -> bool {
+  pub fn verify_row_key(&self, key: &PrimaryKey) -> Result<(), StorageError> {
     if key.cols.len() == self.schema.key_cols.len() {
       for (col_val, (col_type, _)) in key.cols.iter().zip(&self.schema.key_cols) {
-        if !check_type_match(Some(&col_val), col_type) {
-          return false;
-        }
+        check_type_match(Some(&col_val), col_type)?;
       }
+      Ok(())
+    } else {
+      Err(StorageError::MalformedKey)
     }
-    return true;
   }
 
-  fn verify_row_val(&self, val: &Vec<Option<ColumnValue>>) -> bool {
+  fn verify_row_val(&self, val: &Vec<Option<ColumnValue>>) -> Result<(), StorageError> {
     if val.len() == self.schema.val_cols.len() {
       for (col_val, (col_type, _)) in val.iter().zip(&self.schema.val_cols) {
-        if !check_type_match((&col_val).as_ref(), col_type) {
-          return false;
-        }
+        check_type_match((&col_val).as_ref(), col_type)?;
       }
-      return true;
+      Ok(())
+    } else {
+      Err(StorageError::MalformedKey)
     }
-    return false;
+  }
+
+  /// Gets the ColumnType of the given col_name if it actually exists
+  /// in schema.
+  fn get_col_type(&self, col_name: &ColumnName) -> Option<ColumnType> {
+    for (col_type, name) in &self.schema.val_cols {
+      if name == col_name {
+        return Some(col_type.clone());
+      }
+    }
+    for (col_type, name) in &self.schema.key_cols {
+      if name == col_name {
+        return Some(col_type.clone());
+      }
+    }
+    return None;
+  }
+
+  fn verify_vals(
+    &self,
+    val_cols: &Vec<(ColumnName, Option<ColumnValue>)>,
+  ) -> Result<(), StorageError> {
+    for (col_name, col_val) in val_cols {
+      if let Some(col_type) = self.get_col_type(col_name) {
+        check_type_match(col_val.as_ref(), &col_type)?;
+      } else {
+        return Err(StorageError::ColumnDNE);
+      }
+    }
+    Ok(())
   }
 
   /// Checks if `key` is in the RelationalTablet's `table_shape`'s
   /// range.
-  pub fn is_in_key_range(&self, key: &PrimaryKey) -> bool {
+  pub fn is_in_key_range(&self, key: &PrimaryKey) -> Result<(), StorageError> {
     if let Some(lower_bound) = &self.tablet_shape.range.start {
       if key < lower_bound {
-        return false;
+        return Err(StorageError::RowOutOfRange);
       }
     }
     if let Some(upper_bound) = &self.tablet_shape.range.end {
       if key >= upper_bound {
-        return false;
+        return Err(StorageError::RowOutOfRange);
       }
     }
-    true
+    Ok(())
   }
 
   /// Inserts the row into the RelationalTablet. This method first checks
@@ -121,11 +160,11 @@ impl RelationalTablet {
   /// schema. Then, it inserts the row into the MultiVersionMap. If either
   /// of these steps fails, we return false, otherwise we return true.
   pub fn insert_row(&mut self, row: &Row, timestamp: Timestamp) -> Result<(), String> {
-    if !self.verify_row(row) {
+    if self.verify_row(row).is_err() {
       return Err("The given row does not conform to the schema.".to_string());
     }
 
-    if !self.is_in_key_range(&row.key) {
+    if self.is_in_key_range(&row.key).is_err() {
       return Err("The given row's primary key isn't in the range of this tablet".to_string());
     }
 
@@ -176,109 +215,75 @@ impl RelationalTablet {
     return Ok(());
   }
 
-  /// Gets the ColumnType of the given col_name if it actually exists
-  /// in schema.
-  fn get_val_col_type(&self, col_name: &ColumnName) -> Option<ColumnType> {
-    for (col_type, name) in &self.schema.val_cols {
-      if name == col_name {
-        return Some(col_type.clone());
-      }
-    }
-    return None;
-  }
-
-  /// This function updates a subset of the Value Column.
-  ///
-  /// Throws an error if the primary_key isn't in line, the timestamp is
-  /// too far behind, the Value Columns don't exist, or there is a type
-  /// mismatch with the schema.
-  pub fn insert_partial_val(
+  /// A wrapper around mvm.write that will return a StorageError::BackwardsWrite
+  /// if the write fails.
+  fn write(
     &mut self,
-    key: PrimaryKey,
-    col_name: ColumnName,
-    val: Option<ColumnValue>,
-    timestamp: &Timestamp,
-  ) -> Result<(), String> {
-    if !self.verify_row_key(&key) {
-      return Err("Malformed PrimarKey".to_string());
-    }
-    if !self.is_in_key_range(&key) {
-      return Err("Range error".to_string());
-    }
-    if let Some(col_type) = self.get_val_col_type(&col_name) {
-      if !check_type_match(val.as_ref(), &col_type) {
-        return Err("Set type mismatch".to_string());
-      }
-      // We first make sure that the actual row we are trying to
-      // insert to doesn't actually exist yet, that we instantiate it.
-      if self
-        .mvm
-        .static_read(&(key.clone(), None), *timestamp)
-        .is_none()
-      {
-        self
-          .mvm
-          .write(&(key.clone(), None), Some(StorageValue::Unit), *timestamp)?;
-      }
-      // Finally, update the column with the given value.
-      self
-        .mvm
-        .write(&(key, Some(col_name)), val.map(|v| v.convert()), *timestamp)
+    key: &(PrimaryKey, Option<ColumnName>),
+    value: Option<StorageValue>,
+    timestamp: Timestamp,
+  ) -> Result<(), StorageError> {
+    if self.mvm.write(key, value, timestamp).is_ok() {
+      Ok(())
     } else {
-      return Err("Non-existant column".to_string());
+      Err(StorageError::BackwardsWrite)
     }
   }
 
-  /// Performs `insert_partial_val` for every pair in `partial_val`.
+  /// This is a general function for inserting a row, or updating it if it
+  /// already exists. The `key` must conform the the schema. If `val_cols_o`
+  /// is `None`, it means we must delete the row. If it's `Some`, it means that
+  /// we must upsert the row, where the Value Columns take on the values indicated
+  /// by `val_cols_o`. There might be Value Columns missing here, indicating those
+  /// should be NULL.
   ///
-  /// Throws an error if the primary_key isn't in line, the timestamp is
-  /// too far behind, the Value Columns don't exist, or there is a type
-  /// mismatch with the schema.
-  pub fn insert_partial_vals(
+  /// If either `key` or `val_cols_o` doesn't conform to the schema (where there is
+  /// an unknown column, or the `ColumnValue` provided doensn't match the type, etc),
+  /// then we return an error. If the `key` is outside the range of this tablet,
+  /// we also throw an error.
+  ///
+  /// If an Err is returned, then the MVT was not modified.
+  pub fn upsert_row(
     &mut self,
     key: PrimaryKey,
-    partial_vals: Vec<(ColumnName, Option<ColumnValue>)>,
+    val_cols_o: Option<Vec<(ColumnName, Option<ColumnValue>)>>,
     timestamp: &Timestamp,
-  ) -> Result<(), String> {
-    // We first make sure that the actual row we are trying to
-    // insert to doesn't actually exist yet, that we instantiate it.
-    // We can't rely on `insert_partial_val` doing this in case
-    // `partial_vals` is empty.
-    if self
-      .mvm
-      .static_read(&(key.clone(), None), *timestamp)
-      .is_none()
-    {
-      self
-        .mvm
-        .write(&(key.clone(), None), Some(StorageValue::Unit), *timestamp)?;
-    }
-    // Iterate through `partial_vals` and then insert the values
-    // accordingly
-    for (col_name, col_val) in partial_vals {
-      self.insert_partial_val(key.clone(), col_name, col_val, timestamp)?;
-    }
-    Ok(())
-  }
-
-  /// Performs `insert_partial_vals` if the `partial_val_o` is present,
-  /// otherwise it deletes the row at `key`.
-  ///
-  /// Throws an error if the primary_key isn't in line, the timestamp is
-  /// too far behind, the Value Columns don't exist, or there is a type
-  /// mismatch with the schema.
-  pub fn insert_row_diff(
-    &mut self,
-    key: PrimaryKey,
-    partial_val_o: Option<Vec<(ColumnName, Option<ColumnValue>)>>,
-    timestamp: &Timestamp,
-  ) -> Result<(), String> {
-    if let Some(partial_val) = partial_val_o {
-      self.insert_partial_vals(key, partial_val, timestamp)
+  ) -> Result<(), StorageError> {
+    self.verify_row_key(&key)?;
+    if let Some(val_cols) = val_cols_o {
+      self.verify_vals(&val_cols)?;
+      // First, make sure that the columns we want to write to can actually
+      // be written to (i.e. don't incur a BackwardsWrite error).
+      for (col_name, _) in &val_cols {
+        if timestamp <= &self.mvm.get_lat(&(key.clone(), Some(col_name.clone()))) {
+          return Err(StorageError::BackwardsWrite);
+        }
+      }
+      // Now, the last place this upsert can fail is if the row doesn't
+      // exist yet, but we can't bring it into existance.
+      if let None = self.mvm.static_read(&(key.clone(), None), *timestamp) {
+        // This means the row doesn't exist.
+        self.write(&(key.clone(), None), Some(StorageValue::Unit), *timestamp)?;
+      }
+      // At this point, the upsert will surely succeed.
+      for (col_name, col_val) in &val_cols {
+        self
+          .write(
+            &(key.clone(), Some(col_name.clone())),
+            col_val.clone().map(|v| v.convert()),
+            *timestamp,
+          )
+          .unwrap();
+      }
     } else {
       // This means we must delete the row.
-      self.mvm.write(&(key, None), None, *timestamp)
+      panic!(
+        "TODO: implement. Make sure to write all column values as\
+      deleted too. If all of these writes aren't possible, then don't modify\
+      the tablet and return an error."
+      )
     }
+    Ok(())
   }
 
   /// Returns true iff the column name exists in the schema.
@@ -356,7 +361,7 @@ impl RelationalTablet {
     key: &PrimaryKey,
     timestamp: Timestamp,
   ) -> Result<Option<Row>, String> {
-    if !self.verify_row_key(key) {
+    if self.verify_row_key(key).is_err() {
       return Err(String::from(
         "The given key does not confrom to the schema.",
       ));
@@ -381,13 +386,16 @@ impl RelationalTablet {
 }
 
 /// Returns false if the types don't match, and true otherwise.
-fn check_type_match(value: Option<&ColumnValue>, col_type: &ColumnType) -> bool {
+fn check_type_match(
+  value: Option<&ColumnValue>,
+  col_type: &ColumnType,
+) -> Result<(), StorageError> {
   match (value, col_type) {
-    (Some(ColumnValue::Int(_)), ColumnType::Int) => true,
-    (Some(ColumnValue::String(_)), ColumnType::String) => true,
-    (Some(ColumnValue::Bool(_)), ColumnType::Bool) => true,
-    (None, _) => true,
-    _ => false,
+    (Some(ColumnValue::Int(_)), ColumnType::Int) => Ok(()),
+    (Some(ColumnValue::String(_)), ColumnType::String) => Ok(()),
+    (Some(ColumnValue::Bool(_)), ColumnType::Bool) => Ok(()),
+    (None, _) => Ok(()),
+    _ => Err(StorageError::TypeError),
   }
 }
 
