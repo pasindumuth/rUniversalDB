@@ -418,6 +418,14 @@ pub fn eval_write_graph(
               write_task.val = WriteQueryTask::WriteDoneTask(task.key_vals.clone());
             }
           }
+          UpdateKeyTask::None(_) => {
+            // This means the key's WHERE clause evaluated to false, so just skip this key.
+            task.key_tasks.remove(key).unwrap();
+            if task.key_tasks.is_empty() {
+              // This means that the whole Write Task is finished as well.
+              write_task.val = WriteQueryTask::WriteDoneTask(task.key_vals.clone());
+            }
+          }
           _ => {
             let mut context = BTreeMap::<SelectQueryId, (FromWriteTask, SelectStmt)>::new();
             for (sid, select_stmt) in subqueries {
@@ -610,6 +618,14 @@ pub fn eval_select_graph(
             }
             task.select_view.insert(key.clone(), view_row);
             // Remove the key task because it is done.
+            task.key_tasks.remove(key).unwrap();
+            if task.key_tasks.is_empty() {
+              // This means that the whole Select Task is finished as well.
+              select_task.val = SelectQueryTask::SelectDoneTask(task.select_view.clone());
+            }
+          }
+          SelectKeyTask::None(_) => {
+            // This means the key's WHERE clause evaluated to false, so just skip this key.
             task.key_tasks.remove(key).unwrap();
             if task.key_tasks.is_empty() {
               // This means that the whole Select Task is finished as well.
@@ -862,8 +878,14 @@ fn replace_columns(
     },
     ValExpr::Literal(literal) => ValExpr::Literal(literal.clone()),
     ValExpr::Column(col) => {
-      let col_name = ColumnName(col.clone());
-      if rel_tab.col_name_exists(&col_name) {
+      let col_name = ColumnName(col.col_name.clone());
+      if rel_tab.col_name_exists(&col_name)
+        && (if let Some(qualifier) = &col.qualifier {
+          qualifier == &rel_tab.table_shape().path.path
+        } else {
+          true
+        })
+      {
         // If the column name exists in the current tablet's schema,
         // we replace the column name with the column value.
         ValExpr::Literal(match rel_tab.get_partial_val(key, &col_name, timestamp) {
@@ -933,7 +955,7 @@ fn make_col_vals(
     col_name_val_map.insert(col_name.clone(), from_lit(col_val.clone()));
   }
   let mut key = PrimaryKey { cols: vec![] };
-  for (_, key_col_name) in &rel_tab.schema.key_cols {
+  for (_, key_col_name) in &rel_tab.schema().key_cols {
     // Due to `verify_insert`, we may use `unwrap` without concern.
     if let Some(key_col_val) = col_name_val_map.remove(key_col_name).unwrap() {
       key.cols.push(key_col_val);
@@ -1091,7 +1113,7 @@ pub fn verify_insert(rel_tab: &RelationalTablet, insert_stmt: &InsertStmt) -> Re
     return Err(EvalErr::MalformedSQL);
   }
   // Next, we verify that the given set of columns span the PrimaryKey columns.
-  for (_, key_col_name) in &rel_tab.schema.key_cols {
+  for (_, key_col_name) in &rel_tab.schema().key_cols {
     if !col_names.contains(key_col_name) {
       return Err(EvalErr::MalformedSQL);
     }

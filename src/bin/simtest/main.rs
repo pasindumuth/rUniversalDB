@@ -60,6 +60,7 @@ fn schema() -> Schema {
 fn basic_insert_select(sim: &mut Simulation) -> Result<(), String> {
   exec_seq_session(
     sim,
+    schema(),
     &EndpointId::from("c0"),
     &EndpointId::from("s0"),
     vec![
@@ -94,6 +95,7 @@ fn basic_insert_select(sim: &mut Simulation) -> Result<(), String> {
 fn insert_select_multi_tablet(sim: &mut Simulation) -> Result<(), String> {
   exec_seq_session(
     sim,
+    schema(),
     &EndpointId::from("c0"),
     &EndpointId::from("s0"),
     vec![
@@ -129,6 +131,7 @@ fn insert_select_multi_tablet(sim: &mut Simulation) -> Result<(), String> {
 fn basic_insert_update_select(sim: &mut Simulation) -> Result<(), String> {
   exec_seq_session(
     sim,
+    schema(),
     &EndpointId::from("c0"),
     &EndpointId::from("s0"),
     vec![
@@ -150,7 +153,7 @@ fn basic_insert_update_select(sim: &mut Simulation) -> Result<(), String> {
         Ok(BTreeMap::new()),
       ),
       (
-        &r#"
+        r#"
           SELECT key, value
           FROM table1
           WHERE TRUE
@@ -172,6 +175,7 @@ fn basic_insert_update_select(sim: &mut Simulation) -> Result<(), String> {
 fn insert_update_select_multi_tablet(sim: &mut Simulation) -> Result<(), String> {
   exec_seq_session(
     sim,
+    schema(),
     &EndpointId::from("c0"),
     &EndpointId::from("s0"),
     vec![
@@ -208,7 +212,7 @@ fn insert_update_select_multi_tablet(sim: &mut Simulation) -> Result<(), String>
         Ok(BTreeMap::new()),
       ),
       (
-        &r#"
+        r#"
           SELECT key, value
           FROM table3
           WHERE TRUE
@@ -233,6 +237,7 @@ fn insert_update_select_multi_tablet(sim: &mut Simulation) -> Result<(), String>
 fn update_complex_where(sim: &mut Simulation) -> Result<(), String> {
   exec_seq_session(
     sim,
+    schema(),
     &EndpointId::from("c0"),
     &EndpointId::from("s0"),
     vec![
@@ -257,7 +262,7 @@ fn update_complex_where(sim: &mut Simulation) -> Result<(), String> {
         Ok(BTreeMap::new()),
       ),
       (
-        &r#"
+        r#"
           SELECT key, value
           FROM table3
           WHERE TRUE
@@ -282,6 +287,7 @@ fn update_complex_where(sim: &mut Simulation) -> Result<(), String> {
 fn basic_subquery(sim: &mut Simulation) -> Result<(), String> {
   exec_seq_session(
     sim,
+    schema(),
     &EndpointId::from("c0"),
     &EndpointId::from("s0"),
     vec![
@@ -308,7 +314,7 @@ fn basic_subquery(sim: &mut Simulation) -> Result<(), String> {
         Ok(BTreeMap::new()),
       ),
       (
-        &r#"
+        r#"
           SELECT key, value
           FROM table2
           WHERE TRUE
@@ -328,6 +334,7 @@ fn basic_subquery(sim: &mut Simulation) -> Result<(), String> {
 fn multi_tablet_subquery(sim: &mut Simulation) -> Result<(), String> {
   exec_seq_session(
     sim,
+    schema(),
     &EndpointId::from("c0"),
     &EndpointId::from("s0"),
     vec![
@@ -370,7 +377,7 @@ fn multi_tablet_subquery(sim: &mut Simulation) -> Result<(), String> {
         Ok(BTreeMap::new()),
       ),
       (
-        &r#"
+        r#"
           SELECT key, value
           FROM table1
           WHERE TRUE
@@ -390,6 +397,7 @@ fn multi_tablet_subquery(sim: &mut Simulation) -> Result<(), String> {
 fn update_subquery(sim: &mut Simulation) -> Result<(), String> {
   exec_seq_session(
     sim,
+    schema(),
     &EndpointId::from("c0"),
     &EndpointId::from("s0"),
     vec![
@@ -427,7 +435,7 @@ fn update_subquery(sim: &mut Simulation) -> Result<(), String> {
         Ok(BTreeMap::new()),
       ),
       (
-        &r#"
+        r#"
           SELECT key, value
           FROM table3
           WHERE TRUE
@@ -480,9 +488,7 @@ fn test_driver() {
   drive_test(5, "update_complex_where", update_complex_where);
   drive_test(6, "basic_subquery", basic_subquery);
   drive_test(7, "multi_tablet_subquery", multi_tablet_subquery);
-  // This test won't pass until using `key` inside a subquery refers to
-  // the subquery's table's column, not the parent query's table.
-  // drive_test(8, "update_subquery", update_subquery);
+  drive_test(8, "update_subquery", update_subquery);
 }
 
 fn main() {

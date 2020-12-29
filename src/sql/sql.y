@@ -171,7 +171,7 @@ expr -> ValExpr
       }
     }
   | literal                       { ValExpr::Literal($1) }
-  | iden                          { ValExpr::Column($1) }
+  | qualified_column              { ValExpr::Column($1) }
   | '(' select_stmt ')'           { ValExpr::Subquery(Box::new($2)) }
   ;
 
@@ -180,6 +180,23 @@ literal -> Literal
   | int            { Literal::Int($1) }
   | bool           { Literal::Bool($1) }
   | null           { Literal::Null }
+  ;
+
+qualified_column -> QualColumn
+  : iden
+    {
+      QualColumn {
+        qualifier: None,
+        col_name: $1
+      }
+    }
+  | iden '.' iden
+    {
+      QualColumn {
+        qualifier: Some($1),
+        col_name: $3
+      }
+    }
   ;
 
 iden -> String

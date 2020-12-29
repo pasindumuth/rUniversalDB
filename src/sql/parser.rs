@@ -28,7 +28,7 @@ pub fn parse_sql(l: &String) -> Option<SqlStmt> {
 #[cfg(test)]
 mod tests {
   use crate::model::sqlast::{
-    BinaryOp, InsertStmt, Literal, Root, SelectStmt, SqlStmt, Test, UpdateStmt, ValExpr,
+    BinaryOp, InsertStmt, Literal, QualColumn, Root, SelectStmt, SqlStmt, Test, UpdateStmt, ValExpr,
   };
   use crate::sql::parser::{parse_root, parse_sql};
 
@@ -36,6 +36,20 @@ mod tests {
     match parse_root(l) {
       Some(Root::Test(ast)) => Some(ast),
       _ => None,
+    }
+  }
+
+  fn qual_col(qualifier: &str, col_name: &str) -> QualColumn {
+    QualColumn {
+      qualifier: Some(qualifier.to_string()),
+      col_name: col_name.to_string(),
+    }
+  }
+
+  fn unqual_col(col_name: &str) -> QualColumn {
+    QualColumn {
+      qualifier: None,
+      col_name: col_name.to_string(),
     }
   }
 
@@ -193,6 +207,24 @@ mod tests {
     assert_eq!(parse_test(&"1 >= 1 = 1".to_string()), None);
   }
 
+  /// This test checks to see if qualifying a column with a table name
+  /// produces the right QualColumn node.
+  #[test]
+  fn qualified_col_test() {
+    assert_eq!(
+      parse_test(&"10 < table.age + 1".to_string()),
+      Some(Test::ValExpr(ValExpr::BinaryExpr {
+        op: BinaryOp::LT,
+        lhs: Box::new(ValExpr::Literal(Literal::Int("10".to_string()))),
+        rhs: Box::new(ValExpr::BinaryExpr {
+          op: BinaryOp::PLUS,
+          lhs: Box::new(ValExpr::Column(qual_col("table", "age"))),
+          rhs: Box::new(ValExpr::Literal(Literal::Int("1".to_string()))),
+        }),
+      }))
+    );
+  }
+
   /// This test checks to see if Select Statements are being parse properly.
   #[test]
   fn select_parse_test() {
@@ -203,7 +235,7 @@ mod tests {
         table_name: "table".to_string(),
         where_clause: ValExpr::BinaryExpr {
           op: BinaryOp::E,
-          lhs: Box::new(ValExpr::Column("key".to_string())),
+          lhs: Box::new(ValExpr::Column(unqual_col("key"))),
           rhs: Box::new(ValExpr::Literal(Literal::Int("123".to_string()))),
         }
       }))
@@ -218,7 +250,7 @@ mod tests {
         table_name: "table".to_string(),
         where_clause: ValExpr::BinaryExpr {
           op: BinaryOp::E,
-          lhs: Box::new(ValExpr::Column("key".to_string())),
+          lhs: Box::new(ValExpr::Column(unqual_col("key"))),
           rhs: Box::new(ValExpr::Literal(Literal::Int("123".to_string()))),
         }
       }))
@@ -237,13 +269,13 @@ mod tests {
         table_name: "table1".to_string(),
         where_clause: ValExpr::BinaryExpr {
           op: BinaryOp::E,
-          lhs: Box::new(ValExpr::Column("key1".to_string())),
+          lhs: Box::new(ValExpr::Column(unqual_col("key1"))),
           rhs: Box::new(ValExpr::Subquery(Box::from(SelectStmt {
             col_names: vec!["key2".to_string()],
             table_name: "table2".to_string(),
             where_clause: ValExpr::BinaryExpr {
               op: BinaryOp::E,
-              lhs: Box::new(ValExpr::Column("key2".to_string())),
+              lhs: Box::new(ValExpr::Column(unqual_col("key2"))),
               rhs: Box::new(ValExpr::Literal(Literal::String("Bob".to_string()))),
             }
           }))),
@@ -265,12 +297,12 @@ mod tests {
         set_col: "val".to_string(),
         set_val: ValExpr::BinaryExpr {
           op: BinaryOp::PLUS,
-          lhs: Box::new(ValExpr::Column("val".to_string())),
+          lhs: Box::new(ValExpr::Column(unqual_col("val"))),
           rhs: Box::new(ValExpr::Literal(Literal::Int("1".to_string()))),
         },
         where_clause: ValExpr::BinaryExpr {
           op: BinaryOp::LT,
-          lhs: Box::new(ValExpr::Column("key".to_string())),
+          lhs: Box::new(ValExpr::Column(unqual_col("key"))),
           rhs: Box::new(ValExpr::Literal(Literal::Int("3".to_string()))),
         }
       }))
@@ -291,27 +323,27 @@ mod tests {
         set_col: "val".to_string(),
         set_val: ValExpr::BinaryExpr {
           op: BinaryOp::PLUS,
-          lhs: Box::new(ValExpr::Column("val".to_string())),
+          lhs: Box::new(ValExpr::Column(unqual_col("val"))),
           rhs: Box::new(ValExpr::Subquery(Box::from(SelectStmt {
             col_names: vec!["key2".to_string()],
             table_name: "table2".to_string(),
             where_clause: ValExpr::BinaryExpr {
               op: BinaryOp::E,
-              lhs: Box::new(ValExpr::Column("key2".to_string())),
+              lhs: Box::new(ValExpr::Column(unqual_col("key2"))),
               rhs: Box::new(ValExpr::Literal(Literal::String("Bob".to_string()))),
             }
           }))),
         },
         where_clause: ValExpr::BinaryExpr {
           op: BinaryOp::E,
-          lhs: Box::new(ValExpr::Column("key".to_string())),
+          lhs: Box::new(ValExpr::Column(unqual_col("key"))),
           rhs: Box::new(ValExpr::Subquery(Box::from(SelectStmt {
             col_names: vec!["key3".to_string()],
             table_name: "table3".to_string(),
             where_clause: ValExpr::BinaryExpr {
               op: BinaryOp::AND,
-              lhs: Box::new(ValExpr::Column("key3".to_string())),
-              rhs: Box::new(ValExpr::Column("val3".to_string())),
+              lhs: Box::new(ValExpr::Column(unqual_col("key3"))),
+              rhs: Box::new(ValExpr::Column(unqual_col("val3"))),
             }
           }))),
         }
@@ -344,8 +376,8 @@ mod tests {
               table_name: "table3".to_string(),
               where_clause: ValExpr::BinaryExpr {
                 op: BinaryOp::AND,
-                lhs: Box::new(ValExpr::Column("key3".to_string())),
-                rhs: Box::new(ValExpr::Column("val3".to_string())),
+                lhs: Box::new(ValExpr::Column(unqual_col("key3"))),
+                rhs: Box::new(ValExpr::Column(unqual_col("val3"))),
               }
             })),
             ValExpr::Literal(Literal::Bool(true))
@@ -361,7 +393,7 @@ mod tests {
   fn val_expr_test() {
     assert_eq!(
       parse_test(&"key".to_string()),
-      Some(Test::ValExpr(ValExpr::Column("key".to_string())))
+      Some(Test::ValExpr(ValExpr::Column(unqual_col("key"))))
     );
   }
 }

@@ -66,7 +66,7 @@ impl ColumnValue {
 pub struct RelationalTablet {
   mvm: MultiVersionMap<(PrimaryKey, Option<ColumnName>), StorageValue>,
   tablet_shape: TabletShape,
-  pub schema: Schema,
+  schema: Schema,
 }
 
 impl RelationalTablet {
@@ -77,6 +77,22 @@ impl RelationalTablet {
       schema,
     }
   }
+
+  // -----------------------------------------------------------------------------------------------
+  //  Const getters
+  // -----------------------------------------------------------------------------------------------
+
+  pub fn schema(&self) -> &Schema {
+    &self.schema
+  }
+
+  pub fn table_shape(&self) -> &TabletShape {
+    &self.tablet_shape
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  //  Rest
+  // -----------------------------------------------------------------------------------------------
 
   /// This checks to see if the provided row conforms to the schema. For this
   /// check to pass, the  Types of the elements in `row.key` and `row.value`
@@ -141,7 +157,7 @@ impl RelationalTablet {
 
   /// Checks if `key` is in the RelationalTablet's `table_shape`'s
   /// range.
-  pub fn is_in_key_range(&self, key: &PrimaryKey) -> Result<(), StorageError> {
+  pub fn verify_key_in_range(&self, key: &PrimaryKey) -> Result<(), StorageError> {
     if let Some(lower_bound) = &self.tablet_shape.range.start {
       if key < lower_bound {
         return Err(StorageError::RowOutOfRange);
@@ -164,7 +180,7 @@ impl RelationalTablet {
       return Err("The given row does not conform to the schema.".to_string());
     }
 
-    if self.is_in_key_range(&row.key).is_err() {
+    if self.verify_key_in_range(&row.key).is_err() {
       return Err("The given row's primary key isn't in the range of this tablet".to_string());
     }
 
@@ -250,6 +266,7 @@ impl RelationalTablet {
     timestamp: &Timestamp,
   ) -> Result<(), StorageError> {
     self.verify_row_key(&key)?;
+    self.verify_key_in_range(&key)?;
     if let Some(val_cols) = val_cols_o {
       self.verify_vals(&val_cols)?;
       // First, make sure that the columns we want to write to can actually

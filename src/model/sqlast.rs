@@ -96,6 +96,18 @@ pub enum ValExpr {
   Literal(Literal),
   // For now, we don't assume it's possible to define symbol aliases
   // using `AS`. No colum names are qualified with a `.` before it.
-  Column(String),
+  Column(QualColumn),
   Subquery(Box<SelectStmt>),
+}
+
+/// This is a qualified column name, like `table_name.col_name`,
+/// which is often used to disambiguate column names in an
+/// expression where multiple tables with similar columns names
+/// are in scope.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct QualColumn {
+  /// This is a table name.
+  pub qualifier: Option<String>,
+  /// This is the colum name
+  pub col_name: String,
 }
