@@ -1,3 +1,5 @@
 .idea
 rUniversalDB.iml
 target
+
+cockroach-data
