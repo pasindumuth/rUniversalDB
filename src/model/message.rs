@@ -2,7 +2,6 @@ use crate::model::common::{
   EndpointId, PrimaryKey, RequestId, Row, SelectQueryId, SelectView, TabletShape, Timestamp,
   TransactionId, WriteQueryId,
 };
-use crate::model::sqlast::{InsertStmt, SelectStmt, SqlStmt, UpdateStmt};
 use serde::{Deserialize, Serialize};
 
 /// These are PODs that are used for Threads to communicate with

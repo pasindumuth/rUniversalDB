@@ -97,13 +97,13 @@ fn main() {
   args.pop_front();
   // This remove the seed for now.
   let slave_index = args
-    .pop_front()
-    .expect("A slave index should be provided.")
-    .parse::<u32>()
-    .expect("The slave index couldn't be parsed as a string.");
+      .pop_front()
+      .expect("A slave index should be provided.")
+      .parse::<u32>()
+      .expect("The slave index couldn't be parsed as a string.");
   let cur_ip = args
-    .pop_front()
-    .expect("The endpoint_id of the current slave should be provided.");
+      .pop_front()
+      .expect("The endpoint_id of the current slave should be provided.");
 
   // The mpsc channel for sending data to the Server Thread
   let (slave_sender, slave_receiver) = mpsc::channel();
