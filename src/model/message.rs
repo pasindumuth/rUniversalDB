@@ -66,7 +66,7 @@ pub enum AdminRequest {
   SqlQuery {
     rid: RequestId,
     tid: TransactionId,
-    sql: SqlStmt,
+    // sql: SqlStmt,
     timestamp: Timestamp,
   },
 }
@@ -131,7 +131,7 @@ pub enum SlaveMessage {
     tablet: TabletShape,
     sid: SelectQueryId,
     subquery_path: FromRoot,
-    select_stmt: SelectStmt,
+    // select_stmt: SelectStmt,
     timestamp: Timestamp,
   },
   /// A Forwarding Wrapper for a Tablet's SelectPrepare.
@@ -171,7 +171,7 @@ pub enum SlaveMessage {
 pub struct SelectPrepare {
   pub tm_eid: EndpointId,
   pub sid: SelectQueryId,
-  pub select_query: SelectStmt,
+  // pub select_query: SelectStmt,
   pub timestamp: Timestamp,
 }
 
@@ -179,8 +179,8 @@ pub struct SelectPrepare {
 /// Insert, Update, and Delete SQL statements.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum WriteQuery {
-  Update(UpdateStmt),
-  Insert(InsertStmt),
+  // Update(UpdateStmt),
+// Insert(InsertStmt),
 }
 
 /// The Prepare message sent from a Slave (the TM) to a Tablet

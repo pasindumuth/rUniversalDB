@@ -1,10 +1,8 @@
-use rand::{RngCore, SeedableRng};
-use rand_xorshift::XorShiftRng;
-use runiversal::common::rand::RandGen;
-use runiversal::model::common::{ColumnName, ColumnType, EndpointId, Schema, table_shape, TabletShape, TabletGroupId, SlaveGroupId, TablePath, TabletKeyRange};
-use runiversal::net::network::{recv, send};
-use runiversal::slave::thread::start_slave_thread;
-use runiversal::tablet::thread::start_tablet_thread;
+mod server;
+
+use crate::server::start_server;
+use runiversal::model::common::EndpointId;
+use runiversal::net::{recv, send};
 use std::collections::{HashMap, LinkedList};
 use std::env;
 use std::net::{TcpListener, TcpStream};
@@ -30,6 +28,10 @@ use std::thread;
 /// Instead, we have one auxiliary thread, called the Self Connection
 /// Thread, which takes packets that are sent out of Server Thread and
 /// immediately feeds it back in.
+///
+/// We also have an Accepting Thread that listens for new connections
+/// and constructs the FromNetwork Thread, ToNetwork Thread, and connects
+/// them up.
 
 const SERVER_PORT: u32 = 1610;
 
@@ -47,7 +49,9 @@ fn handle_conn(
     let stream = stream.try_clone().unwrap();
     thread::spawn(move || loop {
       let val_in = recv(&stream);
-      to_server_sender.send((endpoint_id.clone(), val_in)).unwrap();
+      to_server_sender
+        .send((endpoint_id.clone(), val_in))
+        .unwrap();
     });
   }
 
@@ -79,6 +83,7 @@ fn handle_self_conn(
 
   // Setup Self Connection Thread
   let endpoint_id = endpoint_id.clone();
+  let to_server_sender = to_server_sender.clone();
   thread::spawn(move || loop {
     let data = from_server_receiver.recv().unwrap();
     to_server_sender.send((endpoint_id.clone(), data)).unwrap();
@@ -90,15 +95,16 @@ fn main() {
 
   // Removes the program name argument.
   args.pop_front();
-  // This remove the seed for now.
+  // Pop the seed
   let slave_index = args
-      .pop_front()
-      .expect("A slave index should be provided.")
-      .parse::<u32>()
-      .expect("The slave index couldn't be parsed as a string.");
+    .pop_front()
+    .expect("A slave index should be provided.")
+    .parse::<u32>()
+    .expect("The slave index couldn't be parsed as a string.");
+  // Pop the IP address
   let cur_ip = args
-      .pop_front()
-      .expect("The endpoint_id of the current slave should be provided.");
+    .pop_front()
+    .expect("The endpoint_id of the current slave should be provided.");
 
   // The mpsc channel for sending data to the Server Thread from all FromNetwork Threads.
   let (to_server_sender, to_server_receiver) = mpsc::channel();
@@ -132,97 +138,6 @@ fn main() {
   let endpoint_id = EndpointId(cur_ip);
   handle_self_conn(&endpoint_id, &net_conn_map, &to_server_sender);
 
-  let mut tablet_sharding_config = HashMap::<(TablePath, u32), Vec<(TabletKeyRange, TabletGroupId)>>::new();
-  let mut tablet_slave_config = HashMap::<TabletGroupId, SlaveGroupId>::new();
-  let mut slave_network_config = HashMap::<SlaveGroupId, EndpointId>::new();
-
-  // // A pre-defined map of what tablets that each slave should be managing.
-  // // For now, we create all tablets for the current Slave during boot-time.
-  // let mut tablet_config = HashMap::<EndpointId, Vec<TabletShape>>::new();
-  // tablet_config.insert(
-  //   EndpointId::from("172.19.0.3"),
-  //   vec![table_shape("table1", None, None)],
-  // );
-  // tablet_config.insert(
-  //   EndpointId::from("172.19.0.4"),
-  //   vec![table_shape("table2", None, Some("j"))],
-  // );
-  // tablet_config.insert(
-  //   EndpointId::from("172.19.0.5"),
-  //   vec![
-  //     table_shape("table2", Some("j"), None),
-  //     table_shape("table3", None, Some("d")),
-  //     table_shape("table4", None, Some("k")),
-  //   ],
-  // );
-  // tablet_config.insert(
-  //   EndpointId::from("172.19.0.6"),
-  //   vec![table_shape("table3", Some("d"), Some("p"))],
-  // );
-  // tablet_config.insert(
-  //   EndpointId::from("172.19.0.7"),
-  //   vec![
-  //     table_shape("table3", Some("p"), None),
-  //     table_shape("table4", Some("k"), None),
-  //   ],
-  // );
-  // let tablet_config = tablet_config;
-
-  // The above map was constructed assuming this predefined schema:
-  let static_schema = Schema {
-    key_cols: vec![(ColumnType::String, ColumnName(String::from("key")))],
-    val_cols: vec![(ColumnType::Int, ColumnName(String::from("value")))],
-  };
-
-  // Create the seed that this Slave uses for random number generation.
-  // It's 16 bytes long, so we do (16 * slave_index + i) to make sure
-  // every element of the seed is different across all slaves.
-  let mut seed = [0; 16];
-  for i in 0..16 {
-    seed[i] = (16 * slave_index + i as u32) as u8;
-  }
-
-  // Create Slave RNG.
-  let mut rng = Box::new(XorShiftRng::from_seed(seed));
-
-  // Setup the Tablet.
-  let mut tablet_map = HashMap::new();
-
-  for tablet_shape in tablet_config.get(&endpoint_id).unwrap() {
-    // Create the seed for the Tablet's RNG. We use the Slave's
-    // RNG to create a random seed.
-    let mut seed = [0; 16];
-    rng.fill_bytes(&mut seed);
-    // Create Tablet RNG.
-    let rng = Box::new(XorShiftRng::from_seed(seed));
-
-    // Create mpsc queue for Slave-Tablet communication.
-    let (tablet_sender, tablet_receiver) = mpsc::channel();
-    tablet_map.insert(tablet_shape.clone(), tablet_sender);
-
-    // Start the Tablet Thread
-    let tablet_shape = tablet_shape.clone();
-    let static_schema = static_schema.clone();
-    let net_conn_map = net_conn_map.clone();
-    let endpoint_id = endpoint_id.clone();
-    thread::spawn(move || {
-      start_tablet_thread(
-        tablet_shape,
-        endpoint_id,
-        static_schema,
-        RandGen { rng },
-        tablet_receiver,
-        net_conn_map,
-      );
-    });
-  }
-
-  start_slave_thread(
-    endpoint_id,
-    RandGen { rng },
-    to_server_receiver,
-    net_conn_map,
-    tablet_map,
-    tablet_config,
-  );
+  // Start the server
+  start_server(to_server_receiver, &net_conn_map, slave_index);
 }
