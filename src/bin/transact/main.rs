@@ -1,8 +1,7 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::rand::RandGen;
-use runiversal::common::test_config::table_shape;
-use runiversal::model::common::{ColumnName, ColumnType, EndpointId, Schema};
+use runiversal::model::common::{ColumnName, ColumnType, EndpointId, Schema, table_shape, TabletShape, TabletGroupId, SlaveGroupId, TablePath, TabletKeyRange};
 use runiversal::net::network::{recv, send};
 use runiversal::slave::thread::start_slave_thread;
 use runiversal::tablet::thread::start_tablet_thread;
@@ -15,19 +14,18 @@ use std::thread;
 
 /// The threading architecture we use is as follows. Every network
 /// connection has 2 threads, one for receiving data, called the
-/// Receiving Thread (which most of its time blocking on reading
-/// the socket), and one thread for sending data, called the Sending
-/// Thread (which spends most of it's time blocking on an Output
-/// Queue, which we create every time a new socket is created). Once a
-/// Receiving Thread receives a packet, it puts it into a Multi-Producer-
-/// Single-Consumer Queue. Here, each Receiving Thread is a Producer, and
-/// the only Consumer is the Server Thread. We call this Queue the
-/// "Event Queue". Once the Server Thread wants to send a packet out of a
-/// socket, it places it in the socket's Output Queue. The Sending Thread
-/// picks this up and sends it out of the socket. The Output Queue is a
-/// Single-Producer-Single-Consumer queue.
+/// FromNetwork Thread (which spends most of its time blocking on reading
+/// the socket), and one thread for sending data, called the ToNetwork
+/// Thread (which spends most of its time blocking on a FromServer Queue,
+/// which we create every time a new socket is created). Once a FromNetwork
+/// Thread receives a packet, it puts it into a Multi-Producer-Single-Consumer
+/// Queue, called the ToServer MPSC. Here, each FromNetwork Thread is a Producer,
+/// and the only Consumer is the Server Thread. Once the Server Thread wants
+/// to send a packet out of a socket, it places it in the socket's FromServer
+/// Queue. The ToNetwork Thread picks this up and sends it out of the socket.
+/// The FromServer Queue is a Single-Producer-Single-Consumer queue.
 ///
-/// For the Server Thread also needs to connect to itself. We don't use
+/// The Server Thread also needs to connect to itself. We don't use
 /// a network socket for this, and we don't have two auxiliary threads.
 /// Instead, we have one auxiliary thread, called the Self Connection
 /// Thread, which takes packets that are sent out of Server Thread and
@@ -37,32 +35,31 @@ const SERVER_PORT: u32 = 1610;
 
 fn handle_conn(
   net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
-  slave_sender: &Sender<(EndpointId, Vec<u8>)>,
+  to_server_sender: &Sender<(EndpointId, Vec<u8>)>,
   stream: TcpStream,
 ) -> EndpointId {
   let endpoint_id = EndpointId(stream.peer_addr().unwrap().ip().to_string());
 
-  // Setup Receiving Thread
+  // Setup FromNetwork Thread
   {
-    let slave_sender = slave_sender.clone();
+    let to_server_sender = to_server_sender.clone();
     let endpoint_id = endpoint_id.clone();
     let stream = stream.try_clone().unwrap();
     thread::spawn(move || loop {
       let val_in = recv(&stream);
-      slave_sender.send((endpoint_id.clone(), val_in)).unwrap();
+      to_server_sender.send((endpoint_id.clone(), val_in)).unwrap();
     });
   }
 
-  // Used like a Single-Producer-Single-Consumer queue, where Server Thread
-  // is the producer, the Sending Thread is the consumer.
-  let (slave_sender, receiver) = mpsc::channel();
-  // Add slave_sender of the SPSC to the net_conn_map so the Server Thread can access it.
+  // This is the FromServer Queue.
+  let (from_server_sender, from_server_receiver) = mpsc::channel();
+  // Add from_server_sender to the net_conn_map so the Server Thread can access it.
   let mut net_conn_map = net_conn_map.lock().unwrap();
-  net_conn_map.insert(endpoint_id.clone(), slave_sender);
+  net_conn_map.insert(endpoint_id.clone(), from_server_sender);
 
-  // Setup Sending Thread
+  // Setup ToNetwork Thread
   thread::spawn(move || loop {
-    let data_out = receiver.recv().unwrap();
+    let data_out = from_server_receiver.recv().unwrap();
     send(&data_out, &stream);
   });
 
@@ -72,21 +69,19 @@ fn handle_conn(
 fn handle_self_conn(
   endpoint_id: &EndpointId,
   net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
-  slave_sender: &Sender<(EndpointId, Vec<u8>)>,
+  to_server_sender: &Sender<(EndpointId, Vec<u8>)>,
 ) {
-  // Used like a Single-Producer-Single-Consumer queue, where Server Thread
-  // is the producer, the Sending Thread is the consumer.
-  let (sender, receiver) = mpsc::channel();
+  // This is the FromServer Queue.
+  let (from_server_sender, from_server_receiver) = mpsc::channel();
   // Add sender of the SPSC to the net_conn_map so the Server Thread can access it.
   let mut net_conn_map = net_conn_map.lock().unwrap();
-  net_conn_map.insert(endpoint_id.clone(), sender);
+  net_conn_map.insert(endpoint_id.clone(), from_server_sender);
 
-  // Setup Sending Thread
-  let slave_sender = slave_sender.clone();
+  // Setup Self Connection Thread
   let endpoint_id = endpoint_id.clone();
   thread::spawn(move || loop {
-    let data = receiver.recv().unwrap();
-    slave_sender.send((endpoint_id.clone(), data)).unwrap();
+    let data = from_server_receiver.recv().unwrap();
+    to_server_sender.send((endpoint_id.clone(), data)).unwrap();
   });
 }
 
@@ -105,22 +100,22 @@ fn main() {
       .pop_front()
       .expect("The endpoint_id of the current slave should be provided.");
 
-  // The mpsc channel for sending data to the Server Thread
-  let (slave_sender, slave_receiver) = mpsc::channel();
-  // The map mapping the IP addresses to a mpsc Sender object, used to
-  // communicate with the Sender Threads to send data out.
-  let net_conn_map = Arc::new(Mutex::new(HashMap::new()));
+  // The mpsc channel for sending data to the Server Thread from all FromNetwork Threads.
+  let (to_server_sender, to_server_receiver) = mpsc::channel();
+  // The map mapping the IP addresses to an FromServer Queue, used to
+  // communicate with the ToNetwork Threads to send data out.
+  let net_conn_map = Arc::new(Mutex::new(HashMap::<EndpointId, Sender<Vec<u8>>>::new()));
 
   // Start the Accepting Thread
   {
-    let sender = slave_sender.clone();
+    let to_server_sender = to_server_sender.clone();
     let net_conn_map = net_conn_map.clone();
     let cur_ip = cur_ip.clone();
     thread::spawn(move || {
       let listener = TcpListener::bind(format!("{}:{}", &cur_ip, SERVER_PORT)).unwrap();
       for stream in listener.incoming() {
         let stream = stream.unwrap();
-        let endpoint_id = handle_conn(&net_conn_map, &sender, stream);
+        let endpoint_id = handle_conn(&net_conn_map, &to_server_sender, stream);
         println!("Connected from: {:?}", endpoint_id);
       }
     });
@@ -129,45 +124,49 @@ fn main() {
   // Connect to other IPs
   for ip in args {
     let stream = TcpStream::connect(format!("{}:{}", ip, SERVER_PORT));
-    let endpoint_id = handle_conn(&net_conn_map, &slave_sender, stream.unwrap());
+    let endpoint_id = handle_conn(&net_conn_map, &to_server_sender, stream.unwrap());
     println!("Connected to: {:?}", endpoint_id);
   }
 
   // Handle self-connection
   let endpoint_id = EndpointId(cur_ip);
-  handle_self_conn(&endpoint_id, &net_conn_map, &slave_sender);
+  handle_self_conn(&endpoint_id, &net_conn_map, &to_server_sender);
 
-  // A pre-defined map of what tablets that each slave should be managing.
-  // For now, we create all tablets for the current Slave during boot-time.
-  let mut tablet_config = HashMap::new();
-  tablet_config.insert(
-    EndpointId::from("172.19.0.3"),
-    vec![table_shape("table1", None, None)],
-  );
-  tablet_config.insert(
-    EndpointId::from("172.19.0.4"),
-    vec![table_shape("table2", None, Some("j"))],
-  );
-  tablet_config.insert(
-    EndpointId::from("172.19.0.5"),
-    vec![
-      table_shape("table2", Some("j"), None),
-      table_shape("table3", None, Some("d")),
-      table_shape("table4", None, Some("k")),
-    ],
-  );
-  tablet_config.insert(
-    EndpointId::from("172.19.0.6"),
-    vec![table_shape("table3", Some("d"), Some("p"))],
-  );
-  tablet_config.insert(
-    EndpointId::from("172.19.0.7"),
-    vec![
-      table_shape("table3", Some("p"), None),
-      table_shape("table4", Some("k"), None),
-    ],
-  );
-  let tablet_config = tablet_config;
+  let mut tablet_sharding_config = HashMap::<(TablePath, u32), Vec<(TabletKeyRange, TabletGroupId)>>::new();
+  let mut tablet_slave_config = HashMap::<TabletGroupId, SlaveGroupId>::new();
+  let mut slave_network_config = HashMap::<SlaveGroupId, EndpointId>::new();
+
+  // // A pre-defined map of what tablets that each slave should be managing.
+  // // For now, we create all tablets for the current Slave during boot-time.
+  // let mut tablet_config = HashMap::<EndpointId, Vec<TabletShape>>::new();
+  // tablet_config.insert(
+  //   EndpointId::from("172.19.0.3"),
+  //   vec![table_shape("table1", None, None)],
+  // );
+  // tablet_config.insert(
+  //   EndpointId::from("172.19.0.4"),
+  //   vec![table_shape("table2", None, Some("j"))],
+  // );
+  // tablet_config.insert(
+  //   EndpointId::from("172.19.0.5"),
+  //   vec![
+  //     table_shape("table2", Some("j"), None),
+  //     table_shape("table3", None, Some("d")),
+  //     table_shape("table4", None, Some("k")),
+  //   ],
+  // );
+  // tablet_config.insert(
+  //   EndpointId::from("172.19.0.6"),
+  //   vec![table_shape("table3", Some("d"), Some("p"))],
+  // );
+  // tablet_config.insert(
+  //   EndpointId::from("172.19.0.7"),
+  //   vec![
+  //     table_shape("table3", Some("p"), None),
+  //     table_shape("table4", Some("k"), None),
+  //   ],
+  // );
+  // let tablet_config = tablet_config;
 
   // The above map was constructed assuming this predefined schema:
   let static_schema = Schema {
@@ -221,7 +220,7 @@ fn main() {
   start_slave_thread(
     endpoint_id,
     RandGen { rng },
-    slave_receiver,
+    to_server_receiver,
     net_conn_map,
     tablet_map,
     tablet_config,

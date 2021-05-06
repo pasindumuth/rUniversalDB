@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 /// A global identifier of a Tablet (across tables and databases).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TabletPath {
+pub struct TablePath {
   pub path: String,
 }
 
@@ -28,7 +28,7 @@ pub struct TabletKeyRange {
 /// A global identifier for a tablet.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TabletShape {
-  pub path: TabletPath,
+  pub path: TablePath,
   pub range: TabletKeyRange,
 }
 
@@ -94,6 +94,14 @@ pub type SelectView = BTreeMap<PrimaryKey, Vec<(ColumnName, Option<ColumnValue>)
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EndpointId(pub String);
 
+/// A global identfier of a Tablet.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TabletGroupId(pub String);
+
+/// A global identfier of a Slave.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SlaveGroupId(pub String);
+
 /// A request Id that globally identifies a request.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestId(pub String);
@@ -122,9 +130,9 @@ pub struct WriteQueryId(pub TransactionId);
 //  Implementations
 // -------------------------------------------------------------------------------------------------
 
-impl TabletPath {
-  pub fn from(eid: &str) -> TabletPath {
-    TabletPath {
+impl TablePath {
+  pub fn from(eid: &str) -> TablePath {
+    TablePath {
       path: eid.to_string(),
     }
   }
@@ -140,4 +148,18 @@ impl RequestId {
   pub fn from(eid: &str) -> RequestId {
     RequestId(eid.to_string())
   }
+}
+
+pub fn table_shape(path: &str, start: Option<&str>, end: Option<&str>) -> TabletShape {
+    TabletShape {
+        path: TablePath::from(path),
+        range: TabletKeyRange {
+            start: start.map(|start| PrimaryKey {
+                cols: vec![ColumnValue::String(String::from(start))],
+            }),
+            end: end.map(|end| PrimaryKey {
+                cols: vec![ColumnValue::String(String::from(end))],
+            }),
+        },
+    }
 }
