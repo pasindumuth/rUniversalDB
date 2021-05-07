@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// These are common PODs that form the core data objects
 /// of the system.
@@ -34,7 +34,7 @@ pub struct TabletShape {
 
 /// The types that the columns of a Relational Tablet can take on.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ColumnType {
+pub enum ColType {
   Int,
   Bool,
   String,
@@ -42,7 +42,7 @@ pub enum ColumnType {
 
 /// The values that the columns of a Relational Tablet can take on.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ColumnValue {
+pub enum ColValue {
   Int(i32),
   Bool(bool),
   String(String),
@@ -50,13 +50,13 @@ pub enum ColumnValue {
 
 /// The name of a column.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ColumnName(pub String);
+pub struct ColName(pub String);
 
 /// The Primary Key of a Relational Tablet. Note that we don't use
-/// Vec<Option<ColumnValue>> because values of a key column can't be NULL.
+/// Vec<Option<ColValue>> because values of a key column can't be NULL.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrimaryKey {
-  pub cols: Vec<ColumnValue>,
+  pub cols: Vec<ColValue>,
 }
 
 /// The Schema of a Relational Tablet. This stays constant throughout the lifetime
@@ -64,26 +64,27 @@ pub struct PrimaryKey {
 /// we implement that by creating a new Relational Tablet.
 #[derive(Debug, Clone)]
 pub struct Schema {
-  pub key_cols: Vec<(ColumnType, ColumnName)>,
-  pub val_cols: Vec<(ColumnType, ColumnName)>,
+  pub key_cols: Vec<(ColType, ColName)>,
+  pub val_cols: Vec<(ColType, ColName)>,
 }
 
-/// A Row of a Relational Tablet. The reason for Option<ColumnValue> is that None
+/// A Row of a Relational Tablet. The reason for Option<ColValue> is that None
 /// represents the NULL value for a column.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Row {
   pub key: PrimaryKey,
-  pub val: Vec<Option<ColumnValue>>,
+  pub val: Vec<Option<ColValue>>,
 }
 
 // -------------------------------------------------------------------------------------------------
 //  Transaction Data Structures
 // -------------------------------------------------------------------------------------------------
 
-pub type WriteDiff = Vec<(PrimaryKey, Option<Vec<(ColumnName, Option<ColumnValue>)>>)>;
-/// Here, even if the PrimaryKey columns aren't being selected, we still map the
-/// columns values selected by each row form the PrimaryKey of that row.
-pub type SelectView = BTreeMap<PrimaryKey, Vec<(ColumnName, Option<ColumnValue>)>>;
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TableView {
+  col_names: Box<[(ColName, ColType)]>,
+  rows: BTreeMap<Box<[Option<ColValue>]>, u64>,
+}
 
 // -------------------------------------------------------------------------------------------------
 //  Miscellaneous
@@ -151,15 +152,15 @@ impl RequestId {
 }
 
 pub fn table_shape(path: &str, start: Option<&str>, end: Option<&str>) -> TabletShape {
-    TabletShape {
-        path: TablePath::from(path),
-        range: TabletKeyRange {
-            start: start.map(|start| PrimaryKey {
-                cols: vec![ColumnValue::String(String::from(start))],
-            }),
-            end: end.map(|end| PrimaryKey {
-                cols: vec![ColumnValue::String(String::from(end))],
-            }),
-        },
-    }
+  TabletShape {
+    path: TablePath::from(path),
+    range: TabletKeyRange {
+      start: start.map(|start| PrimaryKey {
+        cols: vec![ColValue::String(String::from(start))],
+      }),
+      end: end.map(|end| PrimaryKey {
+        cols: vec![ColValue::String(String::from(end))],
+      }),
+    },
+  }
 }
