@@ -20,9 +20,9 @@ struct ProdNetworkOut {
 }
 
 impl NetworkOut for ProdNetworkOut {
-  fn send(self, eid: EndpointId, msg: NetworkMessage) {
+  fn send(&mut self, eid: &EndpointId, msg: NetworkMessage) {
     let net_conn_map = self.net_conn_map.lock().unwrap();
-    let sender = net_conn_map.get(&eid).unwrap();
+    let sender = net_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
   }
 }
@@ -34,10 +34,10 @@ struct ProdTabletForwardOut {
 }
 
 impl TabletForwardOut for ProdTabletForwardOut {
-  fn forward(self, tablet_group_id: TabletGroupId, msg: TabletMessage) {
+  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletMessage) {
     self
       .tablet_map
-      .get(&tablet_group_id)
+      .get(tablet_group_id)
       .unwrap()
       .send(msg)
       .unwrap();

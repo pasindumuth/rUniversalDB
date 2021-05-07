@@ -229,36 +229,6 @@ pub enum TabletMessage {
 }
 
 // -------------------------------------------------------------------------------------------------
-//  Actions
-// -------------------------------------------------------------------------------------------------
-/// These messages aren't like the others. These are the actions returned
-/// by the thread's Handle Functions, which are pure functions. These actions
-/// are effectively how the Handle Functions do side-effects without actually
-/// doing it in the function.
-
-/// Message that come out of the Slave's handler
-#[derive(Debug)]
-pub enum SlaveAction {
-  Forward {
-    tablet: TabletShape,
-    msg: TabletMessage,
-  },
-  Send {
-    eid: EndpointId,
-    msg: NetworkMessage,
-  },
-}
-
-/// Message that come out of the Tablet's handler
-#[derive(Debug)]
-pub enum TabletAction {
-  Send {
-    eid: EndpointId,
-    msg: NetworkMessage,
-  },
-}
-
-// -------------------------------------------------------------------------------------------------
 //  Miscellaneous
 // -------------------------------------------------------------------------------------------------
 
