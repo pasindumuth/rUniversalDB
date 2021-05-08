@@ -104,8 +104,8 @@ pub fn start_server(
   loop {
     // Receive data from the `to_server_receiver` and update the SlaveState accordingly.
     // This is the steady state that the slaves enters.
-    let (_, data) = to_server_receiver.recv().unwrap();
+    let (from_eid, data) = to_server_receiver.recv().unwrap();
     let slave_msg: SlaveMessage = rmp_serde::from_read_ref(&data).unwrap();
-    slave.handle_incoming_message(slave_msg);
+    slave.handle_incoming_message(from_eid, slave_msg);
   }
 }

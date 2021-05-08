@@ -1,6 +1,6 @@
-use crate::model::common::{EndpointId, TabletGroupId};
+use crate::model::common::{EndpointId, QueryId, TabletGroupId};
 use crate::model::message::{NetworkMessage, TabletMessage};
-use rand::RngCore;
+use rand::{Rng, RngCore};
 
 pub trait NetworkOut {
   fn send(&mut self, eid: &EndpointId, msg: NetworkMessage);
@@ -22,4 +22,10 @@ pub trait IOTypes {
 
 pub fn rvec(i: i32, j: i32) -> Vec<i32> {
   (i..j).collect()
+}
+
+pub fn mk_qid<R: Rng>(rng: &mut R) -> QueryId {
+  let mut bytes: [u8; 8] = [0; 8];
+  rng.fill(&mut bytes);
+  QueryId(bytes)
 }

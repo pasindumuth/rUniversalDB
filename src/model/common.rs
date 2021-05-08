@@ -99,6 +99,10 @@ pub struct EndpointId(pub String);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TabletGroupId(pub String);
 
+/// A global identfier of a Tablet.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryId(pub [u8; 8]);
+
 /// A global identfier of a Slave.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SlaveGroupId(pub String);

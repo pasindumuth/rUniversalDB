@@ -19,8 +19,4 @@ impl<T: IOTypes> TabletState<T> {
   pub fn handle_incoming_message(&mut self, msg: TabletMessage) {
     unimplemented!();
   }
-
-  pub fn mk_rand(&mut self) -> u32 {
-    self.rand.next_u32()
-  }
 }

@@ -5,6 +5,7 @@ use runiversal::model::common::{EndpointId, RequestId, TabletGroupId};
 use runiversal::model::message::{NetworkMessage, SlaveMessage, TabletMessage};
 use runiversal::slave::SlaveState;
 use runiversal::tablet::TabletState;
+use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Formatter, Result};
@@ -101,14 +102,6 @@ pub struct Simulation {
   true_timestamp: i64,
   /// Accumulated client responses for each client.
   client_msgs_received: HashMap<EndpointId, Vec<NetworkMessage>>,
-}
-
-pub fn slave_id(i: &i32) -> EndpointId {
-  EndpointId(format!("s{}", i))
-}
-
-pub fn client_id(i: &i32) -> EndpointId {
-  EndpointId(format!("c{}", i))
 }
 
 impl Simulation {
@@ -229,13 +222,12 @@ impl Simulation {
     let mut queues = self.queues.borrow_mut();
     let queue = queues.get_mut(from_eid).unwrap().get_mut(to_eid).unwrap();
     if queue.len() == 1 {
-      if let Some(index) = self
-        .nonempty_queues
-        .borrow_mut()
+      let mut nonempty_queues = self.nonempty_queues.borrow_mut();
+      if let Some(index) = nonempty_queues
         .iter()
         .position(|(from_eid2, to_eid2)| from_eid2 == from_eid && to_eid2 == to_eid)
       {
-        self.nonempty_queues.borrow_mut().remove(index);
+        nonempty_queues.remove(index);
       }
     }
     queue.pop_front()
@@ -245,13 +237,18 @@ impl Simulation {
   /// `queues`. This function will run the Slave on the `to_eid` end, which
   /// might have any number of side effects, including adding new messages into
   /// `queues`.
-  pub fn run_slave_message(&mut self, to_eid: &EndpointId, msg: SlaveMessage) {
+  pub fn run_slave_message(
+    &mut self,
+    from_eid: &EndpointId,
+    to_eid: &EndpointId,
+    msg: SlaveMessage,
+  ) {
     self
       .slave_states
       .borrow_mut()
       .get_mut(&to_eid)
       .unwrap()
-      .handle_incoming_message(msg);
+      .handle_incoming_message(from_eid.clone(), msg);
   }
 
   /// The endpoints provided must exist. This function polls a message from
@@ -262,7 +259,7 @@ impl Simulation {
     if let Some(msg) = self.poll_msg(from_eid, to_eid) {
       if self.slave_states.borrow_mut().contains_key(to_eid) {
         match msg {
-          NetworkMessage::Slave(slave_msg) => self.run_slave_message(to_eid, slave_msg),
+          NetworkMessage::Slave(slave_msg) => self.run_slave_message(from_eid, to_eid, slave_msg),
           _ => panic!(
             "Endpoint {:?} is a Slave but received a non-SlaveMessage {:?} ",
             to_eid, msg
@@ -327,6 +324,16 @@ impl Simulation {
 // -----------------------------------------------------------------------------------------------
 //  Utils
 // -----------------------------------------------------------------------------------------------
+
+// Construct the Slave id of the slave at the given index.
+pub fn slave_id(i: &i32) -> EndpointId {
+  EndpointId(format!("s{}", i))
+}
+
+// Construct the Client id of the slave at the given index.
+pub fn client_id(i: &i32) -> EndpointId {
+  EndpointId(format!("c{}", i))
+}
 
 /// Add a message between two nodes in the network.
 fn add_msg(

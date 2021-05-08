@@ -47,22 +47,29 @@ pub enum NetworkMessage {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformExternalQuery {
-  request_id: RequestId,
-  query: String,
+  pub request_id: RequestId,
+  pub query: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CancelExternalQuery {
-  request_id: RequestId,
+  pub request_id: RequestId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ExternalQuerySuccess {
-  request_id: RequestId,
-  result: TableView,
+  pub request_id: RequestId,
+  pub result: TableView,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum QueryError {
+  /// Happens during the initial parsing of the Query.
+  ParseError(String),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ExternalQueryAbort {
-  request_id: RequestId,
+  pub request_id: RequestId,
+  pub error: QueryError,
 }
