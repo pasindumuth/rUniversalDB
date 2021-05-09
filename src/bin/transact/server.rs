@@ -1,7 +1,7 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{IOTypes, NetworkOut, TabletForwardOut};
-use runiversal::model::common::{EndpointId, TabletGroupId};
+use runiversal::model::common::{EndpointId, SlaveGroupId, TabletGroupId};
 use runiversal::model::message::{NetworkMessage, SlaveMessage, TabletMessage};
 use runiversal::slave::SlaveState;
 use runiversal::tablet::TabletState;
@@ -91,7 +91,16 @@ pub fn start_server(
   // Construct the SlaveState
   let network_output = ProdNetworkOut { net_conn_map: net_conn_map.clone() };
   let tablet_forward_output = ProdTabletForwardOut { tablet_map };
-  let mut slave = SlaveState::<ProdIOTypes>::new(rand, network_output, tablet_forward_output);
+  let mut slave = SlaveState::<ProdIOTypes>::new(
+    rand,
+    network_output,
+    tablet_forward_output,
+    Default::default(),
+    Default::default(),
+    Default::default(),
+    Default::default(),
+    SlaveGroupId("".to_string()),
+  );
   loop {
     // Receive data from the `to_server_receiver` and update the SlaveState accordingly.
     // This is the steady state that the slaves enters.

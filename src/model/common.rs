@@ -8,29 +8,13 @@ use std::collections::{BTreeMap, HashMap};
 //  Relational Tablet
 // -------------------------------------------------------------------------------------------------
 
-/// A global identifier of a Tablet (across tables and databases).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TablePath {
-  pub path: String,
-}
+/// A global identifier of a Table (across tables and databases).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TablePath(pub String);
 
-/// The key range that a tablet manages. The `start` and `end` are
-/// PrimaryKey types, which are convenient for splitting the key-space.
-/// If either `start` or `end` is `None`, that means there is no bound
-/// for that direction. This is a half-open interval, where `start`
-/// is inclusive and `end` is exclusive.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TabletKeyRange {
-  pub start: Option<PrimaryKey>,
-  pub end: Option<PrimaryKey>,
-}
-
-/// A global identifier for a tablet.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TabletShape {
-  pub path: TablePath,
-  pub range: TabletKeyRange,
-}
+/// A global identifier of a TransTable (across tables and databases).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TransTablePath(pub String);
 
 /// The types that the columns of a Relational Tablet can take on.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -52,6 +36,15 @@ pub enum ColValue {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ColName(pub String);
 
+/// The TableSchema of a Relational Tablet. This stays constant throughout the lifetime
+/// of a Relational Tablet. If the USER wants to change the number of key-columns,
+/// we implement that by creating a new Relational Tablet.
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+  pub key_cols: Vec<(ColType, ColName)>,
+  pub val_cols: Vec<(ColType, ColName)>,
+}
+
 /// The Primary Key of a Relational Tablet. Note that we don't use
 /// Vec<Option<ColValue>> because values of a key column can't be NULL.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -59,21 +52,15 @@ pub struct PrimaryKey {
   pub cols: Vec<ColValue>,
 }
 
-/// The Schema of a Relational Tablet. This stays constant throughout the lifetime
-/// of a Relational Tablet. If the USER wants to change the number of key-columns,
-/// we implement that by creating a new Relational Tablet.
-#[derive(Debug, Clone)]
-pub struct Schema {
-  pub key_cols: Vec<(ColType, ColName)>,
-  pub val_cols: Vec<(ColType, ColName)>,
-}
-
-/// A Row of a Relational Tablet. The reason for Option<ColValue> is that None
-/// represents the NULL value for a column.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Row {
-  pub key: PrimaryKey,
-  pub val: Vec<Option<ColValue>>,
+/// The key range that a tablet manages. The `start` and `end` are
+/// PrimaryKey types, which are convenient for splitting the key-space.
+/// If either `start` or `end` is `None`, that means there is no bound
+/// for that direction. This is a half-open interval, where `start`
+/// is inclusive and `end` is exclusive.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TabletKeyRange {
+  pub start: Option<PrimaryKey>,
+  pub end: Option<PrimaryKey>,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -116,8 +103,8 @@ pub struct RequestId(pub String);
 // -------------------------------------------------------------------------------------------------
 
 impl TablePath {
-  pub fn from(eid: &str) -> TablePath {
-    TablePath { path: eid.to_string() }
+  pub fn from(table: &str) -> TablePath {
+    TablePath(table.to_string())
   }
 }
 
@@ -133,13 +120,76 @@ impl RequestId {
   }
 }
 
-pub fn table_shape(path: &str, start: Option<&str>, end: Option<&str>) -> TabletShape {
-  TabletShape {
-    path: TablePath::from(path),
-    range: TabletKeyRange {
-      start: start.map(|start| PrimaryKey { cols: vec![ColValue::String(String::from(start))] }),
-      end: end.map(|end| PrimaryKey { cols: vec![ColValue::String(String::from(end))] }),
-    },
+// -------------------------------------------------------------------------------------------------
+// Processed SQL
+// -------------------------------------------------------------------------------------------------
+
+pub mod proc {
+  use crate::model::common::iast::{BinaryOp, UnaryOp, Value};
+  use crate::model::common::{ColName, TablePath, TransTablePath};
+  use serde::{Deserialize, Serialize};
+  use std::collections::HashMap;
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum DataSourceName {
+    TablePath(TablePath),
+    TransTablePath(TransTablePath),
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct QualColName {
+    data_source: DataSourceName,
+    col_name: ColName,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum ValExpr {
+    ColumnRef(QualColName),
+    UnaryOp { op: UnaryOp, expr: Box<ValExpr> },
+    BinaryOp { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
+    Value { val: Value },
+    Subquery { query: Box<GRQuery> },
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct SuperSimpleSelect {
+    pub select: Vec<QualColName>,
+    pub from: DataSourceName,
+    pub selection: ValExpr,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct Update {
+    pub table: TablePath,
+    pub assignment: Vec<(ColName, ValExpr)>,
+    pub selection: ValExpr,
+  }
+
+  // GR
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum GRQueryStage {
+    SuperSimpleSelect(SuperSimpleSelect),
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct GRQuery {
+    pub trans_table_assignment: HashMap<TransTablePath, (Vec<ColName>, GRQueryStage)>,
+    pub returning: TransTablePath,
+  }
+
+  // MS
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum MSQueryStage {
+    GRQueryStage(GRQueryStage),
+    Update(Update),
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct MSQuery {
+    pub trans_table_assignment: HashMap<TransTablePath, (Vec<ColName>, MSQueryStage)>,
+    pub returning: TransTablePath,
   }
 }
 
@@ -148,13 +198,15 @@ pub fn table_shape(path: &str, start: Option<&str>, end: Option<&str>) -> Tablet
 // -------------------------------------------------------------------------------------------------
 
 pub mod iast {
-  #[derive(Debug)]
+  use serde::{Deserialize, Serialize};
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct TableAlias {
     pub name: String,
     pub columns: Option<Vec<String>>,
   }
 
-  #[derive(Debug)]
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum ValExpr {
     ColumnRef { table_ref: Option<String>, col_ref: String },
     UnaryOp { op: UnaryOp, expr: Box<ValExpr> },
@@ -163,7 +215,7 @@ pub mod iast {
     Subquery { query: Box<Query> },
   }
 
-  #[derive(Debug)]
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum UnaryOp {
     Plus,
     Minus,
@@ -172,7 +224,7 @@ pub mod iast {
     IsNotNull,
   }
 
-  #[derive(Debug)]
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum BinaryOp {
     Plus,
     Minus,
@@ -191,7 +243,7 @@ pub mod iast {
     Or,
   }
 
-  #[derive(Debug)]
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum Value {
     Number(String),
     QuotedString(String),
@@ -199,33 +251,33 @@ pub mod iast {
     Null,
   }
 
-  #[derive(Debug)]
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Query {
     pub ctes: Vec<(TableAlias, Query)>,
     pub body: QueryBody,
   }
 
-  #[derive(Debug)]
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum QueryBody {
     Query(Box<Query>),
     SuperSimpleSelect(SuperSimpleSelect),
     Update(Update),
   }
 
-  #[derive(Debug)]
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
     pub projection: SelectClause, // The select clause
     pub from: (String, Option<TableAlias>),
     pub selection: ValExpr, // The where clause
   }
 
-  #[derive(Debug)]
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum SelectClause {
     SelectList(Vec<(String, Option<String>)>),
     Wildcard,
   }
 
-  #[derive(Debug)]
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Update {
     pub table: String,
     pub assignments: Vec<(String, ValExpr)>,

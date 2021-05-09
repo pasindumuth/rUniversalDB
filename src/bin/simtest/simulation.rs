@@ -1,7 +1,9 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{rvec, IOTypes, NetworkOut, TabletForwardOut};
-use runiversal::model::common::{EndpointId, RequestId, TabletGroupId};
+use runiversal::model::common::{
+  EndpointId, RequestId, SlaveGroupId, TablePath, TableSchema, TabletGroupId, TabletKeyRange,
+};
 use runiversal::model::message::{NetworkMessage, SlaveMessage, TabletMessage};
 use runiversal::slave::SlaveState;
 use runiversal::tablet::TabletState;
@@ -103,8 +105,13 @@ impl Simulation {
   /// we create as many tablets as there are `TabletGroupId` for that slave.
   pub fn new(
     seed: [u8; 16],
-    tablet_config: HashMap<EndpointId, Vec<TabletGroupId>>,
     num_clients: i32,
+
+    // Arguments that are specific to SlaveState and TabletState
+    schema: HashMap<TablePath, TableSchema>,
+    sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+    tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
+    slave_address_config: HashMap<SlaveGroupId, EndpointId>,
   ) -> Simulation {
     let mut sim = Simulation {
       rng: XorShiftRng::from_seed(seed),
@@ -118,8 +125,10 @@ impl Simulation {
       true_timestamp: Default::default(),
       client_msgs_received: Default::default(),
     };
-    sim.slave_eids = tablet_config.keys().cloned().collect();
-    sim.client_eids = rvec(0, num_clients).iter().map(client_id).collect();
+
+    // Setup eids
+    sim.slave_eids = slave_address_config.values().cloned().collect();
+    sim.client_eids = rvec(0, num_clients).iter().map(client_eid).collect();
     let all_eids: Vec<EndpointId> =
       sim.slave_eids.iter().cloned().chain(sim.client_eids.iter().cloned()).collect();
     for from_eid in &all_eids {
@@ -128,7 +137,18 @@ impl Simulation {
         sim.queues.borrow_mut().get_mut(from_eid).unwrap().insert(to_eid.clone(), VecDeque::new());
       }
     }
-    for eid in &sim.slave_eids {
+
+    // Invert `tablet_address_config` for use later.
+    let mut tablets_for_slave = HashMap::<SlaveGroupId, Vec<TabletGroupId>>::new();
+    for (tid, sid) in &tablet_address_config {
+      if !tablets_for_slave.contains_key(sid) {
+        tablets_for_slave.insert(sid.clone(), Vec::new());
+      }
+      tablets_for_slave.get_mut(sid).unwrap().push(tid.clone());
+    }
+
+    // Construct SlaveState and TabletState
+    for (sid, eid) in &slave_address_config {
       let network_out = TestNetworkOut {
         queues: sim.queues.clone(),
         nonempty_queues: sim.nonempty_queues.clone(),
@@ -142,15 +162,28 @@ impl Simulation {
           XorShiftRng::from_seed(seed),
           network_out.clone(),
           TestTabletForwardOut { tablet_states: sim.tablet_states.clone(), from_eid: eid.clone() },
+          schema.clone(),
+          sharding_config.clone(),
+          tablet_address_config.clone(),
+          slave_address_config.clone(),
+          sid.clone(),
         ),
       );
       sim.tablet_states.borrow_mut().insert(eid.clone(), Default::default());
-      for tablet_group_id in tablet_config.get(eid).unwrap() {
+      for tid in tablets_for_slave.get(sid).unwrap() {
         let mut seed = [0; 16];
         sim.rng.fill_bytes(&mut seed);
         sim.tablet_states.borrow_mut().get_mut(eid).unwrap().insert(
-          tablet_group_id.clone(),
-          TabletState::new(XorShiftRng::from_seed(seed), network_out.clone()),
+          tid.clone(),
+          TabletState::new(
+            XorShiftRng::from_seed(seed),
+            network_out.clone(),
+            schema.clone(),
+            sharding_config.clone(),
+            tablet_address_config.clone(),
+            slave_address_config.clone(),
+            tid.clone(),
+          ),
         );
       }
     }
@@ -295,13 +328,13 @@ impl Simulation {
 // -----------------------------------------------------------------------------------------------
 
 // Construct the Slave id of the slave at the given index.
-pub fn slave_id(i: &i32) -> EndpointId {
-  EndpointId(format!("s{}", i))
+pub fn slave_eid(i: &i32) -> EndpointId {
+  EndpointId(format!("se{}", i))
 }
 
 // Construct the Client id of the slave at the given index.
-pub fn client_id(i: &i32) -> EndpointId {
-  EndpointId(format!("c{}", i))
+pub fn client_eid(i: &i32) -> EndpointId {
+  EndpointId(format!("ce{}", i))
 }
 
 /// Add a message between two nodes in the network.

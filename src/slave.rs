@@ -1,5 +1,7 @@
 use crate::common::{mk_qid, IOTypes, NetworkOut};
-use crate::model::common::iast;
+use crate::model::common::{
+  iast, SlaveGroupId, TablePath, TableSchema, TabletGroupId, TabletKeyRange,
+};
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message::NetworkMessage::External;
 use crate::model::message::{
@@ -75,6 +77,15 @@ pub struct SlaveState<T: IOTypes> {
 
   /// External Request management
   external_query_manager: ExternalQueryManager,
+
+  /// Distribution
+  schema: HashMap<TablePath, TableSchema>,
+  sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
+  slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+
+  /// Metadata
+  this_slave_group_id: SlaveGroupId, // The SlaveGroupId of this Slave
 }
 
 impl<T: IOTypes> SlaveState<T> {
@@ -82,12 +93,22 @@ impl<T: IOTypes> SlaveState<T> {
     rand: T::RngCoreT,
     network_output: T::NetworkOutT,
     tablet_forward_output: T::TabletForwardOutT,
+    schema: HashMap<TablePath, TableSchema>,
+    sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+    tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
+    slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+    this_slave_group_id: SlaveGroupId,
   ) -> SlaveState<T> {
     SlaveState {
       rand,
       network_output,
       tablet_forward_output,
       external_query_manager: ExternalQueryManager::new(),
+      schema,
+      sharding_config,
+      tablet_address_config,
+      slave_address_config,
+      this_slave_group_id,
     }
   }
 
