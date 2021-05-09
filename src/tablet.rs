@@ -10,10 +10,7 @@ pub struct TabletState<T: IOTypes> {
 
 impl<T: IOTypes> TabletState<T> {
   pub fn new(rand: T::RngCoreT, network_output: T::NetworkOutT) -> TabletState<T> {
-    TabletState {
-      rand,
-      network_output,
-    }
+    TabletState { rand, network_output }
   }
 
   pub fn handle_incoming_message(&mut self, msg: TabletMessage) {

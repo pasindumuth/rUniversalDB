@@ -23,13 +23,7 @@ struct TestNetworkOut {
 
 impl NetworkOut for TestNetworkOut {
   fn send(&mut self, to_eid: &EndpointId, msg: NetworkMessage) {
-    add_msg(
-      &mut self.queues,
-      &mut self.nonempty_queues,
-      msg,
-      &self.from_eid,
-      to_eid,
-    );
+    add_msg(&mut self.queues, &mut self.nonempty_queues, msg, &self.from_eid, to_eid);
   }
 }
 
@@ -126,24 +120,12 @@ impl Simulation {
     };
     sim.slave_eids = tablet_config.keys().cloned().collect();
     sim.client_eids = rvec(0, num_clients).iter().map(client_id).collect();
-    let all_eids: Vec<EndpointId> = sim
-      .slave_eids
-      .iter()
-      .cloned()
-      .chain(sim.client_eids.iter().cloned())
-      .collect();
+    let all_eids: Vec<EndpointId> =
+      sim.slave_eids.iter().cloned().chain(sim.client_eids.iter().cloned()).collect();
     for from_eid in &all_eids {
-      sim
-        .queues
-        .borrow_mut()
-        .insert(from_eid.clone(), Default::default());
+      sim.queues.borrow_mut().insert(from_eid.clone(), Default::default());
       for to_eid in &all_eids {
-        sim
-          .queues
-          .borrow_mut()
-          .get_mut(from_eid)
-          .unwrap()
-          .insert(to_eid.clone(), VecDeque::new());
+        sim.queues.borrow_mut().get_mut(from_eid).unwrap().insert(to_eid.clone(), VecDeque::new());
       }
     }
     for eid in &sim.slave_eids {
@@ -159,16 +141,10 @@ impl Simulation {
         SlaveState::new(
           XorShiftRng::from_seed(seed),
           network_out.clone(),
-          TestTabletForwardOut {
-            tablet_states: sim.tablet_states.clone(),
-            from_eid: eid.clone(),
-          },
+          TestTabletForwardOut { tablet_states: sim.tablet_states.clone(), from_eid: eid.clone() },
         ),
       );
-      sim
-        .tablet_states
-        .borrow_mut()
-        .insert(eid.clone(), Default::default());
+      sim.tablet_states.borrow_mut().insert(eid.clone(), Default::default());
       for tablet_group_id in tablet_config.get(eid).unwrap() {
         let mut seed = [0; 16];
         sim.rng.fill_bytes(&mut seed);
@@ -208,13 +184,7 @@ impl Simulation {
 
   /// Add a message between two nodes in the network.
   pub fn add_msg(&mut self, msg: NetworkMessage, from_eid: &EndpointId, to_eid: &EndpointId) {
-    add_msg(
-      &mut self.queues,
-      &mut self.nonempty_queues,
-      msg,
-      from_eid,
-      to_eid,
-    );
+    add_msg(&mut self.queues, &mut self.nonempty_queues, msg, from_eid, to_eid);
   }
 
   /// Poll a message between two nodes in the network.
@@ -260,10 +230,9 @@ impl Simulation {
       if self.slave_states.borrow_mut().contains_key(to_eid) {
         match msg {
           NetworkMessage::Slave(slave_msg) => self.run_slave_message(from_eid, to_eid, slave_msg),
-          _ => panic!(
-            "Endpoint {:?} is a Slave but received a non-SlaveMessage {:?} ",
-            to_eid, msg
-          ),
+          _ => {
+            panic!("Endpoint {:?} is a Slave but received a non-SlaveMessage {:?} ", to_eid, msg)
+          }
         }
       } else if self.client_msgs_received.contains_key(to_eid) {
         if let Some(msgs) = self.client_msgs_received.get_mut(to_eid) {

@@ -111,35 +111,13 @@ pub struct SlaveGroupId(pub String);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestId(pub String);
 
-/// A timestamp.
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Timestamp(pub u64);
-
-/// A transaction Id that's globally unique. This includes all Select Queries
-/// and Write Queries, but not Partial Queries (the Partial Queries for
-/// a single Full Query uses the same TransactionId).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TransactionId(pub [u8; 8]);
-
-/// A Wrapper over TransactionId for Select Queries, for just a
-/// little extra type safety.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SelectQueryId(pub TransactionId);
-
-/// A Wrapper over TransactionId for Write Queries (INSERT, UPDATE, and
-/// DELETE), for just a little extra type safety.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WriteQueryId(pub TransactionId);
-
 // -------------------------------------------------------------------------------------------------
 //  Implementations
 // -------------------------------------------------------------------------------------------------
 
 impl TablePath {
   pub fn from(eid: &str) -> TablePath {
-    TablePath {
-      path: eid.to_string(),
-    }
+    TablePath { path: eid.to_string() }
   }
 }
 
@@ -159,12 +137,98 @@ pub fn table_shape(path: &str, start: Option<&str>, end: Option<&str>) -> Tablet
   TabletShape {
     path: TablePath::from(path),
     range: TabletKeyRange {
-      start: start.map(|start| PrimaryKey {
-        cols: vec![ColValue::String(String::from(start))],
-      }),
-      end: end.map(|end| PrimaryKey {
-        cols: vec![ColValue::String(String::from(end))],
-      }),
+      start: start.map(|start| PrimaryKey { cols: vec![ColValue::String(String::from(start))] }),
+      end: end.map(|end| PrimaryKey { cols: vec![ColValue::String(String::from(end))] }),
     },
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
+// SQL
+// -------------------------------------------------------------------------------------------------
+
+pub mod iast {
+  #[derive(Debug)]
+  pub struct TableAlias {
+    pub name: String,
+    pub columns: Option<Vec<String>>,
+  }
+
+  #[derive(Debug)]
+  pub enum ValExpr {
+    ColumnRef { table_ref: Option<String>, col_ref: String },
+    UnaryOp { op: UnaryOp, expr: Box<ValExpr> },
+    BinaryOp { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
+    Value { val: Value },
+    Subquery { query: Box<Query> },
+  }
+
+  #[derive(Debug)]
+  pub enum UnaryOp {
+    Plus,
+    Minus,
+    Not,
+    IsNull,
+    IsNotNull,
+  }
+
+  #[derive(Debug)]
+  pub enum BinaryOp {
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    Modulus,
+    StringConcat,
+    Gt,
+    Lt,
+    GtEq,
+    LtEq,
+    Spaceship,
+    Eq,
+    NotEq,
+    And,
+    Or,
+  }
+
+  #[derive(Debug)]
+  pub enum Value {
+    Number(String),
+    QuotedString(String),
+    Boolean(bool),
+    Null,
+  }
+
+  #[derive(Debug)]
+  pub struct Query {
+    pub ctes: Vec<(TableAlias, Query)>,
+    pub body: QueryBody,
+  }
+
+  #[derive(Debug)]
+  pub enum QueryBody {
+    Query(Box<Query>),
+    SuperSimpleSelect(SuperSimpleSelect),
+    Update(Update),
+  }
+
+  #[derive(Debug)]
+  pub struct SuperSimpleSelect {
+    pub projection: SelectClause, // The select clause
+    pub from: (String, Option<TableAlias>),
+    pub selection: ValExpr, // The where clause
+  }
+
+  #[derive(Debug)]
+  pub enum SelectClause {
+    SelectList(Vec<(String, Option<String>)>),
+    Wildcard,
+  }
+
+  #[derive(Debug)]
+  pub struct Update {
+    pub table: String,
+    pub assignments: Vec<(String, ValExpr)>,
+    pub selection: ValExpr,
   }
 }

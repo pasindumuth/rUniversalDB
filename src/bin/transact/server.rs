@@ -35,12 +35,7 @@ struct ProdTabletForwardOut {
 
 impl TabletForwardOut for ProdTabletForwardOut {
   fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletMessage) {
-    self
-      .tablet_map
-      .get(tablet_group_id)
-      .unwrap()
-      .send(msg)
-      .unwrap();
+    self.tablet_map.get(tablet_group_id).unwrap().send(msg).unwrap();
   }
 }
 
@@ -67,9 +62,7 @@ pub fn start_server(
   let mut rand = XorShiftRng::from_seed(seed);
 
   // Create the network output interface, used by both the Slave and the Tablets.
-  let network_output = ProdNetworkOut {
-    net_conn_map: net_conn_map.clone(),
-  };
+  let network_output = ProdNetworkOut { net_conn_map: net_conn_map.clone() };
 
   // Create the Tablets
   let mut tablet_map = HashMap::<TabletGroupId, Sender<TabletMessage>>::new();
@@ -96,9 +89,7 @@ pub fn start_server(
   }
 
   // Construct the SlaveState
-  let network_output = ProdNetworkOut {
-    net_conn_map: net_conn_map.clone(),
-  };
+  let network_output = ProdNetworkOut { net_conn_map: net_conn_map.clone() };
   let tablet_forward_output = ProdTabletForwardOut { tablet_map };
   let mut slave = SlaveState::<ProdIOTypes>::new(rand, network_output, tablet_forward_output);
   loop {

@@ -22,15 +22,21 @@ fn main() {
   tablet_config.insert(EndpointId("s5".to_string()), vec![]);
   let mut sim = Simulation::new(seed, tablet_config, 5);
 
+  //   let query = "\
+  //     SELECT a, b, 123, myfunc(b) \
+  //     FROM table_1 \
+  //     WHERE a > b AND b < 100 \
+  //     ORDER BY a DESC, b;
+  // \
+  //     SELECT a, b, 123, myfunc(b) \
+  //     FROM table_1 \
+  //     WHERE a > b AND b < 100 \
+  //     ORDER BY a DESC, b";
+
   let query = "\
-    SELECT a, b, 123, myfunc(b) \
-    FROM table_1 \
-    WHERE a > b AND b < 100 \
-    ORDER BY a DESC, b;
-\
-    SELECT a, b, 123, myfunc(b) \
-    FROM table_1 \
-    WHERE a > b AND b < 100 \
+    SELECT a, b, c, d \
+    FROM table_1 AS hi(foo, boo, bar) \
+    WHERE a > b AND b < -100 \
     ORDER BY a DESC, b";
 
   sim.add_msg(

@@ -1,1 +1,21 @@
 tab_spaces = 2
+
+# These are the default values for these settings when
+# `use_small_heuristics = "Default'`. I generally like them, but I'd
+# like to tinker with them a little bit. So I'm turning off
+# `use_small_heuristics` and setting them manually.
+#
+# fn_call_width = 60
+# attr_fn_like_width = 70
+# struct_lit_width = 18
+# struct_variant_width = 35
+# array_width = 60
+# chain_width = 60
+# single_line_if_else_max_width = 50
+# use_small_heuristics = "Off"
+
+# Actually.. this strategy doesn't work. The formatting we get for
+# using above values directly isn't the same as using
+# `use_small_heuristics = "Default"`. I believe there
+# is a bug in rustfmt. We can just use "Max" instead.
+use_small_heuristics = "Max"

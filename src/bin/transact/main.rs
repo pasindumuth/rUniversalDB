@@ -49,9 +49,7 @@ fn handle_conn(
     let stream = stream.try_clone().unwrap();
     thread::spawn(move || loop {
       let val_in = recv(&stream);
-      to_server_sender
-        .send((endpoint_id.clone(), val_in))
-        .unwrap();
+      to_server_sender.send((endpoint_id.clone(), val_in)).unwrap();
     });
   }
 
@@ -102,9 +100,7 @@ fn main() {
     .parse::<u32>()
     .expect("The slave index couldn't be parsed as a string.");
   // Pop the IP address
-  let cur_ip = args
-    .pop_front()
-    .expect("The endpoint_id of the current slave should be provided.");
+  let cur_ip = args.pop_front().expect("The endpoint_id of the current slave should be provided.");
 
   // The mpsc channel for sending data to the Server Thread from all FromNetwork Threads.
   let (to_server_sender, to_server_receiver) = mpsc::channel();
