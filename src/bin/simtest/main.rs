@@ -176,16 +176,19 @@ fn main() {
   let mut sim =
     Simulation::new(seed, 5, schema, sharding_config, tablet_address_config, slave_address_config);
 
-  //   let query = "\
+  // let query = "\
   //     SELECT a, b, 123, myfunc(b) \
   //     FROM table_1 \
   //     WHERE a > b AND b < 100 \
   //     ORDER BY a DESC, b;
-  // \
+  //   \
   //     SELECT a, b, 123, myfunc(b) \
   //     FROM table_1 \
   //     WHERE a > b AND b < 100 \
   //     ORDER BY a DESC, b";
+
+  // let query = "\
+  //   ALTER TABLE bank ADD COLUMN address STRING UNIQUE;";
 
   let query = "\
     SELECT a, b, c, d \

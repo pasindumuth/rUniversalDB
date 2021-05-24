@@ -14,7 +14,7 @@ pub struct TablePath(pub String);
 
 /// A global identifier of a TransTable (across tables and databases).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TransTablePath(pub String);
+pub struct TransTableName(pub String);
 
 /// The types that the columns of a Relational Tablet can take on.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -126,35 +126,29 @@ impl RequestId {
 
 pub mod proc {
   use crate::model::common::iast::{BinaryOp, UnaryOp, Value};
-  use crate::model::common::{ColName, TablePath, TransTablePath};
+  use crate::model::common::{ColName, TablePath, TransTableName};
   use serde::{Deserialize, Serialize};
   use std::collections::HashMap;
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub enum DataSourceName {
+  pub enum TableRef {
     TablePath(TablePath),
-    TransTablePath(TransTablePath),
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct QualColName {
-    data_source: DataSourceName,
-    col_name: ColName,
+    TransTableName(TransTableName),
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum ValExpr {
-    ColumnRef(QualColName),
-    UnaryOp { op: UnaryOp, expr: Box<ValExpr> },
-    BinaryOp { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
+    ColumnRef(ColName),
+    UnaryExpr { op: UnaryOp, expr: Box<ValExpr> },
+    BinaryExpr { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
     Value { val: Value },
     Subquery { query: Box<GRQuery> },
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
-    pub select: Vec<QualColName>,
-    pub from: DataSourceName,
+    pub select: Vec<ColName>,
+    pub from: TableRef,
     pub selection: ValExpr,
   }
 
@@ -174,22 +168,22 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct GRQuery {
-    pub trans_table_assignment: HashMap<TransTablePath, (Vec<ColName>, GRQueryStage)>,
-    pub returning: TransTablePath,
+    pub trans_tables: HashMap<TransTableName, GRQueryStage>,
+    pub returning: TransTableName,
   }
 
   // MS
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum MSQueryStage {
-    GRQueryStage(GRQueryStage),
+    SuperSimpleSelect(SuperSimpleSelect),
     Update(Update),
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct MSQuery {
-    pub trans_table_assignment: HashMap<TransTablePath, (Vec<ColName>, MSQueryStage)>,
-    pub returning: TransTablePath,
+    pub trans_tables: HashMap<TransTableName, MSQueryStage>,
+    pub returning: TransTableName,
   }
 }
 
@@ -201,16 +195,10 @@ pub mod iast {
   use serde::{Deserialize, Serialize};
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct TableAlias {
-    pub name: String,
-    pub columns: Option<Vec<String>>,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum ValExpr {
     ColumnRef { table_ref: Option<String>, col_ref: String },
-    UnaryOp { op: UnaryOp, expr: Box<ValExpr> },
-    BinaryOp { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
+    UnaryExpr { op: UnaryOp, expr: Box<ValExpr> },
+    BinaryExpr { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
     Value { val: Value },
     Subquery { query: Box<Query> },
   }
@@ -253,7 +241,7 @@ pub mod iast {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Query {
-    pub ctes: Vec<(TableAlias, Query)>,
+    pub ctes: Vec<(String, Query)>,
     pub body: QueryBody,
   }
 
@@ -266,15 +254,9 @@ pub mod iast {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
-    pub projection: SelectClause, // The select clause
-    pub from: (String, Option<TableAlias>),
+    pub projection: Vec<String>, // The select clause
+    pub from: String,
     pub selection: ValExpr, // The where clause
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub enum SelectClause {
-    SelectList(Vec<(String, Option<String>)>),
-    Wildcard,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

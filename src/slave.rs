@@ -1,6 +1,6 @@
 use crate::common::{mk_qid, IOTypes, NetworkOut};
 use crate::model::common::{
-  iast, SlaveGroupId, TablePath, TableSchema, TabletGroupId, TabletKeyRange,
+  iast, proc, SlaveGroupId, TablePath, TableSchema, TabletGroupId, TabletKeyRange,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message::NetworkMessage::External;
@@ -136,6 +136,7 @@ impl<T: IOTypes> SlaveState<T> {
             println!("iAST: {:#?}", iast);
           }
           Err(e) => {
+            println!("Error!!!!");
             // Extract error string
             let err_string = match e {
               TokenizerError(s) => s,
@@ -162,10 +163,6 @@ impl<T: IOTypes> SlaveState<T> {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Evaluate Column References
-// -----------------------------------------------------------------------------------------------
-
-// -----------------------------------------------------------------------------------------------
 //  Convert from sqlparser AST to internal AST
 // -----------------------------------------------------------------------------------------------
 
@@ -182,10 +179,10 @@ fn convert_ast(raw_query: &Vec<ast::Statement>) -> iast::Query {
 }
 
 fn convert_query(query: &ast::Query) -> iast::Query {
-  let mut ictes = Vec::<(iast::TableAlias, iast::Query)>::new();
+  let mut ictes = Vec::<(String, iast::Query)>::new();
   if let Some(with) = &query.with {
     for cte in &with.cte_tables {
-      ictes.push((convert_table_alias(&cte.alias), convert_query(&cte.query)));
+      ictes.push((cte.alias.name.value.clone(), convert_query(&cte.query)));
     }
   }
   let body = match &query.body {
@@ -196,12 +193,12 @@ fn convert_query(query: &ast::Query) -> iast::Query {
       let from_clause = &select.from;
       assert!(from_clause.len() == 1, "Joins with ',' not supported");
       assert!(from_clause[0].joins.is_empty(), "Joins not supported");
-      if let ast::TableFactor::Table { name, alias, .. } = &from_clause[0].relation {
+      if let ast::TableFactor::Table { name, .. } = &from_clause[0].relation {
         let ast::ObjectName(idents) = name;
         assert!(idents.len() == 1, "Multi-part table references not supported");
         iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
           projection: convert_select_clause(&select.projection),
-          from: (idents[0].value.clone(), alias.as_ref().map(|a| convert_table_alias(a))),
+          from: idents[0].value.clone(),
           selection: if let Some(selection) = &select.selection {
             convert_expr(selection)
           } else {
@@ -237,45 +234,23 @@ fn convert_query(query: &ast::Query) -> iast::Query {
   iast::Query { ctes: ictes, body }
 }
 
-fn convert_table_alias(table_alias: &ast::TableAlias) -> iast::TableAlias {
-  iast::TableAlias {
-    name: table_alias.name.value.clone(),
-    columns: if table_alias.columns.is_empty() {
-      None
-    } else {
-      Some(table_alias.columns.iter().map(|iden| iden.value.clone()).collect())
-    },
-  }
-}
-
-fn convert_select_clause(select_clause: &Vec<ast::SelectItem>) -> iast::SelectClause {
-  if select_clause.len() == 1 && select_clause[0] == ast::SelectItem::Wildcard {
-    iast::SelectClause::Wildcard
-  } else {
-    let mut select_list = Vec::<(String, Option<String>)>::new();
-    for item in select_clause {
-      match &item {
-        ast::SelectItem::UnnamedExpr(expr) => {
-          if let ast::Expr::Identifier(ident) = expr {
-            select_list.push((ident.value.clone(), None));
-          } else {
-            panic!("{:?} is not supported in SelectItem", expr);
-          }
-        }
-        ast::SelectItem::ExprWithAlias { expr, alias } => {
-          if let ast::Expr::Identifier(ident) = expr {
-            select_list.push((ident.value.clone(), Some(alias.value.clone())));
-          } else {
-            panic!("{:?} is not supported in SelectItem", expr);
-          }
-        }
-        _ => {
+fn convert_select_clause(select_clause: &Vec<ast::SelectItem>) -> Vec<String> {
+  let mut select_list = Vec::<String>::new();
+  for item in select_clause {
+    match &item {
+      ast::SelectItem::UnnamedExpr(expr) => {
+        if let ast::Expr::Identifier(ident) = expr {
+          select_list.push(ident.value.clone());
+        } else {
           panic!("{:?} is not supported in SelectItem", item);
         }
       }
+      _ => {
+        panic!("{:?} is not supported in SelectItem", item);
+      }
     }
-    iast::SelectClause::SelectList(select_list)
   }
+  select_list
 }
 
 fn convert_value(value: &ast::Value) -> iast::Value {
@@ -308,13 +283,13 @@ fn convert_expr(expr: &ast::Expr) -> iast::ValExpr {
         ast::UnaryOperator::Not => iast::UnaryOp::Not,
         _ => panic!("UnaryOperator {:?} not supported", op),
       };
-      iast::ValExpr::UnaryOp { op: iop, expr: Box::new(convert_expr(expr)) }
+      iast::ValExpr::UnaryExpr { op: iop, expr: Box::new(convert_expr(expr)) }
     }
     ast::Expr::IsNull(expr) => {
-      iast::ValExpr::UnaryOp { op: iast::UnaryOp::IsNull, expr: Box::new(convert_expr(expr)) }
+      iast::ValExpr::UnaryExpr { op: iast::UnaryOp::IsNull, expr: Box::new(convert_expr(expr)) }
     }
     ast::Expr::IsNotNull(expr) => {
-      iast::ValExpr::UnaryOp { op: iast::UnaryOp::IsNotNull, expr: Box::new(convert_expr(expr)) }
+      iast::ValExpr::UnaryExpr { op: iast::UnaryOp::IsNotNull, expr: Box::new(convert_expr(expr)) }
     }
     ast::Expr::BinaryOp { op, left, right } => {
       let iop = match op {
@@ -335,7 +310,7 @@ fn convert_expr(expr: &ast::Expr) -> iast::ValExpr {
         ast::BinaryOperator::Or => iast::BinaryOp::Or,
         _ => panic!("BinaryOperator {:?} not supported", op),
       };
-      iast::ValExpr::BinaryOp {
+      iast::ValExpr::BinaryExpr {
         op: iop,
         left: Box::new(convert_expr(left)),
         right: Box::new(convert_expr(right)),
