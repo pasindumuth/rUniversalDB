@@ -1,18 +1,43 @@
 use crate::common::{mk_qid, IOTypes, NetworkOut};
 use crate::model::common::{
-  iast, proc, SlaveGroupId, TablePath, TableSchema, TabletGroupId, TabletKeyRange,
+  iast, proc, ColName, ColType, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
-use crate::model::message::NetworkMessage::External;
 use crate::model::message::{
   ExternalMessage, ExternalQueryAbort, NetworkMessage, QueryError, SlaveMessage,
 };
+use crate::multiversion_map::MVM;
 use rand::RngCore;
 use sqlparser::ast;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::collections::HashMap;
+
+// -----------------------------------------------------------------------------------------------
+//  Table Schema
+// -----------------------------------------------------------------------------------------------
+
+/// A struct to encode the Table Schema of a table. Recall that Key Columns (which forms
+/// the PrimaryKey) can't change. However, Value Columns can change, and they do so in a
+/// versioned fashion with an MVM.
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+  key_cols: Vec<(ColName, ColType)>,
+  val_cols: MVM<ColName, ColType>,
+}
+
+impl TableSchema {
+  pub fn new(key_cols: Vec<(ColName, ColType)>, val_cols: Vec<(ColName, ColType)>) -> TableSchema {
+    // We construct the map underlying an MVM using the given `val_cols`. We just
+    // set the version Timestamp to be 0, and also set the initial LAT to be 0.
+    let mut mvm = MVM::<ColName, ColType>::new();
+    for (col_name, col_type) in val_cols {
+      mvm.write(&col_name, Some(col_type), Timestamp(0));
+    }
+    TableSchema { key_cols, val_cols: mvm }
+  }
+}
 
 // -----------------------------------------------------------------------------------------------
 //  Slave State
@@ -78,8 +103,11 @@ pub struct SlaveState<T: IOTypes> {
   /// External Request management
   external_query_manager: ExternalQueryManager,
 
-  /// Distribution
+  /// Gossip
+  gossip_gen: u32,
   schema: HashMap<TablePath, TableSchema>,
+
+  /// Distribution
   sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
   tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   slave_address_config: HashMap<SlaveGroupId, EndpointId>,
@@ -104,6 +132,7 @@ impl<T: IOTypes> SlaveState<T> {
       network_output,
       tablet_forward_output,
       external_query_manager: ExternalQueryManager::new(),
+      gossip_gen: 0,
       schema,
       sharding_config,
       tablet_address_config,
@@ -132,6 +161,7 @@ impl<T: IOTypes> SlaveState<T> {
         match Parser::parse_sql(&dialect, sql) {
           Ok(ast) => {
             println!("AST: {:#?}", ast);
+            // Convert to internal AST
             let iast = convert_ast(&ast);
             println!("iAST: {:#?}", iast);
           }

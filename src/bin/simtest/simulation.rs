@@ -2,10 +2,10 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{rvec, IOTypes, NetworkOut, TabletForwardOut};
 use runiversal::model::common::{
-  EndpointId, RequestId, SlaveGroupId, TablePath, TableSchema, TabletGroupId, TabletKeyRange,
+  EndpointId, RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message::{NetworkMessage, SlaveMessage, TabletMessage};
-use runiversal::slave::SlaveState;
+use runiversal::slave::{SlaveState, TableSchema};
 use runiversal::tablet::TabletState;
 use std::borrow::Borrow;
 use std::cell::RefCell;

@@ -36,15 +36,6 @@ pub enum ColValue {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ColName(pub String);
 
-/// The TableSchema of a Relational Tablet. This stays constant throughout the lifetime
-/// of a Relational Tablet. If the USER wants to change the number of key-columns,
-/// we implement that by creating a new Relational Tablet.
-#[derive(Debug, Clone)]
-pub struct TableSchema {
-  pub key_cols: Vec<(ColType, ColName)>,
-  pub val_cols: Vec<(ColType, ColName)>,
-}
-
 /// The Primary Key of a Relational Tablet. Note that we don't use
 /// Vec<Option<ColValue>> because values of a key column can't be NULL.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -62,6 +53,10 @@ pub struct TabletKeyRange {
   pub start: Option<PrimaryKey>,
   pub end: Option<PrimaryKey>,
 }
+
+/// A simple Timestamp type.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
+pub struct Timestamp(pub u64);
 
 // -------------------------------------------------------------------------------------------------
 //  Transaction Data Structures

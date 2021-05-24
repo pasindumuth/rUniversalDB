@@ -3,10 +3,11 @@ mod simulation;
 use crate::simulation::{client_eid, slave_eid, Simulation};
 use runiversal::model::common::{
   ColName, ColType, ColValue, EndpointId, PrimaryKey, RequestId, SlaveGroupId, TablePath,
-  TableSchema, TabletGroupId, TabletKeyRange,
+  TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message::{ExternalMessage, NetworkMessage};
 use runiversal::model::message::{PerformExternalQuery, SlaveMessage};
+use runiversal::slave::TableSchema;
 use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------------------------
@@ -71,24 +72,21 @@ fn main() {
   let schema: HashMap<TablePath, TableSchema> = [
     (
       mk_tab("tab0"),
-      TableSchema {
-        key_cols: vec![(ColType::String, cn("id0"))],
-        val_cols: vec![(ColType::Int, cn("c1"))],
-      },
+      TableSchema::new(vec![(cn("id0"), ColType::String)], vec![(cn("c1"), ColType::Int)]),
     ),
     (
       mk_tab("tab1"),
-      TableSchema {
-        key_cols: vec![(ColType::String, cn("id1")), (ColType::String, cn("id2"))],
-        val_cols: vec![(ColType::Int, cn("c2"))],
-      },
+      TableSchema::new(
+        vec![(cn("id1"), ColType::String), (cn("id2"), ColType::String)],
+        vec![(cn("c2"), ColType::Int)],
+      ),
     ),
     (
       mk_tab("tab2"),
-      TableSchema {
-        key_cols: vec![(ColType::Int, cn("id3"))],
-        val_cols: vec![(ColType::String, cn("c3")), (ColType::Bool, cn("c4"))],
-      },
+      TableSchema::new(
+        vec![(cn("id3"), ColType::Int)],
+        vec![(cn("c3"), ColType::String), (cn("c4"), ColType::Bool)],
+      ),
     ),
   ]
   .iter()
