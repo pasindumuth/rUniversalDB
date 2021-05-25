@@ -4,7 +4,7 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message::{
-  ExternalMessage, ExternalQueryAbort, NetworkMessage, QueryError, SlaveMessage,
+  ExternalAbortedData, ExternalMessage, ExternalQueryAbort, NetworkMessage, SlaveMessage,
 };
 use crate::multiversion_map::MVM;
 use rand::RngCore;
@@ -12,7 +12,7 @@ use sqlparser::ast;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // -----------------------------------------------------------------------------------------------
 //  Table Schema
@@ -105,7 +105,7 @@ pub struct SlaveState<T: IOTypes> {
 
   /// Gossip
   gossip_gen: u32,
-  schema: HashMap<TablePath, TableSchema>,
+  gossiped_db_schema: HashMap<TablePath, TableSchema>,
 
   /// Distribution
   sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
@@ -121,7 +121,7 @@ impl<T: IOTypes> SlaveState<T> {
     rand: T::RngCoreT,
     network_output: T::NetworkOutT,
     tablet_forward_output: T::TabletForwardOutT,
-    schema: HashMap<TablePath, TableSchema>,
+    gossiped_db_schema: HashMap<TablePath, TableSchema>,
     sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
     slave_address_config: HashMap<SlaveGroupId, EndpointId>,
@@ -133,7 +133,7 @@ impl<T: IOTypes> SlaveState<T> {
       tablet_forward_output,
       external_query_manager: ExternalQueryManager::new(),
       gossip_gen: 0,
-      schema,
+      gossiped_db_schema,
       sharding_config,
       tablet_address_config,
       slave_address_config,
@@ -177,7 +177,7 @@ impl<T: IOTypes> SlaveState<T> {
             if let Some(metadata) = self.external_query_manager.remove_with_query_id(&query_id) {
               let response = ExternalQueryAbort {
                 request_id: metadata.request_id.clone(),
-                error: QueryError::ParseError(err_string),
+                error: ExternalAbortedData::ParseError(err_string),
               };
               self.network_output.send(
                 &metadata.eid,
@@ -296,15 +296,10 @@ fn convert_value(value: &ast::Value) -> iast::Value {
 
 fn convert_expr(expr: &ast::Expr) -> iast::ValExpr {
   match expr {
-    ast::Expr::Identifier(ident) => {
-      iast::ValExpr::ColumnRef { table_ref: None, col_ref: ident.value.clone() }
-    }
+    ast::Expr::Identifier(ident) => iast::ValExpr::ColumnRef { col_ref: ident.value.clone() },
     ast::Expr::CompoundIdentifier(idents) => {
       assert!(idents.len() == 2, "The only prefix fix for a column should be the table.");
-      iast::ValExpr::ColumnRef {
-        table_ref: Some(idents[0].value.clone()),
-        col_ref: idents[1].value.clone(),
-      }
+      iast::ValExpr::ColumnRef { col_ref: idents[1].value.clone() }
     }
     ast::Expr::UnaryOp { op, expr } => {
       let iop = match op {

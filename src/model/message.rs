@@ -63,13 +63,19 @@ pub struct ExternalQuerySuccess {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum QueryError {
+pub enum ExternalAbortedData {
   /// Happens during the initial parsing of the Query.
   ParseError(String),
+  /// This occurs in the when the SQL query contains a table reference
+  /// that is neither a TransTable or a Table in the gossiped_db_schema.
+  TableDNE(String),
+  /// This occurs if an Update appears as a Subquery (i.e. not at the top-level
+  /// of the SQL transaction).
+  InvalidUpdate,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ExternalQueryAbort {
   pub request_id: RequestId,
-  pub error: QueryError,
+  pub error: ExternalAbortedData,
 }

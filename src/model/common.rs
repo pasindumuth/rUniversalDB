@@ -133,7 +133,7 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum ValExpr {
-    ColumnRef(ColName),
+    ColumnRef { col_ref: ColName },
     UnaryExpr { op: UnaryOp, expr: Box<ValExpr> },
     BinaryExpr { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
     Value { val: Value },
@@ -142,7 +142,7 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
-    pub select: Vec<ColName>,
+    pub projection: Vec<ColName>,
     pub from: TableRef,
     pub selection: ValExpr,
   }
@@ -191,7 +191,7 @@ pub mod iast {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum ValExpr {
-    ColumnRef { table_ref: Option<String>, col_ref: String },
+    ColumnRef { col_ref: String },
     UnaryExpr { op: UnaryOp, expr: Box<ValExpr> },
     BinaryExpr { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
     Value { val: Value },
