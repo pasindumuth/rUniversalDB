@@ -1,4 +1,4 @@
-use crate::model::common::{RequestId, TableView};
+use crate::model::common::{EndpointId, RequestId, TableView};
 use serde::{Deserialize, Serialize};
 
 // -------------------------------------------------------------------------------------------------
@@ -47,6 +47,7 @@ pub enum NetworkMessage {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformExternalQuery {
+  pub sender_path: EndpointId,
   pub request_id: RequestId,
   pub query: String,
 }
@@ -64,6 +65,8 @@ pub struct ExternalQuerySuccess {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ExternalAbortedData {
+  /// Happens if we get an External Query with a RequestId that's already in use.
+  NonUniqueRequestId,
   /// Happens during the initial parsing of the Query.
   ParseError(String),
   /// This occurs in the when the SQL query contains a table reference
@@ -77,5 +80,5 @@ pub enum ExternalAbortedData {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ExternalQueryAbort {
   pub request_id: RequestId,
-  pub error: ExternalAbortedData,
+  pub payload: ExternalAbortedData,
 }

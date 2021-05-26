@@ -1,11 +1,11 @@
+use crate::common::TableSchema;
 use crate::model::common::{iast, proc, ColName, TablePath, TransTableName};
 use crate::model::message::ExternalAbortedData;
-use crate::slave::TableSchema;
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 
-fn convert_to_msquery(
-  gossiped_db_schema: HashMap<String, TableSchema>,
+pub fn convert_to_msquery(
+  gossiped_db_schema: &HashMap<TablePath, TableSchema>,
   query: iast::Query,
 ) -> Result<proc::MSQuery, ExternalAbortedData> {
   // First, we rename all TransTable definitions and references so that they're
@@ -21,7 +21,7 @@ fn convert_to_msquery(
   // actual tables that exist in the gossiped_db_schema. If we find one that doesn't,
   // we return an error.
   for table_name in ctx.table_names {
-    if !gossiped_db_schema.contains_key(&table_name) {
+    if !gossiped_db_schema.contains_key(&TablePath(table_name.clone())) {
       return Err(ExternalAbortedData::TableDNE(table_name.clone()));
     }
   }

@@ -1,7 +1,7 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{IOTypes, NetworkOut, TabletForwardOut};
-use runiversal::model::common::{EndpointId, SlaveGroupId, TabletGroupId};
+use runiversal::common::{Clock, IOTypes, NetworkOut, TabletForwardOut};
+use runiversal::model::common::{EndpointId, SlaveGroupId, TabletGroupId, Timestamp};
 use runiversal::model::message::{NetworkMessage, SlaveMessage, TabletMessage};
 use runiversal::slave::SlaveState;
 use runiversal::tablet::TabletState;
@@ -10,6 +10,16 @@ use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Clone)]
+struct ProdClock {}
+
+impl Clock for ProdClock {
+  fn now(&mut self) -> Timestamp {
+    Timestamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis())
+  }
+}
 
 /// An interface for real network interaction, `NetworkMessages`
 /// are pass through to the ToNetwork Threads via the FromServer Queue.
@@ -43,6 +53,7 @@ struct ProdIOTypes {}
 
 impl IOTypes for ProdIOTypes {
   type RngCoreT = XorShiftRng;
+  type ClockT = ProdClock;
   type NetworkOutT = ProdNetworkOut;
   type TabletForwardOutT = ProdTabletForwardOut;
 }
@@ -80,7 +91,15 @@ pub fn start_server(
     // Create the Tablet
     let network_output = network_output.clone();
     thread::spawn(move || {
-      let mut tablet = TabletState::<ProdIOTypes>::new(rand, network_output.clone());
+      let mut tablet = TabletState::<ProdIOTypes>::new(
+        rand,
+        network_output.clone(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        TabletGroupId("".to_string()),
+      );
       loop {
         let tablet_msg = to_tablet_receiver.recv().unwrap();
         tablet.handle_incoming_message(tablet_msg);
@@ -89,10 +108,12 @@ pub fn start_server(
   }
 
   // Construct the SlaveState
+  let clock = ProdClock {};
   let network_output = ProdNetworkOut { net_conn_map: net_conn_map.clone() };
   let tablet_forward_output = ProdTabletForwardOut { tablet_map };
   let mut slave = SlaveState::<ProdIOTypes>::new(
     rand,
+    clock,
     network_output,
     tablet_forward_output,
     Default::default(),
@@ -104,8 +125,8 @@ pub fn start_server(
   loop {
     // Receive data from the `to_server_receiver` and update the SlaveState accordingly.
     // This is the steady state that the slaves enters.
-    let (from_eid, data) = to_server_receiver.recv().unwrap();
+    let (_, data) = to_server_receiver.recv().unwrap();
     let slave_msg: SlaveMessage = rmp_serde::from_read_ref(&data).unwrap();
-    slave.handle_incoming_message(from_eid, slave_msg);
+    slave.handle_incoming_message(slave_msg);
   }
 }

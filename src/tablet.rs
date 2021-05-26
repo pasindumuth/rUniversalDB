@@ -1,7 +1,6 @@
-use crate::common::IOTypes;
+use crate::common::{IOTypes, TableSchema};
 use crate::model::common::{EndpointId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange};
 use crate::model::message::TabletMessage;
-use crate::slave::TableSchema;
 use rand::RngCore;
 use std::collections::HashMap;
 

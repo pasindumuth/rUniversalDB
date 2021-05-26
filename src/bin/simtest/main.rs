@@ -1,13 +1,13 @@
 mod simulation;
 
 use crate::simulation::{client_eid, slave_eid, Simulation};
+use runiversal::common::TableSchema;
 use runiversal::model::common::{
   ColName, ColType, ColValue, EndpointId, PrimaryKey, RequestId, SlaveGroupId, TablePath,
   TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message::{ExternalMessage, NetworkMessage};
 use runiversal::model::message::{PerformExternalQuery, SlaveMessage};
-use runiversal::slave::TableSchema;
 use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------------------------
@@ -196,6 +196,7 @@ fn main() {
 
   sim.add_msg(
     NetworkMessage::Slave(SlaveMessage::PerformExternalQuery(PerformExternalQuery {
+      sender_path: client_eid(&0),
       request_id: RequestId("rid".to_string()),
       query: query.to_string(),
     })),

@@ -1,12 +1,14 @@
-use crate::common::{mk_qid, IOTypes, NetworkOut};
+use crate::common::{mk_qid, Clock, GossipData, IOTypes, NetworkOut, TableSchema};
 use crate::model::common::{
   iast, proc, ColName, ColType, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message::{
-  ExternalAbortedData, ExternalMessage, ExternalQueryAbort, NetworkMessage, SlaveMessage,
+  ExternalAbortedData, ExternalMessage, ExternalQueryAbort, NetworkMessage, PerformExternalQuery,
+  SlaveMessage,
 };
 use crate::multiversion_map::MVM;
+use crate::query_converter::convert_to_msquery;
 use rand::RngCore;
 use sqlparser::ast;
 use sqlparser::dialect::GenericDialect;
@@ -15,110 +17,68 @@ use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::collections::{HashMap, HashSet};
 
 // -----------------------------------------------------------------------------------------------
-//  Table Schema
+//  MSQueryCoordinationES
 // -----------------------------------------------------------------------------------------------
-
-/// A struct to encode the Table Schema of a table. Recall that Key Columns (which forms
-/// the PrimaryKey) can't change. However, Value Columns can change, and they do so in a
-/// versioned fashion with an MVM.
-#[derive(Debug, Clone)]
-pub struct TableSchema {
-  key_cols: Vec<(ColName, ColType)>,
-  val_cols: MVM<ColName, ColType>,
+#[derive(Debug)]
+struct MSQueryCoordinationES {
+  request_id: RequestId,
+  sender_path: EndpointId,
+  timestamp: Timestamp,
+  query: proc::MSQuery,
 }
 
-impl TableSchema {
-  pub fn new(key_cols: Vec<(ColName, ColType)>, val_cols: Vec<(ColName, ColType)>) -> TableSchema {
-    // We construct the map underlying an MVM using the given `val_cols`. We just
-    // set the version Timestamp to be 0, and also set the initial LAT to be 0.
-    let mut mvm = MVM::<ColName, ColType>::new();
-    for (col_name, col_type) in val_cols {
-      mvm.write(&col_name, Some(col_type), Timestamp(0));
-    }
-    TableSchema { key_cols, val_cols: mvm }
-  }
+#[derive(Debug)]
+enum FullMSQueryCoordinationES {
+  QueryReplanning {
+    timestamp: Timestamp,
+    query: proc::MSQuery,
+    orig_query: PerformExternalQuery,
+  },
+  MasterQueryReplanning {
+    master_query_id: QueryId,
+    // The below are piped from QueryReplanning
+    timestamp: Timestamp,
+    query: proc::MSQuery,
+    orig_query: PerformExternalQuery,
+  },
+  Executing {
+    status: MSQueryCoordinationES,
+  },
 }
 
 // -----------------------------------------------------------------------------------------------
 //  Slave State
 // -----------------------------------------------------------------------------------------------
 
-/// A struct to track an ExternalQuery so that it can be replied to.
-#[derive(Debug)]
-struct ExternalQueryMetadata {
-  request_id: RequestId,
-  eid: EndpointId,
-}
-
-/// Handles creation and cancellation of External Queries
-#[derive(Debug)]
-struct ExternalQueryManager {
-  /// External Request management
-  external_query_map: HashMap<QueryId, ExternalQueryMetadata>,
-  external_query_index: HashMap<RequestId, QueryId>, // This is used to cancel an External Request
-}
-
-impl ExternalQueryManager {
-  fn new() -> ExternalQueryManager {
-    ExternalQueryManager {
-      external_query_map: HashMap::new(),
-      external_query_index: HashMap::new(),
-    }
-  }
-
-  fn add_request(&mut self, query_id: QueryId, from_eid: EndpointId, request_id: RequestId) {
-    self.external_query_map.insert(
-      query_id.clone(),
-      ExternalQueryMetadata { request_id: request_id.clone(), eid: from_eid },
-    );
-    self.external_query_index.insert(request_id, query_id);
-  }
-
-  fn remove_with_request_id(&mut self, request_id: &RequestId) -> Option<ExternalQueryMetadata> {
-    if let Some(query_id) = self.external_query_index.remove(request_id) {
-      Some(self.external_query_map.remove(&query_id).unwrap())
-    } else {
-      None
-    }
-  }
-
-  fn remove_with_query_id(&mut self, query_id: &QueryId) -> Option<ExternalQueryMetadata> {
-    if let Some(metadata) = self.external_query_map.remove(query_id) {
-      self.external_query_index.remove(&metadata.request_id).unwrap();
-      Some(metadata)
-    } else {
-      None
-    }
-  }
-}
-
 /// The SlaveState that holds all the state of the Slave
 #[derive(Debug)]
 pub struct SlaveState<T: IOTypes> {
   /// IO Objects.
   rand: T::RngCoreT,
+  clock: T::ClockT,
   network_output: T::NetworkOutT,
   tablet_forward_output: T::TabletForwardOutT,
 
-  /// External Request management
-  external_query_manager: ExternalQueryManager,
+  /// Metadata
+  this_slave_group_id: SlaveGroupId,
 
   /// Gossip
-  gossip_gen: u32,
-  gossiped_db_schema: HashMap<TablePath, TableSchema>,
+  gossip: GossipData,
 
   /// Distribution
   sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
   tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   slave_address_config: HashMap<SlaveGroupId, EndpointId>,
 
-  /// Metadata
-  this_slave_group_id: SlaveGroupId, // The SlaveGroupId of this Slave
+  /// External query management
+  external_request_id_map: HashMap<RequestId, QueryId>,
+  ms_coord_statuses: HashMap<QueryId, FullMSQueryCoordinationES>,
 }
 
 impl<T: IOTypes> SlaveState<T> {
   pub fn new(
     rand: T::RngCoreT,
+    clock: T::ClockT,
     network_output: T::NetworkOutT,
     tablet_forward_output: T::TabletForwardOutT,
     gossiped_db_schema: HashMap<TablePath, TableSchema>,
@@ -129,65 +89,80 @@ impl<T: IOTypes> SlaveState<T> {
   ) -> SlaveState<T> {
     SlaveState {
       rand,
+      clock,
       network_output,
       tablet_forward_output,
-      external_query_manager: ExternalQueryManager::new(),
-      gossip_gen: 0,
-      gossiped_db_schema,
+      this_slave_group_id,
+      gossip: GossipData { gossip_gen: 0, gossiped_db_schema },
       sharding_config,
       tablet_address_config,
       slave_address_config,
-      this_slave_group_id,
+      external_request_id_map: HashMap::new(),
+      ms_coord_statuses: HashMap::new(),
     }
   }
 
   /// Normally, the sender's metadata would be buried in the message itself.
   /// However, we also have to handle client messages here, we need the EndpointId
   /// passed in explicitly.
-  pub fn handle_incoming_message(&mut self, from_eid: EndpointId, msg: SlaveMessage) {
-    match &msg {
-      SlaveMessage::PerformExternalQuery(exteral_query) => {
-        // Create and store a ExternalQueryMetadata to keep track of the new request
-        let query_id = mk_qid(&mut self.rand);
-        self.external_query_manager.add_request(
-          query_id.clone(),
-          from_eid.clone(),
-          exteral_query.request_id.clone(),
-        );
-
-        // Parse
-        let sql = &exteral_query.query;
-        let dialect = GenericDialect {};
-        match Parser::parse_sql(&dialect, sql) {
-          Ok(ast) => {
-            println!("AST: {:#?}", ast);
-            // Convert to internal AST
-            let iast = convert_ast(&ast);
-            println!("iAST: {:#?}", iast);
-          }
-          Err(e) => {
-            println!("Error!!!!");
-            // Extract error string
-            let err_string = match e {
-              TokenizerError(s) => s,
-              ParserError(s) => s,
-            };
-
-            // Reply to the client with the error
-            if let Some(metadata) = self.external_query_manager.remove_with_query_id(&query_id) {
-              let response = ExternalQueryAbort {
-                request_id: metadata.request_id.clone(),
-                error: ExternalAbortedData::ParseError(err_string),
+  pub fn handle_incoming_message(&mut self, msg: SlaveMessage) {
+    match msg {
+      SlaveMessage::PerformExternalQuery(external_query) => {
+        if self.external_request_id_map.contains_key(&external_query.request_id) {
+          // Duplicate RequestId; respond with an abort.
+          self.network_output.send(
+            &external_query.sender_path,
+            NetworkMessage::External(ExternalMessage::ExternalQueryAbort(ExternalQueryAbort {
+              request_id: external_query.request_id,
+              payload: ExternalAbortedData::NonUniqueRequestId,
+            })),
+          )
+        } else {
+          // Parse the SQL
+          match Parser::parse_sql(&GenericDialect {}, &external_query.query) {
+            Ok(ast) => {
+              let internal_ast = convert_ast(&ast);
+              match convert_to_msquery(&self.gossip.gossiped_db_schema, internal_ast) {
+                Ok(ms_query) => {
+                  let query_id = mk_qid(&mut self.rand);
+                  self
+                    .external_request_id_map
+                    .insert(external_query.request_id.clone(), query_id.clone());
+                  self.ms_coord_statuses.insert(
+                    query_id,
+                    FullMSQueryCoordinationES::QueryReplanning {
+                      timestamp: self.clock.now(),
+                      query: ms_query,
+                      orig_query: external_query.clone(),
+                    },
+                  );
+                }
+                Err(payload) => self.network_output.send(
+                  &external_query.sender_path,
+                  NetworkMessage::External(ExternalMessage::ExternalQueryAbort(
+                    ExternalQueryAbort { request_id: external_query.request_id, payload },
+                  )),
+                ),
+              }
+            }
+            Err(e) => {
+              // Extract error string
+              let err_string = match e {
+                TokenizerError(s) => s,
+                ParserError(s) => s,
               };
               self.network_output.send(
-                &metadata.eid,
-                NetworkMessage::External(ExternalMessage::ExternalQueryAbort(response)),
+                &external_query.sender_path,
+                NetworkMessage::External(ExternalMessage::ExternalQueryAbort(ExternalQueryAbort {
+                  request_id: external_query.request_id,
+                  payload: ExternalAbortedData::ParseError(err_string),
+                })),
               );
             }
           }
         }
       }
-      SlaveMessage::CancelExternalQuery(_) => panic!("support"),
+      SlaveMessage::CancelExternalQuery(_) => panic!("TODO: support"),
     }
   }
 }

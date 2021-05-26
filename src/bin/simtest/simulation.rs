@@ -1,17 +1,26 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{rvec, IOTypes, NetworkOut, TabletForwardOut};
+use runiversal::common::{rvec, Clock, IOTypes, NetworkOut, TableSchema, TabletForwardOut};
 use runiversal::model::common::{
-  EndpointId, RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
+  EndpointId, RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use runiversal::model::message::{NetworkMessage, SlaveMessage, TabletMessage};
-use runiversal::slave::{SlaveState, TableSchema};
+use runiversal::slave::SlaveState;
 use runiversal::tablet::TabletState;
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Formatter, Result};
 use std::rc::Rc;
+
+#[derive(Clone, Debug)]
+struct TestClock {}
+
+impl Clock for TestClock {
+  fn now(&mut self) -> Timestamp {
+    Timestamp(0) // TODO: make this proper.
+  }
+}
 
 /// An interface for test network interaction. `NetworkMessages`
 /// are passed through to the target node by adding it to a queue
@@ -66,6 +75,7 @@ struct TestIOTypes {}
 
 impl IOTypes for TestIOTypes {
   type RngCoreT = XorShiftRng;
+  type ClockT = TestClock;
   type NetworkOutT = TestNetworkOut;
   type TabletForwardOutT = TestTabletForwardOut;
 }
@@ -160,6 +170,7 @@ impl Simulation {
         eid.clone(),
         SlaveState::new(
           XorShiftRng::from_seed(seed),
+          TestClock {},
           network_out.clone(),
           TestTabletForwardOut { tablet_states: sim.tablet_states.clone(), from_eid: eid.clone() },
           schema.clone(),
@@ -240,18 +251,8 @@ impl Simulation {
   /// `queues`. This function will run the Slave on the `to_eid` end, which
   /// might have any number of side effects, including adding new messages into
   /// `queues`.
-  pub fn run_slave_message(
-    &mut self,
-    from_eid: &EndpointId,
-    to_eid: &EndpointId,
-    msg: SlaveMessage,
-  ) {
-    self
-      .slave_states
-      .borrow_mut()
-      .get_mut(&to_eid)
-      .unwrap()
-      .handle_incoming_message(from_eid.clone(), msg);
+  pub fn run_slave_message(&mut self, _: &EndpointId, to_eid: &EndpointId, msg: SlaveMessage) {
+    self.slave_states.borrow_mut().get_mut(&to_eid).unwrap().handle_incoming_message(msg);
   }
 
   /// The endpoints provided must exist. This function polls a message from

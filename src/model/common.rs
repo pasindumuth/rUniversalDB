@@ -56,7 +56,7 @@ pub struct TabletKeyRange {
 
 /// A simple Timestamp type.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
-pub struct Timestamp(pub u64);
+pub struct Timestamp(pub u128);
 
 // -------------------------------------------------------------------------------------------------
 //  Transaction Data Structures
