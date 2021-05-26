@@ -1,6 +1,7 @@
 use crate::common::{mk_qid, Clock, GossipData, IOTypes, NetworkOut, TableSchema};
 use crate::model::common::{
   iast, proc, ColName, ColType, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
+  TransTableName,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message::{
@@ -136,6 +137,7 @@ impl<T: IOTypes> SlaveState<T> {
                       orig_query: external_query.clone(),
                     },
                   );
+                  // What now?
                 }
                 Err(payload) => self.network_output.send(
                   &external_query.sender_path,

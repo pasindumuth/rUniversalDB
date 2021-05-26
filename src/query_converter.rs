@@ -154,7 +154,7 @@ fn flatten_top_level_query(
 ) -> Result<proc::MSQuery, ExternalAbortedData> {
   let aux_table_name = unique_name(counter, &"".to_string());
   let mut ms_query = proc::MSQuery {
-    trans_tables: HashMap::default(),
+    trans_tables: Vec::default(),
     returning: TransTableName(aux_table_name.clone()),
   };
   flatten_top_level_query_R(&aux_table_name, query, counter, &mut ms_query.trans_tables)?;
@@ -170,7 +170,7 @@ fn flatten_top_level_query_R(
   assignment_name: &String,
   query: &iast::Query,
   counter: &mut u32,
-  trans_table_map: &mut HashMap<TransTableName, proc::MSQueryStage>,
+  trans_table_map: &mut Vec<(TransTableName, proc::MSQueryStage)>,
 ) -> Result<(), ExternalAbortedData> {
   // First, have the CTEs flatten their Querys and add their TransTables to the map.
   for (trans_table_name, cte_query) in &query.ctes {
@@ -188,10 +188,10 @@ fn flatten_top_level_query_R(
         from: to_table_ref(&select.from),
         selection: flatten_val_expr_R(&select.selection, counter)?,
       };
-      trans_table_map.insert(
+      trans_table_map.push((
         TransTableName(assignment_name.clone()),
         proc::MSQueryStage::SuperSimpleSelect(ms_select),
-      );
+      ));
       Ok(())
     }
     iast::QueryBody::Update(update) => {
@@ -206,7 +206,7 @@ fn flatten_top_level_query_R(
           .push((ColName(col_name.clone()), flatten_val_expr_R(val_expr, counter)?))
       }
       trans_table_map
-        .insert(TransTableName(assignment_name.clone()), proc::MSQueryStage::Update(ms_update));
+        .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Update(ms_update)));
       Ok(())
     }
   }
@@ -236,7 +236,7 @@ fn flatten_val_expr_R(
       // debugging purposes.
       let aux_table_name = unique_name(counter, &"".to_string());
       let mut gr_query = proc::GRQuery {
-        trans_tables: HashMap::default(),
+        trans_tables: Vec::default(),
         returning: TransTableName(aux_table_name.clone()),
       };
       flatten_sub_query_R(&aux_table_name, &query, counter, &mut gr_query.trans_tables)?;
@@ -249,7 +249,7 @@ fn flatten_sub_query_R(
   assignment_name: &String,
   query: &iast::Query,
   counter: &mut u32,
-  trans_table_map: &mut HashMap<TransTableName, proc::GRQueryStage>,
+  trans_table_map: &mut Vec<(TransTableName, proc::GRQueryStage)>,
 ) -> Result<(), ExternalAbortedData> {
   // First, have the CTEs flatten their Querys and add their TransTables to the map.
   for (trans_table_name, cte_query) in &query.ctes {
@@ -267,10 +267,10 @@ fn flatten_sub_query_R(
         from: to_table_ref(&select.from),
         selection: flatten_val_expr_R(&select.selection, counter)?,
       };
-      trans_table_map.insert(
+      trans_table_map.push((
         TransTableName(assignment_name.clone()),
         proc::GRQueryStage::SuperSimpleSelect(ms_select),
-      );
+      ));
       Ok(())
     }
     iast::QueryBody::Update(_) => Err(ExternalAbortedData::InvalidUpdate),

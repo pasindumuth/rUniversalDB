@@ -48,8 +48,8 @@ pub fn mk_qid<R: Rng>(rng: &mut R) -> QueryId {
 /// versioned fashion with an MVM.
 #[derive(Debug, Clone)]
 pub struct TableSchema {
-  key_cols: Vec<(ColName, ColType)>,
-  val_cols: MVM<ColName, ColType>,
+  pub key_cols: Vec<(ColName, ColType)>,
+  pub val_cols: MVM<ColName, ColType>,
 }
 
 impl TableSchema {

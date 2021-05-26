@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// These are common PODs that form the core data objects
 /// of the system.
@@ -123,7 +123,6 @@ pub mod proc {
   use crate::model::common::iast::{BinaryOp, UnaryOp, Value};
   use crate::model::common::{ColName, TablePath, TransTableName};
   use serde::{Deserialize, Serialize};
-  use std::collections::HashMap;
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum TableRef {
@@ -163,7 +162,7 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct GRQuery {
-    pub trans_tables: HashMap<TransTableName, GRQueryStage>,
+    pub trans_tables: Vec<(TransTableName, GRQueryStage)>,
     pub returning: TransTableName,
   }
 
@@ -177,7 +176,7 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct MSQuery {
-    pub trans_tables: HashMap<TransTableName, MSQueryStage>,
+    pub trans_tables: Vec<(TransTableName, MSQueryStage)>,
     pub returning: TransTableName,
   }
 }

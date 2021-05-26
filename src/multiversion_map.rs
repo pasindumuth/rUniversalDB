@@ -56,6 +56,18 @@ where
     }
   }
 
+  /// Returns the values for all keys that are present at the given
+  /// `timestamp`. This is done statically, so no lats are updated.
+  pub fn static_snapshot_read(&self, timestamp: Timestamp) -> HashMap<K, V> {
+    let mut snapshot = HashMap::new();
+    for (key, (_, versions)) in &self.map {
+      if let Some(value) = MVM::<K, V>::find_version(versions, timestamp) {
+        snapshot.insert(key.clone(), value.clone());
+      }
+    }
+    return snapshot;
+  }
+
   /// Recall that abstractly, all keys are mapped to `(0, [])`
   pub fn get_lat(&self, key: &K) -> Timestamp {
     if let Some((lat, _)) = self.map.get(key) {

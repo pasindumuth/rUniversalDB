@@ -8,35 +8,8 @@ use runiversal::model::common::{
 };
 use runiversal::model::message::{ExternalMessage, NetworkMessage};
 use runiversal::model::message::{PerformExternalQuery, SlaveMessage};
+use runiversal::test_utils::{cn, cvi, cvs, mk_sid, mk_tab, mk_tid};
 use std::collections::HashMap;
-
-// -----------------------------------------------------------------------------------------------
-// Convenience functions
-// -----------------------------------------------------------------------------------------------
-
-pub fn cn(s: &str) -> ColName {
-  ColName(s.to_string())
-}
-
-pub fn cvs(s: &str) -> ColValue {
-  ColValue::String(s.to_string())
-}
-
-pub fn cvi(i: i32) -> ColValue {
-  ColValue::Int(i)
-}
-
-pub fn mk_sid(id: &str) -> SlaveGroupId {
-  SlaveGroupId(id.to_string())
-}
-
-pub fn mk_tid(id: &str) -> TabletGroupId {
-  TabletGroupId(id.to_string())
-}
-
-pub fn mk_tab(table_path: &str) -> TablePath {
-  TablePath(table_path.to_string())
-}
 
 fn main() {
   // Fundamental seed used for all random number generation,
@@ -46,30 +19,28 @@ fn main() {
     seed[i] = i as u8;
   }
 
-  let slave_address_config: HashMap<SlaveGroupId, EndpointId> = [
+  let slave_address_config: HashMap<SlaveGroupId, EndpointId> = vec![
     (mk_sid("s0"), slave_eid(&0)),
     (mk_sid("s1"), slave_eid(&1)),
     (mk_sid("s2"), slave_eid(&2)),
     (mk_sid("s3"), slave_eid(&3)),
     (mk_sid("s4"), slave_eid(&4)),
   ]
-  .iter()
-  .cloned()
+  .into_iter()
   .collect();
 
   // We just have one Tablet per Slave for now.
-  let tablet_address_config: HashMap<TabletGroupId, SlaveGroupId> = [
+  let tablet_address_config: HashMap<TabletGroupId, SlaveGroupId> = vec![
     (mk_tid("t0"), mk_sid("s0")),
     (mk_tid("t1"), mk_sid("s1")),
     (mk_tid("t2"), mk_sid("s2")),
     (mk_tid("t3"), mk_sid("s3")),
     (mk_tid("t4"), mk_sid("s4")),
   ]
-  .iter()
-  .cloned()
+  .into_iter()
   .collect();
 
-  let schema: HashMap<TablePath, TableSchema> = [
+  let schema: HashMap<TablePath, TableSchema> = vec![
     (
       mk_tab("tab0"),
       TableSchema::new(vec![(cn("id0"), ColType::String)], vec![(cn("c1"), ColType::Int)]),
@@ -89,12 +60,11 @@ fn main() {
       ),
     ),
   ]
-  .iter()
-  .cloned()
+  .into_iter()
   .collect();
 
   #[rustfmt::skip]
-  let sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>> = [
+  let sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>> = vec![
     (
       mk_tab("tab0"),
       vec![
@@ -167,8 +137,7 @@ fn main() {
       ],
     ),
   ]
-  .iter()
-  .cloned()
+  .into_iter()
   .collect();
 
   let mut sim =
