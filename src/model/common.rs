@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// These are common PODs that form the core data objects
 /// of the system.
@@ -58,14 +58,28 @@ pub struct TabletKeyRange {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub struct Timestamp(pub u128);
 
+/// A Type for the generation of a gossip message.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
+pub struct Gen(pub u32);
+
 // -------------------------------------------------------------------------------------------------
 //  Transaction Data Structures
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TableView {
-  col_names: Box<[(ColName, ColType)]>,
-  rows: BTreeMap<Box<[Option<ColValue>]>, u64>,
+  /// The keys are the rows, and the values are the number of repetitions.
+  col_names: Vec<(ColName, ColType)>,
+  /// The keys are the rows, and the values are the number of repetitions.
+  rows: BTreeMap<Vec<Option<ColValue>>, u64>,
+}
+
+/// This is used to hold onto Tier that each TablePath is currently being
+/// processed at. This is necessary for performing Intermediary Writes
+/// and Reads properly.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TierMap {
+  pub map: HashMap<TablePath, u32>,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -92,6 +106,42 @@ pub struct SlaveGroupId(pub String);
 /// A request Id that globally identifies a request.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestId(pub String);
+
+/// This is often used when there is behavior that's common between Table and Slave.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NodeGroupId {
+  Tablet(TabletGroupId),
+  Slave(SlaveGroupId),
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Subquery Context
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TransTableLocationPrefix {
+  pub source: NodeGroupId,
+  pub query_id: QueryId,
+  pub trans_table_name: TransTableName,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct ContextSchema {
+  pub column_context_schema: Vec<ColName>,
+  pub trans_table_context_schema: Vec<TransTableLocationPrefix>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct ContextRow {
+  pub column_context_row: Vec<ColValue>,
+  pub trans_table_context_row: Vec<u32>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct Context {
+  pub context_schema: ContextSchema,
+  pub context_rows: Vec<ContextRow>,
+}
 
 // -------------------------------------------------------------------------------------------------
 //  Implementations

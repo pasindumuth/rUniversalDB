@@ -1,5 +1,5 @@
 use crate::model::common::{
-  ColName, ColType, EndpointId, QueryId, TablePath, TabletGroupId, Timestamp,
+  ColName, ColType, EndpointId, Gen, QueryId, TablePath, TabletGroupId, Timestamp,
 };
 use crate::model::message::{NetworkMessage, TabletMessage};
 use crate::multiversion_map::MVM;
@@ -71,6 +71,6 @@ impl TableSchema {
 /// Holds Gossip Data in a node. It's accessible in both Tablets and Slaves.
 #[derive(Debug, Clone)]
 pub struct GossipData {
-  pub gossip_gen: u32,
+  pub gossip_gen: Gen,
   pub gossiped_db_schema: HashMap<TablePath, TableSchema>,
 }
