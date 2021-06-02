@@ -1,8 +1,9 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::common::GossipData;
 use crate::model::common::{
-  proc, ColName, ColType, Context, EndpointId, Gen, QueryId, RequestId, SlaveGroupId, TablePath,
-  TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
+  proc, ColName, ColType, Context, EndpointId, Gen, NodeGroupId, QueryId, RequestId, SlaveGroupId,
+  TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
+  TransTableName,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -37,6 +38,10 @@ pub enum SlaveMessage {
 
   // Tablet forwarding message
   TabletMessage(TabletGroupId, TabletMessage),
+
+  // 2PC backward messages
+  Query2PCPrepared(Query2PCPrepared),
+  Query2PCAborted(Query2PCAborted),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -49,6 +54,11 @@ pub enum TabletMessage {
   CancelQuery(CancelQuery),
   QueryAborted(QueryAborted),
   QuerySuccess(QuerySuccess),
+
+  // 2PC forward messages
+  Query2PCPrepare(Query2PCPrepare),
+  Query2PCAbort(Query2PCAbort),
+  Query2PCCommit(Query2PCCommit),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -91,16 +101,18 @@ pub enum RecieverPath {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CancelQuery {
-  path: RecieverPath,
+  pub path: RecieverPath,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QuerySuccess {
-  sender_path: SenderPath,
-  tablet_group_id: TabletGroupId,
-  query_id: QueryId,
-  result: (Vec<ColName>, HashMap<u32, TableView>),
-  new_rms: Vec<TabletGroupId>,
+  /// The node to send results to.
+  pub sender_path: SenderPath,
+  /// The Tablet/Slave that just succeeded.
+  pub node_group_id: NodeGroupId,
+  pub query_id: QueryId,
+  pub result: (Vec<ColName>, HashMap<u32, TableView>),
+  pub new_rms: Vec<TabletGroupId>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -168,6 +180,41 @@ pub struct UpdateQuery {
   pub context: Context,
   pub query: proc::Update,
   pub query_plan: QueryPlan,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Transaction Inner Messages
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MSQueryCoordPath(pub QueryId);
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Query2PCPrepare {
+  pub sender_path: (SlaveGroupId, MSQueryCoordPath),
+  pub root_query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Query2PCPrepared {
+  pub return_path: MSQueryCoordPath,
+  pub tablet_group_id: TabletGroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Query2PCAborted {
+  pub return_path: MSQueryCoordPath,
+  pub tablet_group_id: TabletGroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Query2PCAbort {
+  pub root_query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Query2PCCommit {
+  pub root_query_id: QueryId,
 }
 
 // -------------------------------------------------------------------------------------------------

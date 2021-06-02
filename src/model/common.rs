@@ -69,9 +69,9 @@ pub struct Gen(pub u32);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TableView {
   /// The keys are the rows, and the values are the number of repetitions.
-  col_names: Vec<(ColName, ColType)>,
+  pub col_names: Vec<(ColName, ColType)>,
   /// The keys are the rows, and the values are the number of repetitions.
-  rows: BTreeMap<Vec<Option<ColValue>>, u64>,
+  pub rows: BTreeMap<Vec<Option<ColValue>>, u64>,
 }
 
 /// This is used to hold onto Tier that each TablePath is currently being
