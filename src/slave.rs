@@ -1,6 +1,7 @@
 use crate::col_usage::{compute_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
-  mk_qid, Clock, GossipData, IOTypes, NetworkOut, TableSchema, TabletForwardOut,
+  mk_qid, Clock, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue,
+  TableSchema, TabletForwardOut,
 };
 use crate::lang;
 use crate::model::common::{
@@ -10,7 +11,7 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::{QuerySuccess, SlaveMessage};
+use crate::model::message::{QuerySuccess, SenderPath, SlaveMessage};
 use crate::multiversion_map::MVM;
 use crate::query_converter::convert_to_msquery;
 use crate::slave::CoordState::ReadStage;
@@ -21,27 +22,7 @@ use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::collections::{HashMap, HashSet};
 use std::ops::Add;
-
-// -----------------------------------------------------------------------------------------------
-//  TMStatus
-// -----------------------------------------------------------------------------------------------
-// These are used to perform PCSA over the network for reads and writes.
-
-#[derive(Debug)]
-enum TMWaitValue {
-  QueryId(QueryId),
-  Result((Vec<ColName>, HashMap<u32, TableView>)),
-}
-
-#[derive(Debug)]
-struct TMStatus {
-  root_query_id: QueryId,
-  new_rms: HashSet<TabletGroupId>,
-  /// Holds the number of nodes that responded (used to decide when this TM is done).
-  responded_count: usize,
-  tm_state: HashMap<NodeGroupId, TMWaitValue>,
-  orig_path: QueryId,
-}
+use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
 //  MSQueryCoordinationES
@@ -119,11 +100,6 @@ impl FullMSQueryCoordinationES {
 //  Slave State
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
-enum OrigP {
-  MSCoordPath(QueryId),
-}
-
 /// The SlaveState that holds all the state of the Slave
 #[derive(Debug)]
 pub struct SlaveState<T: IOTypes> {
@@ -135,16 +111,17 @@ pub struct SlaveState<T: IOTypes> {
 
   /// Metadata
   this_slave_group_id: SlaveGroupId,
+  master_eid: EndpointId,
 
   /// Gossip
-  gossip: GossipData,
+  gossip: Arc<GossipData>,
 
   /// Distribution
   sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
   tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   slave_address_config: HashMap<SlaveGroupId, EndpointId>,
 
-  /// External query management
+  /// External Query Management
   external_request_id_map: HashMap<RequestId, QueryId>,
   ms_coord_statuses: HashMap<QueryId, FullMSQueryCoordinationES>,
 
@@ -159,11 +136,12 @@ impl<T: IOTypes> SlaveState<T> {
     clock: T::ClockT,
     network_output: T::NetworkOutT,
     tablet_forward_output: T::TabletForwardOutT,
-    gossiped_db_schema: HashMap<TablePath, TableSchema>,
+    gossip: Arc<GossipData>,
     sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
     slave_address_config: HashMap<SlaveGroupId, EndpointId>,
     this_slave_group_id: SlaveGroupId,
+    master_eid: EndpointId,
   ) -> SlaveState<T> {
     SlaveState {
       rand,
@@ -171,7 +149,8 @@ impl<T: IOTypes> SlaveState<T> {
       network_output,
       tablet_forward_output,
       this_slave_group_id,
-      gossip: GossipData { gossip_gen: Gen(0), gossiped_db_schema },
+      master_eid,
+      gossip,
       sharding_config,
       tablet_address_config,
       slave_address_config,
@@ -250,18 +229,20 @@ impl<T: IOTypes> SlaveState<T> {
           }
         }
       }
-      msg::SlaveMessage::CancelExternalQuery(_) => panic!("TODO: support"),
+      msg::SlaveMessage::CancelExternalQuery(_) => unimplemented!(),
       msg::SlaveMessage::TabletMessage(tablet_group_id, tablet_msg) => {
         self.tablet_forward_output.forward(&tablet_group_id, tablet_msg);
       }
-      msg::SlaveMessage::PerformQuery(_) => panic!("TODO: support"),
-      msg::SlaveMessage::CancelQuery(_) => panic!("TODO: support"),
+      msg::SlaveMessage::PerformQuery(_) => unimplemented!(),
+      msg::SlaveMessage::CancelQuery(_) => unimplemented!(),
       msg::SlaveMessage::QuerySuccess(query_success) => {
         self.handle_query_success(query_success);
       }
-      msg::SlaveMessage::QueryAborted(_) => panic!("TODO: support"),
-      msg::SlaveMessage::Query2PCPrepared(_) => panic!("TODO: support"),
-      msg::SlaveMessage::Query2PCAborted(_) => panic!("TODO: support"),
+      msg::SlaveMessage::QueryAborted(_) => unimplemented!(),
+      msg::SlaveMessage::Query2PCPrepared(_) => unimplemented!(),
+      msg::SlaveMessage::Query2PCAborted(_) => unimplemented!(),
+      msg::SlaveMessage::MasterFrozenColUsageAborted(_) => unimplemented!(),
+      msg::SlaveMessage::MasterFrozenColUsageSuccess(_) => unimplemented!(),
     }
   }
 
@@ -305,14 +286,16 @@ impl<T: IOTypes> SlaveState<T> {
     match &coord_es.execution_state {
       CoordState::Start => panic!(),
       CoordState::ReadStage { stage_idx, stage_query_id } => {
+        let stage_idx = stage_idx.clone();
+        let stage_query_id = stage_query_id.clone();
         ms_coord_process_stage_result::<T>(
           coord_es,
           &ret_query_id,
           &orig_path,
           new_rms,
           result,
-          &stage_idx.clone(),
-          &stage_query_id.clone(),
+          &stage_idx,
+          &stage_query_id,
           // Slave references
           &mut self.rand,
           &mut self.network_output,
@@ -325,14 +308,16 @@ impl<T: IOTypes> SlaveState<T> {
         );
       }
       CoordState::WriteStage { stage_idx, stage_query_id } => {
+        let stage_idx = stage_idx.clone();
+        let stage_query_id = stage_query_id.clone();
         ms_coord_process_stage_result::<T>(
           coord_es,
           &ret_query_id,
           &orig_path,
           new_rms,
           result,
-          &stage_idx.clone(),
-          &stage_query_id.clone(),
+          &stage_idx,
+          &stage_query_id,
           // Slave references
           &mut self.rand,
           &mut self.network_output,
@@ -608,10 +593,11 @@ fn ms_coord_es_advance<T: IOTypes>(
       };
 
       // Path of this TMStatus to respond to.
-      let sender_path = (
-        (this_slave_group_id.clone(), None),
-        (msg::SenderStatePath::ReadQueryPath { query_id: tm_query_id.clone() }),
-      );
+      let sender_path = SenderPath {
+        slave_group_id: this_slave_group_id.clone(),
+        maybe_tablet_group_id: None,
+        state_path: msg::SenderStatePath::ReadQueryPath { query_id: tm_query_id.clone() },
+      };
 
       match &select_query.from {
         proc::TableRef::TablePath(table_path) => {
@@ -634,9 +620,9 @@ fn ms_coord_es_advance<T: IOTypes>(
                     msg::SuperSimpleTableSelectQuery {
                       timestamp: coord_es.timestamp.clone(),
                       context: context.clone(),
-                      query: select_query.clone(),
-                      query_plan: msg::QueryPlan {
-                        gen: gossip.gossip_gen,
+                      sql_query: select_query.clone(),
+                      query_plan: QueryPlan {
+                        gossip_gen: gossip.gossip_gen,
                         trans_table_schemas: trans_table_schemas.clone(),
                         col_usage_node: col_usage_node.clone(),
                       },
@@ -669,9 +655,9 @@ fn ms_coord_es_advance<T: IOTypes>(
                 msg::SuperSimpleTransTableSelectQuery {
                   location_prefix: location.clone(),
                   context: context.clone(),
-                  query: select_query.clone(),
-                  query_plan: msg::QueryPlan {
-                    gen: gossip.gossip_gen,
+                  sql_query: select_query.clone(),
+                  query_plan: QueryPlan {
+                    gossip_gen: gossip.gossip_gen,
                     trans_table_schemas,
                     col_usage_node: col_usage_node.clone(),
                   },
@@ -699,10 +685,11 @@ fn ms_coord_es_advance<T: IOTypes>(
       };
 
       // Path of this WriteTMStatus to respond to.
-      let sender_path = (
-        (this_slave_group_id.clone(), None),
-        (msg::SenderStatePath::WriteQueryPath { query_id: tm_query_id.clone() }),
-      );
+      let sender_path = SenderPath {
+        slave_group_id: this_slave_group_id.clone(),
+        maybe_tablet_group_id: None,
+        state_path: msg::SenderStatePath::ReadQueryPath { query_id: tm_query_id.clone() },
+      };
 
       // Add in the Tablets that manage this TablePath to `write_tm_state`,
       // and send out the PerformQuery
@@ -722,9 +709,9 @@ fn ms_coord_es_advance<T: IOTypes>(
               query: msg::GeneralQuery::UpdateQuery(msg::UpdateQuery {
                 timestamp: coord_es.timestamp.clone(),
                 context: context.clone(),
-                query: update_query.clone(),
-                query_plan: msg::QueryPlan {
-                  gen: gossip.gossip_gen,
+                sql_query: update_query.clone(),
+                query_plan: QueryPlan {
+                  gossip_gen: gossip.gossip_gen,
                   trans_table_schemas: trans_table_schemas.clone(),
                   col_usage_node: col_usage_node.clone(),
                 },

@@ -1,7 +1,7 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{Clock, IOTypes, NetworkOut, TabletForwardOut};
-use runiversal::model::common::{EndpointId, SlaveGroupId, TabletGroupId, Timestamp};
+use runiversal::common::{Clock, GossipData, IOTypes, NetworkOut, TabletForwardOut};
+use runiversal::model::common::{EndpointId, Gen, SlaveGroupId, TabletGroupId, Timestamp};
 use runiversal::model::message::{NetworkMessage, SlaveMessage, TabletMessage};
 use runiversal::slave::SlaveState;
 use runiversal::tablet::TabletState;
@@ -74,6 +74,10 @@ pub fn start_server(
 
   // Create the network output interface, used by both the Slave and the Tablets.
   let network_output = ProdNetworkOut { net_conn_map: net_conn_map.clone() };
+  let clock = ProdClock {};
+
+  // Create common Gossip
+  let gossip = Arc::new(GossipData { gossiped_db_schema: Default::default(), gossip_gen: Gen(0) });
 
   // Create the Tablets
   let mut tablet_map = HashMap::<TabletGroupId, Sender<TabletMessage>>::new();
@@ -89,16 +93,20 @@ pub fn start_server(
     tablet_map.insert(TabletGroupId(tablet_group_id.to_string()), to_tablet_sender);
 
     // Create the Tablet
+    let clock = clock.clone();
     let network_output = network_output.clone();
+    let gossip = gossip.clone();
     thread::spawn(move || {
       let mut tablet = TabletState::<ProdIOTypes>::new(
         rand,
-        network_output.clone(),
-        Default::default(),
+        clock,
+        network_output,
+        gossip,
         Default::default(),
         Default::default(),
         Default::default(),
         TabletGroupId("".to_string()),
+        EndpointId("".to_string()),
       );
       loop {
         let tablet_msg = to_tablet_receiver.recv().unwrap();
@@ -108,19 +116,17 @@ pub fn start_server(
   }
 
   // Construct the SlaveState
-  let clock = ProdClock {};
-  let network_output = ProdNetworkOut { net_conn_map: net_conn_map.clone() };
-  let tablet_forward_output = ProdTabletForwardOut { tablet_map };
   let mut slave = SlaveState::<ProdIOTypes>::new(
     rand,
     clock,
     network_output,
-    tablet_forward_output,
-    Default::default(),
+    ProdTabletForwardOut { tablet_map },
+    gossip.clone(),
     Default::default(),
     Default::default(),
     Default::default(),
     SlaveGroupId("".to_string()),
+    EndpointId("".to_string()),
   );
   loop {
     // Receive data from the `to_server_receiver` and update the SlaveState accordingly.

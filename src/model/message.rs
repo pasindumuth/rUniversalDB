@@ -1,5 +1,5 @@
 use crate::col_usage::FrozenColUsageNode;
-use crate::common::GossipData;
+use crate::common::{GossipData, QueryPlan};
 use crate::model::common::{
   proc, ColName, ColType, Context, EndpointId, Gen, NodeGroupId, QueryId, RequestId, SlaveGroupId,
   TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
@@ -42,6 +42,10 @@ pub enum SlaveMessage {
   // 2PC backward messages
   Query2PCPrepared(Query2PCPrepared),
   Query2PCAborted(Query2PCAborted),
+
+  // Master Responses
+  MasterFrozenColUsageAborted(MasterFrozenColUsageAborted),
+  MasterFrozenColUsageSuccess(MasterFrozenColUsageSuccess),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -59,6 +63,21 @@ pub enum TabletMessage {
   Query2PCPrepare(Query2PCPrepare),
   Query2PCAbort(Query2PCAbort),
   Query2PCCommit(Query2PCCommit),
+
+  // Master Responses
+  MasterFrozenColUsageAborted(MasterFrozenColUsageAborted),
+  MasterFrozenColUsageSuccess(MasterFrozenColUsageSuccess),
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Master Thread Message
+// -------------------------------------------------------------------------------------------------
+
+/// Message that go into the Master
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum MasterMessage {
+  PerformMasterFrozenColUsage(PerformMasterFrozenColUsage),
+  CancelMasterFrozenColUsage(CancelMasterFrozenColUsage),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -69,6 +88,7 @@ pub enum TabletMessage {
 pub enum NetworkMessage {
   External(ExternalMessage),
   Slave(SlaveMessage),
+  Master(MasterMessage),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -80,8 +100,12 @@ pub enum SenderStatePath {
   WriteQueryPath { query_id: QueryId },
 }
 
-type NodePath = (SlaveGroupId, Option<TabletGroupId>);
-type SenderPath = (NodePath, SenderStatePath);
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SenderPath {
+  pub slave_group_id: SlaveGroupId,
+  pub maybe_tablet_group_id: Option<TabletGroupId>,
+  pub state_path: SenderStatePath,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformQuery {
@@ -95,8 +119,8 @@ pub struct PerformQuery {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum RecieverPath {
   ReadQuery { query_id: QueryId },
-  MSReadQuery { query_id: QueryId },
-  MSWriteQuery { query_id: QueryId },
+  MSReadQuery { root_query_id: QueryId, query_id: QueryId },
+  MSWriteQuery { root_query_id: QueryId },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -107,7 +131,7 @@ pub struct CancelQuery {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QuerySuccess {
   /// The node to send results to.
-  pub sender_path: SenderPath,
+  pub sender_state_path: SenderStatePath,
   /// The Tablet/Slave that just succeeded.
   pub node_group_id: NodeGroupId,
   pub query_id: QueryId,
@@ -134,8 +158,9 @@ pub enum AbortedData {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QueryAborted {
-  pub sender_path: SenderPath,
+  pub sender_state_path: SenderStatePath,
   pub tablet_group_id: TabletGroupId,
+  // The QueryId of the query that was aborted.
   pub query_id: QueryId,
   pub payload: AbortedData,
 }
@@ -152,17 +177,10 @@ pub enum GeneralQuery {
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct QueryPlan {
-  pub gen: Gen,
-  pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,
-  pub col_usage_node: FrozenColUsageNode,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SuperSimpleTransTableSelectQuery {
   pub location_prefix: TransTableLocationPrefix,
   pub context: Context,
-  pub query: proc::SuperSimpleSelect,
+  pub sql_query: proc::SuperSimpleSelect,
   pub query_plan: QueryPlan,
 }
 
@@ -170,7 +188,7 @@ pub struct SuperSimpleTransTableSelectQuery {
 pub struct SuperSimpleTableSelectQuery {
   pub timestamp: Timestamp,
   pub context: Context,
-  pub query: proc::SuperSimpleSelect,
+  pub sql_query: proc::SuperSimpleSelect,
   pub query_plan: QueryPlan,
 }
 
@@ -178,12 +196,12 @@ pub struct SuperSimpleTableSelectQuery {
 pub struct UpdateQuery {
   pub timestamp: Timestamp,
   pub context: Context,
-  pub query: proc::Update,
+  pub sql_query: proc::Update,
   pub query_plan: QueryPlan,
 }
 
 // -------------------------------------------------------------------------------------------------
-//  Transaction Inner Messages
+//  2PC messages
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -257,4 +275,46 @@ pub enum ExternalAbortedData {
 pub struct ExternalQueryAbort {
   pub request_id: RequestId,
   pub payload: ExternalAbortedData,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Master FrozenColUsageAlgorithm messages
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ColUsageTree {
+  MSQuery(proc::MSQuery),
+  GRQuery(proc::GRQuery),
+  MSQueryStage(proc::MSQueryStage),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum FrozenColUsageTree {
+  ColUsageNodes(HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)>),
+  ColUsageNode(FrozenColUsageNode),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PerformMasterFrozenColUsage {
+  pub query_id: QueryId,
+  pub timestamp: Timestamp,
+  pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,
+  pub col_usage_tree: ColUsageTree,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CancelMasterFrozenColUsage {
+  pub query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MasterFrozenColUsageAborted {
+  pub query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MasterFrozenColUsageSuccess {
+  pub query_id: QueryId,
+  pub frozen_col_usage_tree: FrozenColUsageTree,
+  /* TODO: pub gossip: GossipData */
 }

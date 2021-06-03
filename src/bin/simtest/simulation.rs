@@ -1,8 +1,10 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{rvec, Clock, IOTypes, NetworkOut, TableSchema, TabletForwardOut};
+use runiversal::common::{
+  rvec, Clock, GossipData, IOTypes, NetworkOut, TableSchema, TabletForwardOut,
+};
 use runiversal::model::common::{
-  EndpointId, RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
+  EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use runiversal::model::message::{NetworkMessage, SlaveMessage, TabletMessage};
 use runiversal::slave::SlaveState;
@@ -12,6 +14,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Formatter, Result};
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 struct TestClock {}
@@ -164,20 +167,23 @@ impl Simulation {
         nonempty_queues: sim.nonempty_queues.clone(),
         from_eid: eid.clone(),
       };
+      let clock = TestClock {};
+      let gossip = Arc::new(GossipData { gossip_gen: Gen(0), gossiped_db_schema: schema.clone() });
       let mut seed = [0; 16];
       sim.rng.fill_bytes(&mut seed);
       sim.slave_states.borrow_mut().insert(
         eid.clone(),
         SlaveState::new(
           XorShiftRng::from_seed(seed),
-          TestClock {},
+          clock.clone(),
           network_out.clone(),
           TestTabletForwardOut { tablet_states: sim.tablet_states.clone(), from_eid: eid.clone() },
-          schema.clone(),
+          gossip.clone(),
           sharding_config.clone(),
           tablet_address_config.clone(),
           slave_address_config.clone(),
           sid.clone(),
+          EndpointId("".to_string()),
         ),
       );
       sim.tablet_states.borrow_mut().insert(eid.clone(), Default::default());
@@ -188,12 +194,14 @@ impl Simulation {
           tid.clone(),
           TabletState::new(
             XorShiftRng::from_seed(seed),
+            clock.clone(),
             network_out.clone(),
-            schema.clone(),
+            gossip.clone(),
             sharding_config.clone(),
             tablet_address_config.clone(),
             slave_address_config.clone(),
             tid.clone(),
+            EndpointId("".to_string()), // TODO: Implement Master properly.
           ),
         );
       }

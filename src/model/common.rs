@@ -26,7 +26,7 @@ pub enum ColType {
 
 /// The values that the columns of a Relational Tablet can take on.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ColValue {
+pub enum ColVal {
   Int(i32),
   Bool(bool),
   String(String),
@@ -40,7 +40,13 @@ pub struct ColName(pub String);
 /// Vec<Option<ColValue>> because values of a key column can't be NULL.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrimaryKey {
-  pub cols: Vec<ColValue>,
+  pub cols: Vec<ColVal>,
+}
+
+/// A Prefix of a Primary Key, which is very effective in specigyin Regions
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrimaryKeyPrefix {
+  pub cols: Vec<ColVal>,
 }
 
 /// The key range that a tablet manages. The `start` and `end` are
@@ -54,6 +60,7 @@ pub struct TabletKeyRange {
   pub end: Option<PrimaryKey>,
 }
 
+// TODO: get rid of the Copy trait in the below. I never liked it.
 /// A simple Timestamp type.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub struct Timestamp(pub u128);
@@ -71,7 +78,7 @@ pub struct TableView {
   /// The keys are the rows, and the values are the number of repetitions.
   pub col_names: Vec<(ColName, ColType)>,
   /// The keys are the rows, and the values are the number of repetitions.
-  pub rows: BTreeMap<Vec<Option<ColValue>>, u64>,
+  pub rows: BTreeMap<Vec<Option<ColVal>>, u64>,
 }
 
 /// This is used to hold onto Tier that each TablePath is currently being
@@ -133,7 +140,7 @@ pub struct ContextSchema {
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 pub struct ContextRow {
-  pub column_context_row: Vec<ColValue>,
+  pub column_context_row: Vec<ColVal>,
   pub trans_table_context_row: Vec<u32>,
 }
 

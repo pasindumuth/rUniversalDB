@@ -3,7 +3,7 @@ mod simulation;
 use crate::simulation::{client_eid, slave_eid, Simulation};
 use runiversal::common::TableSchema;
 use runiversal::model::common::{
-  ColName, ColType, ColValue, EndpointId, PrimaryKey, RequestId, SlaveGroupId, TablePath,
+  ColName, ColType, ColVal, EndpointId, PrimaryKey, RequestId, SlaveGroupId, TablePath,
   TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message::{ExternalMessage, NetworkMessage};

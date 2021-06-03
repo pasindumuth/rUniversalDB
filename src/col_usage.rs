@@ -72,11 +72,40 @@ impl<'a> ColUsagePlanner<'a> {
     }
   }
 
-  fn plan_stage_query(
+  pub fn get_all_cols(
+    &mut self,
+    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
+    exprs: &Vec<proc::ValExpr>,
+  ) -> Vec<ColName> {
+    let mut requested_cols = Vec::<ColName>::new();
+    let mut children = Vec::<HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)>>::new();
+    for expr in exprs {
+      self.collect_top_level_cols(&mut requested_cols, expr);
+      self.collect_subqueries(trans_table_ctx, &mut children, expr);
+    }
+
+    // Determine all columns in use by the query.
+    let mut all_cols = HashSet::<ColName>::new();
+    for child_map in children {
+      for (_, (_, child)) in child_map {
+        for col in &child.external_cols {
+          all_cols.insert(col.clone());
+        }
+      }
+    }
+    for col in requested_cols {
+      all_cols.insert(col.clone());
+    }
+
+    return all_cols.into_iter().collect();
+  }
+
+  pub fn plan_stage_query_with_schema(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
     projection: &Vec<ColName>,
     table_ref: &proc::TableRef,
+    current_cols: Vec<ColName>,
     exprs: &Vec<proc::ValExpr>,
   ) -> (Vec<ColName>, FrozenColUsageNode) {
     let mut node = FrozenColUsageNode::new(table_ref.clone());
@@ -84,26 +113,6 @@ impl<'a> ColUsagePlanner<'a> {
       self.collect_top_level_cols(&mut node.requested_cols, expr);
       self.collect_subqueries(trans_table_ctx, &mut node.children, expr);
     }
-
-    // Determine the set of existing columns for this table_ref.
-    let current_cols = match table_ref {
-      proc::TableRef::TransTableName(trans_table_name) => {
-        // The Query converter should make sure that all TransTableNames actually exist.
-        trans_table_ctx.get(trans_table_name).unwrap().clone()
-      }
-      proc::TableRef::TablePath(table_path) => {
-        // The Query converter should make sure that all TablePaths actually exist.
-        let mut current_cols = Vec::new();
-        let table_schema = self.gossiped_db_schema.get(table_path).unwrap();
-        for (col_name, _) in &table_schema.key_cols {
-          current_cols.push(col_name.clone());
-        }
-        for (col_name, _) in &table_schema.val_cols.static_snapshot_read(self.timestamp) {
-          current_cols.push(col_name.clone());
-        }
-        current_cols
-      }
-    };
 
     // Determine which columns are safe, and which are external.
     let mut all_cols = HashSet::<ColName>::new();
@@ -130,7 +139,43 @@ impl<'a> ColUsagePlanner<'a> {
     return (projection.clone(), node);
   }
 
-  fn plan_gr_query(
+  fn plan_stage_query(
+    &mut self,
+    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
+    projection: &Vec<ColName>,
+    table_ref: &proc::TableRef,
+    exprs: &Vec<proc::ValExpr>,
+  ) -> (Vec<ColName>, FrozenColUsageNode) {
+    // Determine the set of existing columns for this table_ref.
+    let current_cols = match table_ref {
+      proc::TableRef::TransTableName(trans_table_name) => {
+        // The Query converter should make sure that all TransTableNames actually exist.
+        trans_table_ctx.get(trans_table_name).unwrap().clone()
+      }
+      proc::TableRef::TablePath(table_path) => {
+        // The Query converter should make sure that all TablePaths actually exist.
+        let mut current_cols = Vec::new();
+        let table_schema = self.gossiped_db_schema.get(table_path).unwrap();
+        for (col_name, _) in &table_schema.key_cols {
+          current_cols.push(col_name.clone());
+        }
+        for (col_name, _) in &table_schema.val_cols.static_snapshot_read(self.timestamp) {
+          current_cols.push(col_name.clone());
+        }
+        current_cols
+      }
+    };
+
+    return self.plan_stage_query_with_schema(
+      trans_table_ctx,
+      projection,
+      table_ref,
+      current_cols,
+      exprs,
+    );
+  }
+
+  pub fn plan_gr_query(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
     query: &proc::GRQuery,

@@ -1,10 +1,13 @@
+use crate::col_usage::FrozenColUsageNode;
 use crate::model::common::{
-  ColName, ColType, EndpointId, Gen, QueryId, TablePath, TabletGroupId, Timestamp,
+  ColName, ColType, EndpointId, Gen, NodeGroupId, QueryId, TablePath, TableView, TabletGroupId,
+  Timestamp, TransTableName,
 };
 use crate::model::message::{NetworkMessage, TabletMessage};
 use crate::multiversion_map::MVM;
 use rand::{Rng, RngCore};
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 pub trait Clock {
   fn now(&mut self) -> Timestamp;
@@ -73,4 +76,48 @@ impl TableSchema {
 pub struct GossipData {
   pub gossip_gen: Gen,
   pub gossiped_db_schema: HashMap<TablePath, TableSchema>,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  TMStatus
+// -----------------------------------------------------------------------------------------------
+// These are used to perform PCSA over the network for reads and writes.
+
+#[derive(Debug)]
+pub enum TMWaitValue {
+  QueryId(QueryId),
+  Result((Vec<ColName>, HashMap<u32, TableView>)),
+}
+
+#[derive(Debug)]
+pub struct TMStatus {
+  pub root_query_id: QueryId,
+  pub new_rms: HashSet<TabletGroupId>,
+  /// Holds the number of nodes that responded (used to decide when this TM is done).
+  pub responded_count: usize,
+  pub tm_state: HashMap<NodeGroupId, TMWaitValue>,
+  pub orig_path: QueryId,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Basic Utils
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum OrigP {
+  MSCoordPath(QueryId),
+  MSQueryWritePath(QueryId, u32),
+  MSQueryReadPath(QueryId, QueryId),
+  ReadPath(QueryId),
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Query Plan
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct QueryPlan {
+  pub gossip_gen: Gen,
+  pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,
+  pub col_usage_node: FrozenColUsageNode,
 }

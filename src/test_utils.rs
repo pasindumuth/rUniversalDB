@@ -1,17 +1,17 @@
 use crate::model::common::{
-  ColName, ColValue, SlaveGroupId, TablePath, TabletGroupId, TransTableName,
+  ColName, ColVal, SlaveGroupId, TablePath, TabletGroupId, TransTableName,
 };
 
 pub fn cn(s: &str) -> ColName {
   ColName(s.to_string())
 }
 
-pub fn cvs(s: &str) -> ColValue {
-  ColValue::String(s.to_string())
+pub fn cvs(s: &str) -> ColVal {
+  ColVal::String(s.to_string())
 }
 
-pub fn cvi(i: i32) -> ColValue {
-  ColValue::Int(i)
+pub fn cvi(i: i32) -> ColVal {
+  ColVal::Int(i)
 }
 
 pub fn mk_sid(id: &str) -> SlaveGroupId {
