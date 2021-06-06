@@ -2,8 +2,9 @@ use crate::col_usage::ColUsagePlanner;
 use crate::common::{
   mk_qid, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus, TableSchema,
 };
+use crate::expression::compute_bound;
 use crate::model::common::{
-  iast, proc, ColType, Context, ReadRegion, TierMap, TransTableName, WriteRegion,
+  iast, proc, ColType, ColValN, Context, KeyBound, TableRegion, TierMap, TransTableName,
 };
 use crate::model::common::{
   ColName, ColVal, EndpointId, PrimaryKey, QueryId, SlaveGroupId, TablePath, TabletGroupId,
@@ -111,7 +112,7 @@ struct CommonQueryReplanningES {
 #[derive(Debug)]
 enum ExecutionS {
   Start,
-  Pending(ReadRegion),
+  Pending { read_region: TableRegion },
   Executing,
 }
 
@@ -131,6 +132,10 @@ struct TableReadES {
   // The dynamically evolving fields.
   all_rms: HashSet<TabletGroupId>,
   state: ExecutionS,
+
+  // Convenience fields
+  /// This holds this ES's OrigP, which is cached for convenience
+  orig_p: OrigP,
 }
 
 #[derive(Debug)]
@@ -205,15 +210,15 @@ struct MSQueryES {
 #[derive(Debug)]
 struct VerifyingReadWriteRegion {
   orig_p: OrigP,
-  m_waiting_read_protected: Vec<(OrigP, ReadRegion)>,
-  m_read_protected: Vec<ReadRegion>,
-  m_write_protected: Vec<WriteRegion>,
+  m_waiting_read_protected: Vec<(OrigP, TableRegion)>,
+  m_read_protected: Vec<TableRegion>,
+  m_write_protected: Vec<TableRegion>,
 }
 
 #[derive(Debug)]
 struct ReadWriteRegion {
-  m_read_protected: Vec<ReadRegion>,
-  m_write_protected: Vec<WriteRegion>,
+  m_read_protected: Vec<TableRegion>,
+  m_write_protected: Vec<TableRegion>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -283,8 +288,8 @@ pub struct TabletState<T: IOTypes> {
   prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
   committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
 
-  waiting_read_protected: BTreeMap<Timestamp, Vec<(OrigP, ReadRegion)>>,
-  read_protected: BTreeMap<Timestamp, Vec<ReadRegion>>,
+  waiting_read_protected: BTreeMap<Timestamp, Vec<(OrigP, TableRegion)>>,
+  read_protected: BTreeMap<Timestamp, Vec<TableRegion>>,
 
   // Schema Change and Locking
   prepared_schema_change: BTreeMap<Timestamp, HashMap<ColName, Option<ColType>>>,
@@ -539,12 +544,14 @@ impl<T: IOTypes> TabletState<T> {
         change_occurred = true;
       }
 
+      // TODO: implement main loop drive for Region Protection
+
       change_occurred = false;
     }
   }
 
   fn columns_locked_for_query(&mut self, orig_p: OrigP) {
-    match orig_p {
+    match orig_p.clone() {
       OrigP::MSCoordPath(_) => {}
       OrigP::MSQueryWritePath(root_query_id, tier) => {
         if let Some(ms_query_es) = self.ms_statuses.get_mut(&root_query_id) {
@@ -602,49 +609,112 @@ impl<T: IOTypes> TabletState<T> {
             CommonQueryReplanningS::Done(success) => {
               if success {
                 // First, we construct the ReadRegion
-                let es = TableReadES {
+                let mut es = TableReadES {
                   tier_map: plan_es.tier_map.clone(),
                   timestamp: comm_plan_es.timestamp,
                   context: comm_plan_es.context.clone(),
                   sender_path: comm_plan_es.sender_path.clone(),
-                  query_id,
+                  query_id: query_id.clone(),
                   query: plan_es.sql_query.clone(),
                   query_plan: comm_plan_es.query_plan.clone(),
                   all_rms: Default::default(),
                   state: ExecutionS::Start,
+                  orig_p,
                 };
 
-                // Compute the column region.
+                // Compute the Column Region.
                 let mut col_region = HashSet::<ColName>::new();
                 col_region.extend(es.query.projection.clone());
-                col_region.extend(es.query_plan.col_usage_node.external_cols.clone());
+                col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
 
-                // Compute the row region. To do this, we take the union of Row Regions
-                // for each row in the ContextRow.
+                // Here, `context_col_index` has every External Column used by
+                // the query as a key.
                 let mut context_col_index = HashMap::<ColName, usize>::new();
-                for (index, col) in
-                  es.context.context_schema.column_context_schema.iter().enumerate()
-                {
-                  context_col_index.insert(col.clone(), index);
-                }
-
-                for context_row in &es.context.context_rows {
-                  // fuck
-                  for (col, _) in &self.table_schema.key_cols {
-                    // We see if we can find a lower and upper ColVal bound for this
-                    // `col` by using the `selection`, given the current ContextRow.
-                    let index = context_col_index.get(col);
+                let col_schema = es.context.context_schema.column_context_schema.clone();
+                for (index, col) in col_schema.iter().enumerate() {
+                  if es.query_plan.col_usage_node.external_cols.contains(col) {
+                    context_col_index.insert(col.clone(), index);
                   }
                 }
 
-                // Which means we need to gather the relevent part of the context, i.e.
-                // the elements in `external_cols`.
+                // Compute the Row Region by taking the union across all ContextRows
+                let mut row_region = Vec::<KeyBound>::new();
+                for context_row in &es.context.context_rows {
+                  let mut key_bounds = Vec::<KeyBound>::new();
+                  for (col_name, col_type) in &self.table_schema.key_cols {
+                    // First, map all External Columns names to the corresponding values
+                    // in this ContextRow
+                    let mut col_context = HashMap::<ColName, ColValN>::new();
+                    for (col, index) in &context_col_index {
+                      col_context.insert(
+                        col.clone(),
+                        context_row.column_context_row.get(*index).unwrap().clone(),
+                      );
+                    }
 
-                for col in &self.table_schema.key_cols {}
+                    // Then, compute the ColBound and extend key_bounds.
+                    match compute_bound(col_name, col_type, &es.query.selection, &col_context) {
+                      Ok(col_bounds) => {
+                        let mut new_key_bounds = Vec::<KeyBound>::new();
+                        for key_bound in key_bounds {
+                          for col_bound in col_bounds.clone() {
+                            let mut new_key_bound = key_bound.clone();
+                            new_key_bound.key_col_bounds.push(col_bound.clone());
+                            new_key_bounds.push(new_key_bound);
+                          }
+                        }
+                        key_bounds = compress_row_region(new_key_bounds);
+                      }
+                      Err(eval_error) => {
+                        // Respond to the sender with an Abort, and remove the ReadStatus.
+                        let aborted = msg::QueryAborted {
+                          sender_state_path: es.sender_path.state_path.clone(),
+                          tablet_group_id: self.this_tablet_group_id.clone(),
+                          query_id: query_id.clone(),
+                          payload: msg::AbortedData::TypeError { msg: format!("{:?}", eval_error) },
+                        };
 
-                let read_region =
-                  ReadRegion { col_region: col_region.into_iter().collect(), row_region: vec![] };
+                        let sid = &es.sender_path.slave_group_id;
+                        let eid = self.slave_address_config.get(sid).unwrap();
+                        self.network_output.send(
+                          &eid,
+                          msg::NetworkMessage::Slave(
+                            if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
+                              msg::SlaveMessage::TabletMessage(
+                                tablet_group_id.clone(),
+                                msg::TabletMessage::QueryAborted(aborted),
+                              )
+                            } else {
+                              msg::SlaveMessage::QueryAborted(aborted)
+                            },
+                          ),
+                        );
+                        self.read_statuses.remove(&query_id);
+                        return;
+                      }
+                    }
+                  }
+                  for key_bound in key_bounds {
+                    row_region.push(key_bound);
+                  }
+                }
+                row_region = compress_row_region(row_region);
 
+                // Move the TableReadES to the Pending state with the given ReadRegion.
+                let col_region: Vec<ColName> = col_region.into_iter().collect();
+                let read_region = TableRegion { col_region, row_region };
+                es.state = ExecutionS::Pending { read_region: read_region.clone() };
+
+                // Add read protection
+                if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
+                  waiting.push((es.orig_p.clone(), read_region));
+                } else {
+                  self
+                    .waiting_read_protected
+                    .insert(es.timestamp, vec![(es.orig_p.clone(), read_region)]);
+                }
+
+                // Move the FullTableReadES to Executing
                 *read_es = FullTableReadES::Executing(es);
               } else {
                 self.read_statuses.remove(&query_id);
@@ -656,6 +726,13 @@ impl<T: IOTypes> TabletState<T> {
       }
     }
   }
+}
+
+/// This function removes redundancy in the `row_region`. Redundancy may easily
+/// arise from different ColumnContexts. In the future, we can be smarter and
+/// sacrifice granularity for a simpler Key Region.
+fn compress_row_region(row_region: Vec<KeyBound>) -> Vec<KeyBound> {
+  row_region
 }
 
 /// Add the following triple into `requested_locked_columns`, making sure to update

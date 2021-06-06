@@ -9,7 +9,8 @@ Optimizations:
 - We can pre-evaluate constant expressions before evaluating them with the `col_context`.
 */
 
-enum EvalError {
+#[derive(Debug)]
+pub enum EvalError {
   /// An invalid unary operation was attempted.
   InvalidUnaryOp,
   /// An invalid binary operation was attempted.
@@ -75,7 +76,7 @@ fn compute_singe_bound(
   col: &ColName,
   col_type: &ColType,
   expr: &proc::ValExpr,
-  col_context: HashMap<ColName, ColValN>,
+  col_context: &HashMap<ColName, ColValN>,
 ) -> Result<ColBound, EvalError> {
   match expr {
     proc::ValExpr::ColumnRef { col_ref } => {
@@ -102,11 +103,11 @@ fn compute_singe_bound(
 }
 
 /// Similar to the above, but more granular since we return a vector of.
-fn compute_bound(
+pub fn compute_bound(
   col: &ColName,
   col_type: &ColType,
   expr: &proc::ValExpr,
-  col_context: HashMap<ColName, ColValN>,
+  col_context: &HashMap<ColName, ColValN>,
 ) -> Result<Vec<ColBound>, EvalError> {
   // TODO: Complete
   Err(EvalError::GenericError)

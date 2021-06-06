@@ -57,7 +57,6 @@ pub struct TabletKeyRange {
   pub end: Option<PrimaryKey>,
 }
 
-// TODO: get rid of the Copy trait in the below. I never liked it.
 /// A simple Timestamp type.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub struct Timestamp(pub u128);
@@ -80,7 +79,7 @@ pub enum SingleBound<T> {
 
 /// Here, the Variant that the `ColVal` in each `SingleBound` takes
 /// on has to be the same (i.e. the `ColVal` has to be the same type).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ColBound {
   pub start: SingleBound<ColVal>,
   pub end: SingleBound<ColVal>,
@@ -93,21 +92,14 @@ impl ColBound {
 }
 
 /// A full Boundary for a `PrimaryKey`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct KeyBound {
   pub key_col_bounds: Vec<ColBound>,
 }
 
-/// ReadRegion for a query
-#[derive(Debug)]
-pub struct ReadRegion {
-  pub col_region: Vec<ColName>,
-  pub row_region: Vec<KeyBound>,
-}
-
-/// WriteRegion for a query
-#[derive(Debug)]
-pub struct WriteRegion {
+/// TableRegion, used to represent both ReadRegions and WriteRegions.
+#[derive(Debug, Clone)]
+pub struct TableRegion {
   pub col_region: Vec<ColName>,
   pub row_region: Vec<KeyBound>,
 }
