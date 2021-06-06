@@ -2,7 +2,9 @@ use crate::col_usage::ColUsagePlanner;
 use crate::common::{
   mk_qid, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus, TableSchema,
 };
-use crate::model::common::{proc, ColType, Context, TierMap, TransTableName};
+use crate::model::common::{
+  iast, proc, ColType, Context, ReadRegion, TierMap, TransTableName, WriteRegion,
+};
 use crate::model::common::{
   ColName, ColVal, EndpointId, PrimaryKey, QueryId, SlaveGroupId, TablePath, TabletGroupId,
   TabletKeyRange, Timestamp,
@@ -14,7 +16,6 @@ use rand::RngCore;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::read;
 use std::iter::FromIterator;
-use std::ops::Bound::{Included, Unbounded};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -109,6 +110,7 @@ struct CommonQueryReplanningES {
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 enum ExecutionS {
+  Start,
   Pending(ReadRegion),
   Executing,
 }
@@ -199,9 +201,6 @@ struct MSQueryES {
 // -----------------------------------------------------------------------------------------------
 //  Region Isolation Algorithm
 // -----------------------------------------------------------------------------------------------
-
-type ReadRegion = (Vec<ColName>, Vec<(PrimaryKey, PrimaryKey)>);
-type WriteRegion = (Vec<ColName>, Vec<(PrimaryKey, PrimaryKey)>);
 
 #[derive(Debug)]
 struct VerifyingReadWriteRegion {
@@ -602,7 +601,8 @@ impl<T: IOTypes> TabletState<T> {
           match comm_plan_es.state {
             CommonQueryReplanningS::Done(success) => {
               if success {
-                *read_es = FullTableReadES::Executing(TableReadES {
+                // First, we construct the ReadRegion
+                let es = TableReadES {
                   tier_map: plan_es.tier_map.clone(),
                   timestamp: comm_plan_es.timestamp,
                   context: comm_plan_es.context.clone(),
@@ -611,8 +611,41 @@ impl<T: IOTypes> TabletState<T> {
                   query: plan_es.sql_query.clone(),
                   query_plan: comm_plan_es.query_plan.clone(),
                   all_rms: Default::default(),
-                  state: ExecutionS::Executing, // TODO: start this properly.
-                });
+                  state: ExecutionS::Start,
+                };
+
+                // Compute the column region.
+                let mut col_region = HashSet::<ColName>::new();
+                col_region.extend(es.query.projection.clone());
+                col_region.extend(es.query_plan.col_usage_node.external_cols.clone());
+
+                // Compute the row region. To do this, we take the union of Row Regions
+                // for each row in the ContextRow.
+                let mut context_col_index = HashMap::<ColName, usize>::new();
+                for (index, col) in
+                  es.context.context_schema.column_context_schema.iter().enumerate()
+                {
+                  context_col_index.insert(col.clone(), index);
+                }
+
+                for context_row in &es.context.context_rows {
+                  // fuck
+                  for (col, _) in &self.table_schema.key_cols {
+                    // We see if we can find a lower and upper ColVal bound for this
+                    // `col` by using the `selection`, given the current ContextRow.
+                    let index = context_col_index.get(col);
+                  }
+                }
+
+                // Which means we need to gather the relevent part of the context, i.e.
+                // the elements in `external_cols`.
+
+                for col in &self.table_schema.key_cols {}
+
+                let read_region =
+                  ReadRegion { col_region: col_region.into_iter().collect(), row_region: vec![] };
+
+                *read_es = FullTableReadES::Executing(es);
               } else {
                 self.read_statuses.remove(&query_id);
               }

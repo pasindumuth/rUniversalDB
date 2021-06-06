@@ -32,6 +32,9 @@ pub enum ColVal {
   String(String),
 }
 
+/// This is a nullable `ColVal`. We use this alias for self-documentation
+pub type ColValN = Option<ColVal>;
+
 /// The name of a column.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ColName(pub String);
@@ -40,12 +43,6 @@ pub struct ColName(pub String);
 /// Vec<Option<ColValue>> because values of a key column can't be NULL.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrimaryKey {
-  pub cols: Vec<ColVal>,
-}
-
-/// A Prefix of a Primary Key, which is very effective in specigyin Regions
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrimaryKeyPrefix {
   pub cols: Vec<ColVal>,
 }
 
@@ -70,6 +67,52 @@ pub struct Timestamp(pub u128);
 pub struct Gen(pub u32);
 
 // -------------------------------------------------------------------------------------------------
+//  Key Regions
+// -------------------------------------------------------------------------------------------------
+
+// Generic single-side bound for an orderable value.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SingleBound<T> {
+  Included(T),
+  Excluded(T),
+  Unbounded,
+}
+
+/// Here, the Variant that the `ColVal` in each `SingleBound` takes
+/// on has to be the same (i.e. the `ColVal` has to be the same type).
+#[derive(Debug)]
+pub struct ColBound {
+  pub start: SingleBound<ColVal>,
+  pub end: SingleBound<ColVal>,
+}
+
+impl ColBound {
+  pub fn new(start: SingleBound<ColVal>, end: SingleBound<ColVal>) -> ColBound {
+    ColBound { start, end }
+  }
+}
+
+/// A full Boundary for a `PrimaryKey`
+#[derive(Debug)]
+pub struct KeyBound {
+  pub key_col_bounds: Vec<ColBound>,
+}
+
+/// ReadRegion for a query
+#[derive(Debug)]
+pub struct ReadRegion {
+  pub col_region: Vec<ColName>,
+  pub row_region: Vec<KeyBound>,
+}
+
+/// WriteRegion for a query
+#[derive(Debug)]
+pub struct WriteRegion {
+  pub col_region: Vec<ColName>,
+  pub row_region: Vec<KeyBound>,
+}
+
+// -------------------------------------------------------------------------------------------------
 //  Transaction Data Structures
 // -------------------------------------------------------------------------------------------------
 
@@ -78,7 +121,7 @@ pub struct TableView {
   /// The keys are the rows, and the values are the number of repetitions.
   pub col_names: Vec<(ColName, ColType)>,
   /// The keys are the rows, and the values are the number of repetitions.
-  pub rows: BTreeMap<Vec<Option<ColVal>>, u64>,
+  pub rows: BTreeMap<Vec<ColValN>, u64>,
 }
 
 /// This is used to hold onto Tier that each TablePath is currently being
@@ -140,7 +183,7 @@ pub struct ContextSchema {
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 pub struct ContextRow {
-  pub column_context_row: Vec<ColVal>,
+  pub column_context_row: Vec<ColValN>,
   pub trans_table_context_row: Vec<u32>,
 }
 
