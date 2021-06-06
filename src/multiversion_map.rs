@@ -46,6 +46,16 @@ where
     }
   }
 
+  /// Reads the version prior to the timestamp. Asserts that the `lat` is high enough.
+  pub fn strong_static_read(&self, key: &K, timestamp: Timestamp) -> Option<V> {
+    if let Some((lat, versions)) = self.map.get(key) {
+      assert!(&timestamp <= lat);
+      MVM::<K, V>::find_version(versions, timestamp)
+    } else {
+      None
+    }
+  }
+
   /// Reads the version prior to the timestamp. This doesn't mutate
   /// the lat if the read happens with a future timestamp.
   pub fn static_read(&self, key: &K, timestamp: Timestamp) -> Option<V> {
