@@ -135,7 +135,7 @@ pub struct QuerySuccess {
   /// The Tablet/Slave that just succeeded.
   pub node_group_id: NodeGroupId,
   pub query_id: QueryId,
-  pub result: (Vec<ColName>, HashMap<u32, TableView>),
+  pub result: (Vec<ColName>, Vec<TableView>),
   pub new_rms: Vec<TabletGroupId>,
 }
 

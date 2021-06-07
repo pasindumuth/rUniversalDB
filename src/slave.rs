@@ -256,7 +256,7 @@ impl<T: IOTypes> SlaveState<T> {
       if status.responded_count == status.tm_state.len() {
         let status = self.tm_statuses.remove(&query_success.query_id).unwrap();
         // Merge there TableViews together
-        let mut results = Vec::<(Vec<ColName>, HashMap<u32, TableView>)>::new();
+        let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
         for (_, tm_wait_value) in status.tm_state {
           results.push(cast!(TMWaitValue::Result, tm_wait_value).unwrap());
         }
@@ -276,7 +276,7 @@ impl<T: IOTypes> SlaveState<T> {
     ret_query_id: QueryId,
     orig_path: QueryId,
     new_rms: HashSet<TabletGroupId>,
-    result: (Vec<ColName>, HashMap<u32, TableView>),
+    result: (Vec<ColName>, Vec<TableView>),
   ) {
     // For now, each `query_id` here should point back to an MSQueryCoordinationES.
     // It must exist. Recall that if it were cancelled, then it would have deleted the all
@@ -440,14 +440,14 @@ fn lookup_location(
 }
 
 fn merge_table_views(
-  mut results: Vec<(Vec<ColName>, HashMap<u32, TableView>)>,
-) -> (Vec<ColName>, HashMap<u32, TableView>) {
+  mut results: Vec<(Vec<ColName>, Vec<TableView>)>,
+) -> (Vec<ColName>, Vec<TableView>) {
   let (schema, mut views) = results.pop().unwrap();
   for (cur_schema, cur_views) in results {
     assert!(cur_schema == schema);
     assert!(cur_views.len() == views.len());
-    for (idx, cur_view) in cur_views {
-      let mut view = views.get_mut(&idx).unwrap();
+    for (idx, cur_view) in cur_views.into_iter().enumerate() {
+      let mut view = views.get_mut(idx).unwrap();
       assert!(view.col_names == cur_view.col_names);
       for (cur_row_val, cur_row_count) in cur_view.rows {
         if let Some(row_count) = view.rows.get_mut(&cur_row_val) {
@@ -468,7 +468,7 @@ fn ms_coord_process_stage_result<T: IOTypes>(
   ret_query_id: &QueryId,
   orig_path: &QueryId,
   new_rms: HashSet<TabletGroupId>,
-  result: (Vec<ColName>, HashMap<u32, TableView>),
+  result: (Vec<ColName>, Vec<TableView>),
   stage_idx: &usize,
   stage_query_id: &QueryId,
 
@@ -492,8 +492,7 @@ fn ms_coord_process_stage_result<T: IOTypes>(
 
   // There was only one ContextRow, so the result should have 1 TableView as well.
   assert!(res_views.len() == 1);
-  let (idx, res_view) = res_views.into_iter().next().unwrap();
-  assert!(idx == 0);
+  let res_view = res_views.into_iter().next().unwrap();
 
   // Add the results to the `trans_table_views`
   coord_es.trans_table_views.push((trans_table_name.clone(), res_view));

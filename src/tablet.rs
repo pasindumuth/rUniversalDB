@@ -1,10 +1,12 @@
-use crate::col_usage::ColUsagePlanner;
+use crate::col_usage::{ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, QueryPlan, TMStatus, TableRegion,
   TableSchema,
 };
 use crate::expression::compute_bound;
-use crate::model::common::{iast, proc, ColType, ColValN, Context, TierMap, TransTableName};
+use crate::model::common::{
+  iast, proc, ColType, ColValN, Context, Gen, TableView, TierMap, TransTableName,
+};
 use crate::model::common::{
   ColName, ColVal, EndpointId, PrimaryKey, QueryId, SlaveGroupId, TablePath, TabletGroupId,
   TabletKeyRange, Timestamp,
@@ -107,13 +109,29 @@ struct CommonQueryReplanningES {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  MSQueryCoordinationES
+//  SubqueryStatus
+// -----------------------------------------------------------------------------------------------
+#[derive(Debug)]
+enum SingleSubqueryStatus {
+  LockingSchemas { query_id: QueryId },
+  PendingReadRegion { read_region: TableRegion },
+  Pending { context: Rc<Context> },
+  Finished { context: Rc<Context>, result: Vec<TableView> },
+}
+
+#[derive(Debug)]
+struct SubqueryStatus {
+  subqueries: HashMap<QueryId, SingleSubqueryStatus>,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  TableReadES
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 enum ExecutionS {
   Start,
   Pending { read_region: TableRegion },
-  Executing,
+  Executing { subquery_status: SubqueryStatus },
 }
 
 #[derive(Debug)]
@@ -130,7 +148,7 @@ struct TableReadES {
   query_plan: QueryPlan,
 
   // The dynamically evolving fields.
-  all_rms: HashSet<TabletGroupId>,
+  new_rms: HashSet<TabletGroupId>,
   state: ExecutionS,
 
   // Convenience fields
@@ -152,10 +170,49 @@ enum FullTableReadES {
   Executing(TableReadES),
 }
 
+// -----------------------------------------------------------------------------------------------
+//  GRQueryES
+// -----------------------------------------------------------------------------------------------
+
 #[derive(Debug)]
-enum ReadStatus {
-  FullTableReadES(FullTableReadES),
-  TMStatus(TMStatus),
+enum GRExecutionS {
+  Start,
+  ReadStage { stage_idx: usize, subquery_status: SubqueryStatus },
+  MasterQueryReplanning { master_query_id: QueryId },
+}
+
+// Recall that the elements don't need to preserve the order of the TransTables, since the
+// sql_query does that for us (thus, we can use HashMaps).
+#[derive(Debug)]
+struct GRQueryPlan {
+  pub gossip_gen: Gen,
+  pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,
+  pub col_usage_nodes: HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)>,
+}
+
+#[derive(Debug)]
+struct GRQueryES {
+  tier_map: TierMap,
+  timestamp: Timestamp,
+  context: Rc<Context>,
+
+  /// The elements of the outer Vec corresponds to every ContextRow in the
+  /// `context`. The elements of the inner vec corresponds to the elements in
+  /// `trans_table_view`. The `usize` indexes into an element in the corresponding
+  /// Vec<TableView> inside the `trans_table_view`.
+  new_trans_table_context: Vec<Vec<usize>>,
+
+  query: proc::GRQuery,
+  query_plan: GRQueryPlan,
+
+  // The dynamically evolving fields.
+  new_rms: HashSet<TabletGroupId>,
+  trans_table_view: Vec<(TransTableName, Vec<TableView>)>,
+  state: GRExecutionS,
+
+  // Convenience fields
+  /// This holds this ES's OrigP, which is cached for convenience
+  orig_p: OrigP,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -201,6 +258,17 @@ struct MSQueryES {
   timestamp: Timestamp,
   ms_write_statuses: BTreeMap<u32, FullMSTableWriteES>,
   ms_read_statuses: HashMap<QueryId, FullMSTableReadES>,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  ReadStatus
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+enum ReadStatus {
+  FullGRQueryES(GRQueryES),
+  FullTableReadES(FullTableReadES),
+  TMStatus(TMStatus),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -263,6 +331,10 @@ enum ReadProtectionGrant {
 // Naming: ES for structs, S for enums, names consistent with type (potentially shorter),
 // perform_query, query, sql_query.
 // `query_id` for main one in question.
+
+// Every method call to a deep object will be driven from the top here, and all data
+// will be looked up and passed in as references. This allows for many different
+// sub-objects to have (potentially mutable) access to other sub-objects.
 
 // The sender has to send the full SenderPath. The responder
 // just needs to send the SenderStatePath, since it will use the
@@ -564,7 +636,8 @@ impl<T: IOTypes> TabletState<T> {
       let maybe_first_done = (|| {
         // To account for both `verifying_writes` and `prepared_writes`, we merge
         // them into a single container similar to `verifying_writes`. This is just
-        // for expedience; it should be optimized later.
+        // for expedience; it should be optimized later. (We can probably change
+        // `prepared_writes` to `VerifyingReadWriteRegion` and then zip 2 iterators).
         let mut all_cur_writes = BTreeMap::<Timestamp, VerifyingReadWriteRegion>::new();
         for (cur_timestamp, verifying_write) in &self.verifying_writes {
           all_cur_writes.insert(*cur_timestamp, verifying_write.clone());
@@ -819,7 +892,7 @@ impl<T: IOTypes> TabletState<T> {
                   query_id: query_id.clone(),
                   query: plan_es.sql_query.clone(),
                   query_plan: comm_plan_es.query_plan.clone(),
-                  all_rms: Default::default(),
+                  new_rms: Default::default(),
                   state: ExecutionS::Start,
                   orig_p,
                 };
@@ -932,7 +1005,16 @@ impl<T: IOTypes> TabletState<T> {
 
   /// We get this if a ReadProtection was granted by the Main Loop. This includes standard
   /// read_protected, or m_read_protected.
-  fn read_protected_for_query(&mut self, orig_p: OrigP, read_region: TableRegion) {}
+  fn read_protected_for_query(&mut self, orig_p: OrigP, read_region: TableRegion) {
+    match orig_p {
+      OrigP::MSCoordPath(_) => panic!(),
+      OrigP::MSQueryWritePath(_, _) => {}
+      OrigP::MSQueryReadPath(_, _) => {}
+      OrigP::ReadPath(query_id) => {
+        // Here, what do we gotta do?
+      }
+    }
+  }
 
   /// We call this when a DeadlockSafetyReadAbort happens
   fn deadlock_safety_read_abort(&mut self, orig_p: OrigP, read_region: TableRegion) {}

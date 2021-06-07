@@ -86,7 +86,7 @@ pub struct GossipData {
 #[derive(Debug)]
 pub enum TMWaitValue {
   QueryId(QueryId),
-  Result((Vec<ColName>, HashMap<u32, TableView>)),
+  Result((Vec<ColName>, Vec<TableView>)),
 }
 
 #[derive(Debug)]
