@@ -1,5 +1,6 @@
+use crate::common::{ColBound, SingleBound};
 use crate::model::common::iast::BinaryOp;
-use crate::model::common::{iast, proc, ColBound, ColName, ColType, ColVal, ColValN, SingleBound};
+use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
 use std::collections::HashMap;
 use std::ops::Deref;
 

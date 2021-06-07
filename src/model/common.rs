@@ -36,7 +36,7 @@ pub enum ColVal {
 pub type ColValN = Option<ColVal>;
 
 /// The name of a column.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ColName(pub String);
 
 /// The Primary Key of a Relational Tablet. Note that we don't use
@@ -64,45 +64,6 @@ pub struct Timestamp(pub u128);
 /// A Type for the generation of a gossip message.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub struct Gen(pub u32);
-
-// -------------------------------------------------------------------------------------------------
-//  Key Regions
-// -------------------------------------------------------------------------------------------------
-
-// Generic single-side bound for an orderable value.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum SingleBound<T> {
-  Included(T),
-  Excluded(T),
-  Unbounded,
-}
-
-/// Here, the Variant that the `ColVal` in each `SingleBound` takes
-/// on has to be the same (i.e. the `ColVal` has to be the same type).
-#[derive(Debug, Clone)]
-pub struct ColBound {
-  pub start: SingleBound<ColVal>,
-  pub end: SingleBound<ColVal>,
-}
-
-impl ColBound {
-  pub fn new(start: SingleBound<ColVal>, end: SingleBound<ColVal>) -> ColBound {
-    ColBound { start, end }
-  }
-}
-
-/// A full Boundary for a `PrimaryKey`
-#[derive(Debug, Clone)]
-pub struct KeyBound {
-  pub key_col_bounds: Vec<ColBound>,
-}
-
-/// TableRegion, used to represent both ReadRegions and WriteRegions.
-#[derive(Debug, Clone)]
-pub struct TableRegion {
-  pub col_region: Vec<ColName>,
-  pub row_region: Vec<KeyBound>,
-}
 
 // -------------------------------------------------------------------------------------------------
 //  Transaction Data Structures

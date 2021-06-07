@@ -1,11 +1,10 @@
 use crate::col_usage::ColUsagePlanner;
 use crate::common::{
-  mk_qid, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus, TableSchema,
+  mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, QueryPlan, TMStatus, TableRegion,
+  TableSchema,
 };
 use crate::expression::compute_bound;
-use crate::model::common::{
-  iast, proc, ColType, ColValN, Context, KeyBound, TableRegion, TierMap, TransTableName,
-};
+use crate::model::common::{iast, proc, ColType, ColValN, Context, TierMap, TransTableName};
 use crate::model::common::{
   ColName, ColVal, EndpointId, PrimaryKey, QueryId, SlaveGroupId, TablePath, TabletGroupId,
   TabletKeyRange, Timestamp,
@@ -17,6 +16,7 @@ use rand::RngCore;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::read;
 use std::iter::FromIterator;
+use std::ops::Bound;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -207,18 +207,31 @@ struct MSQueryES {
 //  Region Isolation Algorithm
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct VerifyingReadWriteRegion {
   orig_p: OrigP,
-  m_waiting_read_protected: Vec<(OrigP, TableRegion)>,
-  m_read_protected: Vec<TableRegion>,
-  m_write_protected: Vec<TableRegion>,
+  m_waiting_read_protected: BTreeSet<(OrigP, TableRegion)>,
+  m_read_protected: BTreeSet<TableRegion>,
+  m_write_protected: BTreeSet<TableRegion>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ReadWriteRegion {
-  m_read_protected: Vec<TableRegion>,
-  m_write_protected: Vec<TableRegion>,
+  orig_p: OrigP,
+  m_read_protected: BTreeSet<TableRegion>,
+  m_write_protected: BTreeSet<TableRegion>,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Internal Communication
+// -----------------------------------------------------------------------------------------------
+// These enums are used for communication between algorithms.
+
+enum ReadProtectionGrant {
+  Read { timestamp: Timestamp, protect_request: (OrigP, TableRegion) },
+  MRead { timestamp: Timestamp, protect_request: (OrigP, TableRegion) },
+  DeadlockSafetyReadAbort { timestamp: Timestamp, protect_request: (OrigP, TableRegion) },
+  DeadlockSafetyWriteAbort { timestamp: Timestamp, orig_p: OrigP },
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -288,8 +301,8 @@ pub struct TabletState<T: IOTypes> {
   prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
   committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
 
-  waiting_read_protected: BTreeMap<Timestamp, Vec<(OrigP, TableRegion)>>,
-  read_protected: BTreeMap<Timestamp, Vec<TableRegion>>,
+  waiting_read_protected: BTreeMap<Timestamp, BTreeSet<(OrigP, TableRegion)>>,
+  read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
 
   // Schema Change and Locking
   prepared_schema_change: BTreeMap<Timestamp, HashMap<ColName, Option<ColType>>>,
@@ -433,9 +446,9 @@ impl<T: IOTypes> TabletState<T> {
                   timestamp,
                   VerifyingReadWriteRegion {
                     orig_p: OrigP::MSQueryWritePath(perform_query.root_query_id.clone(), tier),
-                    m_waiting_read_protected: vec![],
-                    m_read_protected: vec![],
-                    m_write_protected: vec![],
+                    m_waiting_read_protected: BTreeSet::new(),
+                    m_read_protected: BTreeSet::new(),
+                    m_write_protected: BTreeSet::new(),
                   },
                 );
               }
@@ -486,6 +499,9 @@ impl<T: IOTypes> TabletState<T> {
   fn run_main_loop(&mut self) {
     let mut change_occurred = true;
     while change_occurred {
+      // We set this to false, and the below code will set it back to true if need be.
+      change_occurred = false;
+
       // First, we see if we can satisfy any `requested_locked_cols`.
 
       // First, compute the Timestamp that each ColName is going to change.
@@ -544,9 +560,195 @@ impl<T: IOTypes> TabletState<T> {
         change_occurred = true;
       }
 
-      // TODO: implement main loop drive for Region Protection
+      // Next, we see if we can provide Region
+      let maybe_first_done = (|| {
+        // To account for both `verifying_writes` and `prepared_writes`, we merge
+        // them into a single container similar to `verifying_writes`. This is just
+        // for expedience; it should be optimized later.
+        let mut all_cur_writes = BTreeMap::<Timestamp, VerifyingReadWriteRegion>::new();
+        for (cur_timestamp, verifying_write) in &self.verifying_writes {
+          all_cur_writes.insert(*cur_timestamp, verifying_write.clone());
+        }
+        for (cur_timestamp, verifying_write) in &self.prepared_writes {
+          all_cur_writes.insert(
+            *cur_timestamp,
+            VerifyingReadWriteRegion {
+              orig_p: verifying_write.orig_p.clone(),
+              m_waiting_read_protected: Default::default(),
+              m_read_protected: verifying_write.m_read_protected.clone(),
+              m_write_protected: verifying_write.m_write_protected.clone(),
+            },
+          );
+        }
 
-      change_occurred = false;
+        // First, we see if any `(m_)waiting_read_protected`s can be moved to `(m_)read_protected`.
+        if !all_cur_writes.is_empty() {
+          let (first_write_timestamp, verifying_write) = all_cur_writes.first_key_value().unwrap();
+
+          // First, process all `read_protected`s before the `first_write_timestamp`
+          let bound = (Bound::Unbounded, Bound::Excluded(first_write_timestamp));
+          for (timestamp, set) in self.waiting_read_protected.range(bound) {
+            let protect_request = set.first().unwrap().clone();
+            return Some(ReadProtectionGrant::Read { timestamp: *timestamp, protect_request });
+          }
+
+          // Next, process all `m_read_protected`s for the first `verifying_write`
+          for protect_request in &verifying_write.m_waiting_read_protected {
+            return Some(ReadProtectionGrant::MRead {
+              timestamp: *first_write_timestamp,
+              protect_request: protect_request.clone(),
+            });
+          }
+
+          // Next, accumulate the WriteRegions, and then search for region protection with
+          // all subsequent `(m_)waiting_read_protected`s.
+          let mut cum_write_regions = verifying_write.m_write_protected.clone();
+          let mut prev_write_timestamp = first_write_timestamp;
+          let bound = (Bound::Excluded(first_write_timestamp), Bound::Unbounded);
+          for (cur_timestamp, verifying_write) in all_cur_writes.range(bound) {
+            // The loop state is that `cum_write_regions` contains all WriteRegions <=
+            // `prev_write_timestamp`, all `m_read_protected` <= have been processed, and
+            // all `read_protected`s < have been processed.
+
+            // Process `m_read_protected`
+            for protect_request in &verifying_write.m_waiting_read_protected {
+              let (_, read_region) = protect_request;
+              if does_intersect(read_region, &cum_write_regions) {
+                return Some(ReadProtectionGrant::MRead {
+                  timestamp: *first_write_timestamp,
+                  protect_request: protect_request.clone(),
+                });
+              }
+            }
+
+            // Process `read_protected`
+            let bound = (Bound::Included(prev_write_timestamp), Bound::Excluded(cur_timestamp));
+            for (timestamp, set) in self.waiting_read_protected.range(bound) {
+              for protect_request in set {
+                let (_, read_region) = protect_request;
+                if does_intersect(read_region, &cum_write_regions) {
+                  return Some(ReadProtectionGrant::Read {
+                    timestamp: *timestamp,
+                    protect_request: protect_request.clone(),
+                  });
+                }
+              }
+            }
+
+            // Add the WriteRegions into `cur_write_regions`.
+            for write_region in &verifying_write.m_write_protected {
+              cum_write_regions.insert(write_region.clone());
+            }
+            prev_write_timestamp = cur_timestamp;
+          }
+
+          // Finally, finish processing any remaining `read_protected`s
+          let bound = (Bound::Included(prev_write_timestamp), Bound::Unbounded);
+          for (timestamp, set) in self.waiting_read_protected.range(bound) {
+            for protect_request in set {
+              let (_, read_region) = protect_request;
+              if does_intersect(read_region, &cum_write_regions) {
+                return Some(ReadProtectionGrant::Read {
+                  timestamp: *timestamp,
+                  protect_request: protect_request.clone(),
+                });
+              }
+            }
+          }
+        } else {
+          for (timestamp, set) in &self.waiting_read_protected {
+            let protect_request = set.first().unwrap().clone();
+            return Some(ReadProtectionGrant::Read { timestamp: *timestamp, protect_request });
+          }
+        }
+
+        // Next, we search for any DeadlockSafetyWriteAbort.
+        for (timestamp, set) in &self.waiting_read_protected {
+          if let Some(verifying_write) = self.verifying_writes.get(timestamp) {
+            for protect_request in set {
+              let (orig_p, read_region) = protect_request;
+              if does_intersect(read_region, &verifying_write.m_write_protected) {
+                return Some(ReadProtectionGrant::DeadlockSafetyWriteAbort {
+                  timestamp: *timestamp,
+                  orig_p: orig_p.clone(),
+                });
+              }
+            }
+          }
+        }
+
+        // Finally, we search for any DeadlockSafetyWriteAbort.
+        for (timestamp, set) in &self.waiting_read_protected {
+          if let Some(prepared_write) = self.prepared_writes.get(timestamp) {
+            for protect_request in set {
+              let (_, read_region) = protect_request;
+              if does_intersect(read_region, &prepared_write.m_write_protected) {
+                return Some(ReadProtectionGrant::DeadlockSafetyReadAbort {
+                  timestamp: *timestamp,
+                  protect_request: protect_request.clone(),
+                });
+              }
+            }
+          }
+        }
+
+        return None;
+      })();
+      if let Some(read_protected) = maybe_first_done {
+        match read_protected {
+          ReadProtectionGrant::Read { timestamp, protect_request } => {
+            // Remove the protect_request, doing any extra cleanups too.
+            let mut set = self.waiting_read_protected.get_mut(&timestamp).unwrap();
+            set.remove(&protect_request);
+            if set.is_empty() {
+              self.waiting_read_protected.remove(&timestamp);
+            }
+            let (orig_p, read_region) = protect_request;
+
+            // Add the ReadRegion to `read_protected`.
+            if let Some(set) = self.read_protected.get_mut(&timestamp) {
+              set.insert(read_region.clone());
+            } else {
+              let read_regions = vec![read_region.clone()];
+              self.read_protected.insert(timestamp, read_regions.into_iter().collect());
+            }
+
+            // Inform the originator.
+            self.read_protected_for_query(orig_p, read_region);
+          }
+          ReadProtectionGrant::MRead { timestamp, protect_request } => {
+            // Remove the protect_request, adding the ReadRegion to `m_read_protected`.
+            let mut verifying_write = self.verifying_writes.get_mut(&timestamp).unwrap();
+            verifying_write.m_waiting_read_protected.remove(&protect_request);
+
+            let (orig_p, read_region) = protect_request;
+            verifying_write.m_read_protected.insert(read_region.clone());
+
+            // Inform the originator.
+            self.read_protected_for_query(orig_p, read_region);
+          }
+          ReadProtectionGrant::DeadlockSafetyReadAbort { timestamp, protect_request } => {
+            // Remove the protect_request, doing any extra cleanups too.
+            let mut set = self.waiting_read_protected.get_mut(&timestamp).unwrap();
+            set.remove(&protect_request);
+            if set.is_empty() {
+              self.waiting_read_protected.remove(&timestamp);
+            }
+            let (orig_p, read_region) = protect_request;
+
+            // Inform the originator
+            self.deadlock_safety_read_abort(orig_p, read_region);
+          }
+          ReadProtectionGrant::DeadlockSafetyWriteAbort { orig_p, timestamp } => {
+            // Remove the `verifying_write` at `timestamp`.
+            self.verifying_writes.remove(&timestamp);
+
+            // Inform the originator.
+            self.deadlock_safety_write_abort(orig_p);
+          }
+        }
+        change_occurred = true;
+      }
     }
   }
 
@@ -707,11 +909,12 @@ impl<T: IOTypes> TabletState<T> {
 
                 // Add read protection
                 if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
-                  waiting.push((es.orig_p.clone(), read_region));
+                  waiting.insert((es.orig_p.clone(), read_region));
                 } else {
-                  self
-                    .waiting_read_protected
-                    .insert(es.timestamp, vec![(es.orig_p.clone(), read_region)]);
+                  self.waiting_read_protected.insert(
+                    es.timestamp,
+                    vec![(es.orig_p.clone(), read_region)].into_iter().collect(),
+                  );
                 }
 
                 // Move the FullTableReadES to Executing
@@ -726,6 +929,16 @@ impl<T: IOTypes> TabletState<T> {
       }
     }
   }
+
+  /// We get this if a ReadProtection was granted by the Main Loop. This includes standard
+  /// read_protected, or m_read_protected.
+  fn read_protected_for_query(&mut self, orig_p: OrigP, read_region: TableRegion) {}
+
+  /// We call this when a DeadlockSafetyReadAbort happens
+  fn deadlock_safety_read_abort(&mut self, orig_p: OrigP, read_region: TableRegion) {}
+
+  /// We call this when a DeadlockSafetyWriteAbort happens
+  fn deadlock_safety_write_abort(&mut self, orig_p: OrigP) {}
 }
 
 /// This function removes redundancy in the `row_region`. Redundancy may easily
@@ -733,6 +946,11 @@ impl<T: IOTypes> TabletState<T> {
 /// sacrifice granularity for a simpler Key Region.
 fn compress_row_region(row_region: Vec<KeyBound>) -> Vec<KeyBound> {
   row_region
+}
+
+/// Computes if `region` and intersects with any TableRegion in `regions`.
+fn does_intersect(region: &TableRegion, regions: &BTreeSet<TableRegion>) -> bool {
+  true
 }
 
 /// Add the following triple into `requested_locked_columns`, making sure to update

@@ -1,7 +1,7 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::model::common::{
-  ColName, ColType, EndpointId, Gen, NodeGroupId, QueryId, TablePath, TableView, TabletGroupId,
-  Timestamp, TransTableName,
+  ColName, ColType, ColVal, EndpointId, Gen, NodeGroupId, QueryId, TablePath, TableView,
+  TabletGroupId, Timestamp, TransTableName,
 };
 use crate::model::message::{NetworkMessage, TabletMessage};
 use crate::multiversion_map::MVM;
@@ -103,7 +103,7 @@ pub struct TMStatus {
 //  Basic Utils
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OrigP {
   MSCoordPath(QueryId),
   MSQueryWritePath(QueryId, u32),
@@ -120,4 +120,43 @@ pub struct QueryPlan {
   pub gossip_gen: Gen,
   pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,
   pub col_usage_node: FrozenColUsageNode,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Key Regions
+// -------------------------------------------------------------------------------------------------
+
+// Generic single-side bound for an orderable value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SingleBound<T> {
+  Included(T),
+  Excluded(T),
+  Unbounded,
+}
+
+/// Here, the Variant that the `ColVal` in each `SingleBound` takes
+/// on has to be the same (i.e. the `ColVal` has to be the same type).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ColBound {
+  pub start: SingleBound<ColVal>,
+  pub end: SingleBound<ColVal>,
+}
+
+impl ColBound {
+  pub fn new(start: SingleBound<ColVal>, end: SingleBound<ColVal>) -> ColBound {
+    ColBound { start, end }
+  }
+}
+
+/// A full Boundary for a `PrimaryKey`
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KeyBound {
+  pub key_col_bounds: Vec<ColBound>,
+}
+
+/// TableRegion, used to represent both ReadRegions and WriteRegions.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TableRegion {
+  pub col_region: Vec<ColName>,
+  pub row_region: Vec<KeyBound>,
 }
