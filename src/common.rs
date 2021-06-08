@@ -96,7 +96,7 @@ pub struct TMStatus {
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   pub responded_count: usize,
   pub tm_state: HashMap<NodeGroupId, TMWaitValue>,
-  pub orig_path: QueryId,
+  pub orig_p: OrigP,
 }
 
 // -----------------------------------------------------------------------------------------------

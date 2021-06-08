@@ -1,4 +1,4 @@
-use crate::col_usage::{compute_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
+use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   mk_qid, Clock, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue,
   TableSchema, TabletForwardOut,
@@ -263,7 +263,7 @@ impl<T: IOTypes> SlaveState<T> {
         let merged_result = merge_table_views(results);
         self.handle_done_state(
           query_success.query_id,
-          status.orig_path,
+          cast!(OrigP::MSCoordPath, status.orig_p).unwrap().clone(),
           status.new_rms,
           merged_result,
         );
@@ -558,7 +558,7 @@ fn ms_coord_es_advance<T: IOTypes>(
   let (_, col_usage_node) = coord_es.query_plan.col_usage_nodes.get(trans_table_name).unwrap();
 
   // Compute the context of this `col_usage_node`. Recall there must be exactly one row.
-  let external_trans_tables = compute_external_trans_tables(col_usage_node);
+  let external_trans_tables = node_external_trans_tables(col_usage_node);
   let mut context = Context::default();
   let mut context_row = ContextRow::default();
   for external_trans_table in &external_trans_tables {
@@ -569,7 +569,7 @@ fn ms_coord_es_advance<T: IOTypes>(
     });
     context_row.trans_table_context_row.push(0);
   }
-  context.context_rows.push(context_row);
+  context.context_rows.insert(context_row);
 
   // Compute the `trans_table_schemas` using the `col_usage_nodes`.
   let mut trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
@@ -588,7 +588,7 @@ fn ms_coord_es_advance<T: IOTypes>(
         new_rms: Default::default(),
         responded_count: 0,
         tm_state: Default::default(),
-        orig_path: root_query_id.clone(),
+        orig_p: OrigP::MSCoordPath(root_query_id.clone()),
       };
 
       // Path of this TMStatus to respond to.
@@ -680,7 +680,7 @@ fn ms_coord_es_advance<T: IOTypes>(
         new_rms: Default::default(),
         responded_count: 0,
         tm_state: Default::default(),
-        orig_path: root_query_id.clone(),
+        orig_p: OrigP::MSCoordPath(root_query_id.clone()),
       };
 
       // Path of this WriteTMStatus to respond to.

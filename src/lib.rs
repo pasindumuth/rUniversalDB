@@ -4,6 +4,7 @@
 pub mod lang;
 pub mod col_usage;
 pub mod common;
+pub mod experimental;
 pub mod expression;
 pub mod model;
 pub mod multiversion_map;

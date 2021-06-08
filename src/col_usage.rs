@@ -6,6 +6,7 @@ use crate::model::common::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
+use std::ops::Deref;
 
 // -----------------------------------------------------------------------------------------------
 //  FrozenColUsageAlgorithm
@@ -14,7 +15,7 @@ use std::iter::FromIterator;
 pub struct FrozenColUsageNode {
   pub table_ref: proc::TableRef,
   pub requested_cols: Vec<ColName>,
-  pub children: Vec<HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)>>,
+  pub children: Vec<Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>>,
   pub safe_present_cols: Vec<ColName>,
   pub external_cols: Vec<ColName>,
 }
@@ -40,22 +41,11 @@ impl<'a> ColUsagePlanner<'a> {
   fn collect_subqueries(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
-    subqueries: &mut Vec<HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)>>,
+    subqueries: &mut Vec<Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>>,
     expr: &proc::ValExpr,
   ) {
-    match expr {
-      proc::ValExpr::ColumnRef { .. } => {}
-      proc::ValExpr::UnaryExpr { expr, .. } => {
-        self.collect_subqueries(trans_table_ctx, subqueries, &expr)
-      }
-      proc::ValExpr::BinaryExpr { left, right, .. } => {
-        self.collect_subqueries(trans_table_ctx, subqueries, &left);
-        self.collect_subqueries(trans_table_ctx, subqueries, &right);
-      }
-      proc::ValExpr::Value { .. } => {}
-      proc::ValExpr::Subquery { query } => {
-        subqueries.push(self.plan_gr_query(trans_table_ctx, query));
-      }
+    for query in collect_expr_subqueries(expr) {
+      subqueries.push(self.plan_gr_query(trans_table_ctx, &query));
     }
   }
 
@@ -78,7 +68,7 @@ impl<'a> ColUsagePlanner<'a> {
     exprs: &Vec<proc::ValExpr>,
   ) -> Vec<ColName> {
     let mut requested_cols = Vec::<ColName>::new();
-    let mut children = Vec::<HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)>>::new();
+    let mut children = Vec::<Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>>::new();
     for expr in exprs {
       self.collect_top_level_cols(&mut requested_cols, expr);
       self.collect_subqueries(trans_table_ctx, &mut children, expr);
@@ -179,8 +169,8 @@ impl<'a> ColUsagePlanner<'a> {
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
     query: &proc::GRQuery,
-  ) -> HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)> {
-    let mut children = HashMap::<TransTableName, (Vec<ColName>, FrozenColUsageNode)>::new();
+  ) -> Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> {
+    let mut children = Vec::<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>::new();
     for (trans_table_name, child_query) in &query.trans_tables {
       match child_query {
         proc::GRQueryStage::SuperSimpleSelect(select) => {
@@ -190,7 +180,7 @@ impl<'a> ColUsagePlanner<'a> {
             &select.from,
             &vec![select.selection.clone()],
           );
-          children.insert(trans_table_name.clone(), (cols.clone(), node));
+          children.push((trans_table_name.clone(), (cols.clone(), node)));
           trans_table_ctx.insert(trans_table_name.clone(), cols);
         }
       }
@@ -246,34 +236,76 @@ impl<'a> ColUsagePlanner<'a> {
   }
 }
 
-/// Computes the set of TransTables defined here that's used within the col_usage_node.
-pub fn compute_external_trans_tables(col_usage_node: &FrozenColUsageNode) -> Vec<TransTableName> {
-  // Recall that all TransTablesNames are unique. This recursive
-  // function computes all external TransTableNames in `col_usage_node`
-  // that's also not in `defined_trans_tables`
-  fn compute_external_trans_tables_R(
-    col_usage_node: &FrozenColUsageNode,
-    defined_trans_tables: &mut HashSet<TransTableName>,
-    accum: &mut Vec<TransTableName>,
-  ) {
-    if let proc::TableRef::TransTableName(trans_table_name) = &col_usage_node.table_ref {
-      if !defined_trans_tables.contains(trans_table_name) {
-        accum.push(trans_table_name.clone())
+/// This function collects and returns all GRQueries that belongs to a `SuperSimpleSelect`.
+pub fn collect_select_subqueries(sql_query: &proc::SuperSimpleSelect) -> Vec<proc::GRQuery> {
+  return collect_expr_subqueries(&sql_query.selection);
+}
+
+// Computes the set of all GRQuerys that appear as immediate children of `expr`.
+fn collect_expr_subqueries(expr: &proc::ValExpr) -> Vec<proc::GRQuery> {
+  fn collect_R(expr: &proc::ValExpr, subqueries: &mut Vec<proc::GRQuery>) {
+    match expr {
+      proc::ValExpr::ColumnRef { .. } => {}
+      proc::ValExpr::UnaryExpr { expr, .. } => collect_R(expr, subqueries),
+      proc::ValExpr::BinaryExpr { left, right, .. } => {
+        collect_R(left, subqueries);
+        collect_R(right, subqueries);
       }
-    }
-    for nodes in &col_usage_node.children {
-      for (trans_table_name, (_, node)) in nodes {
-        defined_trans_tables.insert(trans_table_name.clone());
-        compute_external_trans_tables_R(node, defined_trans_tables, accum);
-      }
-      for (trans_table_name, _) in nodes {
-        defined_trans_tables.remove(trans_table_name);
-      }
+      proc::ValExpr::Value { .. } => {}
+      proc::ValExpr::Subquery { query, .. } => subqueries.push(query.deref().clone()),
     }
   }
+  let mut subqueries = Vec::<proc::GRQuery>::new();
+  collect_R(expr, &mut subqueries);
+  subqueries
+}
+
+/// Recall that all TransTablesNames are unique. This function computes all external
+/// TransTableNames in `col_usage_node` that's also not in `defined_trans_tables`
+pub fn node_external_trans_tables(col_usage_node: &FrozenColUsageNode) -> Vec<TransTableName> {
   let mut accum = Vec::<TransTableName>::new();
-  compute_external_trans_tables_R(col_usage_node, &mut HashSet::new(), &mut accum);
+  node_external_trans_tables_R(col_usage_node, &mut HashSet::new(), &mut accum);
   accum
+}
+
+/// Same as above, except we compute for all `nodes`.
+pub fn nodes_external_trans_tables(
+  nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
+) -> Vec<TransTableName> {
+  let mut accum = Vec::<TransTableName>::new();
+  nodes_external_trans_tables_R(nodes, &mut HashSet::new(), &mut accum);
+  accum
+}
+
+// Accumulates external TransTables in `node`.
+fn node_external_trans_tables_R(
+  node: &FrozenColUsageNode,
+  defined_trans_tables: &mut HashSet<TransTableName>,
+  accum: &mut Vec<TransTableName>,
+) {
+  if let proc::TableRef::TransTableName(trans_table_name) = &node.table_ref {
+    if !defined_trans_tables.contains(trans_table_name) {
+      accum.push(trans_table_name.clone())
+    }
+  }
+  for nodes in &node.children {
+    nodes_external_trans_tables_R(nodes, defined_trans_tables, accum);
+  }
+}
+
+// Accumulates external TransTables in `nodes`.
+fn nodes_external_trans_tables_R(
+  nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
+  defined_trans_tables: &mut HashSet<TransTableName>,
+  accum: &mut Vec<TransTableName>,
+) {
+  for (trans_table_name, (_, node)) in nodes {
+    defined_trans_tables.insert(trans_table_name.clone());
+    node_external_trans_tables_R(node, defined_trans_tables, accum);
+  }
+  for (trans_table_name, _) in nodes {
+    defined_trans_tables.remove(trans_table_name);
+  }
 }
 
 #[cfg(test)]

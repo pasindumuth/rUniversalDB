@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// These are common PODs that form the core data objects
 /// of the system.
@@ -121,29 +121,29 @@ pub enum NodeGroupId {
 //  Subquery Context
 // -------------------------------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TransTableLocationPrefix {
   pub source: NodeGroupId,
   pub query_id: QueryId,
   pub trans_table_name: TransTableName,
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextSchema {
   pub column_context_schema: Vec<ColName>,
   pub trans_table_context_schema: Vec<TransTableLocationPrefix>,
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextRow {
   pub column_context_row: Vec<ColValN>,
   pub trans_table_context_row: Vec<u32>,
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Context {
   pub context_schema: ContextSchema,
-  pub context_rows: Vec<ContextRow>,
+  pub context_rows: BTreeSet<ContextRow>,
 }
 
 // -------------------------------------------------------------------------------------------------
