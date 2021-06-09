@@ -3,8 +3,8 @@ use crate::col_usage::{
   ColUsagePlanner, FrozenColUsageNode,
 };
 use crate::common::{
-  mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, QueryPlan, TMStatus, TableRegion,
-  TableSchema,
+  mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue,
+  TableRegion, TableSchema,
 };
 use crate::expression::{compute_bound, EvalError};
 use crate::model::common::proc::{TableRef, ValExpr};
@@ -385,6 +385,7 @@ pub struct TabletState<T: IOTypes> {
   network_output: T::NetworkOutT,
 
   /// Metadata
+  this_slave_group_id: SlaveGroupId,
   this_tablet_group_id: TabletGroupId,
   master_eid: EndpointId,
 
@@ -430,6 +431,7 @@ impl<T: IOTypes> TabletState<T> {
     sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
     slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+    this_slave_group_id: SlaveGroupId,
     this_tablet_group_id: TabletGroupId,
     master_eid: EndpointId,
   ) -> TabletState<T> {
@@ -449,6 +451,7 @@ impl<T: IOTypes> TabletState<T> {
       rand,
       clock,
       network_output,
+      this_slave_group_id,
       this_tablet_group_id,
       master_eid,
       gossip,
@@ -1235,7 +1238,7 @@ impl<T: IOTypes> TabletState<T> {
   }
 
   fn start_gr_query(&mut self, query_id: QueryId) {
-    let read_status = self.read_statuses.get(&query_id).unwrap();
+    let read_status = self.read_statuses.get_mut(&query_id).unwrap();
     let es = cast!(ReadStatus::GRQueryES, read_status).unwrap();
     assert!(matches!(es.state, GRExecutionS::Start));
 
@@ -1356,20 +1359,69 @@ impl<T: IOTypes> TabletState<T> {
       col_usage_node: child.clone(),
     };
 
-    // Finally we compute the SuperSimpleSelectQuery
+    // Construct the TMStatus
+    let tm_query_id = mk_qid(&mut self.rand);
+    let mut tm_status = TMStatus {
+      root_query_id: es.root_query_id.clone(),
+      new_rms: Default::default(),
+      responded_count: 0,
+      tm_state: Default::default(),
+      orig_p: OrigP::ReadPath(es.query_id.clone()),
+    };
+
+    let sender_path = msg::SenderPath {
+      slave_group_id: self.this_slave_group_id.clone(),
+      maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
+      state_path: msg::SenderStatePath::ReadQueryPath { query_id: tm_query_id.clone() },
+    };
+
+    // Send out the PerformQuery and populate TMStatus accordingly.
     let (_, stage) = es.query.trans_tables.get(stage_idx).unwrap();
     let child_sql_query = cast!(proc::GRQueryStage::SuperSimpleSelect, stage).unwrap();
-    let general_query = match &child_sql_query.from {
-      TableRef::TablePath(_) => {
+    match &child_sql_query.from {
+      TableRef::TablePath(table_path) => {
+        // Here, we must do a SuperSimpleTableSelectQuery.
         let child_query = msg::SuperSimpleTableSelectQuery {
           timestamp: es.timestamp.clone(),
           context: context.deref().clone(),
           sql_query: child_sql_query.clone(),
           query_plan,
         };
-        msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query)
+        let general_query = msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query);
+
+        // Compute the TabletGroups involved.
+        for tablet_group_id in get_min_tablets(
+          &self.sharding_config,
+          &self.gossip,
+          table_path,
+          &child_sql_query.selection,
+        ) {
+          let child_query_id = mk_qid(&mut self.rand);
+          let sid = self.tablet_address_config.get(&tablet_group_id).unwrap();
+          let eid = self.slave_address_config.get(&sid).unwrap();
+
+          // Send out PerformQuery.
+          self.network_output.send(
+            eid,
+            msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
+              tablet_group_id.clone(),
+              msg::TabletMessage::PerformQuery(msg::PerformQuery {
+                root_query_id: es.root_query_id.clone(),
+                sender_path: sender_path.clone(),
+                query_id: child_query_id.clone(),
+                tier_map: es.tier_map.clone(),
+                query: general_query.clone(),
+              }),
+            )),
+          );
+
+          // Add the TabletGroup into the TMStatus.
+          let node_group_id = NodeGroupId::Tablet(tablet_group_id);
+          tm_status.tm_state.insert(node_group_id, TMWaitValue::QueryId(child_query_id));
+        }
       }
       TableRef::TransTableName(trans_table_name) => {
+        // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
         let location_prefix = context
           .context_schema
           .trans_table_context_schema
@@ -1378,28 +1430,58 @@ impl<T: IOTypes> TabletState<T> {
           .unwrap()
           .clone();
         let child_query = msg::SuperSimpleTransTableSelectQuery {
-          location_prefix,
+          location_prefix: location_prefix.clone(),
           context: context.deref().clone(),
           sql_query: child_sql_query.clone(),
           query_plan,
         };
-        msg::GeneralQuery::SuperSimpleTransTableSelectQuery(child_query)
+
+        // Construct PerformQuery
+        let general_query = msg::GeneralQuery::SuperSimpleTransTableSelectQuery(child_query);
+        let child_query_id = mk_qid(&mut self.rand);
+        let perform_query = msg::PerformQuery {
+          root_query_id: es.root_query_id.clone(),
+          sender_path: sender_path.clone(),
+          query_id: child_query_id.clone(),
+          tier_map: es.tier_map.clone(),
+          query: general_query.clone(),
+        };
+
+        // Send out PerformQuery, wrapping it according to if the
+        // TransTable is on a Slave or a Tablet
+        let node_group_id = match &location_prefix.source {
+          NodeGroupId::Tablet(tablet_group_id) => {
+            let sid = self.tablet_address_config.get(tablet_group_id).unwrap();
+            let eid = self.slave_address_config.get(sid).unwrap();
+            let network_msg = msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
+              tablet_group_id.clone(),
+              msg::TabletMessage::PerformQuery(perform_query),
+            ));
+            self.network_output.send(eid, network_msg);
+            NodeGroupId::Tablet(tablet_group_id.clone())
+          }
+          NodeGroupId::Slave(sid) => {
+            let eid = self.slave_address_config.get(sid).unwrap();
+            let network_msg =
+              msg::NetworkMessage::Slave(msg::SlaveMessage::PerformQuery(perform_query));
+            self.network_output.send(eid, network_msg);
+            NodeGroupId::Slave(sid.clone())
+          }
+        };
+
+        // Add the TabletGroup into the TMStatus.
+        tm_status.tm_state.insert(node_group_id, TMWaitValue::QueryId(child_query_id.clone()));
       }
     };
 
-    let perform_query = msg::PerformQuery {
-      root_query_id: es.root_query_id.clone(),
-      sender_path: msg::SenderPath {
-        slave_group_id: self.tablet_address_config.get(&self.this_tablet_group_id).unwrap().clone(),
-        maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
-        state_path: msg::SenderStatePath::ReadQueryPath { query_id: es.query_id.clone() },
-      },
-      query_id: es.query_id.clone(),
-      tier_map: es.tier_map.clone(),
-      query: general_query,
-    };
+    // Create a SubqueryStatus and move the GRQueryES to the next Stage.
+    let mut subquery_status = SubqueryStatus { subqueries: Default::default() };
+    let single_subquery_status = SingleSubqueryStatus::Pending { context: context.clone() };
+    subquery_status.subqueries.insert(tm_query_id.clone(), single_subquery_status);
+    es.state = GRExecutionS::ReadStage { stage_idx, subquery_status };
 
-    // TODO: Send out the PerformQuery
+    // Add the TMStatus into read_statuses
+    self.read_statuses.insert(tm_query_id, ReadStatus::TMStatus(tm_status));
   }
 
   /// We call this when a DeadlockSafetyReadAbort happens
@@ -1407,6 +1489,27 @@ impl<T: IOTypes> TabletState<T> {
 
   /// We call this when a DeadlockSafetyWriteAbort happens
   fn deadlock_safety_write_abort(&mut self, orig_p: OrigP) {}
+}
+
+/// This function computes a minimum set of `TabletGroupId`s whose `TabletKeyRange`
+/// has a non-empty intersect with the KeyRegion we compute from the given `selection`.
+fn get_min_tablets(
+  sharding_config: &HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  gossip: &GossipData,
+  table_path: &TablePath,
+  selection: &proc::ValExpr,
+) -> Vec<TabletGroupId> {
+  // Next, we try to reduce the number of TabletGroups we must contact by computing
+  // the key_region of TablePath that we're going to be reading.
+  let tablet_groups = sharding_config.get(table_path).unwrap();
+  let key_cols = &gossip.gossiped_db_schema.get(table_path).unwrap().key_cols;
+  match &compute_key_region(selection, key_cols, HashMap::new()) {
+    Ok(_) => {
+      // We use a trivial implementation for now, where we just return all TabletGroupIds
+      tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone()).collect()
+    }
+    Err(_) => panic!(),
+  }
 }
 
 /// Computes `KeyBound`s that have a corresponding shape to `key_cols`, such that

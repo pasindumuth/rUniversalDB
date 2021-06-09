@@ -200,6 +200,7 @@ impl Simulation {
             sharding_config.clone(),
             tablet_address_config.clone(),
             slave_address_config.clone(),
+            sid.clone(),
             tid.clone(),
             EndpointId("".to_string()), // TODO: Implement Master properly.
           ),
