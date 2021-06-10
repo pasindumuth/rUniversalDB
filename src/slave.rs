@@ -1,7 +1,7 @@
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
-  mk_qid, Clock, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue,
-  TableSchema, TabletForwardOut,
+  merge_table_views, mk_qid, Clock, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus,
+  TMWaitValue, TableSchema, TabletForwardOut,
 };
 use crate::lang;
 use crate::model::common::{
@@ -439,28 +439,6 @@ fn lookup_location(
   return None;
 }
 
-fn merge_table_views(
-  mut results: Vec<(Vec<ColName>, Vec<TableView>)>,
-) -> (Vec<ColName>, Vec<TableView>) {
-  let (schema, mut views) = results.pop().unwrap();
-  for (cur_schema, cur_views) in results {
-    assert!(cur_schema == schema);
-    assert!(cur_views.len() == views.len());
-    for (idx, cur_view) in cur_views.into_iter().enumerate() {
-      let mut view = views.get_mut(idx).unwrap();
-      assert!(view.col_names == cur_view.col_names);
-      for (cur_row_val, cur_row_count) in cur_view.rows {
-        if let Some(row_count) = view.rows.get_mut(&cur_row_val) {
-          *row_count += cur_row_count;
-        } else {
-          view.rows.insert(cur_row_val, cur_row_count);
-        }
-      }
-    }
-  }
-  (schema, views)
-}
-
 /// This function accepts the results for the subquery, and then decides either
 /// to move onto the next stage, or start 2PC to commit the change.
 fn ms_coord_process_stage_result<T: IOTypes>(
@@ -569,7 +547,7 @@ fn ms_coord_es_advance<T: IOTypes>(
     });
     context_row.trans_table_context_row.push(0);
   }
-  context.context_rows.insert(context_row);
+  context.context_rows.push(context_row);
 
   // Compute the `trans_table_schemas` using the `col_usage_nodes`.
   let mut trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();

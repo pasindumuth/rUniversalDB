@@ -130,7 +130,7 @@ pub struct CancelQuery {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QuerySuccess {
-  /// The node to send results to.
+  /// The receiving node's State that the responses should be routed to.
   pub sender_state_path: SenderStatePath,
   /// The Tablet/Slave that just succeeded.
   pub node_group_id: NodeGroupId,

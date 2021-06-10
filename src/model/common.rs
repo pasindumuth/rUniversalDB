@@ -143,7 +143,7 @@ pub struct ContextRow {
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Context {
   pub context_schema: ContextSchema,
-  pub context_rows: BTreeSet<ContextRow>,
+  pub context_rows: Vec<ContextRow>,
 }
 
 // -------------------------------------------------------------------------------------------------

@@ -3,8 +3,8 @@ use crate::col_usage::{
   ColUsagePlanner, FrozenColUsageNode,
 };
 use crate::common::{
-  mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue,
-  TableRegion, TableSchema,
+  lookup_pos, merge_table_views, mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
+  QueryPlan, TMStatus, TMWaitValue, TableRegion, TableSchema,
 };
 use crate::expression::{compute_bound, EvalError};
 use crate::model::common::proc::{TableRef, ValExpr};
@@ -23,7 +23,7 @@ use rand::RngCore;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::read;
 use std::iter::FromIterator;
-use std::ops::{Bound, Deref};
+use std::ops::{Add, Bound, Deref};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -130,11 +130,32 @@ struct CommonQueryReplanningES<T: QueryReplanningSqlView> {
 //  SubqueryStatus
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
+struct SubqueryLockingSchemas {
+  query_id: QueryId,
+}
+
+#[derive(Debug)]
+struct SubqueryPendingReadRegion {
+  read_region: TableRegion,
+}
+
+#[derive(Debug)]
+struct SubqueryPending {
+  context: Rc<Context>,
+}
+
+#[derive(Debug)]
+struct SubqueryFinished {
+  context: Rc<Context>,
+  result: Vec<TableView>,
+}
+
+#[derive(Debug)]
 enum SingleSubqueryStatus {
-  LockingSchemas { query_id: QueryId },
-  PendingReadRegion { read_region: TableRegion },
-  Pending { context: Rc<Context> },
-  Finished { context: Rc<Context>, result: Vec<TableView> },
+  LockingSchemas(SubqueryLockingSchemas),
+  PendingReadRegion(SubqueryPendingReadRegion),
+  Pending(SubqueryPending),
+  Finished(SubqueryFinished),
 }
 
 #[derive(Debug)]
@@ -146,10 +167,24 @@ struct SubqueryStatus {
 //  TableReadES
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
+struct Pending {
+  read_region: TableRegion,
+}
+
+#[derive(Debug)]
+struct Executing {
+  completed: usize,
+  /// This fields is used to associate a subquery's QueryId with the position
+  /// that it appears in the SQL query.
+  subquery_pos: Vec<QueryId>,
+  subquery_status: SubqueryStatus,
+}
+
+#[derive(Debug)]
 enum ExecutionS {
   Start,
-  Pending { read_region: TableRegion },
-  Executing { subquery_status: SubqueryStatus },
+  Pending(Pending),
+  Executing(Executing),
 }
 
 #[derive(Debug)]
@@ -191,12 +226,26 @@ enum FullTableReadES {
 // -----------------------------------------------------------------------------------------------
 //  GRQueryES
 // -----------------------------------------------------------------------------------------------
+#[derive(Debug)]
+struct ReadStage {
+  stage_idx: usize,
+  /// This fields maps the indices of the GRQueryES Context to that of the Context
+  /// in this SubqueryStatus. We cache this here since it's computed when the child
+  /// context is computed.
+  parent_context_map: Vec<usize>,
+  subquery_status: SubqueryStatus,
+}
+
+#[derive(Debug)]
+struct MasterQueryReplanning {
+  master_query_id: QueryId,
+}
 
 #[derive(Debug)]
 enum GRExecutionS {
   Start,
-  ReadStage { stage_idx: usize, subquery_status: SubqueryStatus },
-  MasterQueryReplanning { master_query_id: QueryId },
+  ReadStage(ReadStage),
+  MasterQueryReplanning(MasterQueryReplanning),
 }
 
 // Recall that the elements don't need to preserve the order of the TransTables, since the
@@ -597,7 +646,9 @@ impl<T: IOTypes> TabletState<T> {
       }
       msg::TabletMessage::CancelQuery(_) => unimplemented!(),
       msg::TabletMessage::QueryAborted(_) => unimplemented!(),
-      msg::TabletMessage::QuerySuccess(_) => unimplemented!(),
+      msg::TabletMessage::QuerySuccess(query_success) => {
+        self.handle_query_success(query_success);
+      }
       msg::TabletMessage::Query2PCPrepare(_) => unimplemented!(),
       msg::TabletMessage::Query2PCAbort(_) => unimplemented!(),
       msg::TabletMessage::Query2PCCommit(_) => unimplemented!(),
@@ -869,6 +920,7 @@ impl<T: IOTypes> TabletState<T> {
       OrigP::MSQueryWritePath(root_query_id, tier) => {
         if let Some(ms_query_es) = self.ms_statuses.get_mut(&root_query_id) {
           if let Some(ms_write_es) = ms_query_es.ms_write_statuses.get_mut(&tier) {
+            // Advance the QueryReplanning now that the desired columns have been locked.
             let plan_es = cast!(FullMSTableWriteES::QueryReplanning, ms_write_es).unwrap();
             let query_id = &plan_es.query_id;
             let comm_plan_es = &mut plan_es.status;
@@ -885,6 +937,7 @@ impl<T: IOTypes> TabletState<T> {
               &mut self.requested_locked_columns,
               &mut self.master_query_map,
             );
+            // We check if the QueryReplanning is done.
             match comm_plan_es.state {
               CommonQueryReplanningS::Done(success) => {
                 if success {
@@ -902,6 +955,7 @@ impl<T: IOTypes> TabletState<T> {
       OrigP::MSQueryReadPath(_, _) => {}
       OrigP::ReadPath(query_id) => {
         if let Some(read_status) = self.read_statuses.get_mut(&query_id) {
+          // Advance the QueryReplanning now that the desired columns have been locked.
           let read_es = cast!(ReadStatus::FullTableReadES, read_status).unwrap();
           let plan_es = cast!(FullTableReadES::QueryReplanning, read_es).unwrap();
           let comm_plan_es = &mut plan_es.status;
@@ -918,11 +972,13 @@ impl<T: IOTypes> TabletState<T> {
             &mut self.requested_locked_columns,
             &mut self.master_query_map,
           );
+          // We check if the QueryReplanning is done.
           match comm_plan_es.state {
             CommonQueryReplanningS::Done(success) => {
               if success {
-                // First, we construct the ReadRegion
-                let mut es = TableReadES {
+                // If the QueryReplanning was successful, we move the FullTableReadES
+                // to Executing in the Start state, and immediately start executing it.
+                *read_es = FullTableReadES::Executing(TableReadES {
                   root_query_id: plan_es.root_query_id.clone(),
                   tier_map: plan_es.tier_map.clone(),
                   timestamp: comm_plan_es.timestamp,
@@ -933,95 +989,13 @@ impl<T: IOTypes> TabletState<T> {
                   query_plan: comm_plan_es.query_plan.clone(),
                   new_rms: Default::default(),
                   state: ExecutionS::Start,
-                };
-
-                // Compute the Column Region.
-                let mut col_region = HashSet::<ColName>::new();
-                col_region.extend(es.query.projection.clone());
-                col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
-
-                // Here, `context_col_index` has every External Column used by
-                // the query as a key.
-                let mut context_col_index = HashMap::<ColName, usize>::new();
-                let col_schema = es.context.context_schema.column_context_schema.clone();
-                for (index, col) in col_schema.iter().enumerate() {
-                  if es.query_plan.col_usage_node.external_cols.contains(col) {
-                    context_col_index.insert(col.clone(), index);
-                  }
-                }
-
-                // Compute the Row Region by taking the union across all ContextRows
-                let mut row_region = Vec::<KeyBound>::new();
-                for context_row in &es.context.context_rows {
-                  // First, map all External Columns names to the corresponding values
-                  // in this ContextRow
-                  let mut col_context = HashMap::<ColName, ColValN>::new();
-                  for (col, index) in &context_col_index {
-                    col_context.insert(
-                      col.clone(),
-                      context_row.column_context_row.get(*index).unwrap().clone(),
-                    );
-                  }
-
-                  match compute_key_region(
-                    &es.query.selection,
-                    &self.table_schema.key_cols,
-                    col_context,
-                  ) {
-                    Ok(key_bounds) => {
-                      for key_bound in key_bounds {
-                        row_region.push(key_bound);
-                      }
-                    }
-                    Err(eval_error) => {
-                      // Respond to the sender with an Abort, and remove the ReadStatus.
-                      let aborted = msg::QueryAborted {
-                        sender_state_path: es.sender_path.state_path.clone(),
-                        tablet_group_id: self.this_tablet_group_id.clone(),
-                        query_id: query_id.clone(),
-                        payload: msg::AbortedData::TypeError { msg: format!("{:?}", eval_error) },
-                      };
-
-                      let sid = &es.sender_path.slave_group_id;
-                      let eid = self.slave_address_config.get(sid).unwrap();
-                      self.network_output.send(
-                        &eid,
-                        msg::NetworkMessage::Slave(
-                          if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
-                            msg::SlaveMessage::TabletMessage(
-                              tablet_group_id.clone(),
-                              msg::TabletMessage::QueryAborted(aborted),
-                            )
-                          } else {
-                            msg::SlaveMessage::QueryAborted(aborted)
-                          },
-                        ),
-                      );
-                      self.read_statuses.remove(&query_id);
-                      return;
-                    }
-                  }
-                }
-                row_region = compress_row_region(row_region);
-
-                // Move the TableReadES to the Pending state with the given ReadRegion.
-                let col_region: Vec<ColName> = col_region.into_iter().collect();
-                let read_region = TableRegion { col_region, row_region };
-                es.state = ExecutionS::Pending { read_region: read_region.clone() };
-
-                // Add read protection
-                if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
-                  waiting.insert((OrigP::ReadPath(es.query_id.clone()), read_region));
-                } else {
-                  self.waiting_read_protected.insert(
-                    es.timestamp,
-                    vec![(OrigP::ReadPath(es.query_id.clone()), read_region)].into_iter().collect(),
-                  );
-                }
-
-                // Move the FullTableReadES to Executing
-                *read_es = FullTableReadES::Executing(es);
+                });
+                self.start_table_read_es(&query_id);
               } else {
+                // Recall that if QueryReplanning had ended in a failure (i.e.
+                // having missing columns), then `CommonQueryReplanningES` will
+                // have send back the necessary responses. Thus, we only need to
+                // Exist the ES here.
                 self.read_statuses.remove(&query_id);
               }
             }
@@ -1032,9 +1006,106 @@ impl<T: IOTypes> TabletState<T> {
     }
   }
 
+  /// Processes the Start state of TableReadES.
+  fn start_table_read_es(&mut self, query_id: &QueryId) {
+    let read_status = self.read_statuses.get_mut(&query_id).unwrap();
+    let read_es = cast!(ReadStatus::FullTableReadES, read_status).unwrap();
+    let es = cast!(FullTableReadES::Executing, read_es).unwrap();
+
+    // Compute the Column Region.
+    let mut col_region = HashSet::<ColName>::new();
+    col_region.extend(es.query.projection.clone());
+    col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
+
+    // Here, `context_col_index` has every External Column used by
+    // the query as a key.
+    let mut context_col_index = HashMap::<ColName, usize>::new();
+    let col_schema = es.context.context_schema.column_context_schema.clone();
+    for (index, col) in col_schema.iter().enumerate() {
+      if es.query_plan.col_usage_node.external_cols.contains(col) {
+        context_col_index.insert(col.clone(), index);
+      }
+    }
+
+    // Compute the Row Region by taking the union across all ContextRows
+    let mut row_region = Vec::<KeyBound>::new();
+    for context_row in &es.context.context_rows {
+      // First, map all External Columns names to the corresponding values
+      // in this ContextRow
+      let mut col_context = HashMap::<ColName, ColValN>::new();
+      for (col, index) in &context_col_index {
+        col_context
+          .insert(col.clone(), context_row.column_context_row.get(*index).unwrap().clone());
+      }
+
+      match compute_key_region(&es.query.selection, &self.table_schema.key_cols, col_context) {
+        Ok(key_bounds) => {
+          for key_bound in key_bounds {
+            row_region.push(key_bound);
+          }
+        }
+        Err(eval_error) => {
+          self.handle_eval_error_table_es(&query_id, eval_error);
+          return;
+        }
+      }
+    }
+    row_region = compress_row_region(row_region);
+
+    // Move the TableReadES to the Pending state with the given ReadRegion.
+    let col_region: Vec<ColName> = col_region.into_iter().collect();
+    let read_region = TableRegion { col_region, row_region };
+    es.state = ExecutionS::Pending(Pending { read_region: read_region.clone() });
+
+    // Add read protection
+    if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
+      waiting.insert((OrigP::ReadPath(es.query_id.clone()), read_region));
+    } else {
+      self.waiting_read_protected.insert(
+        es.timestamp,
+        vec![(OrigP::ReadPath(es.query_id.clone()), read_region)].into_iter().collect(),
+      );
+    }
+  }
+
+  /// This is used to simply delete a TableReadES due to an expression evaluation
+  /// error that occured inside, and respond to the client. Note that this function doesn't
+  /// do any other kind of cleanup.
+  fn handle_eval_error_table_es(&mut self, query_id: &QueryId, eval_error: EvalError) {
+    let read_status = self.read_statuses.get_mut(&query_id).unwrap();
+    let read_es = cast!(ReadStatus::FullTableReadES, read_status).unwrap();
+    let es = cast!(FullTableReadES::Executing, read_es).unwrap();
+
+    // If an error occurs here, we simply abort this whole query and respond
+    // to the sender with an Abort.
+    let aborted = msg::QueryAborted {
+      sender_state_path: es.sender_path.state_path.clone(),
+      tablet_group_id: self.this_tablet_group_id.clone(),
+      query_id: query_id.clone(),
+      payload: msg::AbortedData::TypeError { msg: format!("{:?}", eval_error) },
+    };
+
+    let sid = &es.sender_path.slave_group_id;
+    let eid = self.slave_address_config.get(sid).unwrap();
+    self.network_output.send(
+      &eid,
+      msg::NetworkMessage::Slave(
+        if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
+          msg::SlaveMessage::TabletMessage(
+            tablet_group_id.clone(),
+            msg::TabletMessage::QueryAborted(aborted),
+          )
+        } else {
+          msg::SlaveMessage::QueryAborted(aborted)
+        },
+      ),
+    );
+    self.read_statuses.remove(&query_id);
+  }
+
   /// We get this if a ReadProtection was granted by the Main Loop. This includes standard
   /// read_protected, or m_read_protected.
-  fn read_protected_for_query(&mut self, orig_p: OrigP, read_region: TableRegion) {
+  fn read_protected_for_query(&mut self, orig_p: OrigP, _: TableRegion) {
     match orig_p {
       OrigP::MSCoordPath(_) => panic!(),
       OrigP::MSQueryWritePath(_, _) => {}
@@ -1059,74 +1130,24 @@ impl<T: IOTypes> TabletState<T> {
           // an error occurs here
           let mut gr_query_statuses = Vec::<GRQueryES>::new();
           let subqueries = collect_select_subqueries(&es.query);
-          for i in 0..subqueries.len() {
-            let subquery = subqueries.get(i).unwrap();
-            let child = es.query_plan.col_usage_node.children.get(i).unwrap();
+          for subquery_index in 0..subqueries.len() {
+            let subquery = subqueries.get(subquery_index).unwrap();
+            let child = es.query_plan.col_usage_node.children.get(subquery_index).unwrap();
 
-            // Construct the ContextSchema of the GRQueryES.
-            let mut context_schema = ContextSchema::default();
-            let mut subquery_external_cols = HashSet::<ColName>::new();
-            for (_, (_, node)) in child {
-              subquery_external_cols.extend(node.external_cols.clone());
-            }
-
-            // Split the `subquery_external_cols` by which of those cols are in this Table,
-            // and which aren't.
-            let mut safe_present_split = Vec::<ColName>::new();
-            let mut external_split = Vec::<ColName>::new();
-            for col in &subquery_external_cols {
-              if es.query_plan.col_usage_node.safe_present_cols.contains(col) {
-                safe_present_split.push(col.clone());
-              } else {
-                external_split.push(col.clone());
-              }
-            }
-
-            // Point all `external_split` columns to their index in main Query's ContextSchema.
-            let mut context_col_index = HashMap::<ColName, usize>::new();
-            let col_schema = &es.context.context_schema.column_context_schema;
-            for (index, col) in col_schema.iter().enumerate() {
-              if external_split.contains(col) {
-                context_col_index.insert(col.clone(), index);
-              }
-            }
-
-            // Compute the ColumnContextSchema so that `safe_present_split` is first, and
-            // `external_split` is second. This is relevent when we compute ContextRows.
-            context_schema.column_context_schema.extend(safe_present_split.clone());
-            context_schema.column_context_schema.extend(external_split.clone());
-
-            // Compute the TransTables that the child Context will use.
-            let trans_table_split = nodes_external_trans_tables(child);
-
-            // Point all `trans_table_split` to their index in main Query's ContextSchema.
-            let mut context_trans_table_index = HashMap::<TransTableName, usize>::new();
-            let trans_table_context_schema = &es.context.context_schema.trans_table_context_schema;
-            for (index, prefix) in trans_table_context_schema.iter().enumerate() {
-              if trans_table_split.contains(&prefix.trans_table_name) {
-                context_trans_table_index.insert(prefix.trans_table_name.clone(), index);
-              }
-            }
-
-            // Compute the TransTableContextSchema
-            for trans_table_name in &trans_table_split {
-              let index = context_trans_table_index.get(trans_table_name).unwrap();
-              let trans_table_prefix = trans_table_context_schema.get(*index).unwrap().clone();
-              context_schema.trans_table_context_schema.push(trans_table_prefix);
-            }
+            // This computes a ContextSchema for the subquery, as well as expose a conversion
+            // utility to compute ContextRows.
+            let conv = ContextConverter::new(
+              &es.context.context_schema,
+              &es.query_plan.col_usage_node,
+              subquery_index,
+            );
 
             // Construct the `ContextRow`s. To do this, we iterate over main Query's
             // `ContextRow`s and then the corresponding `ContextRow`s for the subquery.
-            // Recall that this is a BTreeSet to eliminate duplication and provide order.
-            let mut new_context_rows = BTreeSet::<ContextRow>::new();
+            // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
+            let mut new_context_rows = Vec::<ContextRow>::new();
+            let mut new_row_set = HashSet::<ContextRow>::new();
             for context_row in &es.context.context_rows {
-              // First, map all columns in `external_split` to their values in this ContextRow.
-              let mut col_context = HashMap::<ColName, ColValN>::new();
-              for (col, index) in &context_col_index {
-                col_context
-                  .insert(col.clone(), context_row.column_context_row.get(*index).unwrap().clone());
-              }
-
               // Next, we compute the tightest KeyBound for this `context_row`, compute the
               // corresponding subtable using `safe_present_split`, and then extend it by this
               // `context_row.column_context_row`. We also add the `TransTableContextRow`. This
@@ -1134,23 +1155,17 @@ impl<T: IOTypes> TabletState<T> {
               match compute_key_region(
                 &es.query.selection,
                 &self.table_schema.key_cols,
-                col_context,
+                conv.compute_col_context(&context_row),
               ) {
                 Ok(key_bounds) => {
-                  for mut row in compute_subtable(&safe_present_split, &key_bounds, &self.storage) {
-                    for col in &external_split {
-                      let index = context_col_index.get(col).unwrap();
-                      row.push(context_row.column_context_row.get(*index).unwrap().clone());
+                  let (_, mut subtable) =
+                    compute_subtable(&conv.safe_present_split, &key_bounds, &self.storage);
+                  for mut row in subtable {
+                    let new_context_row = conv.compute_child_context_row(context_row, row);
+                    if !new_row_set.contains(&new_context_row) {
+                      new_row_set.insert(new_context_row.clone());
+                      new_context_rows.push(new_context_row);
                     }
-                    let mut new_context_row = ContextRow::default();
-                    new_context_row.column_context_row = row;
-                    // Compute the `TransTableContextRow`
-                    for trans_table_name in &trans_table_split {
-                      let index = context_trans_table_index.get(trans_table_name).unwrap();
-                      let trans_index = context_row.trans_table_context_row.get(*index).unwrap();
-                      new_context_row.trans_table_context_row.push(*trans_index);
-                    }
-                    new_context_rows.insert(new_context_row);
                   }
                 }
                 Err(eval_error) => {
@@ -1185,7 +1200,10 @@ impl<T: IOTypes> TabletState<T> {
             }
 
             // Finally, compute the context.
-            let context = Rc::new(Context { context_schema, context_rows: new_context_rows });
+            let context = Rc::new(Context {
+              context_schema: conv.context_schema,
+              context_rows: new_context_rows,
+            });
 
             // Construct the GRQueryES
             let gr_query_id = mk_qid(&mut self.rand);
@@ -1216,34 +1234,76 @@ impl<T: IOTypes> TabletState<T> {
           for gr_query_es in &gr_query_statuses {
             subquery_status.subqueries.insert(
               gr_query_es.query_id.clone(),
-              SingleSubqueryStatus::Pending { context: gr_query_es.context.clone() },
+              SingleSubqueryStatus::Pending(SubqueryPending {
+                context: gr_query_es.context.clone(),
+              }),
             );
           }
-          es.state = ExecutionS::Executing { subquery_status };
 
           let mut gr_query_ids = Vec::<QueryId>::new();
+          for gr_query_es in &gr_query_statuses {
+            gr_query_ids.push(gr_query_es.query_id.clone());
+          }
+
+          es.state = ExecutionS::Executing(Executing {
+            completed: 0,
+            subquery_pos: gr_query_ids.clone(),
+            subquery_status,
+          });
+
           for gr_query_es in gr_query_statuses {
             let query_id = gr_query_es.query_id.clone();
-            gr_query_ids.push(query_id.clone());
             self.read_statuses.insert(query_id, ReadStatus::GRQueryES(gr_query_es));
           }
 
           // Drive GRQueries
           for query_id in gr_query_ids {
-            self.start_gr_query(query_id);
+            self.advance_gr_query(query_id);
           }
         }
       }
     }
   }
 
-  fn start_gr_query(&mut self, query_id: QueryId) {
+  fn advance_gr_query(&mut self, query_id: QueryId) {
     let read_status = self.read_statuses.get_mut(&query_id).unwrap();
     let es = cast!(ReadStatus::GRQueryES, read_status).unwrap();
-    assert!(matches!(es.state, GRExecutionS::Start));
 
-    let stage_idx = 0;
-    // For now, we assert that there is at least one stage.
+    // Compute the next stage
+    let next_stage_idx = match &es.state {
+      GRExecutionS::Start => 0,
+      GRExecutionS::ReadStage(read_stage) => read_stage.stage_idx + 1,
+      _ => panic!(),
+    };
+
+    if next_stage_idx < es.query_plan.col_usage_nodes.len() {
+      // This means that we have still have stages to evaluate, so we move on.
+      self.process_gr_query_stage(query_id, next_stage_idx);
+    } else {
+      // This means the GRQueryES is done, so we send the desired result
+      // back to the originator.
+      let return_trans_table_pos = lookup_pos(&es.trans_table_view, &es.query.returning).unwrap();
+      let (_, (schema, table_views)) = es.trans_table_view.get(return_trans_table_pos).unwrap();
+
+      // To compute the result, recall that we need to associate the Context to each TableView.
+      let mut result = Vec::<TableView>::new();
+      for extended_trans_tables_row in &es.new_trans_table_context {
+        let idx = extended_trans_tables_row.get(return_trans_table_pos).unwrap();
+        result.push(table_views.get(*idx).unwrap().clone());
+      }
+
+      let orig_p = es.orig_p.clone();
+      let schema = schema.clone();
+      let new_rms = es.new_rms.clone();
+      self.handle_gr_query_done(orig_p, query_id, new_rms, (schema, result));
+    }
+  }
+
+  /// This function moves the GRQueryES to the Stage indicated by `stage_idx`.
+  /// This index must be valid (an actual stage).
+  fn process_gr_query_stage(&mut self, query_id: QueryId, stage_idx: usize) {
+    let read_status = self.read_statuses.get_mut(&query_id).unwrap();
+    let es = cast!(ReadStatus::GRQueryES, read_status).unwrap();
     assert!(stage_idx < es.query_plan.col_usage_nodes.len());
     let (_, (_, child)) = es.query_plan.col_usage_nodes.get(stage_idx).unwrap();
 
@@ -1308,8 +1368,11 @@ impl<T: IOTypes> TabletState<T> {
 
     // Construct the `ContextRow`s. To do this, we iterate over main Query's
     // `ContextRow`s and then the corresponding `ContextRow`s for the subquery.
-    // Recall that this is a BTreeSet to eliminate duplication and provide order.
-    let mut new_context_rows = BTreeSet::<ContextRow>::new();
+    // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
+    let mut new_context_rows = Vec::<ContextRow>::new();
+    let mut new_row_map = HashMap::<ContextRow, usize>::new();
+    // We also map the indices of the GRQueryES Context to that of the SubqueryStatus.
+    let mut parent_context_map = Vec::<usize>::new();
     for (row_idx, context_row) in es.context.context_rows.iter().enumerate() {
       let mut new_context_row = ContextRow::default();
 
@@ -1332,7 +1395,12 @@ impl<T: IOTypes> TabletState<T> {
         new_context_row.trans_table_context_row.push(*trans_index);
       }
 
-      new_context_rows.insert(new_context_row);
+      if !new_row_map.contains_key(&new_context_row) {
+        new_row_map.insert(new_context_row.clone(), new_context_rows.len());
+        new_context_rows.push(new_context_row.clone());
+      }
+
+      parent_context_map.push(new_row_map.get(&new_context_row).unwrap().clone());
     }
 
     // Finally, compute the context.
@@ -1476,12 +1544,309 @@ impl<T: IOTypes> TabletState<T> {
 
     // Create a SubqueryStatus and move the GRQueryES to the next Stage.
     let mut subquery_status = SubqueryStatus { subqueries: Default::default() };
-    let single_subquery_status = SingleSubqueryStatus::Pending { context: context.clone() };
-    subquery_status.subqueries.insert(tm_query_id.clone(), single_subquery_status);
-    es.state = GRExecutionS::ReadStage { stage_idx, subquery_status };
+    subquery_status.subqueries.insert(
+      tm_query_id.clone(),
+      SingleSubqueryStatus::Pending(SubqueryPending { context: context.clone() }),
+    );
+    es.state =
+      GRExecutionS::ReadStage(ReadStage { stage_idx, parent_context_map, subquery_status });
 
     // Add the TMStatus into read_statuses
     self.read_statuses.insert(tm_query_id, ReadStatus::TMStatus(tm_status));
+  }
+
+  fn handle_query_success(&mut self, query_success: msg::QuerySuccess) {
+    let tm_query_id = &query_success.query_id;
+    if let Some(read_status) = self.read_statuses.get_mut(tm_query_id) {
+      // Since the `read_status` must be a TMStatus, we cast it.
+      let tm_status = cast!(ReadStatus::TMStatus, read_status).unwrap();
+      // We just add the result of the `query_success` here.
+      let tm_wait_value = tm_status.tm_state.get_mut(&query_success.node_group_id).unwrap();
+      *tm_wait_value = TMWaitValue::Result(query_success.result.clone());
+      tm_status.new_rms.extend(query_success.new_rms);
+      tm_status.responded_count += 1;
+      if tm_status.responded_count == tm_status.tm_state.len() {
+        // Remove the `TMStatus` and take ownershup
+        let read_status = self.read_statuses.remove(&query_success.query_id).unwrap();
+        let tm_status = cast!(ReadStatus::TMStatus, read_status).unwrap();
+        // Merge there TableViews together
+        let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
+        for (_, tm_wait_value) in tm_status.tm_state {
+          results.push(cast!(TMWaitValue::Result, tm_wait_value).unwrap());
+        }
+        let merged_result = merge_table_views(results);
+        let gr_query_id = cast!(OrigP::ReadPath, tm_status.orig_p).unwrap();
+        self.handle_tm_done(gr_query_id, tm_query_id.clone(), merged_result);
+      }
+    }
+  }
+
+  /// This function processes the result of a GRQueryES.
+  fn handle_gr_query_done(
+    &mut self,
+    orig_p: OrigP,
+    subquery_id: QueryId,
+    subquery_new_rms: HashSet<TabletGroupId>,
+    (_, table_views): (Vec<ColName>, Vec<TableView>),
+  ) {
+    match orig_p {
+      OrigP::MSCoordPath(_) => panic!(),
+      OrigP::MSQueryWritePath(_, _) => {}
+      OrigP::MSQueryReadPath(_, _) => {}
+      OrigP::ReadPath(query_id) => {
+        if let Some(read_status) = self.read_statuses.get_mut(&query_id) {
+          let read_es = cast!(ReadStatus::FullTableReadES, read_status).unwrap();
+          let es = cast!(FullTableReadES::Executing, read_es).unwrap();
+
+          // Add the subquery results into the TableReadES.
+          es.new_rms.extend(subquery_new_rms);
+          let executing_state = cast!(ExecutionS::Executing, &mut es.state).unwrap();
+          let subquery_status = &mut executing_state.subquery_status;
+          let single_status = subquery_status.subqueries.get_mut(&subquery_id).unwrap();
+          let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
+          *single_status = SingleSubqueryStatus::Finished(SubqueryFinished {
+            context: context.clone(),
+            result: table_views,
+          });
+          executing_state.completed += 1;
+
+          // If all subqueries have been evaluated, finish the TableReadES
+          // and respond to the client.
+          if executing_state.completed == subquery_status.subqueries.len() {
+            /*
+             We are trying to compute the final Vec<TableView> that we send off to the
+             request sender. We iterator ContextRow by ContextRow. For each, we read
+             every relevent key. Recall that keybounds are computed like:
+
+             match compute_key_region(
+                &es.query.selection,
+                &self.table_schema.key_cols,
+                col_context)
+
+            Which only uses the main ContextRow. Then, we iterate every key in this Key
+            Bounds. For each, we use that + main Context Row to compute the Context Row
+            for every child query. We hold HashMap<ContextRow, usize> for each subquery,
+            ultimately allowing us to lookup SingleSubqueryContext's Vec<TableView>. (We
+            don't even need the ContextRow in Finished anymore.) Thus, for every
+            main ContextRow + in-bound TableRow, we can replace appearances of
+            ValExpr::Subquery with actual values. (Note we also throw runtime errors if
+            the subquery TableViews aren't single values.)
+            */
+
+            let subqueries = collect_select_subqueries(&es.query);
+
+            // Construct the ContextConverters for all subqueries
+            let mut converters = Vec::<ContextConverter>::new();
+            for subquery_index in 0..subqueries.len() {
+              converters.push(ContextConverter::new(
+                &es.context.context_schema,
+                &es.query_plan.col_usage_node,
+                subquery_index,
+              ));
+            }
+
+            // Setup the child_context_row_maps that will be populated over time.
+            let mut child_context_row_maps = Vec::<HashMap<ContextRow, usize>>::new();
+            for _ in 0..subqueries.len() {
+              child_context_row_maps.push(HashMap::new());
+            }
+
+            // Compute the Schema that should belong to every TableView that's returned
+            // from this TableReadES.
+            let mut res_col_names = Vec::<(ColName, ColType)>::new();
+            for col_name in &es.query_plan.col_usage_node.requested_cols {
+              let col_type = if let Some(pos) = lookup_pos(&self.table_schema.key_cols, col_name) {
+                let (_, col_type) = self.table_schema.key_cols.get(pos).unwrap();
+                col_type.clone()
+              } else {
+                self.table_schema.val_cols.strong_static_read(col_name, es.timestamp).unwrap()
+              };
+              res_col_names.push((col_name.clone(), col_type));
+            }
+
+            // Now, we are recomputing the KeyRegion the same way as we had to when
+            // we went to Pending to wait for the ReadRegion to lock.
+
+            // Here, `context_col_index` has every External Column used by
+            // the query as a key.
+            let mut context_col_index = HashMap::<ColName, usize>::new();
+            let col_schema = es.context.context_schema.column_context_schema.clone();
+            for (index, col) in col_schema.iter().enumerate() {
+              if es.query_plan.col_usage_node.external_cols.contains(col) {
+                context_col_index.insert(col.clone(), index);
+              }
+            }
+
+            let mut res_table_views = Vec::<TableView>::new();
+            for context_row in &es.context.context_rows {
+              // First, map all External Columns names to the corresponding values
+              // in this ContextRow
+              let mut col_context = HashMap::<ColName, ColValN>::new();
+              for (col, index) in &context_col_index {
+                col_context
+                  .insert(col.clone(), context_row.column_context_row.get(*index).unwrap().clone());
+              }
+
+              // Since we recomputed this exact `key_bounds` before going to the Pending
+              // state, we can unwrap it; there should be no errors.
+              let key_bounds =
+                compute_key_region(&es.query.selection, &self.table_schema.key_cols, col_context)
+                  .unwrap();
+
+              // We iterate over the rows of the Subtable computed for this ContextRow,
+              // computing the TableView we desire for the ContextRow.
+              let (subtable_schema, subtable) = compute_subtable(
+                &es.query_plan.col_usage_node.safe_present_cols,
+                &key_bounds,
+                &self.storage,
+              );
+
+              // Next, we initialize the TableView that we are trying to construct for
+              // this `context_row`.
+
+              let mut res_table_view =
+                TableView { col_names: res_col_names.clone(), rows: Default::default() };
+
+              for subtable_row in subtable {
+                // Now, we compute the subquery result for all subqueries for this
+                // `context_row` + `subtable_row`.
+                let mut subquery_vals = Vec::<TableView>::new();
+                for index in 0..subqueries.len() {
+                  // Compute the child ContextRow for this subquery, and populate
+                  // `child_context_row_map` accordingly.
+                  let conv = converters.get(index).unwrap();
+                  let child_context_row_map = child_context_row_maps.get_mut(index).unwrap();
+                  let row = conv.extract_child_relevent_cols(&subtable_schema, &subtable_row);
+                  let new_context_row = conv.compute_child_context_row(context_row, row);
+                  if !child_context_row_map.contains_key(&new_context_row) {
+                    let idx = child_context_row_map.len();
+                    child_context_row_map.insert(new_context_row.clone(), idx);
+                  }
+
+                  // Get the child_context_idx to get the relevent TableView from the subquery
+                  // results, and populate `subquery_vals`.
+                  let child_context_idx = child_context_row_map.get(&new_context_row).unwrap();
+                  let subquery_id = executing_state.subquery_pos.get(index).unwrap();
+                  let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+                  let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
+                  subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
+                }
+
+                /// Now, we evaluate all expressions in the SQL query and amend the
+                /// result to this TableView (if the WHERE clause evaluates to true).
+                let mut subtable_row_map = HashMap::<ColName, ColValN>::new();
+                for i in 0..subtable_schema.len() {
+                  subtable_row_map.insert(
+                    subtable_schema.get(i).unwrap().clone(),
+                    subtable_row.get(i).unwrap().clone(),
+                  );
+                }
+
+                match is_true(&evaluate_expr(
+                  &es.query.selection,
+                  &subtable_row_map,
+                  &subquery_vals,
+                )) {
+                  Ok(bool_val) => {
+                    if bool_val {
+                      // This means that the current row should be selected for the result.
+                      // First, we take the projected columns.
+                      let mut res_row = Vec::<ColValN>::new();
+                      for (res_col_name, _) in &res_col_names {
+                        // Now, what? We take this
+                        // We need to compute the row for the select cols. Thus, for every
+                        // select col, we need to find it's position. Then, we need to read
+                        // the row
+                        let idx = subtable_schema.iter().position(|k| res_col_name == k).unwrap();
+                        res_row.push(subtable_row.get(idx).unwrap().clone());
+                      }
+
+                      // And the `res_row` into the TableView.
+                      if let Some(count) = res_table_view.rows.get_mut(&res_row) {
+                        count.add(1);
+                      } else {
+                        res_table_view.rows.insert(res_row, 1);
+                      }
+                    }
+                  }
+                  Err(eval_error) => {
+                    self.handle_eval_error_table_es(&query_id, eval_error);
+                    return;
+                  }
+                }
+              }
+
+              // Finally, accumulate the resulting TableView.
+              res_table_views.push(res_table_view);
+            }
+
+            // Build the success message and respond.
+            let success_msg = msg::QuerySuccess {
+              sender_state_path: es.sender_path.state_path.clone(),
+              node_group_id: NodeGroupId::Tablet(self.this_tablet_group_id.clone()),
+              query_id: query_id.clone(),
+              result: (es.query_plan.col_usage_node.requested_cols.clone(), res_table_views),
+              new_rms: es.new_rms.iter().cloned().collect(),
+            };
+
+            let sid = &es.sender_path.slave_group_id;
+            let eid = self.slave_address_config.get(sid).unwrap();
+            self.network_output.send(
+              &eid,
+              msg::NetworkMessage::Slave(
+                if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
+                  msg::SlaveMessage::TabletMessage(
+                    tablet_group_id.clone(),
+                    msg::TabletMessage::QuerySuccess(success_msg),
+                  )
+                } else {
+                  msg::SlaveMessage::QuerySuccess(success_msg)
+                },
+              ),
+            );
+
+            // Remove the TableReadES.
+            self.read_statuses.remove(&query_id);
+          }
+        }
+      }
+    }
+  }
+
+  fn handle_tm_done(
+    &mut self,
+    query_id: QueryId,
+    tm_query_id: QueryId,
+    (schema, table_views): (Vec<ColName>, Vec<TableView>),
+  ) {
+    let read_status = self.read_statuses.get_mut(&query_id).unwrap();
+    let es = cast!(ReadStatus::GRQueryES, read_status).unwrap();
+    let read_stage = cast!(GRExecutionS::ReadStage, &mut es.state).unwrap();
+    let subqueries = &read_stage.subquery_status.subqueries;
+
+    // Extract the `context` from the SingleSubqueryStatus and verify
+    // that it corresponds to `table_views`.
+    assert_eq!(subqueries.len(), 1);
+    let (child_query_id, subquery_status) = subqueries.iter().next().unwrap();
+    let subquery_context = &cast!(SingleSubqueryStatus::Pending, subquery_status).unwrap().context;
+    assert_eq!(child_query_id, &tm_query_id);
+    assert_eq!(table_views.len(), subquery_context.context_rows.len());
+
+    // For now, just assert assert that the schema that we get corresponds
+    // to that in the QueryPlan.
+    let (trans_table_name, (cur_schema, _)) =
+      es.query_plan.col_usage_nodes.get(read_stage.stage_idx).unwrap();
+    assert_eq!(&schema, cur_schema);
+
+    // Amend the `new_trans_table_context`
+    for i in 0..es.context.context_rows.len() {
+      let idx = read_stage.parent_context_map.get(i).unwrap();
+      es.new_trans_table_context.get_mut(i).unwrap().push(*idx);
+    }
+
+    // Add the `table_views` to the GRQueryES and advance it.
+    es.trans_table_view.push((trans_table_name.clone(), (schema, table_views)));
+    self.advance_gr_query(query_id);
   }
 
   /// We call this when a DeadlockSafetyReadAbort happens
@@ -1489,6 +1854,161 @@ impl<T: IOTypes> TabletState<T> {
 
   /// We call this when a DeadlockSafetyWriteAbort happens
   fn deadlock_safety_write_abort(&mut self, orig_p: OrigP) {}
+}
+
+/// This evaluates a `ValExpr` completely into a `ColVal` by using the column values
+/// and the subquery values.
+fn evaluate_expr(
+  expr: &proc::ValExpr,
+  subtable_row_map: &HashMap<ColName, ColValN>,
+  subquery_vals: &Vec<TableView>,
+) -> ColValN {
+  unimplemented!()
+}
+
+/// This function simply deduces if the given `ColValN` sould be interpreted as true
+/// during query evaluation (e.g. when used in the WHERE clause). An error is returned
+/// if `val` isn't a Bool type.
+fn is_true(val: &ColValN) -> Result<bool, EvalError> {
+  match val {
+    Some(ColVal::Bool(bool_val)) => Ok(bool_val.clone()),
+    _ => Ok(false),
+  }
+}
+
+/// This container computes and remembers how to construct a child ContextRow
+/// from a parent ContexRow + Table row. We have to initially pass in the
+/// the parent's ContextRowSchema, the parent's ColUsageNode, as well as `i`,
+/// which points to the Subquery we want to compute child ContextRows for.
+#[derive(Default)]
+struct ContextConverter {
+  // This is the child query's ContextSchema, and it's computed in the constructor.
+  context_schema: ContextSchema,
+
+  // These fields are the constituents of the `context_schema above.
+  safe_present_split: Vec<ColName>,
+  external_split: Vec<ColName>,
+  trans_table_split: Vec<TransTableName>,
+
+  /// This maps the `ColName`s in `external_split` to their positions in the
+  /// parent ColumnContextSchema.
+  context_col_index: HashMap<ColName, usize>,
+  /// This maps the `TransTableName`s in `trans_table_split` to their positions in the
+  /// parent TransTableContextSchema.
+  context_trans_table_index: HashMap<TransTableName, usize>,
+}
+
+impl ContextConverter {
+  /// Compute all of the data members.
+  fn new(
+    parent_context_schema: &ContextSchema,
+    parent_node: &FrozenColUsageNode,
+    subquery_index: usize,
+  ) -> ContextConverter {
+    let mut conv = ContextConverter::default();
+    let child = parent_node.children.get(subquery_index).unwrap();
+
+    // Construct the ContextSchema of the GRQueryES.
+    let mut context_schema = ContextSchema::default();
+    let mut subquery_external_cols = HashSet::<ColName>::new();
+    for (_, (_, node)) in child {
+      subquery_external_cols.extend(node.external_cols.clone());
+    }
+
+    // Split the `subquery_external_cols` by which of those cols are in this Table,
+    // and which aren't.
+    for col in &subquery_external_cols {
+      if parent_node.safe_present_cols.contains(col) {
+        conv.safe_present_split.push(col.clone());
+      } else {
+        conv.external_split.push(col.clone());
+      }
+    }
+
+    // Point all `conv.external_split` columns to their index in main Query's ContextSchema.
+    let col_schema = &parent_context_schema.column_context_schema;
+    for (index, col) in col_schema.iter().enumerate() {
+      if conv.external_split.contains(col) {
+        conv.context_col_index.insert(col.clone(), index);
+      }
+    }
+
+    // Compute the ColumnContextSchema so that `afe_present_split` is first, and
+    // `external_split` is second. This is relevent when we compute ContextRows.
+    context_schema.column_context_schema.extend(conv.safe_present_split.clone());
+    context_schema.column_context_schema.extend(conv.external_split.clone());
+
+    // Compute the TransTables that the child Context will use.
+    let trans_table_split = nodes_external_trans_tables(child);
+
+    // Point all `trans_table_split` to their index in main Query's ContextSchema.
+    let trans_table_context_schema = &parent_context_schema.trans_table_context_schema;
+    for (index, prefix) in trans_table_context_schema.iter().enumerate() {
+      if trans_table_split.contains(&prefix.trans_table_name) {
+        conv.context_trans_table_index.insert(prefix.trans_table_name.clone(), index);
+      }
+    }
+
+    // Compute the TransTableContextSchema
+    for trans_table_name in &trans_table_split {
+      let index = conv.context_trans_table_index.get(trans_table_name).unwrap();
+      let trans_table_prefix = trans_table_context_schema.get(*index).unwrap().clone();
+      context_schema.trans_table_context_schema.push(trans_table_prefix);
+    }
+
+    conv
+  }
+
+  /// Use the given `parent_context_row` to create a child ContextRow,
+  /// consuming the given child ColumnContextRow in the process. (Here,
+  /// this child ColumnContextRow is computed from the outside before
+  /// being passed in.)
+  fn compute_child_context_row(
+    &self,
+    parent_context_row: &ContextRow,
+    mut row: Vec<ColValN>,
+  ) -> ContextRow {
+    for col in &self.external_split {
+      let index = self.context_col_index.get(col).unwrap();
+      row.push(parent_context_row.column_context_row.get(*index).unwrap().clone());
+    }
+    let mut new_context_row = ContextRow::default();
+    new_context_row.column_context_row = row;
+    // Compute the `TransTableContextRow`
+    for trans_table_name in &self.trans_table_split {
+      let index = self.context_trans_table_index.get(trans_table_name).unwrap();
+      let trans_index = parent_context_row.trans_table_context_row.get(*index).unwrap();
+      new_context_row.trans_table_context_row.push(*trans_index);
+    }
+    new_context_row
+  }
+
+  /// This function takes a Table row, uses the `safe_present_cols` of this
+  /// subquery + `subtable_schema` to compute the child ColumnContextRow. It
+  /// can be fed into `compute_child_context_row` later on.
+  fn extract_child_relevent_cols(
+    &self,
+    subtable_schema: &Vec<ColName>,
+    subtable_row: &Vec<ColValN>,
+  ) -> Vec<ColValN> {
+    let mut row = Vec::<ColValN>::new();
+    for col in &self.safe_present_split {
+      let pos = subtable_schema.iter().position(|sub_col| col == sub_col).unwrap();
+      row.push(subtable_row.get(pos).unwrap().clone());
+    }
+    row
+  }
+
+  /// Computes the ColumnContext for the given ContextRow of the parent.
+  fn compute_col_context(&self, parent_context_row: &ContextRow) -> HashMap<ColName, ColValN> {
+    // First, map all columns in `external_split` to their values in this ContextRow.
+    let mut col_context = HashMap::<ColName, ColValN>::new();
+    for (col, index) in &self.context_col_index {
+      col_context
+        .insert(col.clone(), parent_context_row.column_context_row.get(*index).unwrap().clone());
+    }
+    col_context
+  }
 }
 
 /// This function computes a minimum set of `TabletGroupId`s whose `TabletKeyRange`
@@ -1537,11 +2057,12 @@ fn compute_key_region(
 }
 
 /// This computes a sub-table from `storage` over the given `cols` and `key_bounds`.
+/// This also returns the `ColNames` that correspond ot the subtable returned.
 fn compute_subtable(
   cols: &Vec<ColName>,
   key_bounds: &Vec<KeyBound>,
   storage: &GenericMVTable,
-) -> Vec<Vec<ColValN>> {
+) -> (Vec<ColName>, Vec<Vec<ColValN>>) {
   unimplemented!()
 }
 
