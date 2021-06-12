@@ -96,8 +96,7 @@ pub enum NetworkMessage {
 // -------------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SenderStatePath {
-  ReadQueryPath { query_id: QueryId },
-  WriteQueryPath { query_id: QueryId },
+  TMStatusQueryId(QueryId),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -142,8 +141,7 @@ pub struct QuerySuccess {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum AbortedData {
   // ColumnsDNE
-  // TODO: to address the `gossip` problem, we can just hold the underlying map of the MVM.
-  ColumnsDNE { missing_cols: Vec<ColName> /* TODO:  gossip: GossipData */ },
+  ColumnsDNE { missing_cols: Vec<ColName> },
 
   // Fatal Query Errors to be propagated to the user.
   TypeError { msg: String },
@@ -316,5 +314,6 @@ pub struct MasterFrozenColUsageAborted {
 pub struct MasterFrozenColUsageSuccess {
   pub query_id: QueryId,
   pub frozen_col_usage_tree: FrozenColUsageTree,
-  /* TODO: pub gossip: GossipData */
+  // TODO: to address the `gossip` problem, we can just hold the underlying map of the MVM.
+  /* pub gossip: GossipData */
 }

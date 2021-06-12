@@ -645,7 +645,9 @@ impl<T: IOTypes> TabletState<T> {
         }
       }
       msg::TabletMessage::CancelQuery(_) => unimplemented!(),
-      msg::TabletMessage::QueryAborted(_) => unimplemented!(),
+      msg::TabletMessage::QueryAborted(query_aborted) => {
+        // fuck
+      }
       msg::TabletMessage::QuerySuccess(query_success) => {
         self.handle_query_success(query_success);
       }
@@ -1440,7 +1442,7 @@ impl<T: IOTypes> TabletState<T> {
     let sender_path = msg::SenderPath {
       slave_group_id: self.this_slave_group_id.clone(),
       maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
-      state_path: msg::SenderStatePath::ReadQueryPath { query_id: tm_query_id.clone() },
+      state_path: msg::SenderStatePath::TMStatusQueryId(tm_query_id.clone()),
     };
 
     // Send out the PerformQuery and populate TMStatus accordingly.

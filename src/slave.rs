@@ -573,7 +573,7 @@ fn ms_coord_es_advance<T: IOTypes>(
       let sender_path = SenderPath {
         slave_group_id: this_slave_group_id.clone(),
         maybe_tablet_group_id: None,
-        state_path: msg::SenderStatePath::ReadQueryPath { query_id: tm_query_id.clone() },
+        state_path: msg::SenderStatePath::TMStatusQueryId(tm_query_id.clone()),
       };
 
       match &select_query.from {
@@ -665,7 +665,7 @@ fn ms_coord_es_advance<T: IOTypes>(
       let sender_path = SenderPath {
         slave_group_id: this_slave_group_id.clone(),
         maybe_tablet_group_id: None,
-        state_path: msg::SenderStatePath::ReadQueryPath { query_id: tm_query_id.clone() },
+        state_path: msg::SenderStatePath::TMStatusQueryId(tm_query_id.clone()),
       };
 
       // Add in the Tablets that manage this TablePath to `write_tm_state`,
