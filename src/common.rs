@@ -114,10 +114,7 @@ pub struct TMStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OrigP {
-  MSCoordPath(QueryId),
-  MSQueryWritePath(QueryId, u32),
-  MSQueryReadPath(QueryId, QueryId),
-  ReadPath(QueryId),
+  StatusPath(QueryId),
 }
 
 pub fn merge_table_views(

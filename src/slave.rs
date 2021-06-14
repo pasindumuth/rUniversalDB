@@ -11,7 +11,7 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::{QuerySuccess, SenderPath, SlaveMessage};
+use crate::model::message::{QueryPath, QuerySuccess, SlaveMessage};
 use crate::multiversion_map::MVM;
 use crate::query_converter::convert_to_msquery;
 use crate::slave::CoordState::ReadStage;
@@ -263,7 +263,7 @@ impl<T: IOTypes> SlaveState<T> {
         let merged_result = merge_table_views(results);
         self.handle_done_state(
           query_success.query_id,
-          cast!(OrigP::MSCoordPath, status.orig_p).unwrap().clone(),
+          cast!(OrigP::StatusPath, status.orig_p).unwrap().clone(),
           status.new_rms,
           merged_result,
         );
@@ -366,7 +366,8 @@ impl<T: IOTypes> SlaveState<T> {
         }
 
         // The Tier should be where every Read query should be reading from, except
-        // if the current stage is an Update, which should be one Tier ahead for that TablePath.
+        // if the current stage is an Update, which should be one Tier ahead (i.e.
+        // lower) for that TablePath.
         let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
         for (trans_table_name, stage) in query.trans_tables.iter().rev() {
           all_tier_maps.insert(trans_table_name.clone(), TierMap { map: tier_map.clone() });
@@ -566,14 +567,14 @@ fn ms_coord_es_advance<T: IOTypes>(
         new_rms: Default::default(),
         responded_count: 0,
         tm_state: Default::default(),
-        orig_p: OrigP::MSCoordPath(root_query_id.clone()),
+        orig_p: OrigP::StatusPath(root_query_id.clone()),
       };
 
       // Path of this TMStatus to respond to.
-      let sender_path = SenderPath {
+      let sender_path = QueryPath {
         slave_group_id: this_slave_group_id.clone(),
         maybe_tablet_group_id: None,
-        state_path: msg::SenderStatePath::TMStatusQueryId(tm_query_id.clone()),
+        query_id: msg::SenderStatePath::TMStatusQueryId(tm_query_id.clone()),
       };
 
       match &select_query.from {
@@ -589,7 +590,7 @@ fn ms_coord_es_advance<T: IOTypes>(
               msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
                 tablet_group_id.clone(),
                 msg::TabletMessage::PerformQuery(msg::PerformQuery {
-                  root_query_id: root_query_id.clone(),
+                  root_query_path: root_query_id.clone(),
                   sender_path: sender_path.clone(),
                   query_id: child_query_id.clone(),
                   tier_map: coord_es.all_tier_maps.get(trans_table_name).unwrap().clone(),
@@ -624,7 +625,7 @@ fn ms_coord_es_advance<T: IOTypes>(
           network_output.send(
             eid,
             msg::NetworkMessage::Slave(msg::SlaveMessage::PerformQuery(msg::PerformQuery {
-              root_query_id: root_query_id.clone(),
+              root_query_path: root_query_id.clone(),
               sender_path,
               query_id: child_query_id.clone(),
               tier_map: coord_es.all_tier_maps.get(trans_table_name).unwrap().clone(),
@@ -658,14 +659,14 @@ fn ms_coord_es_advance<T: IOTypes>(
         new_rms: Default::default(),
         responded_count: 0,
         tm_state: Default::default(),
-        orig_p: OrigP::MSCoordPath(root_query_id.clone()),
+        orig_p: OrigP::StatusPath(root_query_id.clone()),
       };
 
       // Path of this WriteTMStatus to respond to.
-      let sender_path = SenderPath {
+      let sender_path = QueryPath {
         slave_group_id: this_slave_group_id.clone(),
         maybe_tablet_group_id: None,
-        state_path: msg::SenderStatePath::TMStatusQueryId(tm_query_id.clone()),
+        query_id: msg::SenderStatePath::TMStatusQueryId(tm_query_id.clone()),
       };
 
       // Add in the Tablets that manage this TablePath to `write_tm_state`,
@@ -679,7 +680,7 @@ fn ms_coord_es_advance<T: IOTypes>(
           msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
             tablet_group_id.clone(),
             msg::TabletMessage::PerformQuery(msg::PerformQuery {
-              root_query_id: root_query_id.clone(),
+              root_query_path: root_query_id.clone(),
               sender_path: sender_path.clone(),
               query_id: child_query_id.clone(),
               tier_map: coord_es.all_tier_maps.get(trans_table_name).unwrap().clone(),

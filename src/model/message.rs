@@ -100,37 +100,30 @@ pub enum SenderStatePath {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct SenderPath {
+pub struct QueryPath {
   pub slave_group_id: SlaveGroupId,
   pub maybe_tablet_group_id: Option<TabletGroupId>,
-  pub state_path: SenderStatePath,
+  pub query_id: SenderStatePath,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformQuery {
-  pub root_query_id: QueryId,
-  pub sender_path: SenderPath,
+  pub root_query_path: QueryId,
+  pub sender_path: QueryPath,
   pub query_id: QueryId,
   pub tier_map: TierMap,
   pub query: GeneralQuery,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum RecieverPath {
-  ReadQuery { query_id: QueryId },
-  MSReadQuery { root_query_id: QueryId, query_id: QueryId },
-  MSWriteQuery { root_query_id: QueryId },
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CancelQuery {
-  pub path: RecieverPath,
+  pub query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QuerySuccess {
   /// The receiving node's State that the responses should be routed to.
-  pub sender_state_path: SenderStatePath,
+  pub sender_status_path: SenderStatePath,
   /// The Tablet/Slave that just succeeded.
   pub node_group_id: NodeGroupId,
   pub query_id: QueryId,
@@ -138,11 +131,10 @@ pub struct QuerySuccess {
   pub new_rms: Vec<TabletGroupId>,
 }
 
+/// These are Errors that are simply recursively propagated up to the Slave,
+/// where all intermediary ESs are exited.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum AbortedData {
-  // ColumnsDNE
-  ColumnsDNE { missing_cols: Vec<ColName> },
-
+pub enum QueryError {
   // Fatal Query Errors to be propagated to the user.
   TypeError { msg: String },
   RuntimeError { msg: String },
@@ -152,6 +144,14 @@ pub enum AbortedData {
   WriteRegionConflictWithSubsequentRead,
   DeadlockSafetyAbortion,
   TimestampConflict,
+
+  LateralError,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum AbortedData {
+  ColumnsDNE { missing_cols: Vec<ColName> },
+  QueryError(QueryError),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
