@@ -650,7 +650,7 @@ impl<T: IOTypes> TabletState<T> {
       }
       msg::TabletMessage::CancelQuery(_) => unimplemented!(),
       msg::TabletMessage::QueryAborted(query_aborted) => {
-        // fuck
+        self.handle_query_aborted(query_aborted);
       }
       msg::TabletMessage::QuerySuccess(query_success) => {
         self.handle_query_success(query_success);
@@ -1859,6 +1859,50 @@ impl<T: IOTypes> TabletState<T> {
     es.trans_table_view.push((trans_table_name.clone(), (schema, table_views)));
     self.advance_gr_query(query_id);
   }
+
+  fn handle_query_aborted(&mut self, query_aborted: msg::QueryAborted) {
+    if let Some(tablet_status) = self.tablet_statuses.remove(&query_aborted.return_path) {
+      let tm_status = cast!(TabletStatus::TMStatus, tablet_status).unwrap();
+      // We Exit and Clean up this TMStatus (sending CancelQuery to all
+      // remaining participants) and send the QueryAborted back to the orig_path
+      for (node_group_id, child_query_id) in &tm_status.node_group_ids {
+        if tm_status.tm_state.get(child_query_id).unwrap() == &TMWaitValue::Nothing {
+          // If the child Query hasn't responded, then sent it a CancelQuery
+          match node_group_id {
+            NodeGroupId::Tablet(tid) => {
+              let sid = self.tablet_address_config.get(tid).unwrap();
+              let eid = self.slave_address_config.get(sid).unwrap();
+              self.network_output.send(
+                eid,
+                msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
+                  tid.clone(),
+                  msg::TabletMessage::CancelQuery(msg::CancelQuery {
+                    query_id: child_query_id.clone(),
+                  }),
+                )),
+              );
+            }
+            NodeGroupId::Slave(sid) => {
+              let eid = self.slave_address_config.get(sid).unwrap();
+              self.network_output.send(
+                eid,
+                msg::NetworkMessage::Slave(msg::SlaveMessage::CancelQuery(msg::CancelQuery {
+                  query_id: child_query_id.clone(),
+                })),
+              );
+            }
+          };
+        }
+      }
+
+      // Finally, we propagate up the AbortData to the GRQueryES that owns this TMStatus
+      let gr_query_id = cast!(OrigP::StatusPath, tm_status.orig_p).unwrap();
+      self.abort_gr_query_es(gr_query_id, query_aborted.payload);
+    }
+  }
+
+  /// Propagate up an abort from a TMStatus up the owning GRQueryES.
+  fn abort_gr_query_es(&mut self, query_id: QueryId, aborted_data: AbortedData) {}
 
   /// We call this when a DeadlockSafetyReadAbort happens
   fn deadlock_safety_read_abort(&mut self, orig_p: OrigP, read_region: TableRegion) {}

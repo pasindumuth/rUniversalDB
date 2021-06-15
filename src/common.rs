@@ -92,7 +92,7 @@ pub struct GossipData {
 // -----------------------------------------------------------------------------------------------
 // These are used to perform PCSA over the network for reads and writes.
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TMWaitValue {
   Nothing,
   Result((Vec<ColName>, Vec<TableView>)),
