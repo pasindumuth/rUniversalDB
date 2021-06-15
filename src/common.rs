@@ -1,6 +1,6 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::model::common::{
-  ColName, ColType, ColVal, EndpointId, Gen, NodeGroupId, QueryId, TablePath, TableView,
+  ColName, ColType, ColVal, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, TablePath, TableView,
   TabletGroupId, Timestamp, TransTableName,
 };
 use crate::model::message::{NetworkMessage, TabletMessage};
@@ -94,17 +94,17 @@ pub struct GossipData {
 
 #[derive(Debug)]
 pub enum TMWaitValue {
-  QueryId(QueryId),
+  Nothing,
   Result((Vec<ColName>, Vec<TableView>)),
 }
 
 #[derive(Debug)]
 pub struct TMStatus {
-  pub root_query_id: QueryId,
-  pub new_rms: HashSet<TabletGroupId>,
+  pub node_group_ids: HashMap<NodeGroupId, QueryId>,
+  pub new_rms: HashSet<QueryPath>,
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   pub responded_count: usize,
-  pub tm_state: HashMap<NodeGroupId, TMWaitValue>,
+  pub tm_state: HashMap<QueryId, TMWaitValue>,
   pub orig_p: OrigP,
 }
 

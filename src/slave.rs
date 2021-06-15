@@ -5,13 +5,13 @@ use crate::common::{
 };
 use crate::lang;
 use crate::model::common::{
-  iast, proc, ColName, ColType, Context, ContextRow, Gen, NodeGroupId, SlaveGroupId, TablePath,
-  TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp, TransTableLocationPrefix,
-  TransTableName,
+  iast, proc, ColName, ColType, Context, ContextRow, Gen, NodeGroupId, QueryPath, SlaveGroupId,
+  TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
+  TransTableLocationPrefix, TransTableName,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::{QueryPath, QuerySuccess, SlaveMessage};
+use crate::model::message::{QuerySuccess, SlaveMessage};
 use crate::multiversion_map::MVM;
 use crate::query_converter::convert_to_msquery;
 use crate::slave::CoordState::ReadStage;
@@ -23,6 +23,15 @@ use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::collections::{HashMap, HashSet};
 use std::ops::Add;
 use std::sync::Arc;
+
+// -----------------------------------------------------------------------------------------------
+//  SlaveStatus
+// -----------------------------------------------------------------------------------------------
+#[derive(Debug)]
+enum SlaveStatus {
+  TMStatus(TMStatus),
+  FullMSQueryCoordinationES(FullMSQueryCoordinationES),
+}
 
 // -----------------------------------------------------------------------------------------------
 //  MSQueryCoordinationES
@@ -38,7 +47,7 @@ enum CoordState {
   Start,
   ReadStage { stage_idx: usize, stage_query_id: QueryId },
   WriteStage { stage_idx: usize, stage_query_id: QueryId },
-  Preparing { tablet_group_ids: HashSet<TabletGroupId> },
+  Preparing { tablet_group_ids: HashSet<QueryPath> },
   Committing,
   Aborting,
 }
@@ -58,9 +67,12 @@ struct MSQueryCoordinationES {
   all_tier_maps: HashMap<TransTableName, TierMap>,
 
   // The dynamically evolving fields.
-  all_rms: HashSet<TabletGroupId>,
+  all_rms: HashSet<QueryPath>,
   trans_table_views: Vec<(TransTableName, TableView)>,
   execution_state: CoordState,
+
+  // Memory management fields
+  registered_queries: HashSet<QueryId>,
 }
 
 #[derive(Debug)]
@@ -79,21 +91,6 @@ enum FullMSQueryCoordinationES {
     execution_status: QueryReplanningES,
   },
   Executing(MSQueryCoordinationES),
-}
-
-impl FullMSQueryCoordinationES {
-  fn new(
-    timestamp: Timestamp,
-    query: proc::MSQuery,
-    orig_query: msg::PerformExternalQuery,
-  ) -> FullMSQueryCoordinationES {
-    Self::QueryReplanning {
-      timestamp,
-      query,
-      orig_query,
-      execution_status: QueryReplanningES::Start,
-    }
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -123,10 +120,12 @@ pub struct SlaveState<T: IOTypes> {
 
   /// External Query Management
   external_request_id_map: HashMap<RequestId, QueryId>,
+  // TODO: remove. We need to rearchitected the below to have methods
+  // instead of `ms_coord_process_stage_result`.
   ms_coord_statuses: HashMap<QueryId, FullMSQueryCoordinationES>,
 
   /// Child Queries
-  tm_statuses: HashMap<QueryId, TMStatus>,
+  slave_statuses: HashMap<QueryId, SlaveStatus>,
   master_query_map: HashMap<QueryId, OrigP>,
 }
 
@@ -156,7 +155,7 @@ impl<T: IOTypes> SlaveState<T> {
       slave_address_config,
       external_request_id_map: Default::default(),
       ms_coord_statuses: Default::default(),
-      tm_statuses: Default::default(),
+      slave_statuses: Default::default(),
       master_query_map: Default::default(),
     }
   }
@@ -192,12 +191,15 @@ impl<T: IOTypes> SlaveState<T> {
                   self
                     .external_request_id_map
                     .insert(external_query.request_id.clone(), query_id.clone());
-                  self.ms_coord_statuses.insert(
+                  self.slave_statuses.insert(
                     query_id.clone(),
-                    FullMSQueryCoordinationES::new(
-                      self.clock.now(),
-                      ms_query,
-                      external_query.clone(),
+                    SlaveStatus::FullMSQueryCoordinationES(
+                      FullMSQueryCoordinationES::QueryReplanning {
+                        timestamp: self.clock.now(),
+                        query: ms_query,
+                        orig_query: external_query.clone(),
+                        execution_status: QueryReplanningES::Start,
+                      },
                     ),
                   );
                   self.handle_coord(&query_id);
@@ -247,24 +249,27 @@ impl<T: IOTypes> SlaveState<T> {
   }
 
   fn handle_query_success(&mut self, query_success: QuerySuccess) {
-    if let Some(status) = self.tm_statuses.get_mut(&query_success.query_id) {
+    if let Some(slave_status) = self.slave_statuses.get_mut(&query_success.query_id) {
+      let tm_status = cast!(SlaveStatus::TMStatus, slave_status).unwrap();
       // We just add the result of the `query_success` here.
-      let tm_wait_value = status.tm_state.get_mut(&query_success.node_group_id).unwrap();
+      let tm_wait_value = tm_status.tm_state.get_mut(&query_success.return_path).unwrap();
       *tm_wait_value = TMWaitValue::Result(query_success.result.clone());
-      status.new_rms.extend(query_success.new_rms);
-      status.responded_count += 1;
-      if status.responded_count == status.tm_state.len() {
-        let status = self.tm_statuses.remove(&query_success.query_id).unwrap();
+      tm_status.new_rms.extend(query_success.new_rms.into_iter());
+      tm_status.responded_count += 1;
+      if tm_status.responded_count == tm_status.tm_state.len() {
+        // Remove the `TMStatus` and take ownership
+        let slave_status = self.slave_statuses.remove(&query_success.query_id).unwrap();
+        let tm_status = cast!(SlaveStatus::TMStatus, slave_status).unwrap();
         // Merge there TableViews together
         let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
-        for (_, tm_wait_value) in status.tm_state {
+        for (_, tm_wait_value) in tm_status.tm_state {
           results.push(cast!(TMWaitValue::Result, tm_wait_value).unwrap());
         }
         let merged_result = merge_table_views(results);
         self.handle_done_state(
           query_success.query_id,
-          cast!(OrigP::StatusPath, status.orig_p).unwrap().clone(),
-          status.new_rms,
+          cast!(OrigP::StatusPath, tm_status.orig_p).unwrap().clone(),
+          tm_status.new_rms,
           merged_result,
         );
       }
@@ -275,7 +280,7 @@ impl<T: IOTypes> SlaveState<T> {
     &mut self,
     ret_query_id: QueryId,
     orig_path: QueryId,
-    new_rms: HashSet<TabletGroupId>,
+    new_rms: HashSet<QueryPath>,
     result: (Vec<ColName>, Vec<TableView>),
   ) {
     // For now, each `query_id` here should point back to an MSQueryCoordinationES.
@@ -299,7 +304,7 @@ impl<T: IOTypes> SlaveState<T> {
           // Slave references
           &mut self.rand,
           &mut self.network_output,
-          &mut self.tm_statuses,
+          &mut self.slave_statuses,
           &self.this_slave_group_id,
           &self.gossip,
           &self.sharding_config,
@@ -321,7 +326,7 @@ impl<T: IOTypes> SlaveState<T> {
           // Slave references
           &mut self.rand,
           &mut self.network_output,
-          &mut self.tm_statuses,
+          &mut self.slave_statuses,
           &self.this_slave_group_id,
           &self.gossip,
           &self.sharding_config,
@@ -389,6 +394,7 @@ impl<T: IOTypes> SlaveState<T> {
           all_rms: Default::default(),
           trans_table_views: vec![],
           execution_state: CoordState::Start,
+          registered_queries: Default::default(),
         };
 
         // Move onto the next stage.
@@ -399,7 +405,7 @@ impl<T: IOTypes> SlaveState<T> {
           // Slave references
           &mut self.rand,
           &mut self.network_output,
-          &mut self.tm_statuses,
+          &mut self.slave_statuses,
           &self.this_slave_group_id,
           &self.gossip,
           &self.sharding_config,
@@ -446,7 +452,7 @@ fn ms_coord_process_stage_result<T: IOTypes>(
   coord_es: &mut MSQueryCoordinationES,
   ret_query_id: &QueryId,
   orig_path: &QueryId,
-  new_rms: HashSet<TabletGroupId>,
+  new_rms: HashSet<QueryPath>,
   result: (Vec<ColName>, Vec<TableView>),
   stage_idx: &usize,
   stage_query_id: &QueryId,
@@ -454,7 +460,7 @@ fn ms_coord_process_stage_result<T: IOTypes>(
   // Slave references
   rand: &mut T::RngCoreT,
   network_output: &mut T::NetworkOutT,
-  tm_statuses: &mut HashMap<QueryId, TMStatus>,
+  slave_statuses: &mut HashMap<QueryId, SlaveStatus>,
   this_slave_group_id: &SlaveGroupId,
   gossip: &GossipData,
   sharding_config: &HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
@@ -486,7 +492,7 @@ fn ms_coord_process_stage_result<T: IOTypes>(
       // Slave references
       rand,
       network_output,
-      tm_statuses,
+      slave_statuses,
       this_slave_group_id,
       gossip,
       sharding_config,
@@ -495,17 +501,20 @@ fn ms_coord_process_stage_result<T: IOTypes>(
     );
   } else {
     // Finish the ES by sending out Prepared.
-    let sender_path = (this_slave_group_id.clone(), msg::MSQueryCoordPath(orig_path.clone()));
-    for tablet_group_id in &coord_es.all_rms {
-      let sid = tablet_address_config.get(tablet_group_id).unwrap();
-      let eid = slave_address_config.get(&sid).unwrap();
+    let sender_path = QueryPath {
+      slave_group_id: this_slave_group_id.clone(),
+      maybe_tablet_group_id: None,
+      query_id: orig_path.clone(),
+    };
+    for query_path in &coord_es.all_rms {
+      let eid = slave_address_config.get(&query_path.slave_group_id).unwrap();
       network_output.send(
         eid,
         msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
-          tablet_group_id.clone(),
+          query_path.maybe_tablet_group_id.clone().unwrap(),
           msg::TabletMessage::Query2PCPrepare(msg::Query2PCPrepare {
             sender_path: sender_path.clone(),
-            root_query_id: orig_path.clone(),
+            ms_query_id: orig_path.clone(),
           }),
         )),
       );
@@ -525,7 +534,7 @@ fn ms_coord_es_advance<T: IOTypes>(
   // Slave references
   rand: &mut T::RngCoreT,
   network_output: &mut T::NetworkOutT,
-  tm_statuses: &mut HashMap<QueryId, TMStatus>,
+  slave_statuses: &mut HashMap<QueryId, SlaveStatus>,
   this_slave_group_id: &SlaveGroupId,
   gossip: &GossipData,
   sharding_config: &HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
@@ -557,13 +566,20 @@ fn ms_coord_es_advance<T: IOTypes>(
     trans_table_schemas.insert(external_trans_table, cols.clone());
   }
 
+  // Compute this MSQueryCoordinationESs QueryPath
+  let root_query_path = QueryPath {
+    slave_group_id: this_slave_group_id.clone(),
+    maybe_tablet_group_id: None,
+    query_id: root_query_id.clone(),
+  };
+
   // Handle accordingly
   coord_es.execution_state = match ms_query_stage {
     proc::MSQueryStage::SuperSimpleSelect(select_query) => {
       // Create ReadTMState
       let tm_query_id = mk_qid(rand);
       let mut status = TMStatus {
-        root_query_id: root_query_id.clone(),
+        node_group_ids: Default::default(),
         new_rms: Default::default(),
         responded_count: 0,
         tm_state: Default::default(),
@@ -574,7 +590,7 @@ fn ms_coord_es_advance<T: IOTypes>(
       let sender_path = QueryPath {
         slave_group_id: this_slave_group_id.clone(),
         maybe_tablet_group_id: None,
-        query_id: msg::SenderStatePath::TMStatusQueryId(tm_query_id.clone()),
+        query_id: tm_query_id.clone(),
       };
 
       match &select_query.from {
@@ -590,7 +606,7 @@ fn ms_coord_es_advance<T: IOTypes>(
               msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
                 tablet_group_id.clone(),
                 msg::TabletMessage::PerformQuery(msg::PerformQuery {
-                  root_query_path: root_query_id.clone(),
+                  root_query_path: root_query_path.clone(),
                   sender_path: sender_path.clone(),
                   query_id: child_query_id.clone(),
                   tier_map: coord_es.all_tier_maps.get(trans_table_name).unwrap().clone(),
@@ -610,10 +626,9 @@ fn ms_coord_es_advance<T: IOTypes>(
               )),
             );
 
-            status.tm_state.insert(
-              NodeGroupId::Tablet(tablet_group_id.clone()),
-              TMWaitValue::QueryId(child_query_id),
-            );
+            let node_group_id = NodeGroupId::Tablet(tablet_group_id.clone());
+            status.node_group_ids.insert(node_group_id, child_query_id.clone());
+            status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
           }
         }
         proc::TableRef::TransTableName(trans_table_name) => {
@@ -625,7 +640,7 @@ fn ms_coord_es_advance<T: IOTypes>(
           network_output.send(
             eid,
             msg::NetworkMessage::Slave(msg::SlaveMessage::PerformQuery(msg::PerformQuery {
-              root_query_path: root_query_id.clone(),
+              root_query_path: root_query_path,
               sender_path,
               query_id: child_query_id.clone(),
               tier_map: coord_es.all_tier_maps.get(trans_table_name).unwrap().clone(),
@@ -644,18 +659,19 @@ fn ms_coord_es_advance<T: IOTypes>(
             })),
           );
 
-          status.tm_state.insert(location.source, TMWaitValue::QueryId(child_query_id));
+          status.node_group_ids.insert(location.source, child_query_id.clone());
+          status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
         }
       }
 
-      tm_statuses.insert(tm_query_id.clone(), status);
+      slave_statuses.insert(tm_query_id.clone(), SlaveStatus::TMStatus(status));
       CoordState::ReadStage { stage_idx, stage_query_id: tm_query_id }
     }
     proc::MSQueryStage::Update(update_query) => {
       // Create WriteTMState
       let tm_query_id = mk_qid(rand);
       let mut status = TMStatus {
-        root_query_id: root_query_id.clone(),
+        node_group_ids: Default::default(),
         new_rms: Default::default(),
         responded_count: 0,
         tm_state: Default::default(),
@@ -666,7 +682,7 @@ fn ms_coord_es_advance<T: IOTypes>(
       let sender_path = QueryPath {
         slave_group_id: this_slave_group_id.clone(),
         maybe_tablet_group_id: None,
-        query_id: msg::SenderStatePath::TMStatusQueryId(tm_query_id.clone()),
+        query_id: tm_query_id.clone(),
       };
 
       // Add in the Tablets that manage this TablePath to `write_tm_state`,
@@ -680,7 +696,7 @@ fn ms_coord_es_advance<T: IOTypes>(
           msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
             tablet_group_id.clone(),
             msg::TabletMessage::PerformQuery(msg::PerformQuery {
-              root_query_path: root_query_id.clone(),
+              root_query_path: root_query_path.clone(),
               sender_path: sender_path.clone(),
               query_id: child_query_id.clone(),
               tier_map: coord_es.all_tier_maps.get(trans_table_name).unwrap().clone(),
@@ -698,13 +714,12 @@ fn ms_coord_es_advance<T: IOTypes>(
           )),
         );
 
-        status.tm_state.insert(
-          NodeGroupId::Tablet(tablet_group_id.clone()),
-          TMWaitValue::QueryId(child_query_id),
-        );
+        let node_group_id = NodeGroupId::Tablet(tablet_group_id.clone());
+        status.node_group_ids.insert(node_group_id, child_query_id.clone());
+        status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
       }
 
-      tm_statuses.insert(tm_query_id.clone(), status);
+      slave_statuses.insert(tm_query_id.clone(), SlaveStatus::TMStatus(status));
       CoordState::WriteStage { stage_idx, stage_query_id: tm_query_id }
     }
   };

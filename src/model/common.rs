@@ -117,6 +117,14 @@ pub enum NodeGroupId {
   Slave(SlaveGroupId),
 }
 
+/// This is a generic struct that refers to an ES in the system.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryPath {
+  pub slave_group_id: SlaveGroupId,
+  pub maybe_tablet_group_id: Option<TabletGroupId>,
+  pub query_id: QueryId,
+}
+
 // -------------------------------------------------------------------------------------------------
 //  Subquery Context
 // -------------------------------------------------------------------------------------------------

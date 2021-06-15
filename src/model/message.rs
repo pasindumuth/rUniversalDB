@@ -1,8 +1,8 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::common::{GossipData, QueryPlan};
 use crate::model::common::{
-  proc, ColName, ColType, Context, EndpointId, Gen, NodeGroupId, QueryId, RequestId, SlaveGroupId,
-  TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
+  proc, ColName, ColType, Context, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, RequestId,
+  SlaveGroupId, TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
   TransTableName,
 };
 use serde::{Deserialize, Serialize};
@@ -95,20 +95,8 @@ pub enum NetworkMessage {
 //  Transaction PCSA Messages
 // -------------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum SenderStatePath {
-  TMStatusQueryId(QueryId),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct QueryPath {
-  pub slave_group_id: SlaveGroupId,
-  pub maybe_tablet_group_id: Option<TabletGroupId>,
-  pub query_id: SenderStatePath,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformQuery {
-  pub root_query_path: QueryId,
+  pub root_query_path: QueryPath,
   pub sender_path: QueryPath,
   pub query_id: QueryId,
   pub tier_map: TierMap,
@@ -123,12 +111,10 @@ pub struct CancelQuery {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QuerySuccess {
   /// The receiving node's State that the responses should be routed to.
-  pub sender_status_path: SenderStatePath,
-  /// The Tablet/Slave that just succeeded.
-  pub node_group_id: NodeGroupId,
+  pub return_path: QueryId,
   pub query_id: QueryId,
   pub result: (Vec<ColName>, Vec<TableView>),
-  pub new_rms: Vec<TabletGroupId>,
+  pub new_rms: Vec<QueryPath>,
 }
 
 /// These are Errors that are simply recursively propagated up to the Slave,
@@ -156,8 +142,7 @@ pub enum AbortedData {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QueryAborted {
-  pub sender_state_path: SenderStatePath,
-  pub tablet_group_id: TabletGroupId,
+  pub return_path: QueryId,
   // The QueryId of the query that was aborted.
   pub query_id: QueryId,
   pub payload: AbortedData,
@@ -203,34 +188,31 @@ pub struct UpdateQuery {
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct MSQueryCoordPath(pub QueryId);
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Query2PCPrepare {
-  pub sender_path: (SlaveGroupId, MSQueryCoordPath),
-  pub root_query_id: QueryId,
+  pub sender_path: QueryPath,
+  pub ms_query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Query2PCPrepared {
-  pub return_path: MSQueryCoordPath,
-  pub tablet_group_id: TabletGroupId,
+  pub return_path: QueryId,
+  pub rm_path: QueryPath,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Query2PCAborted {
-  pub return_path: MSQueryCoordPath,
-  pub tablet_group_id: TabletGroupId,
+  pub return_path: QueryId,
+  pub rm_path: QueryPath,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Query2PCAbort {
-  pub root_query_id: QueryId,
+  pub ms_query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Query2PCCommit {
-  pub root_query_id: QueryId,
+  pub ms_query_id: QueryId,
 }
 
 // -------------------------------------------------------------------------------------------------
