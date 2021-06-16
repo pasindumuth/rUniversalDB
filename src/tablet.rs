@@ -700,9 +700,7 @@ impl<T: IOTypes> TabletState<T> {
               // This means that this task is done. We still need to enforce the lats
               // to be high enough.
               for col in cols {
-                let maybe_key_col =
-                  self.table_schema.key_cols.iter().find(|(col_name, _)| col == col_name);
-                if maybe_key_col.is_none() {
+                if lookup_pos(&self.table_schema.key_cols, col).is_none() {
                   // We need to update the lat in val_cols.
                   self.table_schema.val_cols.read(col, timestamp.clone());
                 }
@@ -1139,7 +1137,7 @@ impl<T: IOTypes> TabletState<T> {
 
             // This computes a ContextSchema for the subquery, as well as expose a conversion
             // utility to compute ContextRows.
-            let conv = ContextConverter::new(
+            let conv = ContextConverter::create_from_query_plan(
               &es.context.context_schema,
               &es.query_plan.col_usage_node,
               subquery_index,
@@ -1416,7 +1414,8 @@ impl<T: IOTypes> TabletState<T> {
 
     // Next, we compute the QueryPlan we should send out.
 
-    // Compute the TransTable schemas
+    // Compute the TransTable schemas. We use the true TransTables for all prior
+    // locally defined TransTables.
     let trans_table_schemas = &es.query_plan.trans_table_schemas;
     let mut child_trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
     for trans_table_name in &local_trans_table_split {
@@ -1634,35 +1633,44 @@ impl<T: IOTypes> TabletState<T> {
             Which only uses the main ContextRow. Then, we iterate every key in this Key
             Bounds. For each, we use that + main Context Row to compute the Context Row
             for every child query. We hold HashMap<ContextRow, usize> for each subquery,
-            ultimately allowing us to lookup SingleSubqueryContext's Vec<TableView>. (We
-            don't even need the ContextRow in Finished anymore.) Thus, for every
-            main ContextRow + in-bound TableRow, we can replace appearances of
+            ultimately allowing us to lookup SingleSubqueryContext's Vec<TableView>.
+            (Technically, we don't even need the ContextRow in Finished anymore.) Thus,
+            for every main ContextRow + in-bound TableRow, we can replace appearances of
             ValExpr::Subquery with actual values. (Note we also throw runtime errors if
             the subquery TableViews aren't single values.)
+
+            Note that the child ContextRows we compute here will generally have different
+            column ordering the ones computed originally. Fortunately, this doesn't matter,
+            since we only rely on the distinctness of a child ContextRow from the prior
+            ones in order to update the HashMap<ContextRow, usize>.
             */
 
-            let subqueries = collect_select_subqueries(&es.query);
+            let num_subqueries = executing_state.subquery_pos.len();
+            let requested_cols = es.query_plan.col_usage_node.requested_cols.clone();
 
             // Construct the ContextConverters for all subqueries
             let mut converters = Vec::<ContextConverter>::new();
-            for subquery_index in 0..subqueries.len() {
-              converters.push(ContextConverter::new(
+            for subquery_id in &executing_state.subquery_pos {
+              let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+              let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
+              converters.push(ContextConverter::create_from_prior_schema(
                 &es.context.context_schema,
-                &es.query_plan.col_usage_node,
-                subquery_index,
+                &result.context.context_schema,
+                &es.timestamp,
+                &self.table_schema,
               ));
             }
 
             // Setup the child_context_row_maps that will be populated over time.
             let mut child_context_row_maps = Vec::<HashMap<ContextRow, usize>>::new();
-            for _ in 0..subqueries.len() {
+            for _ in 0..num_subqueries {
               child_context_row_maps.push(HashMap::new());
             }
 
             // Compute the Schema that should belong to every TableView that's returned
             // from this TableReadES.
             let mut res_col_names = Vec::<(ColName, ColType)>::new();
-            for col_name in &es.query_plan.col_usage_node.requested_cols {
+            for col_name in &requested_cols {
               let col_type = if let Some(pos) = lookup_pos(&self.table_schema.key_cols, col_name) {
                 let (_, col_type) = self.table_schema.key_cols.get(pos).unwrap();
                 col_type.clone()
@@ -1672,6 +1680,16 @@ impl<T: IOTypes> TabletState<T> {
               res_col_names.push((col_name.clone(), col_type));
             }
 
+            // Compute the union of `external_cols` and `safe_present_cols` found
+            // in the Contexts. (We can't use the QueryPlan since it might be out-of-date).
+            let mut external_cols_set = HashSet::<ColName>::new();
+            let mut safe_present_cols_set = HashSet::<ColName>::new();
+            for conv in &converters {
+              external_cols_set.extend(conv.external_split.clone());
+              safe_present_cols_set.extend(conv.safe_present_split.clone());
+            }
+            let safe_present_cols: Vec<ColName> = safe_present_cols_set.iter().cloned().collect();
+
             // Now, we are recomputing the KeyRegion the same way as we had to when
             // we went to Pending to wait for the ReadRegion to lock.
 
@@ -1680,7 +1698,7 @@ impl<T: IOTypes> TabletState<T> {
             let mut context_col_index = HashMap::<ColName, usize>::new();
             let col_schema = es.context.context_schema.column_context_schema.clone();
             for (index, col) in col_schema.iter().enumerate() {
-              if es.query_plan.col_usage_node.external_cols.contains(col) {
+              if external_cols_set.contains(col) {
                 context_col_index.insert(col.clone(), index);
               }
             }
@@ -1703,15 +1721,11 @@ impl<T: IOTypes> TabletState<T> {
 
               // We iterate over the rows of the Subtable computed for this ContextRow,
               // computing the TableView we desire for the ContextRow.
-              let (subtable_schema, subtable) = compute_subtable(
-                &es.query_plan.col_usage_node.safe_present_cols,
-                &key_bounds,
-                &self.storage,
-              );
+              let (subtable_schema, subtable) =
+                compute_subtable(&safe_present_cols, &key_bounds, &self.storage);
 
               // Next, we initialize the TableView that we are trying to construct for
               // this `context_row`.
-
               let mut res_table_view =
                 TableView { col_names: res_col_names.clone(), rows: Default::default() };
 
@@ -1719,7 +1733,7 @@ impl<T: IOTypes> TabletState<T> {
                 // Now, we compute the subquery result for all subqueries for this
                 // `context_row` + `subtable_row`.
                 let mut subquery_vals = Vec::<TableView>::new();
-                for index in 0..subqueries.len() {
+                for index in 0..num_subqueries {
                   // Compute the child ContextRow for this subquery, and populate
                   // `child_context_row_map` accordingly.
                   let conv = converters.get(index).unwrap();
@@ -1792,7 +1806,7 @@ impl<T: IOTypes> TabletState<T> {
             let success_msg = msg::QuerySuccess {
               return_path: es.sender_path.query_id.clone(),
               query_id: query_id.clone(),
-              result: (es.query_plan.col_usage_node.requested_cols.clone(), res_table_views),
+              result: (requested_cols, res_table_views),
               new_rms: es.new_rms.iter().cloned().collect(),
             };
 
@@ -1935,6 +1949,9 @@ fn is_true(val: &ColValN) -> Result<bool, EvalError> {
 /// from a parent ContexRow + Table row. We have to initially pass in the
 /// the parent's ContextRowSchema, the parent's ColUsageNode, as well as `i`,
 /// which points to the Subquery we want to compute child ContextRows for.
+///
+/// Importantly, order within `safe_present_split`, `external_split`, and
+/// `trans_table_split` aren't guaranteed.
 #[derive(Default)]
 struct ContextConverter {
   // This is the child query's ContextSchema, and it's computed in the constructor.
@@ -1954,17 +1971,19 @@ struct ContextConverter {
 }
 
 impl ContextConverter {
-  /// Compute all of the data members.
-  fn new(
+  /// Compute all of the data members from a QueryPlan.
+  fn create_from_query_plan(
     parent_context_schema: &ContextSchema,
     parent_node: &FrozenColUsageNode,
     subquery_index: usize,
   ) -> ContextConverter {
-    let mut conv = ContextConverter::default();
     let child = parent_node.children.get(subquery_index).unwrap();
 
+    let mut safe_present_split = Vec::<ColName>::new();
+    let mut external_split = Vec::<ColName>::new();
+    let trans_table_split = nodes_external_trans_tables(child);
+
     // Construct the ContextSchema of the GRQueryES.
-    let mut context_schema = ContextSchema::default();
     let mut subquery_external_cols = HashSet::<ColName>::new();
     for (_, (_, node)) in child {
       subquery_external_cols.extend(node.external_cols.clone());
@@ -1974,11 +1993,74 @@ impl ContextConverter {
     // and which aren't.
     for col in &subquery_external_cols {
       if parent_node.safe_present_cols.contains(col) {
-        conv.safe_present_split.push(col.clone());
+        safe_present_split.push(col.clone());
       } else {
-        conv.external_split.push(col.clone());
+        external_split.push(col.clone());
       }
     }
+
+    ContextConverter::finish_creation(
+      parent_context_schema,
+      safe_present_split,
+      external_split,
+      trans_table_split,
+    )
+  }
+
+  /// This function creates a Converter that converted ContextRows of the
+  /// `parent_context_schema` to Context Rows of the `child_context_schema`.
+  /// In practice, the latter should have been computed by another ContextConverter
+  /// created with the `create_from_query_plan` constructor. The only property we need
+  /// is that all `ColNames` that appear in either ContextSchema have already been
+  /// locked in the `table_schema`, so we can strongly read them.
+  fn create_from_prior_schema(
+    parent_context_schema: &ContextSchema,
+    child_context_schema: &ContextSchema,
+    timestamp: &Timestamp,
+    table_schema: &TableSchema,
+  ) -> ContextConverter {
+    let mut safe_present_split = Vec::<ColName>::new();
+    let mut external_split = Vec::<ColName>::new();
+    let trans_table_split = child_context_schema
+      .trans_table_context_schema
+      .iter()
+      .map(|prefix| prefix.trans_table_name.clone())
+      .collect();
+
+    // Whichever `ColName`s in `child_context_schema` that are also present in
+    // `table_schema` should be added to `safe_present_cols`. Otherwise, they should
+    // be added to `external_split`.
+    for col in &child_context_schema.column_context_schema {
+      if contains_col(table_schema, col, timestamp) {
+        safe_present_split.push(col.clone());
+      } else {
+        external_split.push(col.clone());
+      }
+    }
+
+    ContextConverter::finish_creation(
+      parent_context_schema,
+      safe_present_split,
+      external_split,
+      trans_table_split,
+    )
+  }
+
+  /// Move the `*_split` variables into a ContextConverter, and compute the
+  /// various convenience data.
+  fn finish_creation(
+    parent_context_schema: &ContextSchema,
+    safe_present_split: Vec<ColName>,
+    external_split: Vec<ColName>,
+    trans_table_split: Vec<TransTableName>,
+  ) -> ContextConverter {
+    let mut conv = ContextConverter::default();
+    conv.safe_present_split = safe_present_split;
+    conv.external_split = external_split;
+    conv.trans_table_split = trans_table_split;
+
+    // Construct the ContextSchema of the GRQueryES.
+    let mut context_schema = ContextSchema::default();
 
     // Point all `conv.external_split` columns to their index in main Query's ContextSchema.
     let col_schema = &parent_context_schema.column_context_schema;
@@ -1988,24 +2070,21 @@ impl ContextConverter {
       }
     }
 
-    // Compute the ColumnContextSchema so that `afe_present_split` is first, and
+    // Compute the ColumnContextSchema so that `safe_present_split` is first, and
     // `external_split` is second. This is relevent when we compute ContextRows.
     context_schema.column_context_schema.extend(conv.safe_present_split.clone());
     context_schema.column_context_schema.extend(conv.external_split.clone());
 
-    // Compute the TransTables that the child Context will use.
-    let trans_table_split = nodes_external_trans_tables(child);
-
     // Point all `trans_table_split` to their index in main Query's ContextSchema.
     let trans_table_context_schema = &parent_context_schema.trans_table_context_schema;
     for (index, prefix) in trans_table_context_schema.iter().enumerate() {
-      if trans_table_split.contains(&prefix.trans_table_name) {
+      if conv.trans_table_split.contains(&prefix.trans_table_name) {
         conv.context_trans_table_index.insert(prefix.trans_table_name.clone(), index);
       }
     }
 
     // Compute the TransTableContextSchema
-    for trans_table_name in &trans_table_split {
+    for trans_table_name in &conv.trans_table_split {
       let index = conv.context_trans_table_index.get(trans_table_name).unwrap();
       let trans_table_prefix = trans_table_context_schema.get(*index).unwrap().clone();
       context_schema.trans_table_context_schema.push(trans_table_prefix);
@@ -2064,6 +2143,20 @@ impl ContextConverter {
     }
     col_context
   }
+}
+
+/// Computes whether `col` is in `table_schema` at `timestamp`. Note that it must be
+/// ensured that `col` is a locked column at this Timestamp.
+fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
+  if lookup_pos(&table_schema.key_cols, col).is_some() {
+    return true;
+  }
+  // If the `col` wasn't part of the PrimaryKey, then we need to
+  // check the `val_cols` to check for presence
+  if table_schema.val_cols.strong_static_read(col, *timestamp).is_some() {
+    return true;
+  }
+  return false;
 }
 
 /// This function computes a minimum set of `TabletGroupId`s whose `TabletKeyRange`
@@ -2199,27 +2292,22 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
       CommonQueryReplanningS::ProjectedColumnLocking { .. } => {
         // We need to verify that the projected columns are present.
         for col in &self.sql_view.projected_cols(table_schema) {
-          let maybe_key_col = table_schema.key_cols.iter().find(|(col_name, _)| col == col_name);
-          if maybe_key_col.is_none() {
-            // If the `col` wasn't part of the PrimaryKey, then we need to
-            // check the `val_cols` to check for presence
-            if table_schema.val_cols.strong_static_read(col, self.timestamp.clone()).is_none() {
-              // This means a projected column doesn't exist. Thus, we Exit and Clean Up.
-              let sender_path = &self.sender_path;
-              let eid = slave_address_config.get(&sender_path.slave_group_id).unwrap();
-              network_output.send(
-                &eid,
-                msg::NetworkMessage::Slave(msg::SlaveMessage::QueryAborted(msg::QueryAborted {
-                  return_path: sender_path.query_id.clone(),
-                  query_id: query_id.clone(),
-                  payload: msg::AbortedData::QueryError(msg::QueryError::ProjectedColumnsDNE {
-                    msg: String::new(),
-                  }),
-                })),
-              );
-              self.state = CommonQueryReplanningS::Done(false);
-              return;
-            }
+          if !contains_col(&table_schema, col, &self.timestamp) {
+            // This means a projected column doesn't exist. Thus, we Exit and Clean Up.
+            let sender_path = &self.sender_path;
+            let eid = slave_address_config.get(&sender_path.slave_group_id).unwrap();
+            network_output.send(
+              &eid,
+              msg::NetworkMessage::Slave(msg::SlaveMessage::QueryAborted(msg::QueryAborted {
+                return_path: sender_path.query_id.clone(),
+                query_id: query_id.clone(),
+                payload: msg::AbortedData::QueryError(msg::QueryError::ProjectedColumnsDNE {
+                  msg: String::new(),
+                }),
+              })),
+            );
+            self.state = CommonQueryReplanningS::Done(false);
+            return;
           }
         }
 
@@ -2278,21 +2366,17 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         let mut does_query_plan_align = (|| {
           // First, check that `external_cols are absent.
           for col in &self.query_plan.col_usage_node.external_cols {
-            let maybe_key_col = table_schema.key_cols.iter().find(|(col_name, _)| col == col_name);
             // Since the key_cols are static, no query plan should have a
             // key_col as an external col. Thus, we assert.
-            assert!(maybe_key_col.is_none());
+            assert!(lookup_pos(&table_schema.key_cols, col).is_none());
             if table_schema.val_cols.strong_static_read(&col, self.timestamp).is_some() {
               return false;
             }
           }
           // Next, check that `safe_present_cols` are present.
           for col in &self.query_plan.col_usage_node.safe_present_cols {
-            let maybe_key_col = table_schema.key_cols.iter().find(|(col_name, _)| col == col_name);
-            if maybe_key_col.is_none() {
-              if table_schema.val_cols.strong_static_read(&col, self.timestamp).is_none() {
-                return false;
-              }
+            if !contains_col(table_schema, col, &self.timestamp) {
+              return false;
             }
           }
           return true;
@@ -2369,14 +2453,8 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           // Compute `schema_cols`, the cols that are present among all relevent cols.
           let mut schema_cols = Vec::<ColName>::new();
           for col in locking_cols {
-            let maybe_key_col = table_schema.key_cols.iter().find(|(col_name, _)| col == col_name);
-            if maybe_key_col.is_some() {
+            if contains_col(table_schema, col, &self.timestamp) {
               schema_cols.push(col.clone());
-            } else {
-              // If `col` isn't a `key_col`, then it might be a `val_col`.
-              if table_schema.val_cols.strong_static_read(col, self.timestamp).is_some() {
-                schema_cols.push(col.clone());
-              }
             }
           }
 
