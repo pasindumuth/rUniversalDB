@@ -1,6 +1,6 @@
 use crate::col_usage::{
-  collect_select_subqueries, node_external_trans_tables, nodes_external_trans_tables,
-  ColUsagePlanner, FrozenColUsageNode,
+  collect_select_subqueries, collect_top_level_cols, node_external_trans_tables,
+  nodes_external_trans_tables, ColUsagePlanner, FrozenColUsageNode,
 };
 use crate::common::{
   lookup_pos, merge_table_views, mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
@@ -142,6 +142,7 @@ struct SubqueryLockingSchemas {
 struct SubqueryPendingReadRegion {
   context_schema: ContextSchema,
   read_region: TableRegion,
+  query_id: QueryId,
 }
 
 #[derive(Debug)]
@@ -360,7 +361,7 @@ enum TabletStatus {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct VerifyingReadWriteRegion {
   orig_p: OrigP,
-  m_waiting_read_protected: BTreeSet<(OrigP, TableRegion)>,
+  m_waiting_read_protected: BTreeSet<(OrigP, QueryId, TableRegion)>,
   m_read_protected: BTreeSet<TableRegion>,
   m_write_protected: BTreeSet<TableRegion>,
 }
@@ -377,10 +378,11 @@ struct ReadWriteRegion {
 // -----------------------------------------------------------------------------------------------
 // These enums are used for communication between algorithms.
 
+// TODO: sync the ProtectRequest with the Pseudocode
 enum ReadProtectionGrant {
-  Read { timestamp: Timestamp, protect_request: (OrigP, TableRegion) },
-  MRead { timestamp: Timestamp, protect_request: (OrigP, TableRegion) },
-  DeadlockSafetyReadAbort { timestamp: Timestamp, protect_request: (OrigP, TableRegion) },
+  Read { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
+  MRead { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
+  DeadlockSafetyReadAbort { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
   DeadlockSafetyWriteAbort { timestamp: Timestamp, orig_p: OrigP },
 }
 
@@ -467,7 +469,7 @@ pub struct TabletState<T: IOTypes> {
   prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
   committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
 
-  waiting_read_protected: BTreeMap<Timestamp, BTreeSet<(OrigP, TableRegion)>>,
+  waiting_read_protected: BTreeMap<Timestamp, BTreeSet<(OrigP, QueryId, TableRegion)>>,
   read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
 
   // Schema Change and Locking
@@ -788,7 +790,7 @@ impl<T: IOTypes> TabletState<T> {
 
             // Process `m_read_protected`
             for protect_request in &verifying_write.m_waiting_read_protected {
-              let (_, read_region) = protect_request;
+              let (_, _, read_region) = protect_request;
               if does_intersect(read_region, &cum_write_regions) {
                 return Some(ReadProtectionGrant::MRead {
                   timestamp: *first_write_timestamp,
@@ -801,7 +803,7 @@ impl<T: IOTypes> TabletState<T> {
             let bound = (Bound::Included(prev_write_timestamp), Bound::Excluded(cur_timestamp));
             for (timestamp, set) in self.waiting_read_protected.range(bound) {
               for protect_request in set {
-                let (_, read_region) = protect_request;
+                let (_, _, read_region) = protect_request;
                 if does_intersect(read_region, &cum_write_regions) {
                   return Some(ReadProtectionGrant::Read {
                     timestamp: *timestamp,
@@ -822,7 +824,7 @@ impl<T: IOTypes> TabletState<T> {
           let bound = (Bound::Included(prev_write_timestamp), Bound::Unbounded);
           for (timestamp, set) in self.waiting_read_protected.range(bound) {
             for protect_request in set {
-              let (_, read_region) = protect_request;
+              let (_, _, read_region) = protect_request;
               if does_intersect(read_region, &cum_write_regions) {
                 return Some(ReadProtectionGrant::Read {
                   timestamp: *timestamp,
@@ -842,7 +844,7 @@ impl<T: IOTypes> TabletState<T> {
         for (timestamp, set) in &self.waiting_read_protected {
           if let Some(verifying_write) = self.verifying_writes.get(timestamp) {
             for protect_request in set {
-              let (orig_p, read_region) = protect_request;
+              let (orig_p, _, read_region) = protect_request;
               if does_intersect(read_region, &verifying_write.m_write_protected) {
                 return Some(ReadProtectionGrant::DeadlockSafetyWriteAbort {
                   timestamp: *timestamp,
@@ -857,7 +859,7 @@ impl<T: IOTypes> TabletState<T> {
         for (timestamp, set) in &self.waiting_read_protected {
           if let Some(prepared_write) = self.prepared_writes.get(timestamp) {
             for protect_request in set {
-              let (_, read_region) = protect_request;
+              let (_, _, read_region) = protect_request;
               if does_intersect(read_region, &prepared_write.m_write_protected) {
                 return Some(ReadProtectionGrant::DeadlockSafetyReadAbort {
                   timestamp: *timestamp,
@@ -879,7 +881,7 @@ impl<T: IOTypes> TabletState<T> {
             if set.is_empty() {
               self.waiting_read_protected.remove(&timestamp);
             }
-            let (orig_p, read_region) = protect_request;
+            let (orig_p, query_id, read_region) = protect_request;
 
             // Add the ReadRegion to `read_protected`.
             if let Some(set) = self.read_protected.get_mut(&timestamp) {
@@ -890,18 +892,18 @@ impl<T: IOTypes> TabletState<T> {
             }
 
             // Inform the originator.
-            self.read_protected_for_query(orig_p, read_region);
+            self.read_protected_for_query(orig_p, query_id);
           }
           ReadProtectionGrant::MRead { timestamp, protect_request } => {
             // Remove the protect_request, adding the ReadRegion to `m_read_protected`.
             let mut verifying_write = self.verifying_writes.get_mut(&timestamp).unwrap();
             verifying_write.m_waiting_read_protected.remove(&protect_request);
 
-            let (orig_p, read_region) = protect_request;
+            let (orig_p, query_id, read_region) = protect_request;
             verifying_write.m_read_protected.insert(read_region.clone());
 
             // Inform the originator.
-            self.read_protected_for_query(orig_p, read_region);
+            self.read_protected_for_query(orig_p, query_id);
           }
           ReadProtectionGrant::DeadlockSafetyReadAbort { timestamp, protect_request } => {
             // Remove the protect_request, doing any extra cleanups too.
@@ -910,7 +912,7 @@ impl<T: IOTypes> TabletState<T> {
             if set.is_empty() {
               self.waiting_read_protected.remove(&timestamp);
             }
-            let (orig_p, read_region) = protect_request;
+            let (orig_p, _, read_region) = protect_request;
 
             // Inform the originator
             self.deadlock_safety_read_abort(orig_p, read_region);
@@ -1024,15 +1026,15 @@ impl<T: IOTypes> TabletState<T> {
               };
 
               // Add a read protection requested
+              let protect_query_id = mk_qid(&mut self.rand);
+              let orig_p = OrigP::StatusPath(es.query_id.clone());
+              let protect_request = (orig_p, protect_query_id.clone(), new_read_region.clone());
               if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
-                waiting.insert((OrigP::StatusPath(es.query_id.clone()), new_read_region.clone()));
+                waiting.insert(protect_request);
               } else {
-                self.waiting_read_protected.insert(
-                  es.timestamp,
-                  vec![(OrigP::StatusPath(es.query_id.clone()), new_read_region.clone())]
-                    .into_iter()
-                    .collect(),
-                );
+                self
+                  .waiting_read_protected
+                  .insert(es.timestamp, vec![protect_request].into_iter().collect());
               }
 
               // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
@@ -1042,6 +1044,7 @@ impl<T: IOTypes> TabletState<T> {
               *single_status = SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
                 context_schema: new_context_schema,
                 read_region: new_read_region,
+                query_id: protect_query_id,
               })
             }
           }
@@ -1095,28 +1098,18 @@ impl<T: IOTypes> TabletState<T> {
     col_region.extend(es.query.projection.clone());
     col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
 
-    // Here, `context_col_index` has every External Column used by
-    // the query as a key.
-    let mut context_col_index = HashMap::<ColName, usize>::new();
-    let col_schema = es.context.context_schema.column_context_schema.clone();
-    for (index, col) in col_schema.iter().enumerate() {
-      if es.query_plan.col_usage_node.external_cols.contains(col) {
-        context_col_index.insert(col.clone(), index);
-      }
-    }
+    // Setup ability to compute a tight Keybound for every ContextRow.
+    let keybound_computer = ContextKeyboundComputer::new(
+      &es.query.selection,
+      &self.table_schema,
+      &es.timestamp,
+      &es.context.context_schema,
+    );
 
     // Compute the Row Region by taking the union across all ContextRows
     let mut row_region = Vec::<KeyBound>::new();
     for context_row in &es.context.context_rows {
-      // First, map all External Columns names to the corresponding values
-      // in this ContextRow
-      let mut col_context = HashMap::<ColName, ColValN>::new();
-      for (col, index) in &context_col_index {
-        col_context
-          .insert(col.clone(), context_row.column_context_row.get(*index).unwrap().clone());
-      }
-
-      match compute_key_region(&es.query.selection, &self.table_schema.key_cols, col_context) {
+      match keybound_computer.compute_keybounds(&context_row) {
         Ok(key_bounds) => {
           for key_bound in key_bounds {
             row_region.push(key_bound);
@@ -1135,14 +1128,14 @@ impl<T: IOTypes> TabletState<T> {
     let read_region = TableRegion { col_region, row_region };
     es.state = ExecutionS::Pending(Pending { read_region: read_region.clone() });
 
-    // Add read protection
+    // Add a read protection requested
+    let protect_query_id = mk_qid(&mut self.rand);
+    let orig_p = OrigP::StatusPath(es.query_id.clone());
+    let protect_request = (orig_p, protect_query_id, read_region.clone());
     if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
-      waiting.insert((OrigP::StatusPath(es.query_id.clone()), read_region));
+      waiting.insert(protect_request);
     } else {
-      self.waiting_read_protected.insert(
-        es.timestamp,
-        vec![(OrigP::StatusPath(es.query_id.clone()), read_region)].into_iter().collect(),
-      );
+      self.waiting_read_protected.insert(es.timestamp, vec![protect_request].into_iter().collect());
     }
   }
 
@@ -1232,14 +1225,14 @@ impl<T: IOTypes> TabletState<T> {
 
   /// We get this if a ReadProtection was granted by the Main Loop. This includes standard
   /// read_protected, or m_read_protected.
-  fn read_protected_for_query(&mut self, orig_p: OrigP, _: TableRegion) {
+  fn read_protected_for_query(&mut self, orig_p: OrigP, protect_query_id: QueryId) {
     let query_id = cast!(OrigP::StatusPath, orig_p).unwrap();
     if let Some(tablet_status) = self.tablet_statuses.get_mut(&query_id) {
       match tablet_status {
         TabletStatus::GRQueryES(_) => panic!(),
         TabletStatus::FullTableReadES(read_es) => {
           let es = cast!(FullTableReadES::Executing, read_es).unwrap();
-          match &es.state {
+          match &mut es.state {
             ExecutionS::Start => panic!(),
             ExecutionS::Pending(pending) => {
               // Iterate over every GRQuery. Compute the external_cols (by taking
@@ -1253,6 +1246,14 @@ impl<T: IOTypes> TabletState<T> {
               // we can take the `safe_present_cols` split to compute a TableView.
               // I guess we can iterate over the primary key, see if it's in the split,
               // and then when computing the context, only take a range query over that.
+
+              // Setup ability to compute a tight Keybound for every ContextRow.
+              let keybound_computer = ContextKeyboundComputer::new(
+                &es.query.selection,
+                &self.table_schema,
+                &es.timestamp,
+                &es.context.context_schema,
+              );
 
               // We first compute all GRQueryESs before adding them to `tablet_status`, in case
               // an error occurs here
@@ -1280,11 +1281,7 @@ impl<T: IOTypes> TabletState<T> {
                   // corresponding subtable using `safe_present_split`, and then extend it by this
                   // `context_row.column_context_row`. We also add the `TransTableContextRow`. This
                   // results in a set of `ContextRows` that we add to the childs context.
-                  match compute_key_region(
-                    &es.query.selection,
-                    &self.table_schema.key_cols,
-                    conv.compute_col_context(&context_row),
-                  ) {
+                  match keybound_computer.compute_keybounds(&context_row) {
                     Ok(key_bounds) => {
                       let (_, mut subtable) =
                         compute_subtable(&conv.safe_present_split, &key_bounds, &self.storage);
@@ -1297,32 +1294,7 @@ impl<T: IOTypes> TabletState<T> {
                       }
                     }
                     Err(eval_error) => {
-                      // If an error occurs here, we simply abort this whole query and respond
-                      // to the sender with an Abort.
-                      let aborted = msg::QueryAborted {
-                        return_path: es.sender_path.query_id.clone(),
-                        query_id: query_id.clone(),
-                        payload: msg::AbortedData::QueryError(msg::QueryError::TypeError {
-                          msg: format!("{:?}", eval_error),
-                        }),
-                      };
-
-                      let sid = &es.sender_path.slave_group_id;
-                      let eid = self.slave_address_config.get(sid).unwrap();
-                      self.network_output.send(
-                        &eid,
-                        msg::NetworkMessage::Slave(
-                          if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
-                            msg::SlaveMessage::TabletMessage(
-                              tablet_group_id.clone(),
-                              msg::TabletMessage::QueryAborted(aborted),
-                            )
-                          } else {
-                            msg::SlaveMessage::QueryAborted(aborted)
-                          },
-                        ),
-                      );
-                      self.tablet_statuses.remove(&query_id);
+                      self.handle_eval_error_table_es(&query_id, eval_error);
                       return;
                     }
                   }
@@ -1392,11 +1364,115 @@ impl<T: IOTypes> TabletState<T> {
               }
             }
             ExecutionS::Executing(executing) => {
-              let executing = cast!(ExecutionS::Executing, &mut es.state).unwrap();
+              // Find the subquery that this `protect_query_id` is referring to. There should
+              // always be such a Subquery.
+              let (subquery_id, protect_status) = (|| {
+                for (subquery_id, state) in &executing.subquery_status.subqueries {
+                  match state {
+                    SingleSubqueryStatus::PendingReadRegion(protect_status) => {
+                      if &protect_status.query_id == &protect_query_id {
+                        return Some((subquery_id, protect_status));
+                      }
+                    }
+                    _ => {}
+                  }
+                }
+                return None;
+              })()
+              .unwrap();
 
-              // Finally, we recompute the Context for the relevent subquery and create
-              // a new GRQueryES.
-              // TODO: finish
+              // Setup ability to compute a tight Keybound for every ContextRow.
+              let keybound_computer = ContextKeyboundComputer::new(
+                &es.query.selection,
+                &self.table_schema,
+                &es.timestamp,
+                &es.context.context_schema,
+              );
+
+              // Find the GRQuery that corresponds to this subquery
+              let subqueries = collect_select_subqueries(&es.query);
+              let subquery_index =
+                executing.subquery_pos.iter().position(|id| id == subquery_id).unwrap();
+              let subquery = subqueries.get(subquery_index).unwrap();
+
+              // This computes a ContextSchema for the subquery, as well as expose a conversion
+              // utility to compute ContextRows. Notice we avoid using the child QueryPlan,
+              // since it's out-of-date by this point.
+              let conv = ContextConverter::create_from_prior_schema(
+                &es.context.context_schema,
+                &protect_status.context_schema,
+                &es.timestamp,
+                &self.table_schema,
+              );
+
+              // Construct the `ContextRow`s. To do this, we iterate over main Query's
+              // `ContextRow`s and then the corresponding `ContextRow`s for the subquery.
+              // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
+              let mut new_context_rows = Vec::<ContextRow>::new();
+              let mut new_row_set = HashSet::<ContextRow>::new();
+              for context_row in &es.context.context_rows {
+                // Next, we compute the tightest KeyBound for this `context_row`, compute the
+                // corresponding subtable using `safe_present_split`, and then extend it by this
+                // `context_row.column_context_row`. We also add the `TransTableContextRow`. This
+                // results in a set of `ContextRows` that we add to the childs context.
+                match keybound_computer.compute_keybounds(&context_row) {
+                  Ok(key_bounds) => {
+                    let (_, mut subtable) =
+                      compute_subtable(&conv.safe_present_split, &key_bounds, &self.storage);
+                    for mut row in subtable {
+                      let new_context_row = conv.compute_child_context_row(context_row, row);
+                      if !new_row_set.contains(&new_context_row) {
+                        new_row_set.insert(new_context_row.clone());
+                        new_context_rows.push(new_context_row);
+                      }
+                    }
+                  }
+                  Err(eval_error) => {
+                    self.handle_eval_error_table_es(&query_id, eval_error);
+                    return;
+                  }
+                }
+              }
+
+              // Finally, compute the context.
+              let context = Rc::new(Context {
+                context_schema: conv.context_schema,
+                context_rows: new_context_rows,
+              });
+
+              // Construct the GRQueryES
+              let child = es.query_plan.col_usage_node.children.get(subquery_index).unwrap();
+              let gr_query_es = GRQueryES {
+                root_query_path: es.root_query_path.clone(),
+                tier_map: es.tier_map.clone(),
+                timestamp: es.timestamp.clone(),
+                context: context.clone(),
+                new_trans_table_context: vec![],
+                query_id: subquery_id.clone(),
+                query: subquery.clone(),
+                query_plan: GRQueryPlan {
+                  gossip_gen: es.query_plan.gossip_gen.clone(),
+                  trans_table_schemas: es.query_plan.trans_table_schemas.clone(),
+                  col_usage_nodes: child.clone(),
+                },
+                new_rms: Default::default(),
+                trans_table_view: vec![],
+                state: GRExecutionS::Start,
+                orig_p: OrigP::StatusPath(query_id.clone()),
+              };
+
+              // Advance the SingleSubqueryStatus, add in the subquery to `table_statuses`,
+              // and start evaluating the GRQueryES
+              let subquery_id = subquery_id.clone();
+              let single_status =
+                executing.subquery_status.subqueries.get_mut(&subquery_id).unwrap();
+              *single_status = SingleSubqueryStatus::Pending(SubqueryPending { context });
+
+              self
+                .tablet_statuses
+                .insert(subquery_id.clone(), TabletStatus::GRQueryES(gr_query_es));
+
+              self.advance_gr_query(subquery_id);
             }
           }
         }
@@ -2082,6 +2158,66 @@ fn is_true(val: &ColValN) -> Result<bool, EvalError> {
   }
 }
 
+/// This is used to compute the Keybound of a selection expression for
+/// a given ContextRow containing external columns. Recall that the
+/// selection expression might have ColumnRefs that aren't part of
+/// the TableSchema (i.e. part of the external Context), and we can use
+/// that to compute a tigher Keybound.
+struct ContextKeyboundComputer {
+  context_col_index: HashMap<ColName, usize>,
+  selection: proc::ValExpr,
+  key_cols: Vec<(ColName, ColType)>,
+}
+
+impl ContextKeyboundComputer {
+  fn new(
+    selection: &proc::ValExpr,
+    table_schema: &TableSchema,
+    timestamp: &Timestamp,
+    parent_context_schema: &ContextSchema,
+  ) -> ContextKeyboundComputer {
+    // Compute the ColNames directly used in the `selection` that's not part of
+    // the TableSchema (i.e. part of the external Context).
+    let mut external_cols = HashSet::<ColName>::new();
+    for col in collect_top_level_cols(selection) {
+      if !contains_col(table_schema, &col, timestamp) {
+        external_cols.insert(col);
+      }
+    }
+
+    /// Map the `external_cols` to their position in the parent context. Recall that
+    /// every element `external_cols` should exist in the parent_context, so we
+    /// assert as such.
+    let mut context_col_index = HashMap::<ColName, usize>::new();
+    for (index, col) in parent_context_schema.column_context_schema.iter().enumerate() {
+      if external_cols.contains(col) {
+        context_col_index.insert(col.clone(), index);
+      }
+    }
+    assert_eq!(context_col_index.len(), external_cols.len());
+
+    ContextKeyboundComputer {
+      context_col_index,
+      selection: selection.clone(),
+      key_cols: table_schema.key_cols.clone(),
+    }
+  }
+
+  /// Compute the tightest keybound for the given ContextRow.
+  fn compute_keybounds(&self, context_row: &ContextRow) -> Result<Vec<KeyBound>, EvalError> {
+    // First, map all External Columns names to the corresponding values
+    // in this ContextRow
+    let mut col_context = HashMap::<ColName, ColValN>::new();
+    for (col, index) in &self.context_col_index {
+      let col_val = context_row.column_context_row.get(*index).unwrap().clone();
+      col_context.insert(col.clone(), col_val);
+    }
+
+    // Then, compute the keybound
+    compute_key_region(&self.selection, &self.key_cols, col_context)
+  }
+}
+
 /// This container computes and remembers how to construct a child ContextRow
 /// from a parent ContexRow + Table row. We have to initially pass in the
 /// the parent's ContextRowSchema, the parent's ColUsageNode, as well as `i`,
@@ -2094,7 +2230,7 @@ struct ContextConverter {
   // This is the child query's ContextSchema, and it's computed in the constructor.
   context_schema: ContextSchema,
 
-  // These fields are the constituents of the `context_schema above.
+  // These fields are the constituents of the `context_schema` above.
   safe_present_split: Vec<ColName>,
   external_split: Vec<ColName>,
   trans_table_split: Vec<TransTableName>,

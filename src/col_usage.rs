@@ -49,19 +49,6 @@ impl<'a> ColUsagePlanner<'a> {
     }
   }
 
-  fn collect_top_level_cols(&mut self, cols: &mut Vec<ColName>, expr: &proc::ValExpr) {
-    match expr {
-      proc::ValExpr::ColumnRef { col_ref } => cols.push(col_ref.clone()),
-      proc::ValExpr::UnaryExpr { expr, .. } => self.collect_top_level_cols(cols, &expr),
-      proc::ValExpr::BinaryExpr { left, right, .. } => {
-        self.collect_top_level_cols(cols, &left);
-        self.collect_top_level_cols(cols, &right);
-      }
-      proc::ValExpr::Value { .. } => {}
-      proc::ValExpr::Subquery { .. } => {}
-    }
-  }
-
   pub fn get_all_cols(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
@@ -70,7 +57,7 @@ impl<'a> ColUsagePlanner<'a> {
     let mut requested_cols = Vec::<ColName>::new();
     let mut children = Vec::<Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>>::new();
     for expr in exprs {
-      self.collect_top_level_cols(&mut requested_cols, expr);
+      collect_top_level_cols_R(expr, &mut requested_cols);
       self.collect_subqueries(trans_table_ctx, &mut children, expr);
     }
 
@@ -100,7 +87,7 @@ impl<'a> ColUsagePlanner<'a> {
   ) -> (Vec<ColName>, FrozenColUsageNode) {
     let mut node = FrozenColUsageNode::new(table_ref.clone());
     for expr in exprs {
-      self.collect_top_level_cols(&mut node.requested_cols, expr);
+      collect_top_level_cols_R(expr, &mut node.requested_cols);
       self.collect_subqueries(trans_table_ctx, &mut node.children, expr);
     }
 
@@ -233,6 +220,25 @@ impl<'a> ColUsagePlanner<'a> {
       }
     }
     return children;
+  }
+}
+
+pub fn collect_top_level_cols(expr: &proc::ValExpr) -> Vec<ColName> {
+  let mut cols = Vec::<ColName>::new();
+  collect_top_level_cols_R(expr, &mut cols);
+  cols
+}
+
+fn collect_top_level_cols_R(expr: &proc::ValExpr, cols: &mut Vec<ColName>) {
+  match expr {
+    proc::ValExpr::ColumnRef { col_ref } => cols.push(col_ref.clone()),
+    proc::ValExpr::UnaryExpr { expr, .. } => collect_top_level_cols_R(&expr, cols),
+    proc::ValExpr::BinaryExpr { left, right, .. } => {
+      collect_top_level_cols_R(&left, cols);
+      collect_top_level_cols_R(&right, cols);
+    }
+    proc::ValExpr::Value { .. } => {}
+    proc::ValExpr::Subquery { .. } => {}
   }
 }
 
