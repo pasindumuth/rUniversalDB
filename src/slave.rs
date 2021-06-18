@@ -268,7 +268,7 @@ impl<T: IOTypes> SlaveState<T> {
         let merged_result = merge_table_views(results);
         self.handle_done_state(
           query_success.query_id,
-          cast!(OrigP::StatusPath, tm_status.orig_p).unwrap().clone(),
+          tm_status.orig_p.status_path,
           tm_status.new_rms,
           merged_result,
         );
@@ -583,7 +583,7 @@ fn ms_coord_es_advance<T: IOTypes>(
         new_rms: Default::default(),
         responded_count: 0,
         tm_state: Default::default(),
-        orig_p: OrigP::StatusPath(root_query_id.clone()),
+        orig_p: OrigP { status_path: root_query_id.clone() },
       };
 
       // Path of this TMStatus to respond to.
@@ -675,7 +675,7 @@ fn ms_coord_es_advance<T: IOTypes>(
         new_rms: Default::default(),
         responded_count: 0,
         tm_state: Default::default(),
-        orig_p: OrigP::StatusPath(root_query_id.clone()),
+        orig_p: OrigP { status_path: root_query_id.clone() },
       };
 
       // Path of this WriteTMStatus to respond to.

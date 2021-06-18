@@ -113,8 +113,8 @@ pub struct TMStatus {
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum OrigP {
-  StatusPath(QueryId),
+pub struct OrigP {
+  pub status_path: QueryId,
 }
 
 pub fn merge_table_views(
