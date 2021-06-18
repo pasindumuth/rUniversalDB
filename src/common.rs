@@ -3,7 +3,7 @@ use crate::model::common::{
   ColName, ColType, ColVal, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, TablePath, TableView,
   TabletGroupId, Timestamp, TransTableName,
 };
-use crate::model::message::{NetworkMessage, TabletMessage};
+use crate::model::message as msg;
 use crate::multiversion_map::MVM;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -14,11 +14,11 @@ pub trait Clock {
 }
 
 pub trait NetworkOut {
-  fn send(&mut self, eid: &EndpointId, msg: NetworkMessage);
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
 }
 
 pub trait TabletForwardOut {
-  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletMessage);
+  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: msg::TabletMessage);
 }
 
 pub trait IOTypes {

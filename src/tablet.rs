@@ -175,6 +175,7 @@ struct SubqueryStatus {
 #[derive(Debug)]
 struct Pending {
   read_region: TableRegion,
+  query_id: QueryId,
 }
 
 #[derive(Debug)]
@@ -661,7 +662,7 @@ impl<T: IOTypes> TabletState<T> {
         }
       }
       msg::TabletMessage::CancelQuery(cancel_query) => {
-        // self.handle_cancel_query(cancel_query.query_id);
+        self.exit_and_clean_up(cancel_query.query_id);
       }
       msg::TabletMessage::QueryAborted(query_aborted) => {
         self.handle_query_aborted(query_aborted);
@@ -675,10 +676,53 @@ impl<T: IOTypes> TabletState<T> {
       msg::TabletMessage::MasterFrozenColUsageAborted(_) => unimplemented!(),
       msg::TabletMessage::MasterFrozenColUsageSuccess(_) => unimplemented!(),
     }
+
+    self.run_main_loop();
+  }
+
+  /// This removes elements from `requested_locked_columns`, maintaining
+  /// `request_index` as well, if the request is present.
+  fn remove_col_locking_request(
+    &mut self,
+    query_id: QueryId,
+  ) -> Option<(OrigP, Timestamp, Vec<ColName>)> {
+    // Remove if present
+    if let Some((orig_p, timestamp, cols)) = self.requested_locked_columns.remove(&query_id) {
+      // Maintain the request_index.
+      self.request_index.get_mut(&timestamp).unwrap().remove(&query_id);
+      if self.request_index.get_mut(&timestamp).unwrap().is_empty() {
+        self.request_index.remove(&timestamp);
+      }
+      return Some((orig_p, timestamp, cols));
+    }
+    return None;
+  }
+
+  /// This removes the Read Protection request from `waiting_read_protected` with the given
+  /// `query_id` at the given `timestamp`, if it exists, and returns it.
+  fn remove_read_protected_request(
+    &mut self,
+    timestamp: Timestamp,
+    query_id: QueryId,
+  ) -> Option<(OrigP, QueryId, TableRegion)> {
+    if let Some(waiting) = self.waiting_read_protected.get_mut(&timestamp) {
+      for protect_request in waiting.iter() {
+        let (_, cur_query_id, _) = protect_request;
+        if cur_query_id == &query_id {
+          // Here, we found a request with matching QueryId, so we remove it.
+          let protect_request = protect_request.clone();
+          waiting.remove(&protect_request);
+          if waiting.is_empty() {
+            self.waiting_read_protected.remove(&timestamp);
+          }
+          return Some(protect_request);
+        }
+      }
+    }
+    return None;
   }
 
   fn run_main_loop(&mut self) {
-    // TODO: I believe this should be run at the end of the above. Investiage
     let mut change_occurred = true;
     while change_occurred {
       // We set this to false, and the below code will set it back to true if need be.
@@ -695,49 +739,39 @@ impl<T: IOTypes> TabletState<T> {
       }
 
       // Iterate through every `request_locked_columns` and see if that can be satisfied.
-      let maybe_first_done = (|| {
-        for (_, query_set) in &self.request_index {
-          for query_id in query_set {
-            let (orig_p, timestamp, cols) = self.requested_locked_columns.get(query_id).unwrap();
-            let not_preparing = (|| {
-              for col in cols {
-                // Check if the `col` is being Prepared.
-                if let Some(prep_timestamp) = col_prepare_timestamps.get(col) {
-                  if timestamp >= prep_timestamp {
-                    return false;
-                  }
-                }
+      'outer: for (_, query_set) in &self.request_index {
+        for query_id in query_set {
+          let (_, timestamp, cols) = self.requested_locked_columns.get(query_id).unwrap();
+          let mut not_preparing = true;
+          for col in cols {
+            // Check if the `col` is being Prepared.
+            if let Some(prep_timestamp) = col_prepare_timestamps.get(col) {
+              if timestamp >= prep_timestamp {
+                not_preparing = false;
+                break;
               }
-              return true;
-            })();
-            if not_preparing {
-              // This means that this task is done. We still need to enforce the lats
-              // to be high enough.
-              for col in cols {
-                if lookup_pos(&self.table_schema.key_cols, col).is_none() {
-                  // We need to update the lat in val_cols.
-                  self.table_schema.val_cols.read(col, timestamp.clone());
-                }
-              }
-              return Some((timestamp.clone(), query_id.clone(), orig_p.clone()));
             }
           }
-        }
-        return None;
-      })();
-      if let Some((timestamp, query_id, orig_p)) = maybe_first_done {
-        // Maintain the request_index.
-        self.request_index.get_mut(&timestamp).unwrap().remove(&query_id);
-        if self.request_index.get_mut(&timestamp).unwrap().is_empty() {
-          self.request_index.remove(&timestamp);
-        }
+          if not_preparing {
+            // This means that this task is done. We still need to enforce the lats
+            // to be high enough in `val_cols`.
+            for col in cols {
+              if lookup_pos(&self.table_schema.key_cols, col).is_none() {
+                self.table_schema.val_cols.read(col, timestamp.clone());
+              }
+            }
 
-        // Maintain the requested_locked_columns.
-        self.requested_locked_columns.remove(&query_id);
+            // Remove the column locking request.
+            let query_id = query_id.clone();
+            let (orig_p, _, _) = self.remove_col_locking_request(query_id.clone()).unwrap();
 
-        // Process
-        self.columns_locked_for_query(orig_p, query_id);
-        change_occurred = true;
+            // Process
+            self.columns_locked_for_query(orig_p, query_id);
+            change_occurred = true;
+
+            break 'outer;
+          }
+        }
       }
 
       // Next, we see if we can provide Region
@@ -879,12 +913,9 @@ impl<T: IOTypes> TabletState<T> {
         match read_protected {
           ReadProtectionGrant::Read { timestamp, protect_request } => {
             // Remove the protect_request, doing any extra cleanups too.
-            let mut set = self.waiting_read_protected.get_mut(&timestamp).unwrap();
-            set.remove(&protect_request);
-            if set.is_empty() {
-              self.waiting_read_protected.remove(&timestamp);
-            }
-            let (orig_p, query_id, read_region) = protect_request;
+            let (_, query_id, _) = protect_request;
+            let (orig_p, query_id, read_region) =
+              self.remove_read_protected_request(timestamp, query_id).unwrap();
 
             // Add the ReadRegion to `read_protected`.
             if let Some(set) = self.read_protected.get_mut(&timestamp) {
@@ -910,12 +941,9 @@ impl<T: IOTypes> TabletState<T> {
           }
           ReadProtectionGrant::DeadlockSafetyReadAbort { timestamp, protect_request } => {
             // Remove the protect_request, doing any extra cleanups too.
-            let mut set = self.waiting_read_protected.get_mut(&timestamp).unwrap();
-            set.remove(&protect_request);
-            if set.is_empty() {
-              self.waiting_read_protected.remove(&timestamp);
-            }
-            let (orig_p, _, read_region) = protect_request;
+            let (_, query_id, _) = protect_request;
+            let (orig_p, _, read_region) =
+              self.remove_read_protected_request(timestamp, query_id).unwrap();
 
             // Inform the originator
             self.deadlock_safety_read_abort(orig_p, read_region);
@@ -1174,9 +1202,11 @@ impl<T: IOTypes> TabletState<T> {
     row_region = compress_row_region(row_region);
 
     // Move the TableReadES to the Pending state with the given ReadRegion.
+    let protect_query_id = mk_qid(&mut self.rand);
     let col_region: Vec<ColName> = col_region.into_iter().collect();
     let read_region = TableRegion { col_region, row_region };
-    es.state = ExecutionS::Pending(Pending { read_region: read_region.clone() });
+    es.state =
+      ExecutionS::Pending(Pending { read_region: read_region.clone(), query_id: protect_query_id });
 
     // Add a read protection requested
     let protect_query_id = mk_qid(&mut self.rand);
@@ -2164,6 +2194,7 @@ impl<T: IOTypes> TabletState<T> {
       for (node_group_id, child_query_id) in &tm_status.node_group_ids {
         if tm_status.tm_state.get(child_query_id).unwrap() == &TMWaitValue::Nothing {
           // If the child Query hasn't responded, then sent it a CancelQuery
+          // TODO: create a general function for sending stuff out based on slave or tablet.
           match node_group_id {
             NodeGroupId::Tablet(tid) => {
               let sid = self.tablet_address_config.get(tid).unwrap();
@@ -2302,6 +2333,110 @@ impl<T: IOTypes> TabletState<T> {
         TabletStatus::MSQueryES(_) => {}
         TabletStatus::FullMSTableReadES(_) => {}
         TabletStatus::FullMSTableWriteES(_) => {}
+      }
+    }
+  }
+
+  /// This function is used to cancel an ES both for the case of CancelQuery, but also
+  /// to generally Exit and Clean Up an ES from whatever state it's in. Thus, we don't
+  /// require the ES to be in their valid state; an ES might reference another ES
+  /// that no longer exists (because the calling function did some pre-cleanup).
+  fn exit_and_clean_up(&mut self, query_id: QueryId) {
+    if let Some(tablet_status) = self.tablet_statuses.remove(&query_id) {
+      match tablet_status {
+        TabletStatus::GRQueryES(_) => {
+          // TODO: finish. Sync with existing exit strategy
+        }
+        TabletStatus::FullTableReadES(read_es) => match read_es {
+          FullTableReadES::QueryReplanning(es) => match es.status.state {
+            CommonQueryReplanningS::Start => {}
+            CommonQueryReplanningS::ProjectedColumnLocking { locked_columns_query_id } => {
+              self.remove_col_locking_request(locked_columns_query_id.clone());
+            }
+            CommonQueryReplanningS::ColumnLocking { locked_columns_query_id } => {
+              self.remove_col_locking_request(locked_columns_query_id.clone());
+            }
+            CommonQueryReplanningS::RecomputeQueryPlan { locked_columns_query_id, .. } => {
+              self.remove_col_locking_request(locked_columns_query_id.clone());
+            }
+            CommonQueryReplanningS::MasterQueryReplanning { master_query_id } => {
+              // Remove if present
+              if self.master_query_map.remove(&master_query_id).is_some() {
+                // If the removal was successful, we should also send a Cancellation
+                // message to the Master.
+                self.network_output.send(
+                  &self.master_eid,
+                  msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+                    msg::CancelMasterFrozenColUsage { query_id: master_query_id },
+                  )),
+                );
+              }
+            }
+            CommonQueryReplanningS::Done(_) => {}
+          },
+          FullTableReadES::Executing(es) => match es.state {
+            ExecutionS::Start => {}
+            ExecutionS::Pending(pending) => {
+              // Here, we remove the ReadRegion from `waiting_read_protected`, if it still exists.
+              self.remove_read_protected_request(es.timestamp.clone(), pending.query_id);
+            }
+            ExecutionS::Executing(executing) => {
+              // Here, we need to cancel every Subquery. Depending on the state of the
+              // SingleSubqueryStatus, we either need to either clean up the column locking request,
+              // the ReadRegion from read protection, or abort the underlying GRQueryES.
+              for (query_id, single_query) in executing.subquery_status.subqueries {
+                match single_query {
+                  SingleSubqueryStatus::LockingSchemas(locking_status) => {
+                    self.remove_col_locking_request(locking_status.query_id);
+                  }
+                  SingleSubqueryStatus::PendingReadRegion(protect_status) => {
+                    let protect_query_id = protect_status.query_id;
+                    self.remove_read_protected_request(es.timestamp.clone(), protect_query_id);
+                  }
+                  SingleSubqueryStatus::Pending(_) => {
+                    self.exit_and_clean_up(query_id);
+                  }
+                  SingleSubqueryStatus::Finished(_) => {}
+                }
+              }
+            }
+          },
+        },
+        TabletStatus::TMStatus(tm_status) => {
+          // We Exit and Clean up this TMStatus (sending CancelQuery to all remaining participants)
+          for (node_group_id, child_query_id) in &tm_status.node_group_ids {
+            if tm_status.tm_state.get(child_query_id).unwrap() == &TMWaitValue::Nothing {
+              // If the child Query hasn't responded, then sent it a CancelQuery
+              match node_group_id {
+                NodeGroupId::Tablet(tid) => {
+                  let sid = self.tablet_address_config.get(tid).unwrap();
+                  let eid = self.slave_address_config.get(sid).unwrap();
+                  self.network_output.send(
+                    eid,
+                    msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
+                      tid.clone(),
+                      msg::TabletMessage::CancelQuery(msg::CancelQuery {
+                        query_id: child_query_id.clone(),
+                      }),
+                    )),
+                  );
+                }
+                NodeGroupId::Slave(sid) => {
+                  let eid = self.slave_address_config.get(sid).unwrap();
+                  self.network_output.send(
+                    eid,
+                    msg::NetworkMessage::Slave(msg::SlaveMessage::CancelQuery(msg::CancelQuery {
+                      query_id: child_query_id.clone(),
+                    })),
+                  );
+                }
+              };
+            }
+          }
+        }
+        TabletStatus::MSQueryES(_) => panic!(),
+        TabletStatus::FullMSTableReadES(_) => panic!(),
+        TabletStatus::FullMSTableWriteES(_) => panic!(),
       }
     }
   }
