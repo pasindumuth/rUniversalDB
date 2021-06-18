@@ -243,7 +243,8 @@ struct ReadStage {
   /// in this SubqueryStatus. We cache this here since it's computed when the child
   /// context is computed.
   parent_context_map: Vec<usize>,
-  subquery_status: SubqueryStatus,
+  subquery_id: QueryId,
+  single_subquery_status: SingleSubqueryStatus,
 }
 
 #[derive(Debug)]
@@ -1002,50 +1003,97 @@ impl<T: IOTypes> TabletState<T> {
               })()
               .unwrap();
 
-              // None of the `new_cols` should already exist in the schema (since
-              // they didn't exist when the GRQueryES complained).
+              // None of the `new_cols` should already exist in the subquery schema
+              // (since they didn't exist when the GRQueryES complained).
               let mut new_context_schema = locking_status.context_schema.clone();
               for col in &locking_status.new_cols {
                 assert!(!new_context_schema.column_context_schema.contains(col));
               }
 
-              // Now, add the `new_cols` to the schema
-              new_context_schema.column_context_schema.extend(locking_status.new_cols.clone());
-
-              // For ColNames in `new_cols` that belong to this Table, we need to
-              // lock the region, so we compute a TableRegion accordingly.
-              let mut new_col_region = Vec::<ColName>::new();
+              // Next, we compute the subset of `new_cols` that aren't in the Table
+              // Schema or the Context.
+              let mut rem_cols = Vec::<ColName>::new();
               for col in &locking_status.new_cols {
-                if contains_col(&self.table_schema, col, &es.timestamp) {
-                  new_col_region.push(col.clone());
+                if !contains_col(&self.table_schema, col, &es.timestamp) {
+                  if !es.context.context_schema.column_context_schema.contains(col) {
+                    rem_cols.push(col.clone());
+                  }
                 }
               }
-              let new_read_region = TableRegion {
-                col_region: new_col_region,
-                row_region: executing.row_region.clone(),
-              };
 
-              // Add a read protection requested
-              let protect_query_id = mk_qid(&mut self.rand);
-              let orig_p = OrigP::StatusPath(es.query_id.clone());
-              let protect_request = (orig_p, protect_query_id.clone(), new_read_region.clone());
-              if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
-                waiting.insert(protect_request);
+              if !rem_cols.is_empty() {
+                // If there are still missing columns, we have to Exit and Clean up
+                // this TableReadES, and then respond to the client.
+
+                // Construct a ColumnsDNE containing `missing_cols` and send it
+                // back to the originator.
+                let columns_dne_msg = msg::QueryAborted {
+                  return_path: es.sender_path.query_id.clone(),
+                  query_id: query_id.clone(),
+                  payload: msg::AbortedData::ColumnsDNE { missing_cols: rem_cols },
+                };
+
+                let sid = &es.sender_path.slave_group_id;
+                let eid = self.slave_address_config.get(sid).unwrap();
+                self.network_output.send(
+                  &eid,
+                  msg::NetworkMessage::Slave(
+                    if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
+                      msg::SlaveMessage::TabletMessage(
+                        tablet_group_id.clone(),
+                        msg::TabletMessage::QueryAborted(columns_dne_msg),
+                      )
+                    } else {
+                      msg::SlaveMessage::QueryAborted(columns_dne_msg)
+                    },
+                  ),
+                );
+
+                // Finally, Exit and Clean Up this TableReadES.
+                // TODO: Exit and Clean Up, i.e. cancel all subqueries. Do CancelQuery.
               } else {
-                self
-                  .waiting_read_protected
-                  .insert(es.timestamp, vec![protect_request].into_iter().collect());
-              }
+                // Here, we know all `new_cols` are in this Context, and so we can continue
+                // trying to evaluate the subquery.
 
-              // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
-              let subquery_id = subquery_id.clone();
-              let subqueries = &mut executing.subquery_status.subqueries;
-              let single_status = subqueries.get_mut(&subquery_id).unwrap();
-              *single_status = SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
-                context_schema: new_context_schema,
-                read_region: new_read_region,
-                query_id: protect_query_id,
-              })
+                // Now, add the `new_cols` to the schema
+                new_context_schema.column_context_schema.extend(locking_status.new_cols.clone());
+
+                // For ColNames in `new_cols` that belong to this Table, we need to
+                // lock the region, so we compute a TableRegion accordingly.
+                let mut new_col_region = Vec::<ColName>::new();
+                for col in &locking_status.new_cols {
+                  if contains_col(&self.table_schema, col, &es.timestamp) {
+                    new_col_region.push(col.clone());
+                  }
+                }
+                let new_read_region = TableRegion {
+                  col_region: new_col_region,
+                  row_region: executing.row_region.clone(),
+                };
+
+                // Add a read protection requested
+                let protect_query_id = mk_qid(&mut self.rand);
+                let orig_p = OrigP::StatusPath(es.query_id.clone());
+                let protect_request = (orig_p, protect_query_id.clone(), new_read_region.clone());
+                if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
+                  waiting.insert(protect_request);
+                } else {
+                  self
+                    .waiting_read_protected
+                    .insert(es.timestamp, vec![protect_request].into_iter().collect());
+                }
+
+                // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
+                let subquery_id = subquery_id.clone();
+                let subqueries = &mut executing.subquery_status.subqueries;
+                let single_status = subqueries.get_mut(&subquery_id).unwrap();
+                *single_status =
+                  SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
+                    context_schema: new_context_schema,
+                    read_region: new_read_region,
+                    query_id: protect_query_id,
+                  })
+              }
             }
           }
         }
@@ -1175,12 +1223,15 @@ impl<T: IOTypes> TabletState<T> {
     self.tablet_statuses.remove(&query_id);
   }
 
+  /// Here, the subquery GRQueryES at `subquery_id` must already be cleaned up. This
+  /// function informs the ES at OrigP and updates its state accordingly.
   fn handle_internal_columns_dne(
     &mut self,
-    query_id: QueryId,
+    orig_p: OrigP,
     subquery_id: QueryId,
-    missing_columns: Vec<ColName>,
+    rem_cols: Vec<ColName>,
   ) {
+    let query_id = cast!(OrigP::StatusPath, orig_p).unwrap();
     if let Some(tablet_status) = self.tablet_statuses.get_mut(&query_id) {
       match tablet_status {
         TabletStatus::GRQueryES(_) => panic!(),
@@ -1192,7 +1243,7 @@ impl<T: IOTypes> TabletState<T> {
           let locked_cols_qid = add_requested_locked_columns::<T>(
             OrigP::StatusPath(query_id.clone()),
             es.timestamp,
-            missing_columns.clone(),
+            rem_cols.clone(),
             &mut self.rand,
             &mut self.request_index,
             &mut self.requested_locked_columns,
@@ -1210,7 +1261,7 @@ impl<T: IOTypes> TabletState<T> {
             new_subquery_id.clone(),
             SingleSubqueryStatus::LockingSchemas(SubqueryLockingSchemas {
               context_schema: old_pending.context.context_schema.clone(),
-              new_cols: missing_columns,
+              new_cols: rem_cols,
               query_id: locked_cols_qid,
             }),
           );
@@ -1526,34 +1577,49 @@ impl<T: IOTypes> TabletState<T> {
     assert!(stage_idx < es.query_plan.col_usage_nodes.len());
     let (_, (_, child)) = es.query_plan.col_usage_nodes.get(stage_idx).unwrap();
 
+    // Compute the `ColName`s and `TransTableNames` that we want in the child Query, and
+    // process that.
+    let context_cols = child.external_cols.clone();
+    let context_trans_tables = node_external_trans_tables(child);
+    self.process_gr_query_stage_simple(query_id, stage_idx, &context_cols, context_trans_tables);
+  }
+
+  /// This is a common function used for sending processing a GRQueryES stage that
+  /// doesn't use the child QueryPlan to process the child ContextSchema, but rather
+  /// uses the `context_cols` and `context_trans_table`.
+  fn process_gr_query_stage_simple(
+    &mut self,
+    query_id: QueryId,
+    stage_idx: usize,
+    context_cols: &Vec<ColName>,
+    context_trans_tables: Vec<TransTableName>,
+  ) {
+    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+    let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
+    assert!(stage_idx < es.query_plan.col_usage_nodes.len());
+
     // We first compute the Context
     let mut context_schema = ContextSchema::default();
 
-    // Compute the `external_split`.
-    let external_split = child.external_cols.clone();
-
-    // Point all `external_split` columns to their index in main Query's ContextSchema.
+    // Point all `context_cols` columns to their index in main Query's ContextSchema.
     let mut context_col_index = HashMap::<ColName, usize>::new();
     let col_schema = &es.context.context_schema.column_context_schema;
     for (index, col) in col_schema.iter().enumerate() {
-      if external_split.contains(col) {
+      if context_cols.contains(col) {
         context_col_index.insert(col.clone(), index);
       }
     }
 
     // Compute the ColumnContextSchema
-    context_schema.column_context_schema.extend(external_split.clone());
+    context_schema.column_context_schema.extend(context_cols.clone());
 
-    // Compute the TransTables that the child Context will use.
-    let child_query_trans_tables = node_external_trans_tables(child);
-
-    // Split the `child_query_trans_tables` according to which of them are defined
+    // Split the `context_trans_tables` according to which of them are defined
     // in this GRQueryES, and which come from the outside.
     let mut local_trans_table_split = Vec::<TransTableName>::new();
     let mut external_trans_table_split = Vec::<TransTableName>::new();
     let completed_local_trans_tables: HashSet<TransTableName> =
       es.trans_table_view.iter().map(|(name, _)| name).cloned().collect();
-    for trans_table_name in child_query_trans_tables {
+    for trans_table_name in context_trans_tables {
       if completed_local_trans_tables.contains(&trans_table_name) {
         local_trans_table_split.push(trans_table_name);
       } else {
@@ -1596,7 +1662,7 @@ impl<T: IOTypes> TabletState<T> {
       let mut new_context_row = ContextRow::default();
 
       // Compute the `ColumnContextRow`
-      for col in &external_split {
+      for col in context_cols {
         let index = context_col_index.get(col).unwrap();
         let col_val = context_row.column_context_row.get(*index).unwrap().clone();
         new_context_row.column_context_row.push(col_val);
@@ -1641,6 +1707,7 @@ impl<T: IOTypes> TabletState<T> {
       child_trans_table_schemas.insert(trans_table_name.clone(), schema.clone());
     }
 
+    let (_, (_, child)) = es.query_plan.col_usage_nodes.get(stage_idx).unwrap();
     let query_plan = QueryPlan {
       gossip_gen: es.query_plan.gossip_gen.clone(),
       trans_table_schemas: child_trans_table_schemas,
@@ -1765,13 +1832,14 @@ impl<T: IOTypes> TabletState<T> {
     };
 
     // Create a SubqueryStatus and move the GRQueryES to the next Stage.
-    let mut subquery_status = SubqueryStatus { subqueries: Default::default() };
-    subquery_status.subqueries.insert(
-      tm_query_id.clone(),
-      SingleSubqueryStatus::Pending(SubqueryPending { context: context.clone() }),
-    );
-    es.state =
-      GRExecutionS::ReadStage(ReadStage { stage_idx, parent_context_map, subquery_status });
+    es.state = GRExecutionS::ReadStage(ReadStage {
+      stage_idx,
+      parent_context_map,
+      subquery_id: tm_query_id.clone(),
+      single_subquery_status: SingleSubqueryStatus::Pending(SubqueryPending {
+        context: context.clone(),
+      }),
+    });
 
     // Add the TMStatus into read_statuses
     self.tablet_statuses.insert(tm_query_id, TabletStatus::TMStatus(tm_status));
@@ -2060,13 +2128,12 @@ impl<T: IOTypes> TabletState<T> {
     let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
     let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
     let read_stage = cast!(GRExecutionS::ReadStage, &mut es.state).unwrap();
-    let subqueries = &read_stage.subquery_status.subqueries;
+    let child_query_id = &read_stage.subquery_id;
+    let single_status = &read_stage.single_subquery_status;
 
     // Extract the `context` from the SingleSubqueryStatus and verify
     // that it corresponds to `table_views`.
-    assert_eq!(subqueries.len(), 1);
-    let (child_query_id, subquery_status) = subqueries.iter().next().unwrap();
-    let subquery_context = &cast!(SingleSubqueryStatus::Pending, subquery_status).unwrap().context;
+    let subquery_context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
     assert_eq!(child_query_id, &tm_query_id);
     assert_eq!(table_views.len(), subquery_context.context_rows.len());
 
@@ -2124,12 +2191,118 @@ impl<T: IOTypes> TabletState<T> {
 
       // Finally, we propagate up the AbortData to the GRQueryES that owns this TMStatus
       let gr_query_id = cast!(OrigP::StatusPath, tm_status.orig_p).unwrap();
-      self.abort_gr_query_es(gr_query_id, query_aborted.payload);
+      self.handle_abort_gr_query_es(gr_query_id, query_aborted.payload);
     }
   }
 
   /// Propagate up an abort from a TMStatus up the owning GRQueryES.
-  fn abort_gr_query_es(&mut self, query_id: QueryId, aborted_data: AbortedData) {}
+  fn handle_abort_gr_query_es(&mut self, query_id: QueryId, aborted_data: AbortedData) {
+    match aborted_data {
+      AbortedData::ColumnsDNE { missing_cols } => {
+        let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+        let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
+        let read_stage = cast!(GRExecutionS::ReadStage, &es.state).unwrap();
+        let pending =
+          cast!(SingleSubqueryStatus::Pending, &read_stage.single_subquery_status).unwrap();
+
+        // First, assert that the missing columns are indeed not already a part of the Context.
+        for col in &missing_cols {
+          assert!(!pending.context.context_schema.column_context_schema.contains(col));
+        }
+
+        // Next, we compute the subset of `missing_cols` that are in the Context here.
+        let mut rem_cols = Vec::<ColName>::new();
+        for col in &missing_cols {
+          if !contains_col(&self.table_schema, col, &es.timestamp) {
+            if !es.context.context_schema.column_context_schema.contains(col) {
+              rem_cols.push(col.clone());
+            }
+          }
+        }
+
+        if !rem_cols.is_empty() {
+          // If the Context has the missing columns, then we Exit and Clean Up this
+          // GRQueryES and propagate the error upward. Since there are no subqueries
+          // currently running that needs cleaning up, we may simply remove GRQueryES.
+          let tablet_status = self.tablet_statuses.remove(&query_id).unwrap();
+          let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
+          self.handle_internal_columns_dne(es.orig_p, query_id, rem_cols);
+        } else {
+          // If the GRQueryES Context is sufficient, we simply amend the new columns
+          // to the Context and reprocess the ReadStage.
+          let context_schema = &pending.context.context_schema;
+          let mut context_cols = context_schema.column_context_schema.clone();
+          context_cols.extend(missing_cols);
+          let context_trans_tables: Vec<TransTableName> = context_schema
+            .trans_table_context_schema
+            .iter()
+            .map(|prefix| prefix.trans_table_name.clone())
+            .collect();
+          let stage_idx = read_stage.stage_idx.clone();
+          self.process_gr_query_stage_simple(
+            query_id,
+            stage_idx,
+            &context_cols,
+            context_trans_tables,
+          );
+        }
+      }
+      AbortedData::QueryError(query_error) => {
+        // Here, we Exit and Clean Up the GRQueryES, and we propagate up the QueryError
+        // Note that the only Subquery has already just been cleaned up.
+
+        // We remove the `tablet_status` and take ownership.
+        let tablet_status = self.tablet_statuses.remove(&query_id).unwrap();
+        let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
+        cast!(GRExecutionS::ReadStage, &es.state).unwrap();
+
+        // Finally, we propagate up the QueryError
+        self.propagate_query_error(es.orig_p, query_error);
+      }
+    }
+  }
+
+  /// This routes the QueryError to the appropriate top-level ES.
+  fn propagate_query_error(&mut self, orig_p: OrigP, query_error: msg::QueryError) {
+    let query_id = cast!(OrigP::StatusPath, orig_p).unwrap();
+    if let Some(tablet_status) = self.tablet_statuses.get_mut(&query_id) {
+      match tablet_status {
+        TabletStatus::GRQueryES(_) => panic!(),
+        TabletStatus::FullTableReadES(read_es) => {
+          let es = cast!(FullTableReadES::Executing, read_es).unwrap();
+
+          // Build the error message and respond.
+          let query_error_msg = msg::QueryAborted {
+            return_path: es.sender_path.query_id.clone(),
+            query_id: query_id.clone(),
+            payload: msg::AbortedData::QueryError(query_error),
+          };
+
+          let sid = &es.sender_path.slave_group_id;
+          let eid = self.slave_address_config.get(sid).unwrap();
+          self.network_output.send(
+            &eid,
+            msg::NetworkMessage::Slave(
+              if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
+                msg::SlaveMessage::TabletMessage(
+                  tablet_group_id.clone(),
+                  msg::TabletMessage::QueryAborted(query_error_msg),
+                )
+              } else {
+                msg::SlaveMessage::QueryAborted(query_error_msg)
+              },
+            ),
+          );
+
+          // TODO: Exit and Clean Up, i.e. cancel all subqueries.
+        }
+        TabletStatus::TMStatus(_) => {}
+        TabletStatus::MSQueryES(_) => {}
+        TabletStatus::FullMSTableReadES(_) => {}
+        TabletStatus::FullMSTableWriteES(_) => {}
+      }
+    }
+  }
 
   /// We call this when a DeadlockSafetyReadAbort happens
   fn deadlock_safety_read_abort(&mut self, orig_p: OrigP, read_region: TableRegion) {}
