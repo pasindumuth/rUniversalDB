@@ -388,6 +388,34 @@ enum ReadProtectionGrant {
   DeadlockSafetyWriteAbort { timestamp: Timestamp, orig_p: OrigP },
 }
 
+/// This is a convenience enum to strealine the sending of PCSA messages to Tablets and Slaves.
+enum CommonQuery {
+  PerformQuery(msg::PerformQuery),
+  CancelQuery(msg::CancelQuery),
+  QueryAborted(msg::QueryAborted),
+  QuerySuccess(msg::QuerySuccess),
+}
+
+impl CommonQuery {
+  fn tablet_msg(self) -> msg::TabletMessage {
+    match self {
+      CommonQuery::PerformQuery(query) => msg::TabletMessage::PerformQuery(query),
+      CommonQuery::CancelQuery(query) => msg::TabletMessage::CancelQuery(query),
+      CommonQuery::QueryAborted(query) => msg::TabletMessage::QueryAborted(query),
+      CommonQuery::QuerySuccess(query) => msg::TabletMessage::QuerySuccess(query),
+    }
+  }
+
+  fn slave_msg(self) -> msg::SlaveMessage {
+    match self {
+      CommonQuery::PerformQuery(query) => msg::SlaveMessage::PerformQuery(query),
+      CommonQuery::CancelQuery(query) => msg::SlaveMessage::CancelQuery(query),
+      CommonQuery::QueryAborted(query) => msg::SlaveMessage::QueryAborted(query),
+      CommonQuery::QuerySuccess(query) => msg::SlaveMessage::QuerySuccess(query),
+    }
+  }
+}
+
 // -----------------------------------------------------------------------------------------------
 //  Tablet State
 // -----------------------------------------------------------------------------------------------
@@ -720,6 +748,43 @@ impl<T: IOTypes> TabletState<T> {
       }
     }
     return None;
+  }
+
+  /// This function infers weather the CommonQuery is destined for a Slave or a Tablet
+  /// by using the QueryPath, and then acts accordingly.
+  fn send_to_path(&mut self, sender_path: QueryPath, common_query: CommonQuery) {
+    let sid = &sender_path.slave_group_id;
+    let eid = self.slave_address_config.get(sid).unwrap();
+    self.network_output.send(
+      &eid,
+      msg::NetworkMessage::Slave(
+        if let Some(tablet_group_id) = sender_path.maybe_tablet_group_id {
+          msg::SlaveMessage::TabletMessage(tablet_group_id.clone(), common_query.tablet_msg())
+        } else {
+          common_query.slave_msg()
+        },
+      ),
+    );
+  }
+
+  fn send_to_node(&mut self, node_group_id: NodeGroupId, common_query: CommonQuery) {
+    match node_group_id {
+      NodeGroupId::Tablet(tid) => {
+        let sid = self.tablet_address_config.get(&tid).unwrap();
+        let eid = self.slave_address_config.get(sid).unwrap();
+        self.network_output.send(
+          eid,
+          msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
+            tid,
+            common_query.tablet_msg(),
+          )),
+        );
+      }
+      NodeGroupId::Slave(sid) => {
+        let eid = self.slave_address_config.get(&sid).unwrap();
+        self.network_output.send(eid, msg::NetworkMessage::Slave(common_query.slave_msg()));
+      }
+    };
   }
 
   fn run_main_loop(&mut self) {
@@ -1062,22 +1127,8 @@ impl<T: IOTypes> TabletState<T> {
                   query_id: query_id.clone(),
                   payload: msg::AbortedData::ColumnsDNE { missing_cols: rem_cols },
                 };
-
-                let sid = &es.sender_path.slave_group_id;
-                let eid = self.slave_address_config.get(sid).unwrap();
-                self.network_output.send(
-                  &eid,
-                  msg::NetworkMessage::Slave(
-                    if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
-                      msg::SlaveMessage::TabletMessage(
-                        tablet_group_id.clone(),
-                        msg::TabletMessage::QueryAborted(columns_dne_msg),
-                      )
-                    } else {
-                      msg::SlaveMessage::QueryAborted(columns_dne_msg)
-                    },
-                  ),
-                );
+                let sender_path = es.sender_path.clone();
+                self.send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg))
 
                 // Finally, Exit and Clean Up this TableReadES.
                 // TODO: Exit and Clean Up, i.e. cancel all subqueries. Do CancelQuery.
@@ -1223,7 +1274,7 @@ impl<T: IOTypes> TabletState<T> {
   /// error that occured inside, and respond to the client. Note that this function doesn't
   /// do any other kind of cleanup.
   fn handle_eval_error_table_es(&mut self, query_id: &QueryId, eval_error: EvalError) {
-    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+    let tablet_status = self.tablet_statuses.remove(&query_id).unwrap();
     let read_es = cast!(TabletStatus::FullTableReadES, tablet_status).unwrap();
     let es = cast!(FullTableReadES::Executing, read_es).unwrap();
 
@@ -1236,23 +1287,7 @@ impl<T: IOTypes> TabletState<T> {
         msg: format!("{:?}", eval_error),
       }),
     };
-
-    let sid = &es.sender_path.slave_group_id;
-    let eid = self.slave_address_config.get(sid).unwrap();
-    self.network_output.send(
-      &eid,
-      msg::NetworkMessage::Slave(
-        if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
-          msg::SlaveMessage::TabletMessage(
-            tablet_group_id.clone(),
-            msg::TabletMessage::QueryAborted(aborted),
-          )
-        } else {
-          msg::SlaveMessage::QueryAborted(aborted)
-        },
-      ),
-    );
-    self.tablet_statuses.remove(&query_id);
+    self.send_to_path(es.sender_path.clone(), CommonQuery::QueryAborted(aborted));
   }
 
   /// Here, the subquery GRQueryES at `subquery_id` must already be cleaned up. This
@@ -1837,6 +1872,8 @@ impl<T: IOTypes> TabletState<T> {
 
         // Send out PerformQuery, wrapping it according to if the
         // TransTable is on a Slave or a Tablet
+        // TODO: We can't use `send_to_node` here because of the use of
+        // `self.tablet_statuses` at the bottom of this function.
         let node_group_id = match &location_prefix.source {
           NodeGroupId::Tablet(tablet_group_id) => {
             let sid = self.tablet_address_config.get(tablet_group_id).unwrap();
@@ -2122,22 +2159,8 @@ impl<T: IOTypes> TabletState<T> {
               result: (requested_cols, res_table_views),
               new_rms: es.new_rms.iter().cloned().collect(),
             };
-
-            let sid = &es.sender_path.slave_group_id;
-            let eid = self.slave_address_config.get(sid).unwrap();
-            self.network_output.send(
-              &eid,
-              msg::NetworkMessage::Slave(
-                if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
-                  msg::SlaveMessage::TabletMessage(
-                    tablet_group_id.clone(),
-                    msg::TabletMessage::QuerySuccess(success_msg),
-                  )
-                } else {
-                  msg::SlaveMessage::QuerySuccess(success_msg)
-                },
-              ),
-            );
+            let sender_path = es.sender_path.clone();
+            self.send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
 
             // Remove the TableReadES.
             self.tablet_statuses.remove(&query_id);
@@ -2191,34 +2214,16 @@ impl<T: IOTypes> TabletState<T> {
       let tm_status = cast!(TabletStatus::TMStatus, tablet_status).unwrap();
       // We Exit and Clean up this TMStatus (sending CancelQuery to all
       // remaining participants) and send the QueryAborted back to the orig_path
-      for (node_group_id, child_query_id) in &tm_status.node_group_ids {
-        if tm_status.tm_state.get(child_query_id).unwrap() == &TMWaitValue::Nothing {
-          // If the child Query hasn't responded, then sent it a CancelQuery
-          // TODO: create a general function for sending stuff out based on slave or tablet.
-          match node_group_id {
-            NodeGroupId::Tablet(tid) => {
-              let sid = self.tablet_address_config.get(tid).unwrap();
-              let eid = self.slave_address_config.get(sid).unwrap();
-              self.network_output.send(
-                eid,
-                msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
-                  tid.clone(),
-                  msg::TabletMessage::CancelQuery(msg::CancelQuery {
-                    query_id: child_query_id.clone(),
-                  }),
-                )),
-              );
-            }
-            NodeGroupId::Slave(sid) => {
-              let eid = self.slave_address_config.get(sid).unwrap();
-              self.network_output.send(
-                eid,
-                msg::NetworkMessage::Slave(msg::SlaveMessage::CancelQuery(msg::CancelQuery {
-                  query_id: child_query_id.clone(),
-                })),
-              );
-            }
-          };
+      for (node_group_id, child_query_id) in tm_status.node_group_ids {
+        if tm_status.tm_state.get(&child_query_id).unwrap() == &TMWaitValue::Nothing
+          && child_query_id != query_aborted.query_id
+        {
+          // If the child Query hasn't responded yet, and isn't also the Query that
+          // just aborted, then we send it a CancelQuery
+          self.send_to_node(
+            node_group_id,
+            CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
+          );
         }
       }
 
@@ -2304,30 +2309,16 @@ impl<T: IOTypes> TabletState<T> {
         TabletStatus::FullTableReadES(read_es) => {
           let es = cast!(FullTableReadES::Executing, read_es).unwrap();
 
+          // TODO: Exit and Clean Up, i.e. cancel all subqueries.
+
           // Build the error message and respond.
-          let query_error_msg = msg::QueryAborted {
+          let abort_query = msg::QueryAborted {
             return_path: es.sender_path.query_id.clone(),
             query_id: query_id.clone(),
             payload: msg::AbortedData::QueryError(query_error),
           };
-
-          let sid = &es.sender_path.slave_group_id;
-          let eid = self.slave_address_config.get(sid).unwrap();
-          self.network_output.send(
-            &eid,
-            msg::NetworkMessage::Slave(
-              if let Some(tablet_group_id) = &es.sender_path.maybe_tablet_group_id {
-                msg::SlaveMessage::TabletMessage(
-                  tablet_group_id.clone(),
-                  msg::TabletMessage::QueryAborted(query_error_msg),
-                )
-              } else {
-                msg::SlaveMessage::QueryAborted(query_error_msg)
-              },
-            ),
-          );
-
-          // TODO: Exit and Clean Up, i.e. cancel all subqueries.
+          let sender_path = es.sender_path.clone();
+          self.send_to_path(sender_path, CommonQuery::QueryAborted(abort_query));
         }
         TabletStatus::TMStatus(_) => {}
         TabletStatus::MSQueryES(_) => {}
@@ -2404,33 +2395,13 @@ impl<T: IOTypes> TabletState<T> {
         },
         TabletStatus::TMStatus(tm_status) => {
           // We Exit and Clean up this TMStatus (sending CancelQuery to all remaining participants)
-          for (node_group_id, child_query_id) in &tm_status.node_group_ids {
-            if tm_status.tm_state.get(child_query_id).unwrap() == &TMWaitValue::Nothing {
+          for (node_group_id, child_query_id) in tm_status.node_group_ids {
+            if tm_status.tm_state.get(&child_query_id).unwrap() == &TMWaitValue::Nothing {
               // If the child Query hasn't responded, then sent it a CancelQuery
-              match node_group_id {
-                NodeGroupId::Tablet(tid) => {
-                  let sid = self.tablet_address_config.get(tid).unwrap();
-                  let eid = self.slave_address_config.get(sid).unwrap();
-                  self.network_output.send(
-                    eid,
-                    msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
-                      tid.clone(),
-                      msg::TabletMessage::CancelQuery(msg::CancelQuery {
-                        query_id: child_query_id.clone(),
-                      }),
-                    )),
-                  );
-                }
-                NodeGroupId::Slave(sid) => {
-                  let eid = self.slave_address_config.get(sid).unwrap();
-                  self.network_output.send(
-                    eid,
-                    msg::NetworkMessage::Slave(msg::SlaveMessage::CancelQuery(msg::CancelQuery {
-                      query_id: child_query_id.clone(),
-                    })),
-                  );
-                }
-              };
+              self.send_to_node(
+                node_group_id,
+                CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
+              );
             }
           }
         }
