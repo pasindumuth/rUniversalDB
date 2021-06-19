@@ -1087,7 +1087,7 @@ impl<T: IOTypes> TabletState<T> {
                 for (subquery_id, state) in &executing.subquery_status.subqueries {
                   match state {
                     SingleSubqueryStatus::LockingSchemas(locking_status) => {
-                      if &locking_status.query_id == &locked_cols_qid {
+                      if locking_status.query_id == locked_cols_qid {
                         return Some((subquery_id, locking_status));
                       }
                     }
@@ -1098,11 +1098,10 @@ impl<T: IOTypes> TabletState<T> {
               })()
               .unwrap();
 
-              // None of the `new_cols` should already exist in the subquery schema
+              // None of the `new_cols` should already exist in the old subquery Context schema
               // (since they didn't exist when the GRQueryES complained).
-              let mut new_context_schema = locking_status.context_schema.clone();
               for col in &locking_status.new_cols {
-                assert!(!new_context_schema.column_context_schema.contains(col));
+                assert!(!locking_status.context_schema.column_context_schema.contains(col));
               }
 
               // Next, we compute the subset of `new_cols` that aren't in the Table
@@ -1117,8 +1116,8 @@ impl<T: IOTypes> TabletState<T> {
               }
 
               if !rem_cols.is_empty() {
-                // If there are still missing columns, we have to Exit and Clean up
-                // this TableReadES, and then respond to the client.
+                // If there are missing columns, we Exit and clean up, and propagate
+                // the Abort to the originator.
 
                 // Construct a ColumnsDNE containing `missing_cols` and send it
                 // back to the originator.
@@ -1128,15 +1127,16 @@ impl<T: IOTypes> TabletState<T> {
                   payload: msg::AbortedData::ColumnsDNE { missing_cols: rem_cols },
                 };
                 let sender_path = es.sender_path.clone();
-                self.send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg))
+                self.send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
 
                 // Finally, Exit and Clean Up this TableReadES.
-                // TODO: Exit and Clean Up, i.e. cancel all subqueries. Do CancelQuery.
+                self.exit_and_clean_up(query_id);
               } else {
                 // Here, we know all `new_cols` are in this Context, and so we can continue
                 // trying to evaluate the subquery.
 
                 // Now, add the `new_cols` to the schema
+                let mut new_context_schema = locking_status.context_schema.clone();
                 new_context_schema.column_context_schema.extend(locking_status.new_cols.clone());
 
                 // For ColNames in `new_cols` that belong to this Table, we need to
@@ -1629,9 +1629,12 @@ impl<T: IOTypes> TabletState<T> {
         result.push(table_views.get(*idx).unwrap().clone());
       }
 
+      // Finally, we Exit and Clean Up the GRQueryES and send the results back to the
+      // originator.
       let orig_p = es.orig_p.clone();
       let schema = schema.clone();
       let new_rms = es.new_rms.clone();
+      self.exit_and_clean_up(query_id.clone());
       self.handle_gr_query_done(orig_p, query_id, new_rms, (schema, result));
     }
   }
@@ -2234,37 +2237,33 @@ impl<T: IOTypes> TabletState<T> {
   }
 
   /// Propagate up an abort from a TMStatus up the owning GRQueryES.
+  /// Note that the GRQueryES must exist.
   fn handle_abort_gr_query_es(&mut self, query_id: QueryId, aborted_data: AbortedData) {
+    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+    let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
+    let read_stage = cast!(GRExecutionS::ReadStage, &es.state).unwrap();
+    let pending = cast!(SingleSubqueryStatus::Pending, &read_stage.single_subquery_status).unwrap();
     match aborted_data {
       AbortedData::ColumnsDNE { missing_cols } => {
-        let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
-        let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
-        let read_stage = cast!(GRExecutionS::ReadStage, &es.state).unwrap();
-        let pending =
-          cast!(SingleSubqueryStatus::Pending, &read_stage.single_subquery_status).unwrap();
-
         // First, assert that the missing columns are indeed not already a part of the Context.
         for col in &missing_cols {
           assert!(!pending.context.context_schema.column_context_schema.contains(col));
         }
 
-        // Next, we compute the subset of `missing_cols` that are in the Context here.
+        // Next, we compute the subset of `missing_cols` that are not in the Context here.
         let mut rem_cols = Vec::<ColName>::new();
         for col in &missing_cols {
-          if !contains_col(&self.table_schema, col, &es.timestamp) {
-            if !es.context.context_schema.column_context_schema.contains(col) {
-              rem_cols.push(col.clone());
-            }
+          if !es.context.context_schema.column_context_schema.contains(col) {
+            rem_cols.push(col.clone());
           }
         }
 
         if !rem_cols.is_empty() {
           // If the Context has the missing columns, then we Exit and Clean Up this
-          // GRQueryES and propagate the error upward. Since there are no subqueries
-          // currently running that needs cleaning up, we may simply remove GRQueryES.
-          let tablet_status = self.tablet_statuses.remove(&query_id).unwrap();
-          let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
-          self.handle_internal_columns_dne(es.orig_p, query_id, rem_cols);
+          // GRQueryES and propagate the error upward.
+          let orig_p = es.orig_p.clone();
+          self.exit_and_clean_up(query_id.clone());
+          self.handle_internal_columns_dne(orig_p, query_id, rem_cols);
         } else {
           // If the GRQueryES Context is sufficient, we simply amend the new columns
           // to the Context and reprocess the ReadStage.
@@ -2288,14 +2287,9 @@ impl<T: IOTypes> TabletState<T> {
       AbortedData::QueryError(query_error) => {
         // Here, we Exit and Clean Up the GRQueryES, and we propagate up the QueryError
         // Note that the only Subquery has already just been cleaned up.
-
-        // We remove the `tablet_status` and take ownership.
-        let tablet_status = self.tablet_statuses.remove(&query_id).unwrap();
-        let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
-        cast!(GRExecutionS::ReadStage, &es.state).unwrap();
-
-        // Finally, we propagate up the QueryError
-        self.propagate_query_error(es.orig_p, query_error);
+        let orig_p = es.orig_p.clone();
+        self.exit_and_clean_up(query_id.clone());
+        self.propagate_query_error(orig_p, query_error);
       }
     }
   }
@@ -2309,8 +2303,6 @@ impl<T: IOTypes> TabletState<T> {
         TabletStatus::FullTableReadES(read_es) => {
           let es = cast!(FullTableReadES::Executing, read_es).unwrap();
 
-          // TODO: Exit and Clean Up, i.e. cancel all subqueries.
-
           // Build the error message and respond.
           let abort_query = msg::QueryAborted {
             return_path: es.sender_path.query_id.clone(),
@@ -2319,6 +2311,9 @@ impl<T: IOTypes> TabletState<T> {
           };
           let sender_path = es.sender_path.clone();
           self.send_to_path(sender_path, CommonQuery::QueryAborted(abort_query));
+
+          // Finally, Exit and Clean Up this TableReadES.
+          self.exit_and_clean_up(query_id);
         }
         TabletStatus::TMStatus(_) => {}
         TabletStatus::MSQueryES(_) => {}
@@ -2335,8 +2330,31 @@ impl<T: IOTypes> TabletState<T> {
   fn exit_and_clean_up(&mut self, query_id: QueryId) {
     if let Some(tablet_status) = self.tablet_statuses.remove(&query_id) {
       match tablet_status {
-        TabletStatus::GRQueryES(_) => {
-          // TODO: finish. Sync with existing exit strategy
+        TabletStatus::GRQueryES(es) => {
+          match es.state {
+            GRExecutionS::Start => {}
+            GRExecutionS::ReadStage(read_stage) => match read_stage.single_subquery_status {
+              SingleSubqueryStatus::LockingSchemas(_) => panic!(),
+              SingleSubqueryStatus::PendingReadRegion(_) => panic!(),
+              SingleSubqueryStatus::Pending(_) => {
+                self.exit_and_clean_up(read_stage.subquery_id);
+              }
+              SingleSubqueryStatus::Finished(_) => {}
+            },
+            GRExecutionS::MasterQueryReplanning(planning) => {
+              // Remove if present
+              if self.master_query_map.remove(&planning.master_query_id).is_some() {
+                // If the removal was successful, we should also send a Cancellation
+                // message to the Master.
+                self.network_output.send(
+                  &self.master_eid,
+                  msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+                    msg::CancelMasterFrozenColUsage { query_id: planning.master_query_id },
+                  )),
+                );
+              }
+            }
+          }
         }
         TabletStatus::FullTableReadES(read_es) => match read_es {
           FullTableReadES::QueryReplanning(es) => match es.status.state {
