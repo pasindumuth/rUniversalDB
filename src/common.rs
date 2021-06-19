@@ -8,6 +8,7 @@ use crate::multiversion_map::MVM;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 
 pub trait Clock {
   fn now(&mut self) -> Timestamp;
@@ -22,10 +23,10 @@ pub trait TabletForwardOut {
 }
 
 pub trait IOTypes {
-  type RngCoreT: RngCore;
-  type ClockT: Clock;
-  type NetworkOutT: NetworkOut;
-  type TabletForwardOutT: TabletForwardOut;
+  type RngCoreT: RngCore + Debug;
+  type ClockT: Clock + Debug;
+  type NetworkOutT: NetworkOut + Debug;
+  type TabletForwardOutT: TabletForwardOut + Debug;
 }
 
 /// These are very low-level utilities where I consider

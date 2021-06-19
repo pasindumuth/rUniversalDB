@@ -527,8 +527,17 @@ impl CommonQuery {
 type GenericMVTable = MVM<(PrimaryKey, Option<ColName>), Option<ColVal>>;
 type GenericTable = HashMap<(PrimaryKey, Option<ColName>), Option<ColVal>>;
 
+/// A very minor alias to make the less verbose, since it's used so much.
+type Statuses = HashMap<QueryId, TabletStatus>;
+
 #[derive(Debug)]
 pub struct TabletState<T: IOTypes> {
+  tablet_context: TabletContext<T>,
+  statuses: HashMap<QueryId, TabletStatus>,
+}
+
+#[derive(Debug)]
+pub struct TabletContext<T: IOTypes> {
   /// IO Objects.
   rand: T::RngCoreT,
   clock: T::ClockT,
@@ -568,7 +577,6 @@ pub struct TabletState<T: IOTypes> {
 
   /// Child Queries
   ms_root_query_map: HashMap<QueryId, QueryId>,
-  tablet_statuses: HashMap<QueryId, TabletStatus>,
   master_query_map: HashMap<QueryId, OrigP>,
 }
 
@@ -598,35 +606,43 @@ impl<T: IOTypes> TabletState<T> {
     })();
     let table_schema = gossip.gossiped_db_schema.get(&this_table_path).unwrap().clone();
     TabletState {
-      rand,
-      clock,
-      network_output,
-      this_slave_group_id,
-      this_tablet_group_id,
-      master_eid,
-      gossip,
-      sharding_config,
-      tablet_address_config,
-      slave_address_config,
-      storage: GenericMVTable::new(),
-      this_table_path,
-      this_table_key_range,
-      table_schema,
-      verifying_writes: Default::default(),
-      prepared_writes: Default::default(),
-      committed_writes: Default::default(),
-      waiting_read_protected: Default::default(),
-      read_protected: Default::default(),
-      prepared_schema_change: Default::default(),
-      request_index: Default::default(),
-      requested_locked_columns: Default::default(),
-      ms_root_query_map: Default::default(),
-      tablet_statuses: Default::default(),
-      master_query_map: Default::default(),
+      tablet_context: TabletContext::<T> {
+        rand,
+        clock,
+        network_output,
+        this_slave_group_id,
+        this_tablet_group_id,
+        master_eid,
+        gossip,
+        sharding_config,
+        tablet_address_config,
+        slave_address_config,
+        storage: GenericMVTable::new(),
+        this_table_path,
+        this_table_key_range,
+        table_schema,
+        verifying_writes: Default::default(),
+        prepared_writes: Default::default(),
+        committed_writes: Default::default(),
+        waiting_read_protected: Default::default(),
+        read_protected: Default::default(),
+        prepared_schema_change: Default::default(),
+        request_index: Default::default(),
+        requested_locked_columns: Default::default(),
+        ms_root_query_map: Default::default(),
+        master_query_map: Default::default(),
+      },
+      statuses: Default::default(),
     }
   }
 
   pub fn handle_incoming_message(&mut self, message: msg::TabletMessage) {
+    self.tablet_context.handle_incoming_message(&mut self.statuses, message);
+  }
+}
+
+impl<T: IOTypes> TabletContext<T> {
+  fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::TabletMessage) {
     match message {
       msg::TabletMessage::PerformQuery(perform_query) => {
         match perform_query.query {
@@ -654,7 +670,7 @@ impl<T: IOTypes> TabletState<T> {
                 &mut self.requested_locked_columns,
               );
               // Add ReadStatus
-              self.tablet_statuses.insert(
+              statuses.insert(
                 perform_query.query_id.clone(),
                 TabletStatus::FullTableReadES(FullTableReadES::QueryReplanning(
                   QueryReplanningES {
@@ -690,7 +706,7 @@ impl<T: IOTypes> TabletState<T> {
               } else {
                 // This means that we can add an MSQueryES at the Timestamp
                 let ms_query_id = mk_qid(&mut self.rand);
-                self.tablet_statuses.insert(
+                statuses.insert(
                   ms_query_id.clone(),
                   TabletStatus::MSQueryES(MSQueryES {
                     query_id: ms_query_id.clone(),
@@ -734,7 +750,7 @@ impl<T: IOTypes> TabletState<T> {
 
             // Lookup the MSQuery and the QueryId of the new Query into `pending_queries`.
             let ms_query_id = self.ms_root_query_map.get(&root_query_id).unwrap();
-            let tablet_status = self.tablet_statuses.get_mut(ms_query_id).unwrap();
+            let tablet_status = statuses.get_mut(ms_query_id).unwrap();
             let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
             ms_query.pending_queries.insert(perform_query.query_id.clone());
 
@@ -758,7 +774,7 @@ impl<T: IOTypes> TabletState<T> {
               &mut self.request_index,
               &mut self.requested_locked_columns,
             );
-            self.tablet_statuses.insert(
+            statuses.insert(
               perform_query.query_id.clone(),
               TabletStatus::FullMSTableWriteES(FullMSTableWriteES::QueryReplanning(
                 MSWriteQueryReplanningES {
@@ -773,13 +789,13 @@ impl<T: IOTypes> TabletState<T> {
         }
       }
       msg::TabletMessage::CancelQuery(cancel_query) => {
-        self.exit_and_clean_up(cancel_query.query_id);
+        self.exit_and_clean_up(statuses, cancel_query.query_id);
       }
       msg::TabletMessage::QueryAborted(query_aborted) => {
-        self.handle_query_aborted(query_aborted);
+        self.handle_query_aborted(statuses, query_aborted);
       }
       msg::TabletMessage::QuerySuccess(query_success) => {
-        self.handle_query_success(query_success);
+        self.handle_query_success(statuses, query_success);
       }
       msg::TabletMessage::Query2PCPrepare(_) => unimplemented!(),
       msg::TabletMessage::Query2PCAbort(_) => unimplemented!(),
@@ -788,7 +804,7 @@ impl<T: IOTypes> TabletState<T> {
       msg::TabletMessage::MasterFrozenColUsageSuccess(_) => unimplemented!(),
     }
 
-    self.run_main_loop();
+    self.run_main_loop(statuses);
   }
 
   /// This removes elements from `requested_locked_columns`, maintaining
@@ -912,7 +928,7 @@ impl<T: IOTypes> TabletState<T> {
     return false;
   }
 
-  fn run_main_loop(&mut self) {
+  fn run_main_loop(&mut self, statuses: &mut Statuses) {
     let mut change_occurred = true;
     while change_occurred {
       // We set this to false, and the below code will set it back to true if need be.
@@ -956,7 +972,7 @@ impl<T: IOTypes> TabletState<T> {
             let (orig_p, _, _) = self.remove_col_locking_request(query_id.clone()).unwrap();
 
             // Process
-            self.columns_locked_for_query(orig_p, query_id);
+            self.columns_locked_for_query(statuses, orig_p, query_id);
             change_occurred = true;
 
             break 'outer;
@@ -1116,7 +1132,7 @@ impl<T: IOTypes> TabletState<T> {
             }
 
             // Inform the originator.
-            self.read_protected_for_query(orig_p, query_id);
+            self.read_protected_for_query(statuses, orig_p, query_id);
           }
           ReadProtectionGrant::MRead { timestamp, protect_request } => {
             // Remove the protect_request, adding the ReadRegion to `m_read_protected`.
@@ -1127,7 +1143,7 @@ impl<T: IOTypes> TabletState<T> {
             verifying_write.m_read_protected.insert(read_region.clone());
 
             // Inform the originator.
-            self.read_protected_for_query(orig_p, query_id);
+            self.read_protected_for_query(statuses, orig_p, query_id);
           }
           ReadProtectionGrant::DeadlockSafetyReadAbort { timestamp, protect_request } => {
             // Remove the protect_request, doing any extra cleanups too.
@@ -1136,14 +1152,14 @@ impl<T: IOTypes> TabletState<T> {
               self.remove_read_protected_request(timestamp, query_id).unwrap();
 
             // Inform the originator
-            self.deadlock_safety_read_abort(orig_p, read_region);
+            self.deadlock_safety_read_abort(statuses, orig_p, read_region);
           }
           ReadProtectionGrant::DeadlockSafetyWriteAbort { orig_p, timestamp } => {
             // Remove the `verifying_write` at `timestamp`.
             self.verifying_writes.remove(&timestamp);
 
             // Inform the originator.
-            self.deadlock_safety_write_abort(orig_p);
+            self.deadlock_safety_write_abort(statuses, orig_p);
           }
         }
         change_occurred = true;
@@ -1151,9 +1167,14 @@ impl<T: IOTypes> TabletState<T> {
     }
   }
 
-  fn columns_locked_for_query(&mut self, orig_p: OrigP, locked_cols_qid: QueryId) {
+  fn columns_locked_for_query(
+    &mut self,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    locked_cols_qid: QueryId,
+  ) {
     let query_id = orig_p.status_path;
-    if let Some(tablet_status) = self.tablet_statuses.get_mut(&query_id) {
+    if let Some(tablet_status) = statuses.get_mut(&query_id) {
       match tablet_status {
         TabletStatus::GRQueryES(_) => panic!(),
         TabletStatus::FullTableReadES(read_es) => {
@@ -1191,13 +1212,13 @@ impl<T: IOTypes> TabletState<T> {
                       new_rms: Default::default(),
                       state: ExecutionS::Start,
                     });
-                    self.start_table_read_es(&query_id);
+                    self.start_table_read_es(statuses, &query_id);
                   } else {
                     // Recall that if QueryReplanning had ended in a failure (i.e.
                     // having missing columns), then `CommonQueryReplanningES` will
                     // have send back the necessary responses. Thus, we only need to
                     // Exist the ES here.
-                    self.tablet_statuses.remove(&query_id);
+                    statuses.remove(&query_id);
                   }
                 }
                 _ => {}
@@ -1255,7 +1276,7 @@ impl<T: IOTypes> TabletState<T> {
                 self.send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
 
                 // Finally, Exit and Clean Up this TableReadES.
-                self.exit_and_clean_up(query_id);
+                self.exit_and_clean_up(statuses, query_id);
               } else {
                 // Here, we know all `new_cols` are in this Context, and so we can continue
                 // trying to evaluate the subquery.
@@ -1357,16 +1378,16 @@ impl<T: IOTypes> TabletState<T> {
                     });
 
                     // Finally, we start the MSWriteTableES.
-                    self.start_ms_table_write_es(&query_id);
+                    self.start_ms_table_write_es(statuses, &query_id);
                   } else {
                     // Since `CommonQueryReplanningES` will have already sent back the necessary
                     // responses. Thus, we only need to exit the ES here.
 
                     // Remove that FullMSTableWriteES
-                    self.tablet_statuses.remove(&query_id);
+                    statuses.remove(&query_id);
 
                     // Update that MSQuery
-                    let tablet_status = self.tablet_statuses.get_mut(ms_query_id).unwrap();
+                    let tablet_status = statuses.get_mut(ms_query_id).unwrap();
                     let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
                     ms_query.pending_queries.remove(&query_id);
                   }
@@ -1382,8 +1403,8 @@ impl<T: IOTypes> TabletState<T> {
   }
 
   /// Processes the Start state of TableReadES.
-  fn start_table_read_es(&mut self, query_id: &QueryId) {
-    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+  fn start_table_read_es(&mut self, statuses: &mut Statuses, query_id: &QueryId) {
+    let tablet_status = statuses.get_mut(&query_id).unwrap();
     let read_es = cast!(TabletStatus::FullTableReadES, tablet_status).unwrap();
     let es = cast!(FullTableReadES::Executing, read_es).unwrap();
 
@@ -1405,7 +1426,7 @@ impl<T: IOTypes> TabletState<T> {
           }
         }
         Err(eval_error) => {
-          self.handle_eval_error_table_es(&query_id, eval_error);
+          self.handle_eval_error_table_es(statuses, &query_id, eval_error);
           return;
         }
       }
@@ -1437,8 +1458,8 @@ impl<T: IOTypes> TabletState<T> {
   }
 
   /// Processes the Start state of MSTableWrite.
-  fn start_ms_table_write_es(&mut self, query_id: &QueryId) {
-    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+  fn start_ms_table_write_es(&mut self, statuses: &mut Statuses, query_id: &QueryId) {
+    let tablet_status = statuses.get_mut(&query_id).unwrap();
     let ms_write_es = cast!(TabletStatus::FullMSTableWriteES, tablet_status).unwrap();
     let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
 
@@ -1460,7 +1481,7 @@ impl<T: IOTypes> TabletState<T> {
           }
         }
         Err(eval_error) => {
-          self.handle_eval_error_table_es(&query_id, eval_error);
+          self.handle_eval_error_table_es(statuses, &query_id, eval_error);
           return;
         }
       }
@@ -1478,9 +1499,9 @@ impl<T: IOTypes> TabletState<T> {
     // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
     // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
     let timestamp = es.timestamp.clone();
-    // TODO: we couldn't make this take a &self because of the `self.tablet_statuses.get_mut`
+    // TODO: we couldn't make this take a &self because of the `self.statuses.get_mut`
     // above... idk why, I think it's a Rust bug. Doing TabletContext will help.
-    if !TabletState::<T>::check_write_region_isolation(
+    if !TabletContext::<T>::check_write_region_isolation(
       &write_region,
       &timestamp,
       &self.verifying_writes,
@@ -1500,7 +1521,7 @@ impl<T: IOTypes> TabletState<T> {
           ),
         }),
       );
-      self.exit_and_clean_up(query_id.clone());
+      self.exit_and_clean_up(statuses, query_id.clone());
     } else {
       // Compute the Read Column Region.
       let col_region = HashSet::<ColName>::from_iter(
@@ -1527,8 +1548,13 @@ impl<T: IOTypes> TabletState<T> {
   /// This is used to simply delete a TableReadES or MSTable*ES due to an expression
   /// evaluation error that occured inside, and respond to the client. Note that this
   /// function doesn't do any other kind of cleanup.
-  fn handle_eval_error_table_es(&mut self, query_id: &QueryId, eval_error: EvalError) {
-    let tablet_status = self.tablet_statuses.get(&query_id).unwrap();
+  fn handle_eval_error_table_es(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: &QueryId,
+    eval_error: EvalError,
+  ) {
+    let tablet_status = statuses.get(&query_id).unwrap();
     let sender_path = match tablet_status {
       TabletStatus::GRQueryES(_) => panic!(),
       TabletStatus::FullTableReadES(read_es) => {
@@ -1555,19 +1581,20 @@ impl<T: IOTypes> TabletState<T> {
     };
 
     self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
-    self.exit_and_clean_up(query_id.clone());
+    self.exit_and_clean_up(statuses, query_id.clone());
   }
 
   /// Here, the subquery GRQueryES at `subquery_id` must already be cleaned up. This
   /// function informs the ES at OrigP and updates its state accordingly.
   fn handle_internal_columns_dne(
     &mut self,
+    statuses: &mut Statuses,
     orig_p: OrigP,
     subquery_id: QueryId,
     rem_cols: Vec<ColName>,
   ) {
     let query_id = orig_p.status_path;
-    if let Some(tablet_status) = self.tablet_statuses.get_mut(&query_id) {
+    if let Some(tablet_status) = statuses.get_mut(&query_id) {
       match tablet_status {
         TabletStatus::GRQueryES(_) => panic!(),
         TabletStatus::FullTableReadES(read_es) => {
@@ -1611,9 +1638,14 @@ impl<T: IOTypes> TabletState<T> {
 
   /// We get this if a ReadProtection was granted by the Main Loop. This includes standard
   /// read_protected, or m_read_protected.
-  fn read_protected_for_query(&mut self, orig_p: OrigP, protect_query_id: QueryId) {
+  fn read_protected_for_query(
+    &mut self,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    protect_query_id: QueryId,
+  ) {
     let query_id = orig_p.status_path;
-    if let Some(tablet_status) = self.tablet_statuses.get_mut(&query_id) {
+    if let Some(tablet_status) = statuses.get_mut(&query_id) {
       match tablet_status {
         TabletStatus::GRQueryES(_) => panic!(),
         TabletStatus::FullTableReadES(read_es) => {
@@ -1680,7 +1712,7 @@ impl<T: IOTypes> TabletState<T> {
                       }
                     }
                     Err(eval_error) => {
-                      self.handle_eval_error_table_es(&query_id, eval_error);
+                      self.handle_eval_error_table_es(statuses, &query_id, eval_error);
                       return;
                     }
                   }
@@ -1741,12 +1773,12 @@ impl<T: IOTypes> TabletState<T> {
 
               for gr_query_es in gr_query_statuses {
                 let query_id = gr_query_es.query_id.clone();
-                self.tablet_statuses.insert(query_id, TabletStatus::GRQueryES(gr_query_es));
+                statuses.insert(query_id, TabletStatus::GRQueryES(gr_query_es));
               }
 
               // Drive GRQueries
               for query_id in gr_query_ids {
-                self.advance_gr_query(query_id);
+                self.advance_gr_query(statuses, query_id);
               }
             }
             ExecutionS::Executing(executing) => {
@@ -1814,7 +1846,7 @@ impl<T: IOTypes> TabletState<T> {
                     }
                   }
                   Err(eval_error) => {
-                    self.handle_eval_error_table_es(&query_id, eval_error);
+                    self.handle_eval_error_table_es(statuses, &query_id, eval_error);
                     return;
                   }
                 }
@@ -1854,11 +1886,9 @@ impl<T: IOTypes> TabletState<T> {
                 executing.subquery_status.subqueries.get_mut(&subquery_id).unwrap();
               *single_status = SingleSubqueryStatus::Pending(SubqueryPending { context });
 
-              self
-                .tablet_statuses
-                .insert(subquery_id.clone(), TabletStatus::GRQueryES(gr_query_es));
+              statuses.insert(subquery_id.clone(), TabletStatus::GRQueryES(gr_query_es));
 
-              self.advance_gr_query(subquery_id);
+              self.advance_gr_query(statuses, subquery_id);
             }
           }
         }
@@ -1870,8 +1900,8 @@ impl<T: IOTypes> TabletState<T> {
     }
   }
 
-  fn advance_gr_query(&mut self, query_id: QueryId) {
-    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+  fn advance_gr_query(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    let tablet_status = statuses.get_mut(&query_id).unwrap();
     let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
 
     // Compute the next stage
@@ -1883,7 +1913,7 @@ impl<T: IOTypes> TabletState<T> {
 
     if next_stage_idx < es.query_plan.col_usage_nodes.len() {
       // This means that we have still have stages to evaluate, so we move on.
-      self.process_gr_query_stage(query_id, next_stage_idx);
+      self.process_gr_query_stage(statuses, query_id, next_stage_idx);
     } else {
       // This means the GRQueryES is done, so we send the desired result
       // back to the originator.
@@ -1902,15 +1932,20 @@ impl<T: IOTypes> TabletState<T> {
       let orig_p = es.orig_p.clone();
       let schema = schema.clone();
       let new_rms = es.new_rms.clone();
-      self.exit_and_clean_up(query_id.clone());
-      self.handle_gr_query_done(orig_p, query_id, new_rms, (schema, result));
+      self.exit_and_clean_up(statuses, query_id.clone());
+      self.handle_gr_query_done(statuses, orig_p, query_id, new_rms, (schema, result));
     }
   }
 
   /// This function moves the GRQueryES to the Stage indicated by `stage_idx`.
   /// This index must be valid (an actual stage).
-  fn process_gr_query_stage(&mut self, query_id: QueryId, stage_idx: usize) {
-    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+  fn process_gr_query_stage(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    stage_idx: usize,
+  ) {
+    let tablet_status = statuses.get_mut(&query_id).unwrap();
     let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
     assert!(stage_idx < es.query_plan.col_usage_nodes.len());
     let (_, (_, child)) = es.query_plan.col_usage_nodes.get(stage_idx).unwrap();
@@ -1919,7 +1954,13 @@ impl<T: IOTypes> TabletState<T> {
     // process that.
     let context_cols = child.external_cols.clone();
     let context_trans_tables = node_external_trans_tables(child);
-    self.process_gr_query_stage_simple(query_id, stage_idx, &context_cols, context_trans_tables);
+    self.process_gr_query_stage_simple(
+      statuses,
+      query_id,
+      stage_idx,
+      &context_cols,
+      context_trans_tables,
+    );
   }
 
   /// This is a common function used for sending processing a GRQueryES stage that
@@ -1927,12 +1968,13 @@ impl<T: IOTypes> TabletState<T> {
   /// uses the `context_cols` and `context_trans_table`.
   fn process_gr_query_stage_simple(
     &mut self,
+    statuses: &mut Statuses,
     query_id: QueryId,
     stage_idx: usize,
     context_cols: &Vec<ColName>,
     context_trans_tables: Vec<TransTableName>,
   ) {
-    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+    let tablet_status = statuses.get_mut(&query_id).unwrap();
     let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
     assert!(stage_idx < es.query_plan.col_usage_nodes.len());
 
@@ -2144,7 +2186,7 @@ impl<T: IOTypes> TabletState<T> {
         // Send out PerformQuery, wrapping it according to if the
         // TransTable is on a Slave or a Tablet
         // TODO: We can't use `send_to_node` here because of the use of
-        // `self.tablet_statuses` at the bottom of this function.
+        // `statuses` at the bottom of this function.
         let node_group_id = match &location_prefix.source {
           NodeGroupId::Tablet(tablet_group_id) => {
             let sid = self.tablet_address_config.get(tablet_group_id).unwrap();
@@ -2182,12 +2224,12 @@ impl<T: IOTypes> TabletState<T> {
     });
 
     // Add the TMStatus into read_statuses
-    self.tablet_statuses.insert(tm_query_id, TabletStatus::TMStatus(tm_status));
+    statuses.insert(tm_query_id, TabletStatus::TMStatus(tm_status));
   }
 
-  fn handle_query_success(&mut self, query_success: msg::QuerySuccess) {
+  fn handle_query_success(&mut self, statuses: &mut Statuses, query_success: msg::QuerySuccess) {
     let tm_query_id = &query_success.query_id;
-    if let Some(tablet_status) = self.tablet_statuses.get_mut(tm_query_id) {
+    if let Some(tablet_status) = statuses.get_mut(tm_query_id) {
       // Since the `tablet_status` must be a TMStatus, we cast it.
       let tm_status = cast!(TabletStatus::TMStatus, tablet_status).unwrap();
       // We just add the result of the `query_success` here.
@@ -2197,7 +2239,7 @@ impl<T: IOTypes> TabletState<T> {
       tm_status.responded_count += 1;
       if tm_status.responded_count == tm_status.tm_state.len() {
         // Remove the `TMStatus` and take ownership
-        let tablet_status = self.tablet_statuses.remove(&query_success.query_id).unwrap();
+        let tablet_status = statuses.remove(&query_success.query_id).unwrap();
         let tm_status = cast!(TabletStatus::TMStatus, tablet_status).unwrap();
         // Merge there TableViews together
         let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
@@ -2206,7 +2248,7 @@ impl<T: IOTypes> TabletState<T> {
         }
         let merged_result = merge_table_views(results);
         let gr_query_id = tm_status.orig_p.status_path;
-        self.handle_tm_done(gr_query_id, tm_query_id.clone(), merged_result);
+        self.handle_tm_done(statuses, gr_query_id, tm_query_id.clone(), merged_result);
       }
     }
   }
@@ -2214,13 +2256,14 @@ impl<T: IOTypes> TabletState<T> {
   /// This function processes the result of a GRQueryES.
   fn handle_gr_query_done(
     &mut self,
+    statuses: &mut Statuses,
     orig_p: OrigP,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<QueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.status_path;
-    if let Some(tablet_status) = self.tablet_statuses.get_mut(&query_id) {
+    if let Some(tablet_status) = statuses.get_mut(&query_id) {
       match tablet_status {
         TabletStatus::GRQueryES(_) => panic!(),
         TabletStatus::FullTableReadES(read_es) => {
@@ -2413,7 +2456,7 @@ impl<T: IOTypes> TabletState<T> {
                     }
                   }
                   Err(eval_error) => {
-                    self.handle_eval_error_table_es(&query_id, eval_error);
+                    self.handle_eval_error_table_es(statuses, &query_id, eval_error);
                     return;
                   }
                 }
@@ -2434,7 +2477,7 @@ impl<T: IOTypes> TabletState<T> {
             self.send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
 
             // Remove the TableReadES.
-            self.tablet_statuses.remove(&query_id);
+            statuses.remove(&query_id);
           }
         }
         TabletStatus::TMStatus(_) => panic!(),
@@ -2447,11 +2490,12 @@ impl<T: IOTypes> TabletState<T> {
 
   fn handle_tm_done(
     &mut self,
+    statuses: &mut Statuses,
     query_id: QueryId,
     tm_query_id: QueryId,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) {
-    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+    let tablet_status = statuses.get_mut(&query_id).unwrap();
     let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
     let read_stage = cast!(GRExecutionS::ReadStage, &mut es.state).unwrap();
     let child_query_id = &read_stage.subquery_id;
@@ -2477,11 +2521,11 @@ impl<T: IOTypes> TabletState<T> {
 
     // Add the `table_views` to the GRQueryES and advance it.
     es.trans_table_view.push((trans_table_name.clone(), (schema, table_views)));
-    self.advance_gr_query(query_id);
+    self.advance_gr_query(statuses, query_id);
   }
 
-  fn handle_query_aborted(&mut self, query_aborted: msg::QueryAborted) {
-    if let Some(tablet_status) = self.tablet_statuses.remove(&query_aborted.return_path) {
+  fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
+    if let Some(tablet_status) = statuses.remove(&query_aborted.return_path) {
       let tm_status = cast!(TabletStatus::TMStatus, tablet_status).unwrap();
       // We Exit and Clean up this TMStatus (sending CancelQuery to all
       // remaining participants) and send the QueryAborted back to the orig_path
@@ -2500,14 +2544,19 @@ impl<T: IOTypes> TabletState<T> {
 
       // Finally, we propagate up the AbortData to the GRQueryES that owns this TMStatus
       let gr_query_id = tm_status.orig_p.status_path;
-      self.handle_abort_gr_query_es(gr_query_id, query_aborted.payload);
+      self.handle_abort_gr_query_es(statuses, gr_query_id, query_aborted.payload);
     }
   }
 
   /// Propagate up an abort from a TMStatus up the owning GRQueryES.
   /// Note that the GRQueryES must exist.
-  fn handle_abort_gr_query_es(&mut self, query_id: QueryId, aborted_data: AbortedData) {
-    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+  fn handle_abort_gr_query_es(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    aborted_data: AbortedData,
+  ) {
+    let tablet_status = statuses.get_mut(&query_id).unwrap();
     let es = cast!(TabletStatus::GRQueryES, tablet_status).unwrap();
     let read_stage = cast!(GRExecutionS::ReadStage, &es.state).unwrap();
     let pending = cast!(SingleSubqueryStatus::Pending, &read_stage.single_subquery_status).unwrap();
@@ -2530,8 +2579,8 @@ impl<T: IOTypes> TabletState<T> {
           // If the Context has the missing columns, then we Exit and Clean Up this
           // GRQueryES and propagate the error upward.
           let orig_p = es.orig_p.clone();
-          self.exit_and_clean_up(query_id.clone());
-          self.handle_internal_columns_dne(orig_p, query_id, rem_cols);
+          self.exit_and_clean_up(statuses, query_id.clone());
+          self.handle_internal_columns_dne(statuses, orig_p, query_id, rem_cols);
         } else {
           // If the GRQueryES Context is sufficient, we simply amend the new columns
           // to the Context and reprocess the ReadStage.
@@ -2545,6 +2594,7 @@ impl<T: IOTypes> TabletState<T> {
             .collect();
           let stage_idx = read_stage.stage_idx.clone();
           self.process_gr_query_stage_simple(
+            statuses,
             query_id,
             stage_idx,
             &context_cols,
@@ -2556,16 +2606,21 @@ impl<T: IOTypes> TabletState<T> {
         // Here, we Exit and Clean Up the GRQueryES, and we propagate up the QueryError
         // Note that the only Subquery has already just been cleaned up.
         let orig_p = es.orig_p.clone();
-        self.exit_and_clean_up(query_id.clone());
-        self.propagate_query_error(orig_p, query_error);
+        self.exit_and_clean_up(statuses, query_id.clone());
+        self.propagate_query_error(statuses, orig_p, query_error);
       }
     }
   }
 
   /// This routes the QueryError to the appropriate top-level ES.
-  fn propagate_query_error(&mut self, orig_p: OrigP, query_error: msg::QueryError) {
+  fn propagate_query_error(
+    &mut self,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    query_error: msg::QueryError,
+  ) {
     let query_id = orig_p.status_path;
-    if let Some(tablet_status) = self.tablet_statuses.get_mut(&query_id) {
+    if let Some(tablet_status) = statuses.get_mut(&query_id) {
       match tablet_status {
         TabletStatus::GRQueryES(_) => panic!(),
         TabletStatus::FullTableReadES(read_es) => {
@@ -2581,7 +2636,7 @@ impl<T: IOTypes> TabletState<T> {
           self.send_to_path(sender_path, CommonQuery::QueryAborted(abort_query));
 
           // Finally, Exit and Clean Up this TableReadES.
-          self.exit_and_clean_up(query_id);
+          self.exit_and_clean_up(statuses, query_id);
         }
         TabletStatus::TMStatus(_) => {}
         TabletStatus::MSQueryES(_) => {}
@@ -2595,8 +2650,8 @@ impl<T: IOTypes> TabletState<T> {
   /// to generally Exit and Clean Up an ES from whatever state it's in. Thus, we don't
   /// require the ES to be in their valid state; an ES might reference another ES
   /// that no longer exists (because the calling function did some pre-cleanup).
-  fn exit_and_clean_up(&mut self, query_id: QueryId) {
-    if let Some(tablet_status) = self.tablet_statuses.remove(&query_id) {
+  fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    if let Some(tablet_status) = statuses.remove(&query_id) {
       match tablet_status {
         TabletStatus::GRQueryES(es) => {
           match es.state {
@@ -2605,7 +2660,7 @@ impl<T: IOTypes> TabletState<T> {
               SingleSubqueryStatus::LockingSchemas(_) => panic!(),
               SingleSubqueryStatus::PendingReadRegion(_) => panic!(),
               SingleSubqueryStatus::Pending(_) => {
-                self.exit_and_clean_up(read_stage.subquery_id);
+                self.exit_and_clean_up(statuses, read_stage.subquery_id);
               }
               SingleSubqueryStatus::Finished(_) => {}
             },
@@ -2671,7 +2726,7 @@ impl<T: IOTypes> TabletState<T> {
                     self.remove_read_protected_request(es.timestamp.clone(), protect_query_id);
                   }
                   SingleSubqueryStatus::Pending(_) => {
-                    self.exit_and_clean_up(query_id);
+                    self.exit_and_clean_up(statuses, query_id);
                   }
                   SingleSubqueryStatus::Finished(_) => {}
                 }
@@ -2701,10 +2756,16 @@ impl<T: IOTypes> TabletState<T> {
   }
 
   /// We call this when a DeadlockSafetyReadAbort happens
-  fn deadlock_safety_read_abort(&mut self, orig_p: OrigP, read_region: TableRegion) {}
+  fn deadlock_safety_read_abort(
+    &mut self,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    read_region: TableRegion,
+  ) {
+  }
 
   /// We call this when a DeadlockSafetyWriteAbort happens
-  fn deadlock_safety_write_abort(&mut self, orig_p: OrigP) {}
+  fn deadlock_safety_write_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP) {}
 }
 
 /// This evaluates a `ValExpr` completely into a `ColVal` by using the column values
