@@ -663,12 +663,7 @@ impl<T: IOTypes> TabletContext<T> {
                 orig_p: OrigP { status_path: perform_query.query_id.clone() },
                 state: CommonQueryReplanningS::Start,
               };
-              comm_plan_es.start::<T>(
-                &mut self.rand,
-                &self.table_schema,
-                &mut self.request_index,
-                &mut self.requested_locked_columns,
-              );
+              comm_plan_es.start::<T>(self);
               // Add ReadStatus
               statuses.insert(
                 perform_query.query_id.clone(),
@@ -768,12 +763,7 @@ impl<T: IOTypes> TabletContext<T> {
               orig_p: OrigP { status_path: perform_query.query_id.clone() },
               state: CommonQueryReplanningS::Start,
             };
-            comm_plan_es.start::<T>(
-              &mut self.rand,
-              &self.table_schema,
-              &mut self.request_index,
-              &mut self.requested_locked_columns,
-            );
+            comm_plan_es.start::<T>(self);
             statuses.insert(
               perform_query.query_id.clone(),
               TabletStatus::FullMSTableWriteES(FullMSTableWriteES::QueryReplanning(
@@ -805,6 +795,28 @@ impl<T: IOTypes> TabletContext<T> {
     }
 
     self.run_main_loop(statuses);
+  }
+
+  /// Add the following triple into `requested_locked_columns`, making sure to update
+  /// `request_index` as well.
+  fn add_requested_locked_columns(
+    &mut self,
+    orig_p: OrigP,
+    timestamp: Timestamp,
+    cols: Vec<ColName>,
+  ) -> QueryId {
+    let locked_cols_qid = mk_qid(&mut self.rand);
+    // Add column locking
+    self.requested_locked_columns.insert(locked_cols_qid.clone(), (orig_p, timestamp, cols));
+    // Update index
+    if let Some(set) = self.request_index.get_mut(&timestamp) {
+      set.insert(locked_cols_qid.clone());
+    } else {
+      let mut set = BTreeSet::<QueryId>::new();
+      set.insert(locked_cols_qid.clone());
+      self.request_index.insert(timestamp, set);
+    };
+    locked_cols_qid
   }
 
   /// This removes elements from `requested_locked_columns`, maintaining
@@ -850,7 +862,7 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   /// This function infers weather the CommonQuery is destined for a Slave or a Tablet
-  /// by using the QueryPath, and then acts accordingly.
+  /// by using the `sender_path`, and then acts accordingly.
   fn send_to_path(&mut self, sender_path: QueryPath, common_query: CommonQuery) {
     let sid = &sender_path.slave_group_id;
     let eid = self.slave_address_config.get(sid).unwrap();
@@ -866,6 +878,7 @@ impl<T: IOTypes> TabletContext<T> {
     );
   }
 
+  /// This is similar to the above, except uses a `node_group_id`.
   fn send_to_node(&mut self, node_group_id: NodeGroupId, common_query: CommonQuery) {
     match node_group_id {
       NodeGroupId::Tablet(tid) => {
@@ -887,30 +900,26 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   fn check_write_region_isolation(
+    &self,
     write_region: &TableRegion,
     timestamp: &Timestamp,
-    // Tablet members
-    verifying_writes: &BTreeMap<Timestamp, VerifyingReadWriteRegion>,
-    prepared_writes: &BTreeMap<Timestamp, ReadWriteRegion>,
-    committed_writes: &BTreeMap<Timestamp, ReadWriteRegion>,
-    read_protected: &BTreeMap<Timestamp, BTreeSet<TableRegion>>,
   ) -> bool {
     // We iterate through every subsequent Reads that this `write_region` can conflict
     // with, and check if there is indeed a conflict.
 
     // First, verify Region Isolation with ReadRegions of subsequent *_writes.
     let bound = (Bound::Excluded(timestamp), Bound::Unbounded);
-    for (_, verifying_write) in verifying_writes.range(bound) {
+    for (_, verifying_write) in self.verifying_writes.range(bound) {
       if does_intersect(write_region, &verifying_write.m_read_protected) {
         return false;
       }
     }
-    for (_, prepared_write) in prepared_writes.range(bound) {
+    for (_, prepared_write) in self.prepared_writes.range(bound) {
       if does_intersect(write_region, &prepared_write.m_read_protected) {
         return false;
       }
     }
-    for (_, committed_write) in committed_writes.range(bound) {
+    for (_, committed_write) in self.committed_writes.range(bound) {
       if does_intersect(write_region, &committed_write.m_read_protected) {
         return false;
       }
@@ -918,7 +927,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Then, verify Region Isolation with ReadRegions of subsequent Reads.
     let bound = (Bound::Included(timestamp), Bound::Unbounded);
-    for (_, read_regions) in read_protected.range(bound) {
+    for (_, read_regions) in self.read_protected.range(bound) {
       if does_intersect(write_region, read_regions) {
         return false;
       }
@@ -1182,18 +1191,7 @@ impl<T: IOTypes> TabletContext<T> {
             FullTableReadES::QueryReplanning(plan_es) => {
               // Advance the QueryReplanning now that the desired columns have been locked.
               let comm_plan_es = &mut plan_es.status;
-              comm_plan_es.column_locked::<T>(
-                query_id.clone(),
-                &mut self.rand,
-                &mut self.network_output,
-                &self.master_eid,
-                &self.gossip,
-                &self.table_schema,
-                &self.slave_address_config,
-                &mut self.request_index,
-                &mut self.requested_locked_columns,
-                &mut self.master_query_map,
-              );
+              comm_plan_es.column_locked::<T>(self, query_id.clone());
               // We check if the QueryReplanning is done.
               match comm_plan_es.state {
                 CommonQueryReplanningS::Done(success) => {
@@ -1332,18 +1330,7 @@ impl<T: IOTypes> TabletContext<T> {
             FullMSTableWriteES::QueryReplanning(plan_es) => {
               // Advance the QueryReplanning now that the desired columns have been locked.
               let comm_plan_es = &mut plan_es.status;
-              comm_plan_es.column_locked::<T>(
-                query_id.clone(),
-                &mut self.rand,
-                &mut self.network_output,
-                &self.master_eid,
-                &self.gossip,
-                &self.table_schema,
-                &self.slave_address_config,
-                &mut self.request_index,
-                &mut self.requested_locked_columns,
-                &mut self.master_query_map,
-              );
+              comm_plan_es.column_locked::<T>(self, query_id.clone());
 
               let root_query_id = &plan_es.root_query_path.query_id;
               let ms_query_id = self.ms_root_query_map.get(root_query_id).unwrap();
@@ -1499,16 +1486,7 @@ impl<T: IOTypes> TabletContext<T> {
     // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
     // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
     let timestamp = es.timestamp.clone();
-    // TODO: we couldn't make this take a &self because of the `self.statuses.get_mut`
-    // above... idk why, I think it's a Rust bug. Doing TabletContext will help.
-    if !TabletContext::<T>::check_write_region_isolation(
-      &write_region,
-      &timestamp,
-      &self.verifying_writes,
-      &self.prepared_writes,
-      &self.committed_writes,
-      &self.read_protected,
-    ) {
+    if !self.check_write_region_isolation(&write_region, &timestamp) {
       // Send an abortion.
       let sender_path = es.sender_path.clone();
       self.send_to_path(
@@ -1602,13 +1580,10 @@ impl<T: IOTypes> TabletContext<T> {
           let executing = cast!(ExecutionS::Executing, &mut es.state).unwrap();
 
           // Insert a requested_locked_columns for the missing columns.
-          let locked_cols_qid = add_requested_locked_columns::<T>(
+          let locked_cols_qid = self.add_requested_locked_columns(
             OrigP { status_path: query_id.clone() },
             es.timestamp,
             rem_cols.clone(),
-            &mut self.rand,
-            &mut self.request_index,
-            &mut self.requested_locked_columns,
           );
 
           // We replace `subquery_id` with a new one to guarantee it never gets mangled
@@ -2185,27 +2160,8 @@ impl<T: IOTypes> TabletContext<T> {
 
         // Send out PerformQuery, wrapping it according to if the
         // TransTable is on a Slave or a Tablet
-        // TODO: We can't use `send_to_node` here because of the use of
-        // `statuses` at the bottom of this function.
-        let node_group_id = match &location_prefix.source {
-          NodeGroupId::Tablet(tablet_group_id) => {
-            let sid = self.tablet_address_config.get(tablet_group_id).unwrap();
-            let eid = self.slave_address_config.get(sid).unwrap();
-            let network_msg = msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
-              tablet_group_id.clone(),
-              msg::TabletMessage::PerformQuery(perform_query),
-            ));
-            self.network_output.send(eid, network_msg);
-            NodeGroupId::Tablet(tablet_group_id.clone())
-          }
-          NodeGroupId::Slave(sid) => {
-            let eid = self.slave_address_config.get(sid).unwrap();
-            let network_msg =
-              msg::NetworkMessage::Slave(msg::SlaveMessage::PerformQuery(perform_query));
-            self.network_output.send(eid, network_msg);
-            NodeGroupId::Slave(sid.clone())
-          }
-        };
+        let node_group_id = location_prefix.source.clone();
+        self.send_to_node(node_group_id.clone(), CommonQuery::PerformQuery(perform_query));
 
         // Add the TabletGroup into the TMStatus.
         tm_status.node_group_ids.insert(node_group_id, child_query_id.clone());
@@ -3135,87 +3091,35 @@ fn does_intersect(region: &TableRegion, regions: &BTreeSet<TableRegion>) -> bool
   unimplemented!()
 }
 
-/// Add the following triple into `requested_locked_columns`, making sure to update
-/// `request_index` as well.
-fn add_requested_locked_columns<T: IOTypes>(
-  orig_p: OrigP,
-  timestamp: Timestamp,
-  cols: Vec<ColName>,
-  // Tablet members
-  rand: &mut T::RngCoreT,
-  request_index: &mut BTreeMap<Timestamp, BTreeSet<QueryId>>,
-  requested_locked_columns: &mut HashMap<QueryId, (OrigP, Timestamp, Vec<ColName>)>,
-) -> QueryId {
-  let locked_cols_qid = mk_qid(rand);
-  // Add column locking
-  requested_locked_columns.insert(locked_cols_qid.clone(), (orig_p, timestamp, cols));
-  // Update index
-  if let Some(set) = request_index.get_mut(&timestamp) {
-    set.insert(locked_cols_qid.clone());
-  } else {
-    let mut set = BTreeSet::<QueryId>::new();
-    set.insert(locked_cols_qid.clone());
-    request_index.insert(timestamp, set);
-  };
-  locked_cols_qid
-}
-
 impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
-  fn start<T: IOTypes>(
-    &mut self,
-    // Tablet members
-    rand: &mut T::RngCoreT,
-    table_schema: &TableSchema,
-    request_index: &mut BTreeMap<Timestamp, BTreeSet<QueryId>>,
-    requested_locked_columns: &mut HashMap<QueryId, (OrigP, Timestamp, Vec<ColName>)>,
-  ) {
+  fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
     matches!(self.state, CommonQueryReplanningS::Start);
     // Add column locking
-    let locked_cols_qid = add_requested_locked_columns::<T>(
+    let locked_cols_qid = ctx.add_requested_locked_columns(
       self.orig_p.clone(),
       self.timestamp,
-      self.sql_view.projected_cols(table_schema),
-      rand,
-      request_index,
-      requested_locked_columns,
+      self.sql_view.projected_cols(&ctx.table_schema),
     );
     self.state =
       CommonQueryReplanningS::ProjectedColumnLocking { locked_columns_query_id: locked_cols_qid };
   }
 
-  fn column_locked<T: IOTypes>(
-    &mut self,
-    query_id: QueryId,
-    // Tablet members
-    rand: &mut T::RngCoreT,
-    network_output: &mut T::NetworkOutT,
-    master_eid: &EndpointId,
-    gossip: &Arc<GossipData>,
-    table_schema: &TableSchema,
-    slave_address_config: &HashMap<SlaveGroupId, EndpointId>,
-    request_index: &mut BTreeMap<Timestamp, BTreeSet<QueryId>>,
-    requested_locked_columns: &mut HashMap<QueryId, (OrigP, Timestamp, Vec<ColName>)>,
-    master_query_map: &mut HashMap<QueryId, OrigP>,
-  ) {
+  fn column_locked<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>, query_id: QueryId) {
     match &self.state {
       CommonQueryReplanningS::ProjectedColumnLocking { .. } => {
         // We need to verify that the projected columns are present.
-        for col in &self.sql_view.projected_cols(table_schema) {
-          if !contains_col(&table_schema, col, &self.timestamp) {
+        for col in &self.sql_view.projected_cols(&ctx.table_schema) {
+          if !contains_col(&ctx.table_schema, col, &self.timestamp) {
             // This means a projected column doesn't exist. Thus, we Exit and Clean Up.
-            // TODO: why aren't we responding to Tablets too?.
-            let sender_path = &self.sender_path;
-            let eid = slave_address_config.get(&sender_path.slave_group_id).unwrap();
-            network_output.send(
-              &eid,
-              msg::NetworkMessage::Slave(msg::SlaveMessage::QueryAborted(msg::QueryAborted {
-                return_path: sender_path.query_id.clone(),
-                query_id: query_id.clone(),
-                payload: msg::AbortedData::QueryError(msg::QueryError::ProjectedColumnsDNE {
-                  msg: String::new(),
-                }),
-              })),
-            );
+            let sender_path = self.sender_path.clone();
+            let aborted_msg = msg::QueryAborted {
+              return_path: sender_path.query_id.clone(),
+              query_id: query_id.clone(),
+              payload: msg::AbortedData::QueryError(msg::QueryError::ProjectedColumnsDNE {
+                msg: String::new(),
+              }),
+            };
+            ctx.send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
             self.state = CommonQueryReplanningS::Done(false);
             return;
           }
@@ -3223,21 +3127,15 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
 
         // Next, we check if the `gen` in the query plan is more recent than the
         // current Tablet's `gen`, and we act accordingly.
-        if gossip.gossip_gen <= self.query_plan.gossip_gen {
+        if ctx.gossip.gossip_gen <= self.query_plan.gossip_gen {
           // Lock all of the `external_cols` and `safe_present` columns in this query plan.
           let node = &self.query_plan.col_usage_node;
           let mut all_cols = node.external_cols.clone();
           all_cols.extend(node.safe_present_cols.iter().cloned());
 
           // Add column locking
-          let locked_cols_qid = add_requested_locked_columns::<T>(
-            self.orig_p.clone(),
-            self.timestamp.clone(),
-            all_cols,
-            rand,
-            request_index,
-            requested_locked_columns,
-          );
+          let locked_cols_qid =
+            ctx.add_requested_locked_columns(self.orig_p.clone(), self.timestamp.clone(), all_cols);
 
           // Advance Read Status
           self.state =
@@ -3246,7 +3144,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           // Replan the query. First, we need to gather the set of `ColName`s touched by the
           // query, and then we need to lock them.
           let mut planner = ColUsagePlanner {
-            gossiped_db_schema: &gossip.gossiped_db_schema,
+            gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
             timestamp: self.timestamp,
           };
 
@@ -3254,13 +3152,10 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
             .get_all_cols(&mut self.query_plan.trans_table_schemas.clone(), &self.sql_view.exprs());
 
           // Add column locking
-          let locked_cols_qid = add_requested_locked_columns::<T>(
+          let locked_cols_qid = ctx.add_requested_locked_columns(
             self.orig_p.clone(),
             self.timestamp.clone(),
             all_cols.clone(),
-            rand,
-            request_index,
-            requested_locked_columns,
           );
           // Advance Read Status
           self.state = CommonQueryReplanningS::RecomputeQueryPlan {
@@ -3278,14 +3173,14 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           for col in &self.query_plan.col_usage_node.external_cols {
             // Since the key_cols are static, no query plan should have a
             // key_col as an external col. Thus, we assert.
-            assert!(lookup_pos(&table_schema.key_cols, col).is_none());
-            if table_schema.val_cols.strong_static_read(&col, self.timestamp).is_some() {
+            assert!(lookup_pos(&ctx.table_schema.key_cols, col).is_none());
+            if ctx.table_schema.val_cols.strong_static_read(&col, self.timestamp).is_some() {
               return false;
             }
           }
           // Next, check that `safe_present_cols` are present.
           for col in &self.query_plan.col_usage_node.safe_present_cols {
-            if !contains_col(table_schema, col, &self.timestamp) {
+            if !contains_col(&ctx.table_schema, col, &self.timestamp) {
               return false;
             }
           }
@@ -3299,9 +3194,9 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           // This means the current schema didn't line up with the QueryPlan.
           // The only explanation is that the schema had changed very recently.
           // Thus, we re-plan the query.
-          assert!(self.query_plan.gossip_gen >= gossip.gossip_gen);
+          assert!(self.query_plan.gossip_gen >= ctx.gossip.gossip_gen);
           let mut planner = ColUsagePlanner {
-            gossiped_db_schema: &gossip.gossiped_db_schema,
+            gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
             timestamp: self.timestamp,
           };
 
@@ -3309,13 +3204,10 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
             .get_all_cols(&mut self.query_plan.trans_table_schemas.clone(), &self.sql_view.exprs());
 
           // Add column locking
-          let locked_cols_qid = add_requested_locked_columns::<T>(
+          let locked_cols_qid = ctx.add_requested_locked_columns(
             self.orig_p.clone(),
             self.timestamp.clone(),
             all_cols.clone(),
-            rand,
-            request_index,
-            requested_locked_columns,
           );
           // Advance Read Status
           self.state = CommonQueryReplanningS::RecomputeQueryPlan {
@@ -3330,7 +3222,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         // we need to make sure we actually have indeed locked the necessary
         // columns, and re-lock otherwise.
         let mut planner = ColUsagePlanner {
-          gossiped_db_schema: &gossip.gossiped_db_schema,
+          gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
           timestamp: self.timestamp,
         };
 
@@ -3344,13 +3236,10 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
 
         if !did_lock_all {
           // Add column locking
-          let locked_cols_qid = add_requested_locked_columns::<T>(
+          let locked_cols_qid = ctx.add_requested_locked_columns(
             self.orig_p.clone(),
             self.timestamp.clone(),
             all_cols.clone(),
-            rand,
-            request_index,
-            requested_locked_columns,
           );
           // Repeat this state
           self.state = CommonQueryReplanningS::RecomputeQueryPlan {
@@ -3363,26 +3252,26 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           // Compute `schema_cols`, the cols that are present among all relevent cols.
           let mut schema_cols = Vec::<ColName>::new();
           for col in locking_cols {
-            if contains_col(table_schema, col, &self.timestamp) {
+            if contains_col(&ctx.table_schema, col, &self.timestamp) {
               schema_cols.push(col.clone());
             }
           }
 
           // Construct a new QueryPlan using the above `schema_cols`.
           let mut planner = ColUsagePlanner {
-            gossiped_db_schema: &gossip.gossiped_db_schema,
+            gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
             timestamp: self.timestamp,
           };
           let (_, col_usage_node) = planner.plan_stage_query_with_schema(
             &mut self.query_plan.trans_table_schemas.clone(),
-            &self.sql_view.projected_cols(&table_schema),
+            &self.sql_view.projected_cols(&ctx.table_schema),
             &proc::TableRef::TablePath(self.sql_view.table().clone()),
             schema_cols,
             &self.sql_view.exprs(),
           );
 
           let external_cols = col_usage_node.external_cols.clone();
-          self.query_plan.gossip_gen = gossip.gossip_gen;
+          self.query_plan.gossip_gen = ctx.gossip.gossip_gen;
           self.query_plan.col_usage_node = col_usage_node;
 
           // Next, we check to see if all ColNames in `external_cols` is contaiend
@@ -3390,10 +3279,10 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           for col in external_cols {
             if !self.context.context_schema.column_context_schema.contains(&col) {
               // This means we need to consult the Master.
-              let master_qid = mk_qid(rand);
+              let master_qid = mk_qid(&mut ctx.rand);
 
-              network_output.send(
-                master_eid,
+              ctx.network_output.send(
+                &ctx.master_eid,
                 msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
                   msg::PerformMasterFrozenColUsage {
                     query_id: master_qid.clone(),
@@ -3403,7 +3292,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
                   },
                 )),
               );
-              master_query_map.insert(master_qid.clone(), self.orig_p.clone());
+              ctx.master_query_map.insert(master_qid.clone(), self.orig_p.clone());
 
               // Advance Read Status
               self.state =
