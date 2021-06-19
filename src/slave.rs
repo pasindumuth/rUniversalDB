@@ -11,7 +11,6 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::{QuerySuccess, SlaveMessage};
 use crate::multiversion_map::MVM;
 use crate::query_converter::convert_to_msquery;
 use crate::slave::CoordState::ReadStage;
@@ -245,10 +244,11 @@ impl<T: IOTypes> SlaveState<T> {
       msg::SlaveMessage::Query2PCAborted(_) => unimplemented!(),
       msg::SlaveMessage::MasterFrozenColUsageAborted(_) => unimplemented!(),
       msg::SlaveMessage::MasterFrozenColUsageSuccess(_) => unimplemented!(),
+      msg::SlaveMessage::RegisterQuery(_) => {}
     }
   }
 
-  fn handle_query_success(&mut self, query_success: QuerySuccess) {
+  fn handle_query_success(&mut self, query_success: msg::QuerySuccess) {
     if let Some(slave_status) = self.slave_statuses.get_mut(&query_success.query_id) {
       let tm_status = cast!(SlaveStatus::TMStatus, slave_status).unwrap();
       // We just add the result of the `query_success` here.

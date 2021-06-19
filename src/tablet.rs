@@ -1,6 +1,6 @@
 use crate::col_usage::{
-  collect_select_subqueries, collect_top_level_cols, node_external_trans_tables,
-  nodes_external_trans_tables, ColUsagePlanner, FrozenColUsageNode,
+  collect_select_subqueries, collect_top_level_cols, collect_update_subqueries,
+  node_external_trans_tables, nodes_external_trans_tables, ColUsagePlanner, FrozenColUsageNode,
 };
 use crate::common::{
   lookup_pos, merge_table_views, mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
@@ -23,7 +23,7 @@ use rand::RngCore;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::read;
 use std::iter::FromIterator;
-use std::ops::{Add, Bound, Deref};
+use std::ops::{Add, Bound, Deref, Sub};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -301,11 +301,67 @@ struct GRQueryES {
 // -----------------------------------------------------------------------------------------------
 //  MSQueryES
 // -----------------------------------------------------------------------------------------------
-#[derive(Debug)]
-struct MSTableWriteES {}
 
 #[derive(Debug)]
-struct MSTableReadES {}
+struct MSQueryES {
+  query_id: QueryId,
+  timestamp: Timestamp,
+  update_views: BTreeMap<u32, GenericTable>,
+  pending_queries: HashSet<QueryId>,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  MSTableWriteES
+// -----------------------------------------------------------------------------------------------
+#[derive(Debug)]
+struct MSWritePending {
+  read_region: TableRegion,
+  query_id: QueryId,
+}
+
+#[derive(Debug)]
+struct MSWriteExecuting {
+  completed: usize,
+  /// This fields is used to associate a subquery's QueryId with the position
+  /// that it appears in the SQL query.
+  subquery_pos: Vec<QueryId>,
+  subquery_status: SubqueryStatus,
+
+  // We remember the row_region we had computed previously. If we have to protected
+  // more ReadRegions due to InternalColumnsDNEs, the `row_region` will be the same.
+  row_region: Vec<KeyBound>,
+}
+
+#[derive(Debug)]
+enum MSWriteExecutionS {
+  Start,
+  Pending(MSWritePending),
+  Executing(MSWriteExecuting),
+}
+
+#[derive(Debug)]
+struct MSTableWriteES {
+  root_query_path: QueryPath,
+  tier_map: TierMap,
+  timestamp: Timestamp,
+  tier: u32,
+  context: Rc<Context>,
+
+  // Fields needed for responding.
+  sender_path: QueryPath,
+  query_id: QueryId,
+
+  // Query-related fields.
+  query: proc::Update,
+  query_plan: QueryPlan,
+
+  // MSQuery fields
+  ms_query_id: QueryId,
+
+  // Dynamically evolving fields.
+  new_rms: HashSet<QueryPath>,
+  state: MSWriteExecutionS,
+}
 
 #[derive(Debug)]
 struct MSWriteQueryReplanningES {
@@ -323,6 +379,13 @@ enum FullMSTableWriteES {
   Executing(MSTableWriteES),
 }
 
+// -----------------------------------------------------------------------------------------------
+//  MSTableReadES
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct MSTableReadES {}
+
 #[derive(Debug)]
 struct MSReadQueryReplanningES {
   pub tier_map: TierMap,
@@ -335,11 +398,6 @@ struct MSReadQueryReplanningES {
 enum FullMSTableReadES {
   QueryReplanning(MSReadQueryReplanningES),
   Executing(MSTableReadES),
-}
-
-#[derive(Debug)]
-struct MSQueryES {
-  timestamp: Timestamp,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -467,6 +525,7 @@ impl CommonQuery {
 // separately.
 
 type GenericMVTable = MVM<(PrimaryKey, Option<ColName>), Option<ColVal>>;
+type GenericTable = HashMap<(PrimaryKey, Option<ColName>), Option<ColVal>>;
 
 #[derive(Debug)]
 pub struct TabletState<T: IOTypes> {
@@ -610,42 +669,57 @@ impl<T: IOTypes> TabletState<T> {
           }
           msg::GeneralQuery::UpdateQuery(query) => {
             // Lookup the MSQueryES
-            if !self.ms_root_query_map.contains_key(&perform_query.root_query_path.query_id) {
-              // If it doesn't exist, we try adding one. Of course, we must
-              // check if the Timestamp is available or not.
+            let root_query_id = perform_query.root_query_path.query_id.clone();
+            if !self.ms_root_query_map.contains_key(&root_query_id) {
+              // If it doesn't exist, we try adding one. Of course, we must first
+              // check whether the Timestamp is available or not.
               let timestamp = query.timestamp;
               if self.verifying_writes.contains_key(&timestamp)
                 || self.prepared_writes.contains_key(&timestamp)
+                || self.committed_writes.contains_key(&timestamp)
               {
                 // This means the Timestamp is already in use, so we have to Abort.
-                let sender_path = &perform_query.sender_path;
-                let eid = self.slave_address_config.get(&sender_path.slave_group_id).unwrap();
-                self.network_output.send(
-                  &eid,
-                  msg::NetworkMessage::Slave(msg::SlaveMessage::QueryAborted(msg::QueryAborted {
-                    return_path: sender_path.query_id.clone(),
-                    query_id: perform_query.query_id.clone(),
-                    payload: msg::AbortedData::QueryError(msg::QueryError::ProjectedColumnsDNE {
-                      msg: String::new(),
-                    }),
-                  })),
-                );
+                let sender_path = perform_query.sender_path;
+                let abort_msg = msg::QueryAborted {
+                  return_path: sender_path.query_id.clone(),
+                  query_id: perform_query.query_id.clone(),
+                  payload: msg::AbortedData::QueryError(msg::QueryError::TimestampConflict),
+                };
+                self.send_to_path(sender_path, CommonQuery::QueryAborted(abort_msg));
                 return;
               } else {
                 // This means that we can add an MSQueryES at the Timestamp
+                let ms_query_id = mk_qid(&mut self.rand);
                 self.tablet_statuses.insert(
-                  perform_query.query_id.clone(),
-                  TabletStatus::MSQueryES(MSQueryES { timestamp: query.timestamp }),
+                  ms_query_id.clone(),
+                  TabletStatus::MSQueryES(MSQueryES {
+                    query_id: ms_query_id.clone(),
+                    timestamp: query.timestamp,
+                    update_views: Default::default(),
+                    pending_queries: Default::default(),
+                  }),
                 );
 
-                // We also add to `ms_root_query_map` to associate the root query.
-                self.ms_root_query_map.insert(
-                  perform_query.root_query_path.query_id.clone(),
-                  perform_query.query_id.clone(),
+                // We also amend the `ms_root_query_map` to associate the root query.
+                self.ms_root_query_map.insert(root_query_id.clone(), ms_query_id.clone());
+
+                // Send a register message back to the root.
+                let register_query = msg::RegisterQuery {
+                  root_query_id: root_query_id.clone(),
+                  query_path: QueryPath {
+                    slave_group_id: self.this_slave_group_id.clone(),
+                    maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
+                    query_id: ms_query_id,
+                  },
+                };
+                let sid = perform_query.sender_path.slave_group_id.clone();
+                let eid = self.slave_address_config.get(&sid).unwrap();
+                self.network_output.send(
+                  eid,
+                  msg::NetworkMessage::Slave(msg::SlaveMessage::RegisterQuery(register_query)),
                 );
 
-                // Also add a VerifyingReadWriteRegion
-                assert!(!self.verifying_writes.contains_key(&timestamp));
+                // FInally, add an empty VerifyingReadWriteRegion
                 self.verifying_writes.insert(
                   timestamp,
                   VerifyingReadWriteRegion {
@@ -658,8 +732,17 @@ impl<T: IOTypes> TabletState<T> {
               }
             }
 
+            // Lookup the MSQuery and the QueryId of the new Query into `pending_queries`.
+            let ms_query_id = self.ms_root_query_map.get(&root_query_id).unwrap();
+            let tablet_status = self.tablet_statuses.get_mut(ms_query_id).unwrap();
+            let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
+            ms_query.pending_queries.insert(perform_query.query_id.clone());
+
             // Create an MSWriteTableES in the QueryReplanning state, and add it to
             // the MSQueryES.
+            // TODO: if we wanted to do this Consistently, we would construct the whole
+            // FullMSTableWriteES, and then have a function that looks up ESs and performs
+            // Immediate computations if they are in a state to do so (or throw an error otherwise).
             let mut comm_plan_es = CommonQueryReplanningES {
               timestamp: query.timestamp,
               context: Rc::new(query.context),
@@ -785,6 +868,48 @@ impl<T: IOTypes> TabletState<T> {
         self.network_output.send(eid, msg::NetworkMessage::Slave(common_query.slave_msg()));
       }
     };
+  }
+
+  fn check_write_region_isolation(
+    write_region: &TableRegion,
+    timestamp: &Timestamp,
+    // Tablet members
+    verifying_writes: &BTreeMap<Timestamp, VerifyingReadWriteRegion>,
+    prepared_writes: &BTreeMap<Timestamp, ReadWriteRegion>,
+    committed_writes: &BTreeMap<Timestamp, ReadWriteRegion>,
+    read_protected: &BTreeMap<Timestamp, BTreeSet<TableRegion>>,
+  ) -> bool {
+    // We iterate through every subsequent Reads that this `write_region` can conflict
+    // with, and check if there is indeed a conflict.
+
+    // First, verify Region Isolation with ReadRegions of subsequent *_writes.
+    let bound = (Bound::Excluded(timestamp), Bound::Unbounded);
+    for (_, verifying_write) in verifying_writes.range(bound) {
+      if does_intersect(write_region, &verifying_write.m_read_protected) {
+        return false;
+      }
+    }
+    for (_, prepared_write) in prepared_writes.range(bound) {
+      if does_intersect(write_region, &prepared_write.m_read_protected) {
+        return false;
+      }
+    }
+    for (_, committed_write) in committed_writes.range(bound) {
+      if does_intersect(write_region, &committed_write.m_read_protected) {
+        return false;
+      }
+    }
+
+    // Then, verify Region Isolation with ReadRegions of subsequent Reads.
+    let bound = (Bound::Included(timestamp), Bound::Unbounded);
+    for (_, read_regions) in read_protected.range(bound) {
+      if does_intersect(write_region, read_regions) {
+        return false;
+      }
+    }
+
+    // If we get here, it means we have Region Isolation.
+    return false;
   }
 
   fn run_main_loop(&mut self) {
@@ -1182,34 +1307,74 @@ impl<T: IOTypes> TabletState<T> {
         TabletStatus::MSQueryES(_) => panic!(),
         TabletStatus::FullMSTableReadES(_) => panic!(),
         TabletStatus::FullMSTableWriteES(ms_write_es) => {
-          // Advance the QueryReplanning now that the desired columns have been locked.
-          let plan_es = cast!(FullMSTableWriteES::QueryReplanning, ms_write_es).unwrap();
-          let query_id = &plan_es.query_id;
-          let comm_plan_es = &mut plan_es.status;
-          comm_plan_es.column_locked::<T>(
-            query_id.clone(),
-            &mut self.rand,
-            &mut self.network_output,
-            &self.master_eid,
-            &self.gossip,
-            &self.table_schema,
-            &self.slave_address_config,
-            &mut self.request_index,
-            &mut self.requested_locked_columns,
-            &mut self.master_query_map,
-          );
-          // We check if the QueryReplanning is done.
-          match comm_plan_es.state {
-            CommonQueryReplanningS::Done(success) => {
-              if success {
-                *ms_write_es = FullMSTableWriteES::Executing(MSTableWriteES {});
-              } else {
-                // TODO: terminate the MSTableWriteES properly
-                let query_id = query_id.clone();
-                self.tablet_statuses.remove(&query_id);
+          match ms_write_es {
+            FullMSTableWriteES::QueryReplanning(plan_es) => {
+              // Advance the QueryReplanning now that the desired columns have been locked.
+              let comm_plan_es = &mut plan_es.status;
+              comm_plan_es.column_locked::<T>(
+                query_id.clone(),
+                &mut self.rand,
+                &mut self.network_output,
+                &self.master_eid,
+                &self.gossip,
+                &self.table_schema,
+                &self.slave_address_config,
+                &mut self.request_index,
+                &mut self.requested_locked_columns,
+                &mut self.master_query_map,
+              );
+
+              let root_query_id = &plan_es.root_query_path.query_id;
+              let ms_query_id = self.ms_root_query_map.get(root_query_id).unwrap();
+              // We check if the QueryReplanning is done.
+              match comm_plan_es.state {
+                CommonQueryReplanningS::Done(success) => {
+                  if success {
+                    // If the QueryReplanning was successful, we move the FullMSTableWriteES
+                    // to Executing in the Start state, and immediately start executing it.
+
+                    // First, we look up the `tier` of this Table being
+                    // written, update the `tier_map`.
+                    let sql_query = comm_plan_es.sql_view.clone();
+                    let mut tier_map = plan_es.tier_map.clone();
+                    let tier = tier_map.map.get(sql_query.table()).unwrap().clone();
+                    tier_map.map.get(sql_query.table()).unwrap().sub(1);
+
+                    // Then, we construct the MSTableWriteES.
+                    *ms_write_es = FullMSTableWriteES::Executing(MSTableWriteES {
+                      root_query_path: plan_es.root_query_path.clone(),
+                      tier_map,
+                      timestamp: comm_plan_es.timestamp,
+                      tier,
+                      context: comm_plan_es.context.clone(),
+                      sender_path: comm_plan_es.sender_path.clone(),
+                      query_id: query_id.clone(),
+                      query: sql_query,
+                      query_plan: comm_plan_es.query_plan.clone(),
+                      ms_query_id: ms_query_id.clone(),
+                      new_rms: Default::default(),
+                      state: MSWriteExecutionS::Start,
+                    });
+
+                    // Finally, we start the MSWriteTableES.
+                    self.start_ms_table_write_es(&query_id);
+                  } else {
+                    // Since `CommonQueryReplanningES` will have already sent back the necessary
+                    // responses. Thus, we only need to exit the ES here.
+
+                    // Remove that FullMSTableWriteES
+                    self.tablet_statuses.remove(&query_id);
+
+                    // Update that MSQuery
+                    let tablet_status = self.tablet_statuses.get_mut(ms_query_id).unwrap();
+                    let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
+                    ms_query.pending_queries.remove(&query_id);
+                  }
+                }
+                _ => {}
               }
             }
-            _ => {}
+            FullMSTableWriteES::Executing(_) => {}
           }
         }
       }
@@ -1221,11 +1386,6 @@ impl<T: IOTypes> TabletState<T> {
     let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
     let read_es = cast!(TabletStatus::FullTableReadES, tablet_status).unwrap();
     let es = cast!(FullTableReadES::Executing, read_es).unwrap();
-
-    // Compute the Column Region.
-    let mut col_region = HashSet::<ColName>::new();
-    col_region.extend(es.query.projection.clone());
-    col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
 
     // Setup ability to compute a tight Keybound for every ContextRow.
     let keybound_computer = ContextKeyboundComputer::new(
@@ -1252,17 +1412,23 @@ impl<T: IOTypes> TabletState<T> {
     }
     row_region = compress_row_region(row_region);
 
+    // Compute the Column Region.
+    let mut col_region = HashSet::<ColName>::new();
+    col_region.extend(es.query.projection.clone());
+    col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
+
     // Move the TableReadES to the Pending state with the given ReadRegion.
     let protect_query_id = mk_qid(&mut self.rand);
     let col_region: Vec<ColName> = col_region.into_iter().collect();
     let read_region = TableRegion { col_region, row_region };
-    es.state =
-      ExecutionS::Pending(Pending { read_region: read_region.clone(), query_id: protect_query_id });
+    es.state = ExecutionS::Pending(Pending {
+      read_region: read_region.clone(),
+      query_id: protect_query_id.clone(),
+    });
 
     // Add a read protection requested
-    let protect_query_id = mk_qid(&mut self.rand);
     let orig_p = OrigP { status_path: es.query_id.clone() };
-    let protect_request = (orig_p, protect_query_id, read_region.clone());
+    let protect_request = (orig_p, protect_query_id, read_region);
     if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
       waiting.insert(protect_request);
     } else {
@@ -1270,24 +1436,126 @@ impl<T: IOTypes> TabletState<T> {
     }
   }
 
-  /// This is used to simply delete a TableReadES due to an expression evaluation
-  /// error that occured inside, and respond to the client. Note that this function doesn't
-  /// do any other kind of cleanup.
+  /// Processes the Start state of MSTableWrite.
+  fn start_ms_table_write_es(&mut self, query_id: &QueryId) {
+    let tablet_status = self.tablet_statuses.get_mut(&query_id).unwrap();
+    let ms_write_es = cast!(TabletStatus::FullMSTableWriteES, tablet_status).unwrap();
+    let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
+
+    // Setup ability to compute a tight Keybound for every ContextRow.
+    let keybound_computer = ContextKeyboundComputer::new(
+      &es.query.selection,
+      &self.table_schema,
+      &es.timestamp,
+      &es.context.context_schema,
+    );
+
+    // Compute the Row Region by taking the union across all ContextRows
+    let mut row_region = Vec::<KeyBound>::new();
+    for context_row in &es.context.context_rows {
+      match keybound_computer.compute_keybounds(&context_row) {
+        Ok(key_bounds) => {
+          for key_bound in key_bounds {
+            row_region.push(key_bound);
+          }
+        }
+        Err(eval_error) => {
+          self.handle_eval_error_table_es(&query_id, eval_error);
+          return;
+        }
+      }
+    }
+    row_region = compress_row_region(row_region);
+
+    // Compute the Write Column Region.
+    let mut col_region = HashSet::<ColName>::new();
+    col_region.extend(es.query.assignment.iter().map(|(col, _)| col.clone()));
+
+    // Compute the Write Region
+    let col_region = Vec::from_iter(col_region.into_iter());
+    let write_region = TableRegion { col_region, row_region: row_region.clone() };
+
+    // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
+    // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
+    let timestamp = es.timestamp.clone();
+    // TODO: we couldn't make this take a &self because of the `self.tablet_statuses.get_mut`
+    // above... idk why, I think it's a Rust bug. Doing TabletContext will help.
+    if !TabletState::<T>::check_write_region_isolation(
+      &write_region,
+      &timestamp,
+      &self.verifying_writes,
+      &self.prepared_writes,
+      &self.committed_writes,
+      &self.read_protected,
+    ) {
+      // Send an abortion.
+      let sender_path = es.sender_path.clone();
+      self.send_to_path(
+        sender_path.clone(),
+        CommonQuery::QueryAborted(msg::QueryAborted {
+          return_path: sender_path.query_id.clone(),
+          query_id: query_id.clone(),
+          payload: msg::AbortedData::QueryError(
+            msg::QueryError::WriteRegionConflictWithSubsequentRead,
+          ),
+        }),
+      );
+      self.exit_and_clean_up(query_id.clone());
+    } else {
+      // Compute the Read Column Region.
+      let col_region = HashSet::<ColName>::from_iter(
+        es.query_plan.col_usage_node.safe_present_cols.iter().cloned(),
+      );
+
+      // Move the MSTableWriteES to the Pending state with the given ReadRegion.
+      let protect_query_id = mk_qid(&mut self.rand);
+      let col_region = Vec::from_iter(col_region.into_iter());
+      let read_region = TableRegion { col_region, row_region };
+      es.state = MSWriteExecutionS::Pending(MSWritePending {
+        read_region: read_region.clone(),
+        query_id: protect_query_id.clone(),
+      });
+
+      // Add a ReadRegion to the m_waiting_read_protected.
+      let orig_p = OrigP { status_path: es.query_id.clone() };
+      let protect_request = (orig_p, protect_query_id, read_region);
+      let verifying = self.verifying_writes.get_mut(&es.timestamp).unwrap();
+      verifying.m_waiting_read_protected.insert(protect_request);
+    }
+  }
+
+  /// This is used to simply delete a TableReadES or MSTable*ES due to an expression
+  /// evaluation error that occured inside, and respond to the client. Note that this
+  /// function doesn't do any other kind of cleanup.
   fn handle_eval_error_table_es(&mut self, query_id: &QueryId, eval_error: EvalError) {
-    let tablet_status = self.tablet_statuses.remove(&query_id).unwrap();
-    let read_es = cast!(TabletStatus::FullTableReadES, tablet_status).unwrap();
-    let es = cast!(FullTableReadES::Executing, read_es).unwrap();
+    let tablet_status = self.tablet_statuses.get(&query_id).unwrap();
+    let sender_path = match tablet_status {
+      TabletStatus::GRQueryES(_) => panic!(),
+      TabletStatus::FullTableReadES(read_es) => {
+        let es = cast!(FullTableReadES::Executing, read_es).unwrap();
+        es.sender_path.clone()
+      }
+      TabletStatus::TMStatus(_) => panic!(),
+      TabletStatus::MSQueryES(_) => panic!(),
+      TabletStatus::FullMSTableReadES(_) => panic!(),
+      TabletStatus::FullMSTableWriteES(ms_write_es) => {
+        let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
+        es.sender_path.clone()
+      }
+    };
 
     // If an error occurs here, we simply abort this whole query and respond
     // to the sender with an Abort.
     let aborted = msg::QueryAborted {
-      return_path: es.sender_path.query_id.clone(),
+      return_path: sender_path.query_id.clone(),
       query_id: query_id.clone(),
       payload: msg::AbortedData::QueryError(msg::QueryError::TypeError {
         msg: format!("{:?}", eval_error),
       }),
     };
-    self.send_to_path(es.sender_path.clone(), CommonQuery::QueryAborted(aborted));
+
+    self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
+    self.exit_and_clean_up(query_id.clone());
   }
 
   /// Here, the subquery GRQueryES at `subquery_id` must already be cleaned up. This
@@ -2425,7 +2693,9 @@ impl<T: IOTypes> TabletState<T> {
         }
         TabletStatus::MSQueryES(_) => panic!(),
         TabletStatus::FullMSTableReadES(_) => panic!(),
-        TabletStatus::FullMSTableWriteES(_) => panic!(),
+        TabletStatus::FullMSTableWriteES(_) => {
+          // TODO: do this
+        }
       }
     }
   }
@@ -2469,6 +2739,11 @@ struct ContextKeyboundComputer {
 }
 
 impl ContextKeyboundComputer {
+  /// Here, `selection` is the the filtering expression. `parent_context_schema` is the set
+  /// of External columns whose values we can fill in (during `compute_keybounds`) calls
+  /// to help reduce the KeyBound. However, we need `table_schema` and the `timestamp` of
+  /// the Query to determine which of these External columns are shadowed so we can avoid
+  /// using them.
   fn new(
     selection: &proc::ValExpr,
     table_schema: &TableSchema,
@@ -2867,6 +3142,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         for col in &self.sql_view.projected_cols(table_schema) {
           if !contains_col(&table_schema, col, &self.timestamp) {
             // This means a projected column doesn't exist. Thus, we Exit and Clean Up.
+            // TODO: why aren't we responding to Tablets too?.
             let sender_path = &self.sender_path;
             let eid = slave_address_config.get(&sender_path.slave_group_id).unwrap();
             network_output.send(

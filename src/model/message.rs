@@ -39,6 +39,9 @@ pub enum SlaveMessage {
   // Tablet forwarding message
   TabletMessage(TabletGroupId, TabletMessage),
 
+  // Register message
+  RegisterQuery(RegisterQuery),
+
   // 2PC backward messages
   Query2PCPrepared(Query2PCPrepared),
   Query2PCAborted(Query2PCAborted),
@@ -181,6 +184,16 @@ pub struct UpdateQuery {
   pub context: Context,
   pub sql_query: proc::Update,
   pub query_plan: QueryPlan,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Register message
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RegisterQuery {
+  pub root_query_id: QueryId,
+  pub query_path: QueryPath,
 }
 
 // -------------------------------------------------------------------------------------------------

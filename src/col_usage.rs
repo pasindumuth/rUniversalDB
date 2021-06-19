@@ -242,6 +242,16 @@ fn collect_top_level_cols_R(expr: &proc::ValExpr, cols: &mut Vec<ColName>) {
   }
 }
 
+/// This function collects and returns all GRQueries that belongs to a `Update`.
+pub fn collect_update_subqueries(sql_query: &proc::Update) -> Vec<proc::GRQuery> {
+  let mut subqueries = Vec::<proc::GRQuery>::new();
+  for (_, expr) in &sql_query.assignment {
+    collect_expr_subqueries_R(expr, &mut subqueries);
+  }
+  collect_expr_subqueries_R(&sql_query.selection, &mut subqueries);
+  return subqueries;
+}
+
 /// This function collects and returns all GRQueries that belongs to a `SuperSimpleSelect`.
 pub fn collect_select_subqueries(sql_query: &proc::SuperSimpleSelect) -> Vec<proc::GRQuery> {
   return collect_expr_subqueries(&sql_query.selection);
@@ -249,21 +259,22 @@ pub fn collect_select_subqueries(sql_query: &proc::SuperSimpleSelect) -> Vec<pro
 
 // Computes the set of all GRQuerys that appear as immediate children of `expr`.
 fn collect_expr_subqueries(expr: &proc::ValExpr) -> Vec<proc::GRQuery> {
-  fn collect_R(expr: &proc::ValExpr, subqueries: &mut Vec<proc::GRQuery>) {
-    match expr {
-      proc::ValExpr::ColumnRef { .. } => {}
-      proc::ValExpr::UnaryExpr { expr, .. } => collect_R(expr, subqueries),
-      proc::ValExpr::BinaryExpr { left, right, .. } => {
-        collect_R(left, subqueries);
-        collect_R(right, subqueries);
-      }
-      proc::ValExpr::Value { .. } => {}
-      proc::ValExpr::Subquery { query, .. } => subqueries.push(query.deref().clone()),
-    }
-  }
   let mut subqueries = Vec::<proc::GRQuery>::new();
-  collect_R(expr, &mut subqueries);
+  collect_expr_subqueries_R(expr, &mut subqueries);
   subqueries
+}
+
+fn collect_expr_subqueries_R(expr: &proc::ValExpr, subqueries: &mut Vec<proc::GRQuery>) {
+  match expr {
+    proc::ValExpr::ColumnRef { .. } => {}
+    proc::ValExpr::UnaryExpr { expr, .. } => collect_expr_subqueries_R(expr, subqueries),
+    proc::ValExpr::BinaryExpr { left, right, .. } => {
+      collect_expr_subqueries_R(left, subqueries);
+      collect_expr_subqueries_R(right, subqueries);
+    }
+    proc::ValExpr::Value { .. } => {}
+    proc::ValExpr::Subquery { query, .. } => subqueries.push(query.deref().clone()),
+  }
 }
 
 /// Recall that all TransTablesNames are unique. This function computes all external
