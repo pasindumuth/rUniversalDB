@@ -514,8 +514,8 @@ impl CommonQuery {
 // other data to figure out the node and back that into the NetworkMessage
 // separately.
 
-type GenericMVTable = MVM<(PrimaryKey, Option<ColName>), Option<ColVal>>;
-type GenericTable = HashMap<(PrimaryKey, Option<ColName>), Option<ColVal>>;
+type GenericMVTable = MVM<(PrimaryKey, Option<ColName>), ColValN>;
+type GenericTable = HashMap<(PrimaryKey, Option<ColName>), ColValN>;
 
 /// A very minor alias to make the less verbose, since it's used so much.
 type Statuses = HashMap<QueryId, TabletStatus>;
@@ -669,6 +669,12 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
           msg::GeneralQuery::UpdateQuery(query) => {
+            // We first do some basic verification of the SQL query, namely assert that the
+            // assigned columns aren't key columns.e
+            for (col, _) in &query.sql_query.assignment {
+              assert!(!lookup_pos(&self.table_schema.key_cols, col).is_some())
+            }
+
             // Lookup the MSQueryES
             let root_query_id = perform_query.root_query_path.query_id.clone();
             if !self.ms_root_query_map.contains_key(&root_query_id) {
@@ -2484,36 +2490,35 @@ impl<T: IOTypes> TabletContext<T> {
 
                 /// Now, we evaluate all expressions in the SQL query and amend the
                 /// result to this TableView (if the WHERE clause evaluates to true).
-                match is_true(&evaluate_expr(
-                  &es.query.selection,
-                  &es.context.context_schema,
-                  &context_row,
-                  &subtable_schema,
-                  &subtable_row,
-                  &subquery_vals,
-                )) {
-                  Ok(bool_val) => {
-                    if bool_val {
-                      // This means that the current row should be selected for the result.
-                      // First, we take the projected columns.
-                      let mut res_row = Vec::<ColValN>::new();
-                      for (res_col_name, _) in &res_col_names {
-                        let idx = subtable_schema.iter().position(|k| res_col_name == k).unwrap();
-                        res_row.push(subtable_row.get(idx).unwrap().clone());
-                      }
-
-                      // Then, we add the `res_row` into the TableView.
-                      if let Some(count) = res_table_view.rows.get_mut(&res_row) {
-                        count.add(1);
-                      } else {
-                        res_table_view.rows.insert(res_row, 1);
-                      }
+                let query = &es.query;
+                let context = &es.context;
+                let eval_res = (|| {
+                  let bool_val = is_true(&evaluate_expr(
+                    &query.selection,
+                    &context.context_schema.column_context_schema,
+                    &context_row.column_context_row,
+                    &subtable_schema,
+                    &subtable_row,
+                    &subquery_vals,
+                  )?)?;
+                  if bool_val {
+                    // This means that the current row should be selected for the result.
+                    // First, we take the projected columns.
+                    let mut res_row = Vec::<ColValN>::new();
+                    for (res_col_name, _) in &res_col_names {
+                      let idx = subtable_schema.iter().position(|k| res_col_name == k).unwrap();
+                      res_row.push(subtable_row.get(idx).unwrap().clone());
                     }
-                  }
-                  Err(eval_error) => {
-                    self.handle_eval_error_table_es(statuses, &query_id, eval_error);
-                    return;
-                  }
+
+                    // Then, we add the `res_row` into the TableView.
+                    res_table_view.add_row(res_row);
+                  };
+                  Ok(())
+                })();
+
+                if let Err(eval_error) = eval_res {
+                  self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+                  return;
                 }
               }
 
@@ -2539,12 +2544,202 @@ impl<T: IOTypes> TabletContext<T> {
         TabletStatus::MSQueryES(_) => panic!(),
         TabletStatus::FullMSTableReadES(_) => panic!(),
         TabletStatus::FullMSTableWriteES(ms_write_es) => {
-          // TODO: Recall that Updates can only update ValCols. The MSCoordES should verify this
-          // as an optimization, but even if it doesn't, the Tablet should detect it at the latest
-          // possible moment (like how we handle Type Errors), which is when we compute the
-          // GenericTable, or even later (if we interpret the key ColName as a val column with the
-          // same name), when we try applying it to `storage` (where we will find the GenericTable
-          // has a non-conforming schema).
+          let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
+
+          // Add the subquery results into the MSTableWriteES.
+          es.new_rms.extend(subquery_new_rms);
+          let executing_state = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
+          let subquery_status = &mut executing_state.subquery_status;
+          let single_status = subquery_status.subqueries.get_mut(&subquery_id).unwrap();
+          let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
+          *single_status = SingleSubqueryStatus::Finished(SubqueryFinished {
+            context: context.clone(),
+            result: table_views,
+          });
+          executing_state.completed += 1;
+
+          // If all subqueries have been evaluated, finish the MSTableWriteES
+          // and respond to the client.
+          if executing_state.completed == subquery_status.subqueries.len() {
+            let num_subqueries = executing_state.subquery_pos.len();
+
+            // Construct the ContextConverters for all subqueries
+            let mut converters = Vec::<ContextConverter>::new();
+            for subquery_id in &executing_state.subquery_pos {
+              let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+              let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
+              let context_schema = &result.context.context_schema;
+              converters.push(ContextConverter::general_create(
+                &es.context.context_schema,
+                context_schema.column_context_schema.clone(),
+                context_schema.trans_table_names(),
+                &es.timestamp,
+                &self.table_schema,
+              ));
+            }
+
+            // Setup the `child_context_row_maps` that will be populated over time.
+            let mut child_context_row_maps = Vec::<HashMap<ContextRow, usize>>::new();
+            for _ in 0..num_subqueries {
+              child_context_row_maps.push(HashMap::new());
+            }
+
+            // Compute the Schema that should belong to the TableView that's returned
+            // from this MSTableWriteES.
+            let mut res_col_names = Vec::<(ColName, ColType)>::new();
+            res_col_names.extend(self.table_schema.key_cols.clone());
+            for (col_name, _) in &es.query.assignment.clone() {
+              res_col_names.push((
+                col_name.clone(),
+                self.table_schema.val_cols.strong_static_read(col_name, es.timestamp).unwrap(),
+              ));
+            }
+
+            // Compute the set of columns to read from the table. This should should include all
+            // top-level ColumnRefs that are in expressions but not subqueries (these are included
+            // in `query_plan.col_usage_node.safe_present_cols`), the key columns (recall that the
+            // TableView and the GenericTable both use all key columns), and all Internal columns
+            // used in subqueries (which are best derived from the subquery Contexts, since
+            // they are generally a superset of the Query Plan).
+            let mut cols_to_read_set = HashSet::<ColName>::new();
+            cols_to_read_set.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
+            cols_to_read_set.extend(self.table_schema.key_cols.iter().map(|(col, _)| col.clone()));
+            for conv in &converters {
+              cols_to_read_set.extend(conv.safe_present_split.clone());
+            }
+            let cols_to_read = Vec::from_iter(cols_to_read_set.iter().cloned());
+
+            // Setup ability to compute a tight Keybound for every ContextRow. This will be
+            // the exact same as that computed before sending out the subqueries.
+            let keybound_computer = ContextKeyboundComputer::new(
+              &es.query.selection,
+              &self.table_schema,
+              &es.timestamp,
+              &es.context.context_schema,
+            );
+
+            assert_eq!(&es.context.context_rows.len(), &1);
+            let context_row = &es.context.context_rows.get(0).unwrap();
+
+            // Since we recomputed this exact `key_bounds` before going to the Pending
+            // state, we can unwrap it; there should be no errors.
+            let key_bounds = keybound_computer.compute_keybounds(context_row).unwrap();
+
+            // We iterate over the rows of the Subtable computed for this ContextRow,
+            // computing the TableView we desire for the ContextRow.
+            let (subtable_schema, subtable) =
+              compute_subtable(&cols_to_read, &key_bounds, &self.storage);
+
+            // Next, we initialize the TableView and GenericTable that we are trying to
+            // construct for this `context_row`.
+            let mut res_table_view =
+              TableView { col_names: res_col_names.clone(), rows: Default::default() };
+            let mut update_view = GenericTable::new();
+
+            for subtable_row in subtable {
+              // Now, we compute the subquery result for all subqueries for this
+              // `context_row` + `subtable_row`.
+              let mut subquery_vals = Vec::<TableView>::new();
+              for index in 0..num_subqueries {
+                // Compute the child ContextRow for this subquery, and populate
+                // `child_context_row_map` accordingly.
+                let conv = converters.get(index).unwrap();
+                let child_context_row_map = child_context_row_maps.get_mut(index).unwrap();
+                let row = conv.extract_child_relevent_cols(&subtable_schema, &subtable_row);
+                let new_context_row = conv.compute_child_context_row(context_row, row);
+                if !child_context_row_map.contains_key(&new_context_row) {
+                  let idx = child_context_row_map.len();
+                  child_context_row_map.insert(new_context_row.clone(), idx);
+                }
+
+                // Get the child_context_idx to get the relevent TableView from the subquery
+                // results, and populate `subquery_vals`.
+                let child_context_idx = child_context_row_map.get(&new_context_row).unwrap();
+                let subquery_id = executing_state.subquery_pos.get(index).unwrap();
+                let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+                let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
+                subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
+              }
+
+              // Now, we evaluate all expressions in the SQL query and amend the
+              // result to the TableView (if the WHERE clause evaluates to true).
+              let query = &es.query;
+              let context = &es.context;
+              let eval_res = (|| {
+                let bool_val = is_true(&evaluate_expr(
+                  &query.selection,
+                  &context.context_schema.column_context_schema,
+                  &context_row.column_context_row,
+                  &subtable_schema,
+                  &subtable_row,
+                  &subquery_vals,
+                )?)?;
+                if bool_val {
+                  // This means that the current row should be selected for the result.
+                  let mut res_row = Vec::<ColValN>::new();
+
+                  // First we add in the Key Columns
+                  let mut primary_key = PrimaryKey { cols: vec![] };
+                  for (key_col, _) in &self.table_schema.key_cols {
+                    let idx = subtable_schema.iter().position(|col| key_col == col).unwrap();
+                    let col_val = subtable_row.get(idx).unwrap().clone();
+                    res_row.push(col_val.clone());
+                    primary_key.cols.push(col_val.unwrap());
+                  }
+
+                  // Then, iterate through the assignment, evaluating the set expression.
+                  for (col_name, val_expr) in &query.assignment {
+                    // TODO: this is wrong; we need to figure out which slice of `subquery_vals`
+                    // is actually relevent to the `val_expr` add pass that in instead.
+                    let new_col_val = evaluate_expr(
+                      val_expr,
+                      &context.context_schema.column_context_schema,
+                      &context_row.column_context_row,
+                      &subtable_schema,
+                      &subtable_row,
+                      &subquery_vals,
+                    )?;
+                    res_row.push(new_col_val.clone());
+
+                    // Update the `update_view`.
+                    update_view.insert((primary_key.clone(), Some(col_name.clone())), new_col_val);
+                  }
+
+                  // Finally, we add the `res_row` into the TableView.
+                  res_table_view.add_row(res_row);
+                }
+                Ok(())
+              })();
+
+              if let Err(eval_error) = eval_res {
+                self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+                return;
+              }
+            }
+
+            // Build the success message and respond.
+            let result_schema = Vec::from_iter(res_col_names.iter().map(|(col, _)| col.clone()));
+            let success_msg = msg::QuerySuccess {
+              return_path: es.sender_path.query_id.clone(),
+              query_id: query_id.clone(),
+              result: (result_schema, vec![res_table_view]),
+              new_rms: es.new_rms.iter().cloned().collect(),
+            };
+            let sender_path = es.sender_path.clone();
+            self.send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
+
+            // Update the MSQuery. In particular, amend the `update_view` and remove this
+            // MSTableWriteES from the pending queries.
+            let tier = es.tier.clone();
+            let ms_query_id = es.ms_query_id.clone();
+            let tablet_status = statuses.get_mut(&ms_query_id).unwrap();
+            let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
+            ms_query.pending_queries.remove(&query_id);
+            ms_query.update_views.insert(tier, update_view);
+
+            // Remove the MSTableWriteES.
+            statuses.remove(&query_id);
+          }
         }
       }
     }
@@ -2828,15 +3023,15 @@ impl<T: IOTypes> TabletContext<T> {
 
 /// This evaluates a `ValExpr` completely into a `ColVal`. When a ColumnRef is encountered
 /// in the `expr`, we first search `subtable_row`, and if that's not present, we search the
-/// `parent_context_row`.
+/// `column_context_row`.
 fn evaluate_expr(
   expr: &proc::ValExpr,
-  parent_context_schema: &ContextSchema,
-  parent_context_row: &ContextRow,
+  column_context_schema: &Vec<ColName>,
+  column_context_row: &Vec<ColValN>,
   subtable_schema: &Vec<ColName>,
   subtable_row: &Vec<ColValN>,
   subquery_vals: &Vec<TableView>,
-) -> ColValN {
+) -> Result<ColValN, EvalError> {
   let mut subtable_row_map = HashMap::<ColName, ColValN>::new();
   for i in 0..subtable_schema.len() {
     subtable_row_map

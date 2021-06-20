@@ -170,6 +170,16 @@ impl ContextSchema {
   }
 }
 
+impl TableView {
+  pub fn add_row(&mut self, row: Vec<ColValN>) {
+    if let Some(count) = self.rows.get_mut(&row) {
+      *count += 1;
+    } else {
+      self.rows.insert(row, 1);
+    }
+  }
+}
+
 impl EndpointId {
   pub fn from(eid: &str) -> EndpointId {
     EndpointId(eid.to_string())
