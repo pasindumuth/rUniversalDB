@@ -164,6 +164,12 @@ impl TablePath {
   }
 }
 
+impl ContextSchema {
+  pub fn trans_table_names(&self) -> Vec<TransTableName> {
+    self.trans_table_context_schema.iter().map(|prefix| prefix.trans_table_name.clone()).collect()
+  }
+}
+
 impl EndpointId {
   pub fn from(eid: &str) -> EndpointId {
     EndpointId(eid.to_string())

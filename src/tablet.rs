@@ -132,17 +132,18 @@ struct CommonQueryReplanningES<T: QueryReplanningSqlView> {
 #[derive(Debug)]
 struct SubqueryLockingSchemas {
   // Recall that we only get to this State if a Subquery had failed. We hold onto
-  // the prior ContextSchema (rather than computating from the QueryPlan again) so
-  // that we don't potentially lose prior amendments to it.
-  // TODO: we only need to accumulate ColNames.. should we do that?
-  context_schema: ContextSchema,
+  // the prior ColNames and TransTableNames (rather than computating from the QueryPlan
+  // again) so that we don't potentially lose prior ColName amendments.
+  old_columns: Vec<ColName>,
+  trans_table_names: Vec<TransTableName>,
   new_cols: Vec<ColName>,
   query_id: QueryId,
 }
 
 #[derive(Debug)]
 struct SubqueryPendingReadRegion {
-  context_schema: ContextSchema,
+  new_columns: Vec<ColName>,
+  trans_table_names: Vec<TransTableName>,
   read_region: TableRegion,
   query_id: QueryId,
 }
@@ -1234,7 +1235,7 @@ impl<T: IOTypes> TabletContext<T> {
               // None of the `new_cols` should already exist in the old subquery Context schema
               // (since they didn't exist when the GRQueryES complained).
               for col in &locking_status.new_cols {
-                assert!(!locking_status.context_schema.column_context_schema.contains(col));
+                assert!(!locking_status.old_columns.contains(col));
               }
 
               // Next, we compute the subset of `new_cols` that aren't in the Table
@@ -1269,8 +1270,8 @@ impl<T: IOTypes> TabletContext<T> {
                 // trying to evaluate the subquery.
 
                 // Now, add the `new_cols` to the schema
-                let mut new_context_schema = locking_status.context_schema.clone();
-                new_context_schema.column_context_schema.extend(locking_status.new_cols.clone());
+                let mut new_columns = locking_status.old_columns.clone();
+                new_columns.extend(locking_status.new_cols.clone());
 
                 // For ColNames in `new_cols` that belong to this Table, we need to
                 // lock the region, so we compute a TableRegion accordingly.
@@ -1299,11 +1300,13 @@ impl<T: IOTypes> TabletContext<T> {
 
                 // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
                 let subquery_id = subquery_id.clone();
+                let trans_table_names = locking_status.trans_table_names.clone();
                 let subqueries = &mut executing.subquery_status.subqueries;
                 let single_status = subqueries.get_mut(&subquery_id).unwrap();
                 *single_status =
                   SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
-                    context_schema: new_context_schema,
+                    new_columns,
+                    trans_table_names,
                     read_region: new_read_region,
                     query_id: protect_query_id,
                   })
@@ -1583,10 +1586,12 @@ impl<T: IOTypes> TabletContext<T> {
 
           let old_subquery = executing.subquery_status.subqueries.remove(&subquery_id).unwrap();
           let old_pending = cast!(SingleSubqueryStatus::Pending, old_subquery).unwrap();
+          let old_context_schema = &old_pending.context.context_schema;
           executing.subquery_status.subqueries.insert(
             new_subquery_id.clone(),
             SingleSubqueryStatus::LockingSchemas(SubqueryLockingSchemas {
-              context_schema: old_pending.context.context_schema.clone(),
+              old_columns: old_context_schema.column_context_schema.clone(),
+              trans_table_names: old_context_schema.trans_table_names(),
               new_cols: rem_cols,
               query_id: locked_cols_qid,
             }),
@@ -1745,12 +1750,10 @@ impl<T: IOTypes> TabletContext<T> {
     // This computes a ContextSchema for the subquery, as well as expose a conversion
     // utility to compute ContextRows. Notice we avoid using the child QueryPlan,
     // since it's out-of-date by this point.
-    // TODO: Importantly the child_context_schema is actually useless.. we only use it for columns
-    // and TransTables. However, we need to generally use conv.context_schema to get a new
-    // Context Row.
-    let conv = ContextConverter::create_from_prior_schema(
+    let conv = ContextConverter::general_create(
       &context.context_schema,
-      &protect_status.context_schema,
+      protect_status.new_columns.clone(),
+      protect_status.trans_table_names.clone(),
       &timestamp,
       &self.table_schema,
     );
@@ -2381,16 +2384,17 @@ impl<T: IOTypes> TabletContext<T> {
             */
 
             let num_subqueries = executing_state.subquery_pos.len();
-            let requested_cols = es.query_plan.col_usage_node.requested_cols.clone();
 
             // Construct the ContextConverters for all subqueries
             let mut converters = Vec::<ContextConverter>::new();
             for subquery_id in &executing_state.subquery_pos {
               let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
               let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-              converters.push(ContextConverter::create_from_prior_schema(
+              let context_schema = &result.context.context_schema;
+              converters.push(ContextConverter::general_create(
                 &es.context.context_schema,
-                &result.context.context_schema,
+                context_schema.column_context_schema.clone(),
+                context_schema.trans_table_names(),
                 &es.timestamp,
                 &self.table_schema,
               ));
@@ -2405,7 +2409,7 @@ impl<T: IOTypes> TabletContext<T> {
             // Compute the Schema that should belong to every TableView that's returned
             // from this TableReadES.
             let mut res_col_names = Vec::<(ColName, ColType)>::new();
-            for col_name in &requested_cols {
+            for col_name in &es.query.projection.clone() {
               let col_type = if let Some(pos) = lookup_pos(&self.table_schema.key_cols, col_name) {
                 let (_, col_type) = self.table_schema.key_cols.get(pos).unwrap();
                 col_type.clone()
@@ -2521,7 +2525,7 @@ impl<T: IOTypes> TabletContext<T> {
             let success_msg = msg::QuerySuccess {
               return_path: es.sender_path.query_id.clone(),
               query_id: query_id.clone(),
-              result: (requested_cols, res_table_views),
+              result: (es.query.projection.clone(), res_table_views),
               new_rms: es.new_rms.iter().cloned().collect(),
             };
             let sender_path = es.sender_path.clone();
@@ -2645,11 +2649,7 @@ impl<T: IOTypes> TabletContext<T> {
           let context_schema = &pending.context.context_schema;
           let mut context_cols = context_schema.column_context_schema.clone();
           context_cols.extend(missing_cols);
-          let context_trans_tables: Vec<TransTableName> = context_schema
-            .trans_table_context_schema
-            .iter()
-            .map(|prefix| prefix.trans_table_name.clone())
-            .collect();
+          let context_trans_tables = context_schema.trans_table_names();
           let stage_idx = read_stage.stage_idx.clone();
           self.process_gr_query_stage_simple(
             statuses,
@@ -2983,35 +2983,27 @@ impl ContextConverter {
     )
   }
 
-  /// This function creates a Converter that converted ContextRows of the
-  /// `parent_context_schema` to Context Rows of the `child_context_schema`.
-  /// In practice, the latter should have been computed by another ContextConverter
-  /// created with the `create_from_query_plan` constructor. The only property we need
-  /// is that all `ColNames` that appear in either ContextSchema have already been
-  /// locked in the `table_schema`, so we can strongly read them.
-  /// TODO: I believe we can change the arguments to take in ColNames and TransTableNames.
-  fn create_from_prior_schema(
+  /// Here, all ColNames in `child_columns` must be locked in the `table_schema`.
+  /// In addition they must either appear present in the `table_schema`, or in the
+  /// `parent_context_schema`. Finally, the `child_trans_table_names` must be contained
+  /// in the `parent_context_schema` as well.
+  fn general_create(
     parent_context_schema: &ContextSchema,
-    child_context_schema: &ContextSchema,
+    child_columns: Vec<ColName>,
+    child_trans_table_names: Vec<TransTableName>,
     timestamp: &Timestamp,
     table_schema: &TableSchema,
   ) -> ContextConverter {
     let mut safe_present_split = Vec::<ColName>::new();
     let mut external_split = Vec::<ColName>::new();
-    let trans_table_split = child_context_schema
-      .trans_table_context_schema
-      .iter()
-      .map(|prefix| prefix.trans_table_name.clone())
-      .collect();
 
-    // Whichever `ColName`s in `child_context_schema` that are also present in
-    // `table_schema` should be added to `safe_present_cols`. Otherwise, they should
-    // be added to `external_split`.
-    for col in &child_context_schema.column_context_schema {
-      if contains_col(table_schema, col, timestamp) {
-        safe_present_split.push(col.clone());
+    // Whichever `ColName`s in `child_columns` that are also present in `table_schema` should
+    // be added to `safe_present_cols`. Otherwise, they should be added to `external_split`.
+    for col in child_columns {
+      if contains_col(table_schema, &col, timestamp) {
+        safe_present_split.push(col);
       } else {
-        external_split.push(col.clone());
+        external_split.push(col);
       }
     }
 
@@ -3019,7 +3011,7 @@ impl ContextConverter {
       parent_context_schema,
       safe_present_split,
       external_split,
-      trans_table_split,
+      child_trans_table_names,
     )
   }
 
