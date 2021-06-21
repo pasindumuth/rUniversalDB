@@ -317,15 +317,9 @@ struct MSQueryES {
 //  MSTableWriteES
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
-struct MSWritePending {
-  read_region: TableRegion,
-  query_id: QueryId,
-}
-
-#[derive(Debug)]
 enum MSWriteExecutionS {
   Start,
-  Pending(MSWritePending),
+  Pending(Pending),
   Executing(Executing),
 }
 
@@ -359,6 +353,7 @@ struct MSWriteQueryReplanningES {
   pub root_query_path: QueryPath,
   pub tier_map: TierMap,
   pub query_id: QueryId,
+  pub ms_query_id: QueryId,
   /// Used for updating the query plan
   pub status: CommonQueryReplanningES<proc::Update>,
 }
@@ -428,7 +423,7 @@ struct ReadWriteRegion {
 // -----------------------------------------------------------------------------------------------
 // These enums are used for communication between algorithms.
 
-// TODO: sync the ProtectRequest with the Pseudocode
+// TODO: sync the `TableRegion`.
 enum ReadProtectionGrant {
   Read { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
   MRead { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
@@ -740,8 +735,8 @@ impl<T: IOTypes> TabletContext<T> {
             }
 
             // Lookup the MSQuery and the QueryId of the new Query into `pending_queries`.
-            let ms_query_id = self.ms_root_query_map.get(&root_query_id).unwrap();
-            let tablet_status = statuses.get_mut(ms_query_id).unwrap();
+            let ms_query_id = self.ms_root_query_map.get(&root_query_id).unwrap().clone();
+            let tablet_status = statuses.get_mut(&ms_query_id).unwrap();
             let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
             ms_query.pending_queries.insert(perform_query.query_id.clone());
 
@@ -767,6 +762,7 @@ impl<T: IOTypes> TabletContext<T> {
                   root_query_path: perform_query.root_query_path,
                   tier_map: perform_query.tier_map,
                   query_id: perform_query.query_id,
+                  ms_query_id,
                   status: comm_plan_es,
                 },
               )),
@@ -850,6 +846,27 @@ impl<T: IOTypes> TabletContext<T> {
           if waiting.is_empty() {
             self.waiting_read_protected.remove(&timestamp);
           }
+          return Some(protect_request);
+        }
+      }
+    }
+    return None;
+  }
+
+  /// This removes the Read Protection request from `waiting_read_protected` with the given
+  /// `query_id` at the given `timestamp`, if it exists, and returns it.
+  fn remove_m_read_protected_request(
+    &mut self,
+    timestamp: Timestamp,
+    query_id: QueryId,
+  ) -> Option<(OrigP, QueryId, TableRegion)> {
+    if let Some(verifying_write) = self.verifying_writes.get_mut(&timestamp) {
+      for protect_request in verifying_write.m_waiting_read_protected.iter() {
+        let (_, cur_query_id, _) = protect_request;
+        if cur_query_id == &query_id {
+          // Here, we found a request with matching QueryId, so we remove it.
+          let protect_request = protect_request.clone();
+          verifying_write.m_waiting_read_protected.remove(&protect_request);
           return Some(protect_request);
         }
       }
@@ -1330,9 +1347,8 @@ impl<T: IOTypes> TabletContext<T> {
               let comm_plan_es = &mut plan_es.status;
               comm_plan_es.column_locked::<T>(self, query_id.clone());
 
-              let root_query_id = &plan_es.root_query_path.query_id;
-              let ms_query_id = self.ms_root_query_map.get(root_query_id).unwrap();
               // We check if the QueryReplanning is done.
+              let ms_query_id = plan_es.ms_query_id.clone();
               match comm_plan_es.state {
                 CommonQueryReplanningS::Done(success) => {
                   if success {
@@ -1357,7 +1373,7 @@ impl<T: IOTypes> TabletContext<T> {
                       query_id: query_id.clone(),
                       query: sql_query,
                       query_plan: comm_plan_es.query_plan.clone(),
-                      ms_query_id: ms_query_id.clone(),
+                      ms_query_id: ms_query_id,
                       new_rms: Default::default(),
                       state: MSWriteExecutionS::Start,
                     });
@@ -1372,7 +1388,7 @@ impl<T: IOTypes> TabletContext<T> {
                     statuses.remove(&query_id);
 
                     // Update that MSQuery
-                    let tablet_status = statuses.get_mut(ms_query_id).unwrap();
+                    let tablet_status = statuses.get_mut(&ms_query_id).unwrap();
                     let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
                     ms_query.pending_queries.remove(&query_id);
                   }
@@ -1508,7 +1524,7 @@ impl<T: IOTypes> TabletContext<T> {
       let protect_query_id = mk_qid(&mut self.rand);
       let col_region = Vec::from_iter(col_region.into_iter());
       let read_region = TableRegion { col_region, row_region };
-      es.state = MSWriteExecutionS::Pending(MSWritePending {
+      es.state = MSWriteExecutionS::Pending(Pending {
         read_region: read_region.clone(),
         query_id: protect_query_id.clone(),
       });
@@ -1521,17 +1537,9 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// This is used to simply delete a TableReadES or MSTable*ES due to an expression
-  /// evaluation error that occured inside, and respond to the client. Note that this
-  /// function doesn't do any other kind of cleanup.
-  fn handle_eval_error_table_es(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: &QueryId,
-    eval_error: EvalError,
-  ) {
-    let tablet_status = statuses.get(&query_id).unwrap();
-    let sender_path = match tablet_status {
+  fn get_path(&self, statuses: &Statuses, query_id: &QueryId) -> QueryPath {
+    let tablet_status = statuses.get(query_id).unwrap();
+    match tablet_status {
       TabletStatus::GRQueryES(_) => panic!(),
       TabletStatus::FullTableReadES(read_es) => {
         let es = cast!(FullTableReadES::Executing, read_es).unwrap();
@@ -1544,7 +1552,19 @@ impl<T: IOTypes> TabletContext<T> {
         let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
         es.sender_path.clone()
       }
-    };
+    }
+  }
+
+  /// This is used to simply delete a TableReadES or MSTable*ES due to an expression
+  /// evaluation error that occured inside, and respond to the client. Note that this
+  /// function doesn't do any other kind of cleanup.
+  fn handle_eval_error_table_es(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: &QueryId,
+    eval_error: EvalError,
+  ) {
+    let sender_path = self.get_path(statuses, query_id);
 
     // If an error occurs here, we simply abort this whole query and respond
     // to the sender with an Abort.
@@ -1560,8 +1580,65 @@ impl<T: IOTypes> TabletContext<T> {
     self.exit_and_clean_up(statuses, query_id.clone());
   }
 
+  /// We call this when a DeadlockSafetyReadAbort happens for a `waiting_read_protected`.
+  /// Recall this behavior is distinct than if a `verifying_writes` aborts.
+  fn deadlock_safety_read_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP, _: TableRegion) {
+    let query_id = orig_p.status_path;
+    let sender_path = self.get_path(statuses, &query_id);
+
+    let aborted = msg::QueryAborted {
+      return_path: sender_path.query_id.clone(),
+      query_id: query_id.clone(),
+      payload: msg::AbortedData::QueryError(msg::QueryError::DeadlockSafetyAbortion),
+    };
+
+    self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
+    self.exit_and_clean_up(statuses, query_id);
+  }
+
+  /// We call this when a DeadlockSafetyReadAbort happens for a `verifying_writes`.
+  fn deadlock_safety_write_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP) {
+    // TODO: do this.
+  }
+
   /// Here, the subquery GRQueryES at `subquery_id` must already be cleaned up. This
   /// function informs the ES at OrigP and updates its state accordingly.
+  fn common_handle_internal_columns_dne(
+    &mut self,
+    executing: &mut Executing,
+    query_id: QueryId,
+    timestamp: Timestamp,
+    subquery_id: QueryId,
+    rem_cols: Vec<ColName>,
+  ) {
+    // Insert a requested_locked_columns for the missing columns.
+    let locked_cols_qid = self.add_requested_locked_columns(
+      OrigP { status_path: query_id.clone() },
+      timestamp,
+      rem_cols.clone(),
+    );
+
+    // We replace `subquery_id` with a new one to guarantee it never gets mangled
+    // when we create a new GRQueryES. We also update `executing` accordingly.
+    let new_subquery_id = mk_qid(&mut self.rand);
+    let pos = executing.subquery_pos.iter().position(|id| &subquery_id == id).unwrap();
+    executing.subquery_pos.insert(pos, new_subquery_id.clone());
+
+    let old_subquery = executing.subquery_status.subqueries.remove(&subquery_id).unwrap();
+    let old_pending = cast!(SingleSubqueryStatus::Pending, old_subquery).unwrap();
+    let old_context_schema = &old_pending.context.context_schema;
+    executing.subquery_status.subqueries.insert(
+      new_subquery_id.clone(),
+      SingleSubqueryStatus::LockingSchemas(SubqueryLockingSchemas {
+        old_columns: old_context_schema.column_context_schema.clone(),
+        trans_table_names: old_context_schema.trans_table_names(),
+        new_cols: rem_cols,
+        query_id: locked_cols_qid,
+      }),
+    );
+  }
+
+  // This function just routes the internal columns DNE notification to the right ES.
   fn handle_internal_columns_dne(
     &mut self,
     statuses: &mut Statuses,
@@ -1576,37 +1653,28 @@ impl<T: IOTypes> TabletContext<T> {
         TabletStatus::FullTableReadES(read_es) => {
           let es = cast!(FullTableReadES::Executing, read_es).unwrap();
           let executing = cast!(ExecutionS::Executing, &mut es.state).unwrap();
-
-          // Insert a requested_locked_columns for the missing columns.
-          let locked_cols_qid = self.add_requested_locked_columns(
-            OrigP { status_path: query_id.clone() },
-            es.timestamp,
-            rem_cols.clone(),
-          );
-
-          // We replace `subquery_id` with a new one to guarantee it never gets mangled
-          // when we create a new GRQueryES. We also update `executing` accordingly.
-          let new_subquery_id = mk_qid(&mut self.rand);
-          let pos = executing.subquery_pos.iter().position(|id| &subquery_id == id).unwrap();
-          executing.subquery_pos.insert(pos, new_subquery_id.clone());
-
-          let old_subquery = executing.subquery_status.subqueries.remove(&subquery_id).unwrap();
-          let old_pending = cast!(SingleSubqueryStatus::Pending, old_subquery).unwrap();
-          let old_context_schema = &old_pending.context.context_schema;
-          executing.subquery_status.subqueries.insert(
-            new_subquery_id.clone(),
-            SingleSubqueryStatus::LockingSchemas(SubqueryLockingSchemas {
-              old_columns: old_context_schema.column_context_schema.clone(),
-              trans_table_names: old_context_schema.trans_table_names(),
-              new_cols: rem_cols,
-              query_id: locked_cols_qid,
-            }),
+          self.common_handle_internal_columns_dne(
+            executing,
+            query_id,
+            es.timestamp.clone(),
+            subquery_id,
+            rem_cols,
           );
         }
         TabletStatus::TMStatus(_) => panic!(),
         TabletStatus::MSQueryES(_) => panic!(),
         TabletStatus::FullMSTableReadES(_) => panic!(),
-        TabletStatus::FullMSTableWriteES(_) => panic!(),
+        TabletStatus::FullMSTableWriteES(ms_write_es) => {
+          let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
+          let executing = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
+          self.common_handle_internal_columns_dne(
+            executing,
+            query_id,
+            es.timestamp.clone(),
+            subquery_id,
+            rem_cols,
+          );
+        }
       }
     }
   }
@@ -1985,6 +2053,8 @@ impl<T: IOTypes> TabletContext<T> {
               ) {
                 Ok(gr_query_statuses) => gr_query_statuses,
                 Err(eval_error) => {
+                  // TODO: aborting a write is more complicated because we need to cancel
+                  // the whole MSQueryES, right?
                   self.handle_eval_error_table_es(statuses, &query_id, eval_error);
                   return;
                 }
@@ -2921,32 +2991,7 @@ impl<T: IOTypes> TabletContext<T> {
           }
         }
         TabletStatus::FullTableReadES(read_es) => match read_es {
-          FullTableReadES::QueryReplanning(es) => match es.status.state {
-            CommonQueryReplanningS::Start => {}
-            CommonQueryReplanningS::ProjectedColumnLocking { locked_columns_query_id } => {
-              self.remove_col_locking_request(locked_columns_query_id.clone());
-            }
-            CommonQueryReplanningS::ColumnLocking { locked_columns_query_id } => {
-              self.remove_col_locking_request(locked_columns_query_id.clone());
-            }
-            CommonQueryReplanningS::RecomputeQueryPlan { locked_columns_query_id, .. } => {
-              self.remove_col_locking_request(locked_columns_query_id.clone());
-            }
-            CommonQueryReplanningS::MasterQueryReplanning { master_query_id } => {
-              // Remove if present
-              if self.master_query_map.remove(&master_query_id).is_some() {
-                // If the removal was successful, we should also send a Cancellation
-                // message to the Master.
-                self.network_output.send(
-                  &self.master_eid,
-                  msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-                    msg::CancelMasterFrozenColUsage { query_id: master_query_id },
-                  )),
-                );
-              }
-            }
-            CommonQueryReplanningS::Done(_) => {}
-          },
+          FullTableReadES::QueryReplanning(es) => self.exit_planning(es.status.state),
           FullTableReadES::Executing(es) => match es.state {
             ExecutionS::Start => {}
             ExecutionS::Pending(pending) => {
@@ -2989,24 +3034,94 @@ impl<T: IOTypes> TabletContext<T> {
         }
         TabletStatus::MSQueryES(_) => panic!(),
         TabletStatus::FullMSTableReadES(_) => panic!(),
-        TabletStatus::FullMSTableWriteES(_) => {
-          // TODO: do this
+        TabletStatus::FullMSTableWriteES(ms_write_es) => {
+          match ms_write_es {
+            FullMSTableWriteES::QueryReplanning(es) => {
+              // Remove the MSTableWriteES from the MSQuery::pending_queries.
+              let tablet_status = statuses.get_mut(&es.ms_query_id).unwrap();
+              let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
+              ms_query.pending_queries.remove(&es.query_id);
+
+              // Exit the query Replanning
+              self.exit_planning(es.status.state)
+            }
+            FullMSTableWriteES::Executing(es) => {
+              // Remove the MSTableWriteES from the MSQuery::pending_queries.
+              let tablet_status = statuses.get_mut(&es.ms_query_id).unwrap();
+              let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
+              ms_query.pending_queries.remove(&es.query_id);
+
+              // Exit and Clean Up state-specific resources.
+              match es.state {
+                MSWriteExecutionS::Start => {}
+                MSWriteExecutionS::Pending(pending) => {
+                  // Here, we remove the ReadRegion from `m_waiting_read_protected`, if it still
+                  // exists.
+
+                  // Note that we leave `m_read_protected` and `m_write_protected` in-tact
+                  // since they are inconvenient to change (since they don't have `query_id`.
+                  self.remove_m_read_protected_request(es.timestamp.clone(), pending.query_id);
+                }
+                MSWriteExecutionS::Executing(executing) => {
+                  // Here, we need to cancel every Subquery. Depending on the state of the
+                  // SingleSubqueryStatus, we either need to either clean up the column locking request,
+                  // the ReadRegion from m_waiting_read_protected, or abort the underlying GRQueryES.
+
+                  // Note that we leave `m_read_protected` and `m_write_protected` in-tact
+                  // since they are inconvenient to change (since they don't have `query_id`.
+                  for (query_id, single_query) in executing.subquery_status.subqueries {
+                    match single_query {
+                      SingleSubqueryStatus::LockingSchemas(locking_status) => {
+                        self.remove_col_locking_request(locking_status.query_id);
+                      }
+                      SingleSubqueryStatus::PendingReadRegion(protect_status) => {
+                        let protect_query_id = protect_status.query_id;
+                        self
+                          .remove_m_read_protected_request(es.timestamp.clone(), protect_query_id);
+                      }
+                      SingleSubqueryStatus::Pending(_) => {
+                        self.exit_and_clean_up(statuses, query_id);
+                      }
+                      SingleSubqueryStatus::Finished(_) => {}
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
   }
 
-  /// We call this when a DeadlockSafetyReadAbort happens
-  fn deadlock_safety_read_abort(
-    &mut self,
-    statuses: &mut Statuses,
-    orig_p: OrigP,
-    read_region: TableRegion,
-  ) {
+  fn exit_planning(&mut self, state: CommonQueryReplanningS) {
+    match state {
+      CommonQueryReplanningS::Start => {}
+      CommonQueryReplanningS::ProjectedColumnLocking { locked_columns_query_id } => {
+        self.remove_col_locking_request(locked_columns_query_id.clone());
+      }
+      CommonQueryReplanningS::ColumnLocking { locked_columns_query_id } => {
+        self.remove_col_locking_request(locked_columns_query_id.clone());
+      }
+      CommonQueryReplanningS::RecomputeQueryPlan { locked_columns_query_id, .. } => {
+        self.remove_col_locking_request(locked_columns_query_id.clone());
+      }
+      CommonQueryReplanningS::MasterQueryReplanning { master_query_id } => {
+        // Remove if present
+        if self.master_query_map.remove(&master_query_id).is_some() {
+          // If the removal was successful, we should also send a Cancellation
+          // message to the Master.
+          self.network_output.send(
+            &self.master_eid,
+            msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+              msg::CancelMasterFrozenColUsage { query_id: master_query_id },
+            )),
+          );
+        }
+      }
+      CommonQueryReplanningS::Done(_) => {}
+    }
   }
-
-  /// We call this when a DeadlockSafetyWriteAbort happens
-  fn deadlock_safety_write_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP) {}
 }
 
 /// This evaluates a `ValExpr` completely into a `ColVal`. When a ColumnRef is encountered
