@@ -2493,15 +2493,15 @@ impl<T: IOTypes> TabletContext<T> {
                 let query = &es.query;
                 let context = &es.context;
                 let eval_res = (|| {
-                  let bool_val = is_true(&evaluate_expr(
-                    &query.selection,
+                  let evaluated_select = evaluate_super_simple_select(
+                    query,
                     &context.context_schema.column_context_schema,
                     &context_row.column_context_row,
                     &subtable_schema,
                     &subtable_row,
                     &subquery_vals,
-                  )?)?;
-                  if bool_val {
+                  )?;
+                  if is_true(&evaluated_select.selection)? {
                     // This means that the current row should be selected for the result.
                     // First, we take the projected columns.
                     let mut res_row = Vec::<ColValN>::new();
@@ -2666,15 +2666,15 @@ impl<T: IOTypes> TabletContext<T> {
               let query = &es.query;
               let context = &es.context;
               let eval_res = (|| {
-                let bool_val = is_true(&evaluate_expr(
-                  &query.selection,
+                let evaluated_update = evaluate_update(
+                  query,
                   &context.context_schema.column_context_schema,
                   &context_row.column_context_row,
                   &subtable_schema,
                   &subtable_row,
                   &subquery_vals,
-                )?)?;
-                if bool_val {
+                )?;
+                if is_true(&evaluated_update.selection)? {
                   // This means that the current row should be selected for the result.
                   let mut res_row = Vec::<ColValN>::new();
 
@@ -2687,22 +2687,10 @@ impl<T: IOTypes> TabletContext<T> {
                     primary_key.cols.push(col_val.unwrap());
                   }
 
-                  // Then, iterate through the assignment, evaluating the set expression.
-                  for (col_name, val_expr) in &query.assignment {
-                    // TODO: this is wrong; we need to figure out which slice of `subquery_vals`
-                    // is actually relevent to the `val_expr` add pass that in instead.
-                    let new_col_val = evaluate_expr(
-                      val_expr,
-                      &context.context_schema.column_context_schema,
-                      &context_row.column_context_row,
-                      &subtable_schema,
-                      &subtable_row,
-                      &subquery_vals,
-                    )?;
-                    res_row.push(new_col_val.clone());
-
-                    // Update the `update_view`.
-                    update_view.insert((primary_key.clone(), Some(col_name.clone())), new_col_val);
+                  // Then, iterate through the assignment, updating `res_row` and `update_view`.
+                  for (col_name, col_val) in evaluated_update.assignment {
+                    res_row.push(col_val.clone());
+                    update_view.insert((primary_key.clone(), Some(col_name)), col_val);
                   }
 
                   // Finally, we add the `res_row` into the TableView.
@@ -3023,7 +3011,8 @@ impl<T: IOTypes> TabletContext<T> {
 
 /// This evaluates a `ValExpr` completely into a `ColVal`. When a ColumnRef is encountered
 /// in the `expr`, we first search `subtable_row`, and if that's not present, we search the
-/// `column_context_row`.
+/// `column_context_row`. In addition, `subquery_vals` should have a length equal to that of
+/// how many GRQuerys there are in the `expr`.
 fn evaluate_expr(
   expr: &proc::ValExpr,
   column_context_schema: &Vec<ColName>,
@@ -3032,6 +3021,50 @@ fn evaluate_expr(
   subtable_row: &Vec<ColValN>,
   subquery_vals: &Vec<TableView>,
 ) -> Result<ColValN, EvalError> {
+  let mut subtable_row_map = HashMap::<ColName, ColValN>::new();
+  for i in 0..subtable_schema.len() {
+    subtable_row_map
+      .insert(subtable_schema.get(i).unwrap().clone(), subtable_row.get(i).unwrap().clone());
+  }
+  unimplemented!()
+}
+
+struct EvaluatedSuperSimpleSelect {
+  selection: ColValN,
+}
+
+/// This evaluates a SuperSimpleSelect completely.
+fn evaluate_super_simple_select(
+  select: &proc::SuperSimpleSelect,
+  column_context_schema: &Vec<ColName>,
+  column_context_row: &Vec<ColValN>,
+  subtable_schema: &Vec<ColName>,
+  subtable_row: &Vec<ColValN>,
+  subquery_vals: &Vec<TableView>,
+) -> Result<EvaluatedSuperSimpleSelect, EvalError> {
+  let mut subtable_row_map = HashMap::<ColName, ColValN>::new();
+  for i in 0..subtable_schema.len() {
+    subtable_row_map
+      .insert(subtable_schema.get(i).unwrap().clone(), subtable_row.get(i).unwrap().clone());
+  }
+  unimplemented!()
+}
+
+struct EvaluatedUpdate {
+  assignment: Vec<(ColName, ColValN)>,
+  selection: ColValN,
+}
+
+/// This evaluates a Update completely. This is more convenience that using `evaluate_expr`,
+/// since here, we can pass in all `subquery_vals` for the query.
+fn evaluate_update(
+  select: &proc::Update,
+  column_context_schema: &Vec<ColName>,
+  column_context_row: &Vec<ColValN>,
+  subtable_schema: &Vec<ColName>,
+  subtable_row: &Vec<ColValN>,
+  subquery_vals: &Vec<TableView>,
+) -> Result<EvaluatedUpdate, EvalError> {
   let mut subtable_row_map = HashMap::<ColName, ColValN>::new();
   for i in 0..subtable_schema.len() {
     subtable_row_map
