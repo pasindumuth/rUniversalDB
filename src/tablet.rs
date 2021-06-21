@@ -1596,9 +1596,34 @@ impl<T: IOTypes> TabletContext<T> {
     self.exit_and_clean_up(statuses, query_id);
   }
 
+  /// This function simply removes the the MSQueryES from `statuses`, accesses all ESs in
+  /// `pending_queries`, Exit sthen and cleans up and sends back `query_error` to their senders.
+  fn abort_ms_query(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    query_error: msg::QueryError,
+  ) {
+    let tablet_status = statuses.remove(&query_id).unwrap();
+    let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
+
+    for query_id in ms_query.pending_queries {
+      let sender_path = self.get_path(statuses, &query_id);
+
+      let aborted = msg::QueryAborted {
+        return_path: sender_path.query_id.clone(),
+        query_id: query_id.clone(),
+        payload: msg::AbortedData::QueryError(query_error.clone()),
+      };
+
+      self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
+      self.exit_and_clean_up(statuses, query_id);
+    }
+  }
+
   /// We call this when a DeadlockSafetyReadAbort happens for a `verifying_writes`.
   fn deadlock_safety_write_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP) {
-    // TODO: do this.
+    self.abort_ms_query(statuses, orig_p.status_path, msg::QueryError::DeadlockSafetyAbortion);
   }
 
   /// Here, the subquery GRQueryES at `subquery_id` must already be cleaned up. This
@@ -2053,9 +2078,11 @@ impl<T: IOTypes> TabletContext<T> {
               ) {
                 Ok(gr_query_statuses) => gr_query_statuses,
                 Err(eval_error) => {
-                  // TODO: aborting a write is more complicated because we need to cancel
-                  // the whole MSQueryES, right?
-                  self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+                  self.abort_ms_query(
+                    statuses,
+                    query_id,
+                    msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
+                  );
                   return;
                 }
               };
