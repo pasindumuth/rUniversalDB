@@ -1396,7 +1396,102 @@ impl<T: IOTypes> TabletContext<T> {
                 _ => {}
               }
             }
-            FullMSTableWriteES::Executing(_) => {}
+            FullMSTableWriteES::Executing(es) => {
+              let executing = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
+
+              // Find the Subquery that sent out this requested_locked_columns. There should
+              // always be such a Subquery.
+              let (subquery_id, locking_status) = (|| {
+                for (subquery_id, state) in &executing.subquery_status.subqueries {
+                  match state {
+                    SingleSubqueryStatus::LockingSchemas(locking_status) => {
+                      if locking_status.query_id == locked_cols_qid {
+                        return Some((subquery_id, locking_status));
+                      }
+                    }
+                    _ => {}
+                  }
+                }
+                return None;
+              })()
+              .unwrap();
+
+              // None of the `new_cols` should already exist in the old subquery Context schema
+              // (since they didn't exist when the GRQueryES complained).
+              for col in &locking_status.new_cols {
+                assert!(!locking_status.old_columns.contains(col));
+              }
+
+              // Next, we compute the subset of `new_cols` that aren't in the Table
+              // Schema or the Context.
+              let mut rem_cols = Vec::<ColName>::new();
+              for col in &locking_status.new_cols {
+                if !contains_col(&self.table_schema, col, &es.timestamp) {
+                  if !es.context.context_schema.column_context_schema.contains(col) {
+                    rem_cols.push(col.clone());
+                  }
+                }
+              }
+
+              if !rem_cols.is_empty() {
+                // If there are missing columns, we Exit and clean up, and propagate
+                // the Abort to the originator.
+
+                // Construct a ColumnsDNE containing `missing_cols` and send it
+                // back to the originator.
+                let columns_dne_msg = msg::QueryAborted {
+                  return_path: es.sender_path.query_id.clone(),
+                  query_id: query_id.clone(),
+                  payload: msg::AbortedData::ColumnsDNE { missing_cols: rem_cols },
+                };
+                let sender_path = es.sender_path.clone();
+                self.send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
+
+                // Finally, Exit and Clean Up this TableReadES.
+                self.exit_and_clean_up(statuses, query_id);
+              } else {
+                // Here, we know all `new_cols` are in this Context, and so we can continue
+                // trying to evaluate the subquery.
+
+                // Now, add the `new_cols` to the schema
+                let mut new_columns = locking_status.old_columns.clone();
+                new_columns.extend(locking_status.new_cols.clone());
+
+                // For ColNames in `new_cols` that belong to this Table, we need to
+                // lock the region, so we compute a TableRegion accordingly.
+                let mut new_col_region = Vec::<ColName>::new();
+                for col in &locking_status.new_cols {
+                  if contains_col(&self.table_schema, col, &es.timestamp) {
+                    new_col_region.push(col.clone());
+                  }
+                }
+                let new_read_region = TableRegion {
+                  col_region: new_col_region,
+                  row_region: executing.row_region.clone(),
+                };
+
+                // Add a read protection requested
+                let protect_query_id = mk_qid(&mut self.rand);
+                let orig_p = OrigP { status_path: es.query_id.clone() };
+                let protect_request = (orig_p, protect_query_id.clone(), new_read_region.clone());
+                // Note: this part is the main difference between this and TableReadES.
+                let verifying_write = self.verifying_writes.get_mut(&es.timestamp).unwrap();
+                verifying_write.m_waiting_read_protected.insert(protect_request);
+
+                // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
+                let subquery_id = subquery_id.clone();
+                let trans_table_names = locking_status.trans_table_names.clone();
+                let subqueries = &mut executing.subquery_status.subqueries;
+                let single_status = subqueries.get_mut(&subquery_id).unwrap();
+                *single_status =
+                  SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
+                    new_columns,
+                    trans_table_names,
+                    read_region: new_read_region,
+                    query_id: protect_query_id,
+                  })
+              }
+            }
           }
         }
       }
@@ -1555,6 +1650,26 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
+  fn abort_with_query_error(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: &QueryId,
+    query_error: msg::QueryError,
+  ) {
+    let sender_path = self.get_path(statuses, query_id);
+
+    // If an error occurs here, we simply abort this whole query and respond
+    // to the sender with an Abort.
+    let aborted = msg::QueryAborted {
+      return_path: sender_path.query_id.clone(),
+      query_id: query_id.clone(),
+      payload: msg::AbortedData::QueryError(query_error),
+    };
+
+    self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
+    self.exit_and_clean_up(statuses, query_id.clone());
+  }
+
   /// This is used to simply delete a TableReadES or MSTable*ES due to an expression
   /// evaluation error that occured inside, and respond to the client. Note that this
   /// function doesn't do any other kind of cleanup.
@@ -1564,36 +1679,21 @@ impl<T: IOTypes> TabletContext<T> {
     query_id: &QueryId,
     eval_error: EvalError,
   ) {
-    let sender_path = self.get_path(statuses, query_id);
-
-    // If an error occurs here, we simply abort this whole query and respond
-    // to the sender with an Abort.
-    let aborted = msg::QueryAborted {
-      return_path: sender_path.query_id.clone(),
-      query_id: query_id.clone(),
-      payload: msg::AbortedData::QueryError(msg::QueryError::TypeError {
-        msg: format!("{:?}", eval_error),
-      }),
-    };
-
-    self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
-    self.exit_and_clean_up(statuses, query_id.clone());
+    self.abort_with_query_error(
+      statuses,
+      query_id,
+      msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
+    );
   }
 
   /// We call this when a DeadlockSafetyReadAbort happens for a `waiting_read_protected`.
   /// Recall this behavior is distinct than if a `verifying_writes` aborts.
   fn deadlock_safety_read_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP, _: TableRegion) {
-    let query_id = orig_p.status_path;
-    let sender_path = self.get_path(statuses, &query_id);
-
-    let aborted = msg::QueryAborted {
-      return_path: sender_path.query_id.clone(),
-      query_id: query_id.clone(),
-      payload: msg::AbortedData::QueryError(msg::QueryError::DeadlockSafetyAbortion),
-    };
-
-    self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
-    self.exit_and_clean_up(statuses, query_id);
+    self.abort_with_query_error(
+      statuses,
+      &orig_p.status_path,
+      msg::QueryError::DeadlockSafetyAbortion,
+    );
   }
 
   /// This function simply removes the the MSQueryES from `statuses`, accesses all ESs in
@@ -1608,16 +1708,7 @@ impl<T: IOTypes> TabletContext<T> {
     let ms_query = cast!(TabletStatus::MSQueryES, tablet_status).unwrap();
 
     for query_id in ms_query.pending_queries {
-      let sender_path = self.get_path(statuses, &query_id);
-
-      let aborted = msg::QueryAborted {
-        return_path: sender_path.query_id.clone(),
-        query_id: query_id.clone(),
-        payload: msg::AbortedData::QueryError(query_error.clone()),
-      };
-
-      self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
-      self.exit_and_clean_up(statuses, query_id);
+      self.abort_with_query_error(statuses, &query_id, query_error.clone());
     }
   }
 
@@ -2025,7 +2116,11 @@ impl<T: IOTypes> TabletContext<T> {
               ) {
                 Ok(gr_query_statuses) => gr_query_statuses,
                 Err(eval_error) => {
-                  self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+                  self.abort_ms_query(
+                    statuses,
+                    query_id,
+                    msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
+                  );
                   return;
                 }
               };
@@ -2961,20 +3056,8 @@ impl<T: IOTypes> TabletContext<T> {
     if let Some(tablet_status) = statuses.get_mut(&query_id) {
       match tablet_status {
         TabletStatus::GRQueryES(_) => panic!(),
-        TabletStatus::FullTableReadES(read_es) => {
-          let es = cast!(FullTableReadES::Executing, read_es).unwrap();
-
-          // Build the error message and respond.
-          let abort_query = msg::QueryAborted {
-            return_path: es.sender_path.query_id.clone(),
-            query_id: query_id.clone(),
-            payload: msg::AbortedData::QueryError(query_error),
-          };
-          let sender_path = es.sender_path.clone();
-          self.send_to_path(sender_path, CommonQuery::QueryAborted(abort_query));
-
-          // Finally, Exit and Clean Up this TableReadES.
-          self.exit_and_clean_up(statuses, query_id);
+        TabletStatus::FullTableReadES(_) => {
+          self.abort_with_query_error(statuses, &query_id, query_error)
         }
         TabletStatus::TMStatus(_) => {}
         TabletStatus::MSQueryES(_) => {}
@@ -3547,6 +3630,18 @@ fn compute_subtable(
   cols: &Vec<ColName>,
   key_bounds: &Vec<KeyBound>,
   storage: &GenericMVTable,
+) -> (Vec<ColName>, Vec<Vec<ColValN>>) {
+  unimplemented!()
+}
+
+/// This is similar to `compute_subtables`, except we don't read from `storage` directly;
+/// instead we apply `update_views` on top.
+fn compute_subtable_with_updates(
+  cols: &Vec<ColName>,
+  key_bounds: &Vec<KeyBound>,
+  storage: &GenericMVTable,
+  current_iter: u32,
+  update_views: &BTreeMap<u32, GenericTable>,
 ) -> (Vec<ColName>, Vec<Vec<ColValN>>) {
   unimplemented!()
 }
