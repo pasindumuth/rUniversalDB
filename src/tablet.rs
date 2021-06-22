@@ -364,6 +364,15 @@ enum FullMSTableWriteES {
   Executing(MSTableWriteES),
 }
 
+impl FullMSTableWriteES {
+  fn ms_query_id(&self) -> &QueryId {
+    match self {
+      Self::QueryReplanning(es) => &es.ms_query_id,
+      Self::Executing(es) => &es.ms_query_id,
+    }
+  }
+}
+
 // -----------------------------------------------------------------------------------------------
 //  MSTableReadES
 // -----------------------------------------------------------------------------------------------
@@ -732,7 +741,7 @@ impl<T: IOTypes> TabletContext<T> {
                 sql_view: query.sql_query.clone(),
                 query_plan: query.query_plan,
                 sender_path: perform_query.sender_path,
-                orig_p: OrigP { status_path: perform_query.query_id.clone() },
+                orig_p: OrigP::new(perform_query.query_id.clone()),
                 state: CommonQueryReplanningS::Start,
               };
               comm_plan_es.start::<T>(self);
@@ -810,7 +819,7 @@ impl<T: IOTypes> TabletContext<T> {
                 self.verifying_writes.insert(
                   timestamp,
                   VerifyingReadWriteRegion {
-                    orig_p: OrigP { status_path: perform_query.query_id.clone() },
+                    orig_p: OrigP::new(perform_query.query_id.clone()),
                     m_waiting_read_protected: BTreeSet::new(),
                     m_read_protected: BTreeSet::new(),
                     m_write_protected: BTreeSet::new(),
@@ -835,7 +844,7 @@ impl<T: IOTypes> TabletContext<T> {
               sql_view: query.sql_query.clone(),
               query_plan: query.query_plan,
               sender_path: perform_query.sender_path,
-              orig_p: OrigP { status_path: perform_query.query_id.clone() },
+              orig_p: OrigP::new(perform_query.query_id.clone()),
               state: CommonQueryReplanningS::Start,
             };
             comm_plan_es.start::<T>(self);
@@ -1277,7 +1286,7 @@ impl<T: IOTypes> TabletContext<T> {
     orig_p: OrigP,
     locked_cols_qid: QueryId,
   ) {
-    let query_id = orig_p.status_path;
+    let query_id = orig_p.query_id;
     if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
       match read_es {
         FullTableReadES::QueryReplanning(plan_es) => {
@@ -1388,7 +1397,7 @@ impl<T: IOTypes> TabletContext<T> {
 
             // Add a read protection requested
             let protect_query_id = mk_qid(&mut self.rand);
-            let orig_p = OrigP { status_path: es.query_id.clone() };
+            let orig_p = OrigP::new(es.query_id.clone());
             let protect_request = (orig_p, protect_query_id.clone(), new_read_region.clone());
             if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
               waiting.insert(protect_request);
@@ -1518,7 +1527,7 @@ impl<T: IOTypes> TabletContext<T> {
             let sender_path = es.sender_path.clone();
             self.send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
 
-            // Finally, Exit and Clean Up this TableReadES.
+            // Finally, Exit and Clean Up this MSWriteTableES.
             self.exit_and_clean_up(statuses, query_id);
           } else {
             // Here, we know all `new_cols` are in this Context, and so we can continue
@@ -1541,7 +1550,7 @@ impl<T: IOTypes> TabletContext<T> {
 
             // Add a read protection requested
             let protect_query_id = mk_qid(&mut self.rand);
-            let orig_p = OrigP { status_path: es.query_id.clone() };
+            let orig_p = OrigP::new(es.query_id.clone());
             let protect_request = (orig_p, protect_query_id.clone(), new_read_region.clone());
             // Note: this part is the main difference between this and TableReadES.
             let verifying_write = self.verifying_writes.get_mut(&es.timestamp).unwrap();
@@ -1609,7 +1618,7 @@ impl<T: IOTypes> TabletContext<T> {
     });
 
     // Add a read protection requested
-    let orig_p = OrigP { status_path: es.query_id.clone() };
+    let orig_p = OrigP::new(es.query_id.clone());
     let protect_request = (orig_p, protect_query_id, read_region);
     if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
       waiting.insert(protect_request);
@@ -1689,7 +1698,7 @@ impl<T: IOTypes> TabletContext<T> {
       });
 
       // Add a ReadRegion to the m_waiting_read_protected.
-      let orig_p = OrigP { status_path: es.query_id.clone() };
+      let orig_p = OrigP::new(es.query_id.clone());
       let protect_request = (orig_p, protect_query_id, read_region);
       let verifying = self.verifying_writes.get_mut(&es.timestamp).unwrap();
       verifying.m_waiting_read_protected.insert(protect_request);
@@ -1749,14 +1758,14 @@ impl<T: IOTypes> TabletContext<T> {
   fn deadlock_safety_read_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP, _: TableRegion) {
     self.abort_with_query_error(
       statuses,
-      &orig_p.status_path,
+      &orig_p.query_id,
       msg::QueryError::DeadlockSafetyAbortion,
     );
   }
 
   /// This function simply removes the the MSQueryES from `statuses`, accesses all ESs in
   /// `pending_queries`, Exit sthen and cleans up and sends back `query_error` to their senders.
-  fn abort_ms_query(
+  fn abort_ms_with_query_error(
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
@@ -1770,7 +1779,11 @@ impl<T: IOTypes> TabletContext<T> {
 
   /// We call this when a DeadlockSafetyReadAbort happens for a `verifying_writes`.
   fn deadlock_safety_write_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP) {
-    self.abort_ms_query(statuses, orig_p.status_path, msg::QueryError::DeadlockSafetyAbortion);
+    self.abort_ms_with_query_error(
+      statuses,
+      orig_p.query_id,
+      msg::QueryError::DeadlockSafetyAbortion,
+    );
   }
 
   /// Here, the subquery GRQueryES at `subquery_id` must already be cleaned up. This
@@ -1784,11 +1797,8 @@ impl<T: IOTypes> TabletContext<T> {
     rem_cols: Vec<ColName>,
   ) {
     // Insert a requested_locked_columns for the missing columns.
-    let locked_cols_qid = self.add_requested_locked_columns(
-      OrigP { status_path: query_id.clone() },
-      timestamp,
-      rem_cols.clone(),
-    );
+    let locked_cols_qid =
+      self.add_requested_locked_columns(OrigP::new(query_id.clone()), timestamp, rem_cols.clone());
 
     // We replace `subquery_id` with a new one to guarantee it never gets mangled
     // when we create a new GRQueryES. We also update `executing` accordingly.
@@ -1818,7 +1828,7 @@ impl<T: IOTypes> TabletContext<T> {
     subquery_id: QueryId,
     rem_cols: Vec<ColName>,
   ) {
-    let query_id = orig_p.status_path;
+    let query_id = orig_p.query_id;
     if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
       let es = cast!(FullTableReadES::Executing, read_es).unwrap();
       let executing = cast!(ExecutionS::Executing, &mut es.state).unwrap();
@@ -1850,7 +1860,7 @@ impl<T: IOTypes> TabletContext<T> {
     orig_p: OrigP,
     protect_query_id: QueryId,
   ) {
-    let query_id = orig_p.status_path;
+    let query_id = orig_p.query_id;
 
     if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
       let es = cast!(FullTableReadES::Executing, read_es).unwrap();
@@ -1957,7 +1967,7 @@ impl<T: IOTypes> TabletContext<T> {
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
-              self.abort_ms_query(
+              self.abort_ms_with_query_error(
                 statuses,
                 query_id,
                 msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
@@ -2017,7 +2027,7 @@ impl<T: IOTypes> TabletContext<T> {
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
-              self.abort_ms_query(
+              self.abort_ms_with_query_error(
                 statuses,
                 query_id,
                 msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
@@ -2231,7 +2241,7 @@ impl<T: IOTypes> TabletContext<T> {
       new_rms: Default::default(),
       responded_count: 0,
       tm_state: Default::default(),
-      orig_p: OrigP { status_path: es.query_id.clone() },
+      orig_p: OrigP::new(es.query_id.clone()),
     };
 
     let sender_path = QueryPath {
@@ -2355,7 +2365,7 @@ impl<T: IOTypes> TabletContext<T> {
           results.push(cast!(TMWaitValue::Result, tm_wait_value).unwrap());
         }
         let merged_result = merge_table_views(results);
-        let gr_query_id = tm_status.orig_p.status_path;
+        let gr_query_id = tm_status.orig_p.query_id;
         self.handle_tm_done(statuses, gr_query_id, tm_query_id.clone(), merged_result);
       }
     }
@@ -2370,7 +2380,7 @@ impl<T: IOTypes> TabletContext<T> {
     subquery_new_rms: HashSet<QueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
   ) {
-    let query_id = orig_p.status_path;
+    let query_id = orig_p.query_id;
     if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
       let es = cast!(FullTableReadES::Executing, read_es).unwrap();
 
@@ -2437,8 +2447,7 @@ impl<T: IOTypes> TabletContext<T> {
           child_context_row_maps.push(HashMap::new());
         }
 
-        // Compute the Schema that should belong to every TableView that's returned
-        // from this TableReadES.
+        // Compute the Schema of the TableView that will be returned by this TableReadES.
         let mut res_col_names = Vec::<(ColName, ColType)>::new();
         for col_name in &es.query.projection.clone() {
           let col_type = if let Some(pos) = lookup_pos(&self.table_schema.key_cols, col_name) {
@@ -2606,8 +2615,7 @@ impl<T: IOTypes> TabletContext<T> {
           child_context_row_maps.push(HashMap::new());
         }
 
-        // Compute the Schema that should belong to the TableView that's returned
-        // from this MSTableWriteES.
+        // Compute the Schema of the TableView that will be returned by this MSTableWriteES.
         let mut res_col_names = Vec::<(ColName, ColType)>::new();
         res_col_names.extend(self.table_schema.key_cols.clone());
         for (col_name, _) in &es.query.assignment.clone() {
@@ -2744,8 +2752,7 @@ impl<T: IOTypes> TabletContext<T> {
         let tier = es.tier.clone();
         // TODO: Go through my code and see how many auxiliary variables can now be inlined
         // because of our Unpolymorphic TabletStatuses.
-        let ms_query_id = es.ms_query_id.clone();
-        let ms_query = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+        let ms_query = statuses.ms_query_ess.get_mut(&es.ms_query_id).unwrap();
         ms_query.pending_queries.remove(&query_id);
         ms_query.update_views.insert(tier, update_view);
 
@@ -2808,7 +2815,7 @@ impl<T: IOTypes> TabletContext<T> {
       }
 
       // Finally, we propagate up the AbortData to the GRQueryES that owns this TMStatus
-      let gr_query_id = tm_status.orig_p.status_path;
+      let gr_query_id = tm_status.orig_p.query_id;
       self.handle_abort_gr_query_es(statuses, gr_query_id, query_aborted.payload);
     }
   }
@@ -2879,11 +2886,12 @@ impl<T: IOTypes> TabletContext<T> {
     orig_p: OrigP,
     query_error: msg::QueryError,
   ) {
-    let query_id = orig_p.status_path;
+    let query_id = orig_p.query_id;
     if statuses.full_table_read_ess.contains_key(&query_id) {
       self.abort_with_query_error(statuses, &query_id, query_error)
-    } else if statuses.full_ms_table_write_ess.contains_key(&query_id) {
-      panic!();
+    } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get(&query_id) {
+      let ms_query_id = ms_write_es.ms_query_id().clone();
+      self.abort_ms_with_query_error(statuses, ms_query_id, query_error);
     }
   }
 
@@ -2960,20 +2968,16 @@ impl<T: IOTypes> TabletContext<T> {
         }
       }
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.remove(&query_id) {
+      // Remove the MSTableWriteES from the MSQuery::pending_queries.
+      let ms_query = statuses.ms_query_ess.get_mut(ms_write_es.ms_query_id()).unwrap();
+      ms_query.pending_queries.remove(&query_id);
+
       match ms_write_es {
         FullMSTableWriteES::QueryReplanning(es) => {
-          // Remove the MSTableWriteES from the MSQuery::pending_queries.
-          let ms_query = statuses.ms_query_ess.get_mut(&es.ms_query_id).unwrap();
-          ms_query.pending_queries.remove(&es.query_id);
-
           // Exit the query Replanning
           self.exit_planning(es.status.state)
         }
         FullMSTableWriteES::Executing(es) => {
-          // Remove the MSTableWriteES from the MSQuery::pending_queries.
-          let ms_query = statuses.ms_query_ess.get_mut(&es.ms_query_id).unwrap();
-          ms_query.pending_queries.remove(&es.query_id);
-
           // Exit and Clean Up state-specific resources.
           match es.state {
             MSWriteExecutionS::Start => {}
@@ -3464,7 +3468,7 @@ fn compute_subqueries<T: IOTypes, StorageViewT: StorageView>(
       new_rms: Default::default(),
       trans_table_view: vec![],
       state: GRExecutionS::Start,
-      orig_p: OrigP { status_path: query_id.clone() },
+      orig_p: OrigP::new(query_id.clone()),
     };
     gr_query_statuses.push(gr_query_es)
   }
@@ -3568,7 +3572,7 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
     new_rms: Default::default(),
     trans_table_view: vec![],
     state: GRExecutionS::Start,
-    orig_p: OrigP { status_path: query_id.clone() },
+    orig_p: OrigP::new(query_id.clone()),
   };
 
   // Advance the SingleSubqueryStatus, add in the subquery to `table_statuses`,

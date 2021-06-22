@@ -115,7 +115,13 @@ pub struct TMStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrigP {
-  pub status_path: QueryId,
+  pub query_id: QueryId,
+}
+
+impl OrigP {
+  pub fn new(query_id: QueryId) -> OrigP {
+    OrigP { query_id }
+  }
 }
 
 pub fn merge_table_views(
