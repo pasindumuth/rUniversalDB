@@ -1593,14 +1593,8 @@ impl<T: IOTypes> TabletContext<T> {
                 self.start_ms_table_write_es(statuses, &query_id);
               } else {
                 // Since `CommonQueryReplanningES` will have already sent back the necessary
-                // responses. Thus, we only need to exit the ES here.
-
-                // Remove that FullMSTableWriteES
-                statuses.remove(&query_id);
-
-                // Update that MSQuery
-                let ms_query = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-                ms_query.pending_queries.remove(&query_id);
+                // responses. Thus, we only need to Exit and Clean Up the ES.
+                self.exit_and_clean_up(statuses, query_id);
               }
             }
             _ => {}
@@ -1740,15 +1734,8 @@ impl<T: IOTypes> TabletContext<T> {
                 self.start_ms_table_read_es(statuses, &query_id);
               } else {
                 // Since `CommonQueryReplanningES` will have already sent back the necessary
-                // responses. Thus, we only need to exit the ES here.
-
-                // TODO: should we just exit and abort?
-                // Remove that FullMSTableReadES
-                statuses.remove(&query_id);
-
-                // Update that MSQuery
-                let ms_query = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-                ms_query.pending_queries.remove(&query_id);
+                // responses. Thus, we only need to Exit and Clean Up the ES.
+                self.exit_and_clean_up(statuses, query_id);
               }
             }
             _ => {}
@@ -1874,7 +1861,7 @@ impl<T: IOTypes> TabletContext<T> {
           }
         }
         Err(eval_error) => {
-          self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+          self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
           return;
         }
       }
@@ -1929,7 +1916,7 @@ impl<T: IOTypes> TabletContext<T> {
           }
         }
         Err(eval_error) => {
-          self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+          self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
           return;
         }
       }
@@ -2007,7 +1994,7 @@ impl<T: IOTypes> TabletContext<T> {
           }
         }
         Err(eval_error) => {
-          self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+          self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
           return;
         }
       }
@@ -2042,6 +2029,9 @@ impl<T: IOTypes> TabletContext<T> {
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get(&query_id) {
       let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
       es.sender_path.clone()
+    } else if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get(&query_id) {
+      let es = cast!(FullMSTableReadES::Executing, ms_read_es).unwrap();
+      es.sender_path.clone()
     } else {
       panic!()
     }
@@ -2067,22 +2057,6 @@ impl<T: IOTypes> TabletContext<T> {
     self.exit_and_clean_up(statuses, query_id.clone());
   }
 
-  /// This is used to simply delete a TableReadES or MSTable*ES due to an expression
-  /// evaluation error that occured inside, and respond to the client. Note that this
-  /// function doesn't do any other kind of cleanup.
-  fn handle_eval_error_table_es(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: &QueryId,
-    eval_error: EvalError,
-  ) {
-    self.abort_with_query_error(
-      statuses,
-      query_id,
-      msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
-    );
-  }
-
   /// We call this when a DeadlockSafetyReadAbort happens for a `waiting_read_protected`.
   /// Recall this behavior is distinct than if a `verifying_writes` aborts.
   fn deadlock_safety_read_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP, _: TableRegion) {
@@ -2101,10 +2075,11 @@ impl<T: IOTypes> TabletContext<T> {
     query_id: QueryId,
     query_error: msg::QueryError,
   ) {
-    let ms_query = statuses.ms_query_ess.remove(&query_id).unwrap();
-    for query_id in ms_query.pending_queries {
+    let ms_query_es = statuses.ms_query_ess.remove(&query_id).unwrap();
+    for query_id in ms_query_es.pending_queries {
       self.abort_with_query_error(statuses, &query_id, query_error.clone());
     }
+    self.verifying_writes.remove(&ms_query_es.timestamp);
   }
 
   /// We call this when a DeadlockSafetyReadAbort happens for a `verifying_writes`.
@@ -2179,6 +2154,16 @@ impl<T: IOTypes> TabletContext<T> {
         subquery_id,
         rem_cols,
       );
+    } else if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+      let es = cast!(FullMSTableReadES::Executing, ms_read_es).unwrap();
+      let executing = cast!(MSReadExecutionS::Executing, &mut es.state).unwrap();
+      self.common_handle_internal_columns_dne(
+        executing,
+        query_id,
+        es.timestamp.clone(),
+        subquery_id,
+        rem_cols,
+      );
     }
   }
 
@@ -2191,7 +2176,6 @@ impl<T: IOTypes> TabletContext<T> {
     protect_query_id: QueryId,
   ) {
     let query_id = orig_p.query_id;
-
     if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
       let es = cast!(FullTableReadES::Executing, read_es).unwrap();
       match &mut es.state {
@@ -2212,23 +2196,25 @@ impl<T: IOTypes> TabletContext<T> {
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
-              self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+              self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
               return;
             }
           };
 
-          // Here, we have computed all GRQueryESs, and we can now add them to `read_statuses`
-          // and move the TableReadESs state to `Executing`.
+          // Here, we have computed all GRQueryESs, and we can now add them to
+          // `subquery_status` and `statuses`.
           let mut gr_query_ids = Vec::<QueryId>::new();
           let mut subquery_status = SubqueryStatus { subqueries: Default::default() };
-          for gr_query_es in &gr_query_statuses {
-            gr_query_ids.push(gr_query_es.query_id.clone());
+          for gr_query_es in gr_query_statuses {
+            let query_id = gr_query_es.query_id.clone();
+            gr_query_ids.push(query_id.clone());
             subquery_status.subqueries.insert(
-              gr_query_es.query_id.clone(),
+              query_id.clone(),
               SingleSubqueryStatus::Pending(SubqueryPending {
                 context: gr_query_es.context.clone(),
               }),
             );
+            statuses.gr_query_ess.insert(query_id, gr_query_es);
           }
 
           // Move the ES to the Executing state.
@@ -2238,12 +2224,6 @@ impl<T: IOTypes> TabletContext<T> {
             subquery_status,
             row_region: pending.read_region.row_region.clone(),
           });
-
-          // We do this after modifying `es.state` to avoid invalidating the `es` reference.
-          for gr_query_es in gr_query_statuses {
-            let query_id = gr_query_es.query_id.clone();
-            statuses.gr_query_ess.insert(query_id, gr_query_es);
-          }
 
           // Drive GRQueries
           for query_id in gr_query_ids {
@@ -2267,7 +2247,7 @@ impl<T: IOTypes> TabletContext<T> {
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
-              self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+              self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
               return;
             }
           };
@@ -2297,27 +2277,26 @@ impl<T: IOTypes> TabletContext<T> {
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
-              self.abort_ms_with_query_error(
-                statuses,
-                query_id,
-                msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
-              );
+              let ms_query_id = es.ms_query_id.clone();
+              self.abort_ms_with_query_error(statuses, ms_query_id, mk_eval_error(eval_error));
               return;
             }
           };
 
-          // Here, we have computed all GRQueryESs, and we can now add them to `read_statuses`
-          // and move the TableReadESs state to `Executing`.
+          // Here, we have computed all GRQueryESs, and we can now add them to
+          // `subquery_status` and `statuses`.
           let mut gr_query_ids = Vec::<QueryId>::new();
           let mut subquery_status = SubqueryStatus { subqueries: Default::default() };
-          for gr_query_es in &gr_query_statuses {
-            gr_query_ids.push(gr_query_es.query_id.clone());
+          for gr_query_es in gr_query_statuses {
+            let query_id = gr_query_es.query_id.clone();
+            gr_query_ids.push(query_id.clone());
             subquery_status.subqueries.insert(
-              gr_query_es.query_id.clone(),
+              query_id.clone(),
               SingleSubqueryStatus::Pending(SubqueryPending {
                 context: gr_query_es.context.clone(),
               }),
             );
+            statuses.gr_query_ess.insert(query_id, gr_query_es);
           }
 
           // Move the ES to the Executing state.
@@ -2327,12 +2306,6 @@ impl<T: IOTypes> TabletContext<T> {
             subquery_status,
             row_region: pending.read_region.row_region.clone(),
           });
-
-          // We do this after modifying `es.state` to avoid invalidating the `es` reference.
-          for gr_query_es in gr_query_statuses {
-            let query_id = gr_query_es.query_id.clone();
-            statuses.gr_query_ess.insert(query_id, gr_query_es);
-          }
 
           // Drive GRQueries
           for query_id in gr_query_ids {
@@ -2357,11 +2330,7 @@ impl<T: IOTypes> TabletContext<T> {
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
-              self.abort_ms_with_query_error(
-                statuses,
-                query_id,
-                msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
-              );
+              self.abort_ms_with_query_error(statuses, query_id, mk_eval_error(eval_error));
               return;
             }
           };
@@ -2391,27 +2360,26 @@ impl<T: IOTypes> TabletContext<T> {
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
-              self.abort_ms_with_query_error(
-                statuses,
-                query_id, // TODO: this is wrong; we have to change this to ms_query_id.
-                msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
-              );
+              let ms_query_id = es.ms_query_id.clone();
+              self.abort_ms_with_query_error(statuses, ms_query_id, mk_eval_error(eval_error));
               return;
             }
           };
 
-          // Here, we have computed all GRQueryESs, and we can now add them to `read_statuses`
-          // and move the TableReadESs state to `Executing`.
+          // Here, we have computed all GRQueryESs, and we can now add them to
+          // `subquery_status` and `statuses`.
           let mut gr_query_ids = Vec::<QueryId>::new();
           let mut subquery_status = SubqueryStatus { subqueries: Default::default() };
-          for gr_query_es in &gr_query_statuses {
-            gr_query_ids.push(gr_query_es.query_id.clone());
+          for gr_query_es in gr_query_statuses {
+            let query_id = gr_query_es.query_id.clone();
+            gr_query_ids.push(query_id.clone());
             subquery_status.subqueries.insert(
-              gr_query_es.query_id.clone(),
+              query_id.clone(),
               SingleSubqueryStatus::Pending(SubqueryPending {
                 context: gr_query_es.context.clone(),
               }),
             );
+            statuses.gr_query_ess.insert(query_id, gr_query_es);
           }
 
           // Move the ES to the Executing state.
@@ -2421,13 +2389,6 @@ impl<T: IOTypes> TabletContext<T> {
             subquery_status,
             row_region: pending.read_region.row_region.clone(),
           });
-
-          // We do this after modifying `es.state` to avoid invalidating the `es` reference.
-          // TODO: this logic no longer holds, move it to the above for loop.
-          for gr_query_es in gr_query_statuses {
-            let query_id = gr_query_es.query_id.clone();
-            statuses.gr_query_ess.insert(query_id, gr_query_es);
-          }
 
           // Drive GRQueries
           for query_id in gr_query_ids {
@@ -2452,11 +2413,7 @@ impl<T: IOTypes> TabletContext<T> {
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
-              self.abort_ms_with_query_error(
-                statuses,
-                query_id,
-                msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
-              );
+              self.abort_ms_with_query_error(statuses, query_id, mk_eval_error(eval_error));
               return;
             }
           };
@@ -2977,7 +2934,7 @@ impl<T: IOTypes> TabletContext<T> {
             })();
 
             if let Err(eval_error) = eval_res {
-              self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+              self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
               return;
             }
           }
@@ -3121,7 +3078,7 @@ impl<T: IOTypes> TabletContext<T> {
           // result to the TableView (if the WHERE clause evaluates to true).
           let query = &es.query;
           let context = &es.context;
-          let eval_res = (|| {
+          let eval_res = (|| -> Result<(), EvalError> {
             let evaluated_update = evaluate_update(
               query,
               &context.context_schema.column_context_schema,
@@ -3156,13 +3113,8 @@ impl<T: IOTypes> TabletContext<T> {
           })();
 
           if let Err(eval_error) = eval_res {
-            // TODO: change this to the following, use the ms_query_id
-            // self.abort_ms_with_query_error(
-            //   statuses,
-            //   query_id,
-            //   msg::QueryError::TypeError { msg: format!("{:?}", eval_error) },
-            // );
-            self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+            let ms_query_id = es.ms_query_id.clone();
+            self.abort_ms_with_query_error(statuses, ms_query_id, mk_eval_error(eval_error));
             return;
           }
         }
@@ -3312,7 +3264,7 @@ impl<T: IOTypes> TabletContext<T> {
             /// result to this TableView (if the WHERE clause evaluates to true).
             let query = &es.query;
             let context = &es.context;
-            let eval_res = (|| {
+            let eval_res = (|| -> Result<(), EvalError> {
               let evaluated_select = evaluate_super_simple_select(
                 query,
                 &context.context_schema.column_context_schema,
@@ -3337,8 +3289,8 @@ impl<T: IOTypes> TabletContext<T> {
             })();
 
             if let Err(eval_error) = eval_res {
-              // TODO: same as Update
-              self.handle_eval_error_table_es(statuses, &query_id, eval_error);
+              let ms_query_id = es.ms_query_id.clone();
+              self.abort_ms_with_query_error(statuses, ms_query_id, mk_eval_error(eval_error));
               return;
             }
           }
@@ -3568,6 +3520,15 @@ impl<T: IOTypes> TabletContext<T> {
           );
         }
       }
+    } else if let Some(ms_query_es) = statuses.ms_query_ess.remove(&query_id) {
+      // Note: this code is only run when a CancelQuery comes in (from the Slave) for the
+      // MSQueryES. We don't remove the MSQueryES via this code otherwise, since the Abort
+      // message for the `pending_queries` to propagate up will generally vary. This anomaly is
+      // rooted in the fact that MSQueryES does not own the MTable*ESs.
+      for query_id in ms_query_es.pending_queries {
+        self.abort_with_query_error(statuses, &query_id, msg::QueryError::LateralError);
+      }
+      self.verifying_writes.remove(&ms_query_es.timestamp);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.remove(&query_id) {
       // Remove the MSTableWriteES from the MSQuery::pending_queries.
       let ms_query = statuses.ms_query_ess.get_mut(ms_write_es.ms_query_id()).unwrap();
@@ -3591,6 +3552,54 @@ impl<T: IOTypes> TabletContext<T> {
               self.remove_m_read_protected_request(es.timestamp.clone(), pending.query_id);
             }
             MSWriteExecutionS::Executing(executing) => {
+              // Here, we need to cancel every Subquery. Depending on the state of the
+              // SingleSubqueryStatus, we either need to either clean up the column locking request,
+              // the ReadRegion from m_waiting_read_protected, or abort the underlying GRQueryES.
+
+              // Note that we leave `m_read_protected` and `m_write_protected` in-tact
+              // since they are inconvenient to change (since they don't have `query_id`.
+              for (query_id, single_query) in executing.subquery_status.subqueries {
+                match single_query {
+                  SingleSubqueryStatus::LockingSchemas(locking_status) => {
+                    self.remove_col_locking_request(locking_status.query_id);
+                  }
+                  SingleSubqueryStatus::PendingReadRegion(protect_status) => {
+                    let protect_query_id = protect_status.query_id;
+                    self.remove_m_read_protected_request(es.timestamp.clone(), protect_query_id);
+                  }
+                  SingleSubqueryStatus::Pending(_) => {
+                    self.exit_and_clean_up(statuses, query_id);
+                  }
+                  SingleSubqueryStatus::Finished(_) => {}
+                }
+              }
+            }
+          }
+        }
+      }
+    } else if let Some(ms_read_es) = statuses.full_ms_table_read_ess.remove(&query_id) {
+      // Remove the MSTableReadES from the MSQuery::pending_queries.
+      let ms_query = statuses.ms_query_ess.get_mut(ms_read_es.ms_query_id()).unwrap();
+      ms_query.pending_queries.remove(&query_id);
+
+      match ms_read_es {
+        FullMSTableReadES::QueryReplanning(es) => {
+          // Exit the query Replanning
+          self.exit_planning(es.status.state)
+        }
+        FullMSTableReadES::Executing(es) => {
+          // Exit and Clean Up state-specific resources.
+          match es.state {
+            MSReadExecutionS::Start => {}
+            MSReadExecutionS::Pending(pending) => {
+              // Here, we remove the ReadRegion from `m_waiting_read_protected`, if it still
+              // exists.
+
+              // Note that we leave `m_read_protected` and `m_write_protected` in-tact
+              // since they are inconvenient to change (since they don't have `query_id`.
+              self.remove_m_read_protected_request(es.timestamp.clone(), pending.query_id);
+            }
+            MSReadExecutionS::Executing(executing) => {
               // Here, we need to cancel every Subquery. Depending on the state of the
               // SingleSubqueryStatus, we either need to either clean up the column locking request,
               // the ReadRegion from m_waiting_read_protected, or abort the underlying GRQueryES.
@@ -3711,6 +3720,10 @@ fn evaluate_update(
       .insert(subtable_schema.get(i).unwrap().clone(), subtable_row.get(i).unwrap().clone());
   }
   unimplemented!()
+}
+
+fn mk_eval_error(eval_error: EvalError) -> msg::QueryError {
+  msg::QueryError::TypeError { msg: format!("{:?}", eval_error) }
 }
 
 /// This function simply deduces if the given `ColValN` sould be interpreted as true
