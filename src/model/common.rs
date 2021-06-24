@@ -145,7 +145,7 @@ pub struct ContextSchema {
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextRow {
   pub column_context_row: Vec<ColValN>,
-  pub trans_table_context_row: Vec<u32>,
+  pub trans_table_context_row: Vec<usize>,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
