@@ -238,6 +238,78 @@ enum FullTableReadES {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  TransTableReadES
+// -----------------------------------------------------------------------------------------------
+#[derive(Debug)]
+enum TransExecutionS {
+  Start,
+  Executing(Executing),
+}
+
+#[derive(Debug)]
+struct TransTableReadES {
+  root_query_path: QueryPath,
+  tier_map: TierMap,
+  location_prefix: TransTableLocationPrefix,
+  context: Rc<Context>,
+
+  // Fields needed for responding.
+  sender_path: QueryPath,
+  query_id: QueryId,
+
+  // Query-related fields.
+  sql_query: proc::SuperSimpleSelect,
+  query_plan: QueryPlan,
+
+  // Dynamically evolving fields.
+  new_rms: HashSet<QueryPath>,
+  state: TransExecutionS,
+
+  // Convenience fields
+  timestamp: Timestamp, // The timestamp read from the GRQueryES
+}
+
+#[derive(Debug)]
+enum TransQueryReplanningS {
+  Start,
+  /// Used to wait on the master
+  MasterQueryReplanning {
+    master_query_id: QueryId,
+  },
+  Done(bool),
+}
+
+#[derive(Debug)]
+struct TransQueryReplanningES {
+  /// The below fields are from PerformQuery and are passed through to TableReadES.
+  root_query_path: QueryPath,
+  tier_map: TierMap,
+  query_id: QueryId,
+
+  // These members are parallel to the messages in `msg::GeneralQuery`.
+  location_prefix: TransTableLocationPrefix,
+  context: Rc<Context>,
+  sql_query: proc::SuperSimpleSelect,
+  query_plan: QueryPlan,
+
+  /// Path of the original sender (needed for responding with errors).
+  sender_path: QueryPath,
+  /// The OrigP of the Task holding this CommonQueryReplanningES
+  orig_p: OrigP,
+  /// The state of the CommonQueryReplanningES
+  state: TransQueryReplanningS,
+
+  // Convenience fields
+  timestamp: Timestamp, // The timestamp read from the GRQueryES
+}
+
+#[derive(Debug)]
+enum FullTransTableReadES {
+  QueryReplanning(TransQueryReplanningES),
+  Executing(TransTableReadES),
+}
+
+// -----------------------------------------------------------------------------------------------
 //  GRQueryES
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
@@ -443,6 +515,7 @@ impl FullMSTableReadES {
 pub struct Statuses {
   gr_query_ess: HashMap<QueryId, GRQueryES>,
   full_table_read_ess: HashMap<QueryId, FullTableReadES>,
+  full_trans_table_read_ess: HashMap<QueryId, FullTransTableReadES>,
   tm_statuss: HashMap<QueryId, TMStatus>,
   ms_query_ess: HashMap<QueryId, MSQueryES>,
   full_ms_table_read_ess: HashMap<QueryId, FullMSTableReadES>,
@@ -456,6 +529,9 @@ impl Statuses {
       return;
     };
     if self.full_table_read_ess.remove(query_id).is_some() {
+      return;
+    };
+    if self.full_trans_table_read_ess.remove(query_id).is_some() {
       return;
     };
     if self.tm_statuss.remove(query_id).is_some() {
@@ -766,7 +842,72 @@ impl<T: IOTypes> TabletContext<T> {
     match message {
       msg::TabletMessage::PerformQuery(perform_query) => {
         match perform_query.query {
-          msg::GeneralQuery::SuperSimpleTransTableSelectQuery(_) => unimplemented!(),
+          msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
+            // First, we check if the GRQueryES still exists in the Statuses, continuing
+            // if so and aborting if not.
+            if let Some(gr_query_es) = statuses.gr_query_ess.get(&query.location_prefix.query_id) {
+              // Construct and start the TransQueryReplanningES
+              let mut plan_es = TransQueryReplanningES {
+                root_query_path: perform_query.root_query_path,
+                tier_map: perform_query.tier_map,
+                query_id: perform_query.query_id.clone(),
+                location_prefix: query.location_prefix,
+                context: Rc::new(query.context),
+                sql_query: query.sql_query,
+                query_plan: query.query_plan,
+                sender_path: perform_query.sender_path,
+                orig_p: OrigP::new(perform_query.query_id.clone()),
+                state: TransQueryReplanningS::Start,
+                timestamp: gr_query_es.timestamp.clone(),
+              };
+              plan_es.start::<T>(self, gr_query_es);
+              match plan_es.state {
+                TransQueryReplanningS::Done(success) => {
+                  if success {
+                    // If the QueryReplanning was successful, we move the FullTransTableReadES
+                    // to Executing in the Start state, and immediately start executing it.
+                    statuses.full_trans_table_read_ess.insert(
+                      perform_query.query_id.clone(),
+                      FullTransTableReadES::Executing(TransTableReadES {
+                        root_query_path: plan_es.root_query_path,
+                        tier_map: plan_es.tier_map,
+                        location_prefix: plan_es.location_prefix,
+                        context: plan_es.context,
+                        sender_path: plan_es.sender_path,
+                        query_id: plan_es.query_id,
+                        sql_query: plan_es.sql_query,
+                        query_plan: plan_es.query_plan,
+                        new_rms: Default::default(),
+                        state: TransExecutionS::Start,
+                        timestamp: plan_es.timestamp,
+                      }),
+                    );
+                  } else {
+                    // If the planning was unsuccessful, the Abort message should already
+                    // have been sent. Since there is nothing to clean up, we can just exit.
+                  }
+                }
+                _ => {
+                  // Add FullTransTableReadES.
+                  statuses.full_trans_table_read_ess.insert(
+                    perform_query.query_id.clone(),
+                    FullTransTableReadES::QueryReplanning(plan_es),
+                  );
+                }
+              }
+            } else {
+              // This means that the target GRQueryES was deleted. We can send back an
+              // Abort with LateralError. Exit and Clean Up will be done later.
+              let sender_path = perform_query.sender_path;
+              let aborted_msg = msg::QueryAborted {
+                return_path: sender_path.query_id.clone(),
+                query_id: perform_query.query_id,
+                payload: msg::AbortedData::QueryError(msg::QueryError::LateralError),
+              };
+              self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
+              return;
+            }
+          }
           msg::GeneralQuery::SuperSimpleTableSelectQuery(query) => {
             // We inspect the TierMap to see what kind of ES to create
             let table_path = cast!(proc::TableRef::TablePath, &query.sql_query.from).unwrap();
@@ -1582,7 +1723,7 @@ impl<T: IOTypes> TabletContext<T> {
                   context: comm_plan_es.context.clone(),
                   sender_path: comm_plan_es.sender_path.clone(),
                   query_id: query_id.clone(),
-                  sql_query: sql_query,
+                  sql_query,
                   query_plan: comm_plan_es.query_plan.clone(),
                   ms_query_id,
                   new_rms: Default::default(),
@@ -1723,7 +1864,7 @@ impl<T: IOTypes> TabletContext<T> {
                   context: comm_plan_es.context.clone(),
                   sender_path: comm_plan_es.sender_path.clone(),
                   query_id: query_id.clone(),
-                  sql_query: sql_query,
+                  sql_query,
                   query_plan: comm_plan_es.query_plan.clone(),
                   ms_query_id,
                   new_rms: Default::default(),
@@ -4294,6 +4435,9 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
       CommonQueryReplanningS::ProjectedColumnLocking { locked_columns_query_id: locked_cols_qid };
   }
 
+  /// Note: The reason that `start` above is not just another case statement in this function
+  /// because functions are generally  suppose to take in arguments specific to the states
+  /// that they are transitioning.
   fn column_locked<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>, query_id: QueryId) {
     match &self.state {
       CommonQueryReplanningS::ProjectedColumnLocking { .. } => {
@@ -4469,32 +4613,116 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           for col in external_cols {
             if !self.context.context_schema.column_context_schema.contains(&col) {
               // This means we need to consult the Master.
-              let master_qid = mk_qid(&mut ctx.rand);
+              let master_query_id = mk_qid(&mut ctx.rand);
 
               ctx.network_output.send(
                 &ctx.master_eid,
                 msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
                   msg::PerformMasterFrozenColUsage {
-                    query_id: master_qid.clone(),
+                    query_id: master_query_id.clone(),
                     timestamp: self.timestamp,
                     trans_table_schemas: self.query_plan.trans_table_schemas.clone(),
                     col_usage_tree: msg::ColUsageTree::MSQueryStage(self.sql_view.ms_query_stage()),
                   },
                 )),
               );
-              ctx.master_query_map.insert(master_qid.clone(), self.orig_p.clone());
+              ctx.master_query_map.insert(master_query_id.clone(), self.orig_p.clone());
 
               // Advance Read Status
-              self.state =
-                CommonQueryReplanningS::MasterQueryReplanning { master_query_id: master_qid };
+              self.state = CommonQueryReplanningS::MasterQueryReplanning { master_query_id };
               return;
             }
           }
 
+          // If we get here that means we have successfully computed a valid QueryPlan,
+          // and we are done.
           self.state = CommonQueryReplanningS::Done(true);
         }
       }
       _ => panic!(),
+    }
+  }
+}
+
+impl TransQueryReplanningES {
+  fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>, gr_query_es: &GRQueryES) {
+    matches!(self.state, TransQueryReplanningS::Start);
+    // First, verify that the select columns are in the TransTable.
+    let (_, (schema_cols, _)) = gr_query_es
+      .trans_table_view
+      .iter()
+      .find(|(trans_table_name, _)| trans_table_name == &self.location_prefix.trans_table_name)
+      .unwrap();
+    for col in &self.sql_query.projection {
+      if !schema_cols.contains(col) {
+        // One of the projected columns aren't in the schema, indicating that the
+        // SuperSimpleTransTableSelect is invalid. Thus, we abort.
+        let sender_path = self.sender_path.clone();
+        let aborted_msg = msg::QueryAborted {
+          return_path: sender_path.query_id.clone(),
+          query_id: self.query_id.clone(),
+          payload: msg::AbortedData::QueryError(msg::QueryError::LateralError),
+        };
+        ctx.send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
+        self.state = TransQueryReplanningS::Done(true);
+        return;
+      }
+    }
+
+    // Next, we check the GossipGen of the QueryPlan.
+    if ctx.gossip.gossip_gen <= self.query_plan.gossip_gen {
+      // This means that the sender knew everything this Node knew and more when it made the
+      // QueryPlan, so we can use it directly. Note that since there is no column locking
+      // required, we can move to the Execting state immediately.
+      self.state = TransQueryReplanningS::Done(true);
+    } else {
+      // This means we must recompute the QueryPlan.
+      let mut planner = ColUsagePlanner {
+        gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
+        timestamp: self.timestamp,
+      };
+      let (_, col_usage_node) = planner.plan_stage_query_with_schema(
+        &mut self.query_plan.trans_table_schemas.clone(),
+        &self.sql_query.projection,
+        &self.sql_query.from,
+        schema_cols.clone(),
+        &self.sql_query.exprs(),
+      );
+
+      // Update the QueryPlan
+      let external_cols = col_usage_node.external_cols.clone();
+      self.query_plan.gossip_gen = ctx.gossip.gossip_gen;
+      self.query_plan.col_usage_node = col_usage_node;
+
+      // Next, we check to see if all ColNames in `external_cols` is contaiend
+      // in the Context. If not, we have to consult the Master.
+      for col in external_cols {
+        if !self.context.context_schema.column_context_schema.contains(&col) {
+          // This means we need to consult the Master.
+          let master_query_id = mk_qid(&mut ctx.rand);
+
+          ctx.network_output.send(
+            &ctx.master_eid,
+            msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
+              msg::PerformMasterFrozenColUsage {
+                query_id: master_query_id.clone(),
+                timestamp: self.timestamp,
+                trans_table_schemas: self.query_plan.trans_table_schemas.clone(),
+                col_usage_tree: msg::ColUsageTree::MSQueryStage(self.sql_query.ms_query_stage()),
+              },
+            )),
+          );
+          ctx.master_query_map.insert(master_query_id.clone(), self.orig_p.clone());
+
+          // Advance Read Status
+          self.state = TransQueryReplanningS::MasterQueryReplanning { master_query_id };
+          return;
+        }
+      }
+
+      // If we get here that means we have successfully computed a valid QueryPlan,
+      // and we are done.
+      self.state = TransQueryReplanningS::Done(true);
     }
   }
 }

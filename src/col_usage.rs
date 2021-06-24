@@ -77,12 +77,19 @@ impl<'a> ColUsagePlanner<'a> {
     return all_cols.into_iter().collect();
   }
 
+  /// This computes a QueryPlan for a Table (or TransTable) whose schema is `schema_cols`,
+  /// with TransTable context `trans_table_ctx`. This is used for both Selects and Updates,
+  /// and in order to support both, we simply pass in `projection`, `table_ref` and `expr`,
+  /// which is a consistent decomposition fo the two.
+  ///
+  /// Here, we return the projected cols (i.e. the Schema of the resulting TransTable) and
+  /// the FrozenColUsageNode.
   pub fn plan_stage_query_with_schema(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
     projection: &Vec<ColName>,
     table_ref: &proc::TableRef,
-    current_cols: Vec<ColName>,
+    schema_cols: Vec<ColName>,
     exprs: &Vec<proc::ValExpr>,
   ) -> (Vec<ColName>, FrozenColUsageNode) {
     let mut node = FrozenColUsageNode::new(table_ref.clone());
@@ -104,9 +111,9 @@ impl<'a> ColUsagePlanner<'a> {
       all_cols.insert(col.clone());
     }
 
-    let current_cols_set = HashSet::<ColName>::from_iter(current_cols.into_iter());
+    let schema_cols_set = HashSet::<ColName>::from_iter(schema_cols.into_iter());
     for col in all_cols {
-      if current_cols_set.contains(&col) {
+      if schema_cols_set.contains(&col) {
         node.safe_present_cols.push(col);
       } else {
         node.external_cols.push(col);
