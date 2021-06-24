@@ -213,7 +213,7 @@ struct TableReadES {
   query_id: QueryId,
 
   // Query-related fields.
-  query: proc::SuperSimpleSelect,
+  sql_query: proc::SuperSimpleSelect,
   query_plan: QueryPlan,
 
   // Dynamically evolving fields.
@@ -289,7 +289,7 @@ struct GRQueryES {
   query_id: QueryId,
 
   // Query-related fields.
-  query: proc::GRQuery,
+  sql_query: proc::GRQuery,
   query_plan: GRQueryPlan,
 
   // The dynamically evolving fields.
@@ -336,7 +336,7 @@ struct MSTableWriteES {
   query_id: QueryId,
 
   // Query-related fields.
-  query: proc::Update,
+  sql_query: proc::Update,
   query_plan: QueryPlan,
 
   // MSQuery fields
@@ -396,7 +396,7 @@ struct MSTableReadES {
   query_id: QueryId,
 
   // Query-related fields.
-  query: proc::SuperSimpleSelect,
+  sql_query: proc::SuperSimpleSelect,
   query_plan: QueryPlan,
 
   // MSQuery fields
@@ -1436,7 +1436,7 @@ impl<T: IOTypes> TabletContext<T> {
                   context: comm_plan_es.context.clone(),
                   sender_path: comm_plan_es.sender_path.clone(),
                   query_id: query_id.clone(),
-                  query: comm_plan_es.sql_view.clone(),
+                  sql_query: comm_plan_es.sql_view.clone(),
                   query_plan: comm_plan_es.query_plan.clone(),
                   new_rms: Default::default(),
                   state: ExecutionS::Start,
@@ -1582,7 +1582,7 @@ impl<T: IOTypes> TabletContext<T> {
                   context: comm_plan_es.context.clone(),
                   sender_path: comm_plan_es.sender_path.clone(),
                   query_id: query_id.clone(),
-                  query: sql_query,
+                  sql_query: sql_query,
                   query_plan: comm_plan_es.query_plan.clone(),
                   ms_query_id,
                   new_rms: Default::default(),
@@ -1723,7 +1723,7 @@ impl<T: IOTypes> TabletContext<T> {
                   context: comm_plan_es.context.clone(),
                   sender_path: comm_plan_es.sender_path.clone(),
                   query_id: query_id.clone(),
-                  query: sql_query,
+                  sql_query: sql_query,
                   query_plan: comm_plan_es.query_plan.clone(),
                   ms_query_id,
                   new_rms: Default::default(),
@@ -1845,7 +1845,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Setup ability to compute a tight Keybound for every ContextRow.
     let keybound_computer = ContextKeyboundComputer::new(
-      &es.query.selection,
+      &es.sql_query.selection,
       &self.table_schema,
       &es.timestamp,
       &es.context.context_schema,
@@ -1870,7 +1870,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Compute the Column Region.
     let mut col_region = HashSet::<ColName>::new();
-    col_region.extend(es.query.projection.clone());
+    col_region.extend(es.sql_query.projection.clone());
     col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
 
     // Move the TableReadES to the Pending state with the given ReadRegion.
@@ -1900,7 +1900,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Setup ability to compute a tight Keybound for every ContextRow.
     let keybound_computer = ContextKeyboundComputer::new(
-      &es.query.selection,
+      &es.sql_query.selection,
       &self.table_schema,
       &es.timestamp,
       &es.context.context_schema,
@@ -1925,7 +1925,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Compute the Write Column Region.
     let mut col_region = HashSet::<ColName>::new();
-    col_region.extend(es.query.assignment.iter().map(|(col, _)| col.clone()));
+    col_region.extend(es.sql_query.assignment.iter().map(|(col, _)| col.clone()));
 
     // Compute the Write Region
     let col_region = Vec::from_iter(col_region.into_iter());
@@ -1978,7 +1978,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Setup ability to compute a tight Keybound for every ContextRow.
     let keybound_computer = ContextKeyboundComputer::new(
-      &es.query.selection,
+      &es.sql_query.selection,
       &self.table_schema,
       &es.timestamp,
       &es.context.context_schema,
@@ -2003,7 +2003,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Compute the Read Column Region.
     let mut col_region = HashSet::<ColName>::new();
-    col_region.extend(es.query.projection.clone());
+    col_region.extend(es.sql_query.projection.clone());
     col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
 
     // Move the MSTableReadES to the Pending state with the given ReadRegion.
@@ -2188,8 +2188,8 @@ impl<T: IOTypes> TabletContext<T> {
             &es.query_id,
             &es.root_query_path,
             &es.tier_map,
-            &es.query.selection,
-            &collect_select_subqueries(&es.query),
+            &es.sql_query.selection,
+            &collect_select_subqueries(&es.sql_query),
             &es.timestamp,
             &es.context,
             &es.query_plan,
@@ -2239,8 +2239,8 @@ impl<T: IOTypes> TabletContext<T> {
             &es.query_id,
             &es.root_query_path,
             &es.tier_map,
-            &es.query.selection,
-            &collect_select_subqueries(&es.query),
+            &es.sql_query.selection,
+            &collect_select_subqueries(&es.sql_query),
             &es.timestamp,
             &es.context,
             &es.query_plan,
@@ -2269,8 +2269,8 @@ impl<T: IOTypes> TabletContext<T> {
             &es.query_id,
             &es.root_query_path,
             &es.tier_map,
-            &es.query.selection,
-            &collect_update_subqueries(&es.query),
+            &es.sql_query.selection,
+            &collect_update_subqueries(&es.sql_query),
             &es.timestamp,
             &es.context,
             &es.query_plan,
@@ -2322,8 +2322,8 @@ impl<T: IOTypes> TabletContext<T> {
             &es.query_id,
             &es.root_query_path,
             &es.tier_map,
-            &es.query.selection,
-            &collect_update_subqueries(&es.query),
+            &es.sql_query.selection,
+            &collect_update_subqueries(&es.sql_query),
             &es.timestamp,
             &es.context,
             &es.query_plan,
@@ -2352,8 +2352,8 @@ impl<T: IOTypes> TabletContext<T> {
             &es.query_id,
             &es.root_query_path,
             &es.tier_map,
-            &es.query.selection,
-            &collect_select_subqueries(&es.query),
+            &es.sql_query.selection,
+            &collect_select_subqueries(&es.sql_query),
             &es.timestamp,
             &es.context,
             &es.query_plan,
@@ -2405,8 +2405,8 @@ impl<T: IOTypes> TabletContext<T> {
             &es.query_id,
             &es.root_query_path,
             &es.tier_map,
-            &es.query.selection,
-            &collect_select_subqueries(&es.query),
+            &es.sql_query.selection,
+            &collect_select_subqueries(&es.sql_query),
             &es.timestamp,
             &es.context,
             &es.query_plan,
@@ -2441,7 +2441,8 @@ impl<T: IOTypes> TabletContext<T> {
     } else {
       // This means the GRQueryES is done, so we send the desired result
       // back to the originator.
-      let return_trans_table_pos = lookup_pos(&es.trans_table_view, &es.query.returning).unwrap();
+      let return_trans_table_pos =
+        lookup_pos(&es.trans_table_view, &es.sql_query.returning).unwrap();
       let (_, (schema, table_views)) = es.trans_table_view.get(return_trans_table_pos).unwrap();
 
       // To compute the result, recall that we need to associate the Context to each TableView.
@@ -2633,7 +2634,7 @@ impl<T: IOTypes> TabletContext<T> {
     };
 
     // Send out the PerformQuery and populate TMStatus accordingly.
-    let (_, stage) = es.query.trans_tables.get(stage_idx).unwrap();
+    let (_, stage) = es.sql_query.trans_tables.get(stage_idx).unwrap();
     let child_sql_query = cast!(proc::GRQueryStage::SuperSimpleSelect, stage).unwrap();
     match &child_sql_query.from {
       TableRef::TablePath(table_path) => {
@@ -2831,7 +2832,7 @@ impl<T: IOTypes> TabletContext<T> {
 
         // Compute the Schema of the TableView that will be returned by this TableReadES.
         let mut res_col_names = Vec::<(ColName, ColType)>::new();
-        for col_name in &es.query.projection.clone() {
+        for col_name in &es.sql_query.projection.clone() {
           let col_type = if let Some(pos) = lookup_pos(&self.table_schema.key_cols, col_name) {
             let (_, col_type) = self.table_schema.key_cols.get(pos).unwrap();
             col_type.clone()
@@ -2848,7 +2849,7 @@ impl<T: IOTypes> TabletContext<T> {
         // Contexts, since they are generally a superset of the Query Plan).
         let mut cols_to_read_set = HashSet::<ColName>::new();
         cols_to_read_set.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
-        cols_to_read_set.extend(es.query.projection.clone());
+        cols_to_read_set.extend(es.sql_query.projection.clone());
         for conv in &converters {
           cols_to_read_set.extend(conv.safe_present_split.clone());
         }
@@ -2857,7 +2858,7 @@ impl<T: IOTypes> TabletContext<T> {
         // Setup ability to compute a tight Keybound for every ContextRow. This will be
         // the exact same as that computed before sending out the subqueries.
         let keybound_computer = ContextKeyboundComputer::new(
-          &es.query.selection,
+          &es.sql_query.selection,
           &self.table_schema,
           &es.timestamp,
           &es.context.context_schema,
@@ -2907,7 +2908,7 @@ impl<T: IOTypes> TabletContext<T> {
 
             /// Now, we evaluate all expressions in the SQL query and amend the
             /// result to this TableView (if the WHERE clause evaluates to true).
-            let query = &es.query;
+            let query = &es.sql_query;
             let context = &es.context;
             let eval_res = (|| {
               let evaluated_select = evaluate_super_simple_select(
@@ -2947,7 +2948,7 @@ impl<T: IOTypes> TabletContext<T> {
         let success_msg = msg::QuerySuccess {
           return_path: es.sender_path.query_id.clone(),
           query_id: query_id.clone(),
-          result: (es.query.projection.clone(), res_table_views),
+          result: (es.sql_query.projection.clone(), res_table_views),
           new_rms: es.new_rms.iter().cloned().collect(),
         };
         let sender_path = es.sender_path.clone();
@@ -3000,7 +3001,7 @@ impl<T: IOTypes> TabletContext<T> {
         // Compute the Schema of the TableView that will be returned by this MSTableWriteES.
         let mut res_col_names = Vec::<(ColName, ColType)>::new();
         res_col_names.extend(self.table_schema.key_cols.clone());
-        for (col_name, _) in &es.query.assignment.clone() {
+        for (col_name, _) in &es.sql_query.assignment.clone() {
           res_col_names.push((
             col_name.clone(),
             self.table_schema.val_cols.strong_static_read(col_name, es.timestamp).unwrap(),
@@ -3024,7 +3025,7 @@ impl<T: IOTypes> TabletContext<T> {
         // Setup ability to compute a tight Keybound for every ContextRow. This will be
         // the exact same as that computed before sending out the subqueries.
         let keybound_computer = ContextKeyboundComputer::new(
-          &es.query.selection,
+          &es.sql_query.selection,
           &self.table_schema,
           &es.timestamp,
           &es.context.context_schema,
@@ -3076,7 +3077,7 @@ impl<T: IOTypes> TabletContext<T> {
 
           // Now, we evaluate all expressions in the SQL query and amend the
           // result to the TableView (if the WHERE clause evaluates to true).
-          let query = &es.query;
+          let query = &es.sql_query;
           let context = &es.context;
           let eval_res = (|| -> Result<(), EvalError> {
             let evaluated_update = evaluate_update(
@@ -3185,7 +3186,7 @@ impl<T: IOTypes> TabletContext<T> {
 
         // Compute the Schema of the TableView that will be returned by this MSTableReadES.
         let mut res_col_names = Vec::<(ColName, ColType)>::new();
-        for col_name in &es.query.projection.clone() {
+        for col_name in &es.sql_query.projection.clone() {
           let col_type = if let Some(pos) = lookup_pos(&self.table_schema.key_cols, col_name) {
             let (_, col_type) = self.table_schema.key_cols.get(pos).unwrap();
             col_type.clone()
@@ -3202,7 +3203,7 @@ impl<T: IOTypes> TabletContext<T> {
         // Contexts, since they are generally a superset of the Query Plan).
         let mut cols_to_read_set = HashSet::<ColName>::new();
         cols_to_read_set.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
-        cols_to_read_set.extend(es.query.projection.clone());
+        cols_to_read_set.extend(es.sql_query.projection.clone());
         for conv in &converters {
           cols_to_read_set.extend(conv.safe_present_split.clone());
         }
@@ -3211,7 +3212,7 @@ impl<T: IOTypes> TabletContext<T> {
         // Setup ability to compute a tight Keybound for every ContextRow. This will be
         // the exact same as that computed before sending out the subqueries.
         let keybound_computer = ContextKeyboundComputer::new(
-          &es.query.selection,
+          &es.sql_query.selection,
           &self.table_schema,
           &es.timestamp,
           &es.context.context_schema,
@@ -3262,7 +3263,7 @@ impl<T: IOTypes> TabletContext<T> {
 
             /// Now, we evaluate all expressions in the SQL query and amend the
             /// result to this TableView (if the WHERE clause evaluates to true).
-            let query = &es.query;
+            let query = &es.sql_query;
             let context = &es.context;
             let eval_res = (|| -> Result<(), EvalError> {
               let evaluated_select = evaluate_super_simple_select(
@@ -3303,7 +3304,7 @@ impl<T: IOTypes> TabletContext<T> {
         let success_msg = msg::QuerySuccess {
           return_path: es.sender_path.query_id.clone(),
           query_id: query_id.clone(),
-          result: (es.query.projection.clone(), res_table_views),
+          result: (es.sql_query.projection.clone(), res_table_views),
           new_rms: es.new_rms.iter().cloned().collect(),
         };
         let sender_path = es.sender_path.clone();
@@ -4073,7 +4074,7 @@ fn compute_subqueries<T: IOTypes, StorageViewT: StorageView>(
       context,
       new_trans_table_context: vec![],
       query_id: gr_query_id.clone(),
-      query: subquery.clone(),
+      sql_query: subquery.clone(),
       query_plan: GRQueryPlan {
         gossip_gen: query_plan.gossip_gen.clone(),
         trans_table_schemas: query_plan.trans_table_schemas.clone(),
@@ -4177,7 +4178,7 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
     context: context.clone(),
     new_trans_table_context: vec![],
     query_id: subquery_id.clone(),
-    query: subquery.clone(),
+    sql_query: subquery.clone(),
     query_plan: GRQueryPlan {
       gossip_gen: query_plan.gossip_gen.clone(),
       trans_table_schemas: query_plan.trans_table_schemas.clone(),
