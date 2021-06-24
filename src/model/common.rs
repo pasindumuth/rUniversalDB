@@ -178,6 +178,14 @@ impl TableView {
       self.rows.insert(row, 1);
     }
   }
+
+  pub fn add_row_multi(&mut self, row: Vec<ColValN>, row_count: u64) {
+    if let Some(count) = self.rows.get_mut(&row) {
+      *count += row_count;
+    } else {
+      self.rows.insert(row, row_count);
+    }
+  }
 }
 
 impl EndpointId {
