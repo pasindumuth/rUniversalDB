@@ -1,5 +1,5 @@
 use crate::common::{ColBound, SingleBound};
-use crate::model::common::iast::BinaryOp;
+use crate::expression::EvalError::GenericError;
 use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -10,6 +10,8 @@ Optimizations:
 - We can pre-evaluate constant expressions before evaluating them with the `col_context`.
 */
 
+/// These primarily exist for testing the expression evaluation code. It's not used
+/// by the system for decision making.
 #[derive(Debug)]
 pub enum EvalError {
   /// An invalid unary operation was attempted.
@@ -18,6 +20,18 @@ pub enum EvalError {
   InvalidBinaryOp,
   /// Placeholder error
   GenericError,
+  /// Invalid subquery result.
+  InvalidSubqueryResult,
+  /// Invalid subquery result.
+  NumberParseError,
+}
+
+/// This is the expression type we use to Compute a value (hence why it's called CExpr).
+#[derive(Debug)]
+pub enum CExpr {
+  UnaryExpr { op: iast::UnaryOp, expr: Box<CExpr> },
+  BinaryExpr { op: iast::BinaryOp, left: Box<CExpr>, right: Box<CExpr> },
+  Value { val: ColValN },
 }
 
 fn full_bound() -> ColBound {
@@ -111,5 +125,10 @@ pub fn compute_bound(
   col_context: &HashMap<ColName, ColValN>,
 ) -> Result<Vec<ColBound>, EvalError> {
   // TODO: Complete
+  Err(EvalError::GenericError)
+}
+
+// This is a general expression evaluator.
+pub fn evaluate_c_expr(c_expr: &CExpr) -> Result<ColValN, EvalError> {
   Err(EvalError::GenericError)
 }

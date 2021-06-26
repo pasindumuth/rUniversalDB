@@ -6,7 +6,8 @@ use crate::common::{
   lookup_pos, merge_table_views, mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
   QueryPlan, TMStatus, TMWaitValue, TableRegion, TableSchema,
 };
-use crate::expression::{compute_bound, EvalError};
+use crate::expression::{compute_bound, evaluate_c_expr, CExpr, EvalError};
+use crate::model::common::iast::Value;
 use crate::model::common::proc::{TableRef, ValExpr};
 use crate::model::common::{
   iast, proc, ColType, ColValN, Context, ContextRow, ContextSchema, Gen, NodeGroupId, QueryPath,
@@ -4242,68 +4243,177 @@ impl<T: IOTypes> TabletContext<T> {
   }
 }
 
-/// This evaluates a `ValExpr` completely into a `ColVal`. When a ColumnRef is encountered
-/// in the `expr`, we first search `subtable_row`, and if that's not present, we search the
-/// `column_context_row`. In addition, `subquery_vals` should have a length equal to that of
-/// how many GRQuerys there are in the `expr`.
-fn evaluate_expr(
-  expr: &proc::ValExpr,
+/// Maps all `ColName`s to `ColValN`s by first using that in the subtable, and then the context.
+fn mk_col_map(
   column_context_schema: &Vec<ColName>,
-  column_context_row: &Vec<ColValN>,
+  column_context_row: &Vec<Option<ColVal>>,
   subtable_schema: &Vec<ColName>,
-  subtable_row: &Vec<ColValN>,
-  subquery_vals: &Vec<TableView>,
-) -> Result<ColValN, EvalError> {
-  let mut subtable_row_map = HashMap::<ColName, ColValN>::new();
+  subtable_row: &Vec<Option<ColVal>>,
+) -> HashMap<ColName, ColValN> {
+  let mut col_map = HashMap::<ColName, ColValN>::new();
+  assert_eq!(subtable_schema.len(), subtable_row.len());
   for i in 0..subtable_schema.len() {
-    subtable_row_map
-      .insert(subtable_schema.get(i).unwrap().clone(), subtable_row.get(i).unwrap().clone());
+    let col_name = subtable_schema.get(i).unwrap().clone();
+    let col_val = subtable_row.get(i).unwrap().clone();
+    col_map.insert(col_name, col_val);
   }
-  unimplemented!()
+
+  assert_eq!(column_context_schema.len(), column_context_row.len());
+  for i in 0..column_context_schema.len() {
+    let col_name = column_context_schema.get(i).unwrap().clone();
+    let col_val = column_context_row.get(i).unwrap().clone();
+    if !col_map.contains_key(&col_name) {
+      // If the ColName was already in the subtable, we don't take the ColValN here.
+      col_map.insert(col_name, col_val);
+    }
+  }
+  return col_map;
 }
 
+/// Verifies that each `TableView` only contains one cell, and then extract that cell value.
+fn extract_subquery_vals(raw_subquery_vals: &Vec<TableView>) -> Result<Vec<ColValN>, EvalError> {
+  // Next, we reduce the subquery values to single values.
+  let mut subquery_vals = Vec::<ColValN>::new();
+  for raw_val in raw_subquery_vals {
+    if raw_val.rows.len() != 1 {
+      return Err(EvalError::InvalidSubqueryResult);
+    }
+
+    // Check that there is one row, and that row has only one column value.
+    let (row, count) = raw_val.rows.iter().next().unwrap();
+    if row.len() != 1 || count != &1 {
+      return Err(EvalError::InvalidSubqueryResult);
+    }
+
+    subquery_vals.push(row.get(0).unwrap().clone());
+  }
+  Ok(subquery_vals)
+}
+
+/// Construct a `CExpr` recursively from the given `sql_expr`. The `ColumnRefs` should be replaced
+/// by the value in `col_map` (such a value should exist), and the `Subquery`s should be replaced
+/// by the values in `subquery_vals` starting from `next_subquery_idx`. The `next_subquery_idx`
+/// should be increment to point passed the final subquery_val that was used.
+fn construct_cexpr(
+  sql_expr: &proc::ValExpr,
+  col_map: &HashMap<ColName, ColValN>,
+  subquery_vals: &Vec<ColValN>,
+  next_subquery_idx: &mut usize,
+) -> Result<CExpr, EvalError> {
+  let c_expr = match sql_expr {
+    ValExpr::ColumnRef { col_ref } => CExpr::Value { val: col_map.get(col_ref).unwrap().clone() },
+    ValExpr::UnaryExpr { op, expr } => CExpr::UnaryExpr {
+      op: op.clone(),
+      expr: Box::new(construct_cexpr(expr.deref(), col_map, subquery_vals, next_subquery_idx)?),
+    },
+    ValExpr::BinaryExpr { op, left, right } => CExpr::BinaryExpr {
+      op: op.clone(),
+      left: Box::new(construct_cexpr(left.deref(), col_map, subquery_vals, next_subquery_idx)?),
+      right: Box::new(construct_cexpr(right.deref(), col_map, subquery_vals, next_subquery_idx)?),
+    },
+    ValExpr::Value { val } => {
+      // We parse the `val` into a valid `ColValN` here.
+      CExpr::Value {
+        val: match val {
+          Value::Number(num_string) => {
+            if let Ok(parsed_num) = num_string.parse::<i32>() {
+              Some(ColVal::Int(parsed_num))
+            } else {
+              return Err(EvalError::GenericError);
+            }
+          }
+          Value::QuotedString(string_val) => Some(ColVal::String(string_val.clone())),
+          Value::Boolean(bool_val) => Some(ColVal::Bool(bool_val.clone())),
+          Value::Null => None,
+        },
+      }
+    }
+    ValExpr::Subquery { .. } => {
+      // Here, we simply take the next subquery and increment `next_subquery_idx`.
+      let subquery_val = subquery_vals.get(*next_subquery_idx).unwrap().clone();
+      *next_subquery_idx += 1;
+      CExpr::Value { val: subquery_val }
+    }
+  };
+  Ok(c_expr)
+}
+
+#[derive(Debug, Default)]
 struct EvaluatedSuperSimpleSelect {
   selection: ColValN,
 }
 
-/// This evaluates a SuperSimpleSelect completely.
+/// This evaluates a SuperSimpleSelect completely. When a ColumnRef is encountered
+/// in the `expr`, we first search `subtable_row`, and if that's not present, we search the
+/// `column_context_row`. In addition, `subquery_vals` should have a length equal to that of
+/// how many GRQuerys there are in the `expr`.
 fn evaluate_super_simple_select(
   select: &proc::SuperSimpleSelect,
   column_context_schema: &Vec<ColName>,
   column_context_row: &Vec<ColValN>,
   subtable_schema: &Vec<ColName>,
   subtable_row: &Vec<ColValN>,
-  subquery_vals: &Vec<TableView>,
+  raw_subquery_vals: &Vec<TableView>,
 ) -> Result<EvaluatedSuperSimpleSelect, EvalError> {
-  let mut subtable_row_map = HashMap::<ColName, ColValN>::new();
-  for i in 0..subtable_schema.len() {
-    subtable_row_map
-      .insert(subtable_schema.get(i).unwrap().clone(), subtable_row.get(i).unwrap().clone());
-  }
-  unimplemented!()
+  // We map all ColNames to their ColValNs using the Context and subtable.
+  let col_map =
+    mk_col_map(column_context_schema, column_context_row, subtable_schema, subtable_row);
+
+  // Next, we reduce the subquery values to single values.
+  let subquery_vals = extract_subquery_vals(raw_subquery_vals)?;
+
+  // Construct the Evaluated Select
+  let mut next_subquery_idx = 0;
+  Ok(EvaluatedSuperSimpleSelect {
+    selection: evaluate_c_expr(&construct_cexpr(
+      &select.selection,
+      &col_map,
+      &subquery_vals,
+      &mut next_subquery_idx,
+    )?)?,
+  })
 }
 
+#[derive(Debug, Default)]
 struct EvaluatedUpdate {
   assignment: Vec<(ColName, ColValN)>,
   selection: ColValN,
 }
 
-/// This evaluates a Update completely. This is more convenience that using `evaluate_expr`,
-/// since here, we can pass in all `subquery_vals` for the query.
+/// This evaluates a Update completely. When a ColumnRef is encountered
+/// in the `expr`, we first search `subtable_row`, and if that's not present, we search the
+/// `column_context_row`. In addition, `subquery_vals` should have a length equal to that of
+/// how many GRQuerys there are in the `expr`.
 fn evaluate_update(
-  select: &proc::Update,
+  update: &proc::Update,
   column_context_schema: &Vec<ColName>,
   column_context_row: &Vec<ColValN>,
   subtable_schema: &Vec<ColName>,
   subtable_row: &Vec<ColValN>,
-  subquery_vals: &Vec<TableView>,
+  raw_subquery_vals: &Vec<TableView>,
 ) -> Result<EvaluatedUpdate, EvalError> {
-  let mut subtable_row_map = HashMap::<ColName, ColValN>::new();
-  for i in 0..subtable_schema.len() {
-    subtable_row_map
-      .insert(subtable_schema.get(i).unwrap().clone(), subtable_row.get(i).unwrap().clone());
+  // We map all ColNames to their ColValNs using the Context and subtable.
+  let col_map =
+    mk_col_map(column_context_schema, column_context_row, subtable_schema, subtable_row);
+
+  // Next, we reduce the subquery values to single values.
+  let subquery_vals = extract_subquery_vals(raw_subquery_vals)?;
+
+  // Construct the Evaluated Update
+  let mut evaluated_update = EvaluatedUpdate::default();
+  let mut next_subquery_idx = 0;
+  for (col_name, expr) in &update.assignment {
+    let c_expr = construct_cexpr(expr, &col_map, &subquery_vals, &mut next_subquery_idx)?;
+    evaluated_update.assignment.push((col_name.clone(), evaluate_c_expr(&c_expr)?));
   }
-  unimplemented!()
+  evaluated_update.selection = evaluate_c_expr(&construct_cexpr(
+    &update.selection,
+    &col_map,
+    &subquery_vals,
+    &mut next_subquery_idx,
+  )?)?;
+
+  return Ok(evaluated_update);
 }
 
 fn mk_eval_error(eval_error: EvalError) -> msg::QueryError {
