@@ -6,7 +6,10 @@ use crate::common::{
   lookup_pos, merge_table_views, mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
   QueryPlan, TMStatus, TMWaitValue, TableRegion, TableSchema,
 };
-use crate::expression::{compute_bound, evaluate_c_expr, CExpr, EvalError};
+use crate::expression::{
+  compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
+  construct_kb_expr, evaluate_c_expr, is_true, CExpr, EvalError,
+};
 use crate::model::common::iast::Value;
 use crate::model::common::proc::{TableRef, ValExpr};
 use crate::model::common::{
@@ -640,6 +643,10 @@ impl<'a> StorageView for SimpleStorageView<'a> {
     key_region: &Vec<KeyBound>,
     column_region: &Vec<ColName>,
   ) -> (Vec<ColName>, Vec<Vec<ColValN>>) {
+    // TODO: We can probably change the key type used in the GenericMVTable so that we
+    // can do range querys in BTreeMaps, where we can directly use the KeyBound bounds
+    // (inclusive, exclusive, and unbounded bounds) to get what we need directly. This
+    // is an implementation detail.
     unimplemented!()
   }
 }
@@ -4290,54 +4297,6 @@ fn extract_subquery_vals(raw_subquery_vals: &Vec<TableView>) -> Result<Vec<ColVa
   Ok(subquery_vals)
 }
 
-/// Construct a `CExpr` recursively from the given `sql_expr`. The `ColumnRefs` should be replaced
-/// by the value in `col_map` (such a value should exist), and the `Subquery`s should be replaced
-/// by the values in `subquery_vals` starting from `next_subquery_idx`. The `next_subquery_idx`
-/// should be increment to point passed the final subquery_val that was used.
-fn construct_cexpr(
-  sql_expr: &proc::ValExpr,
-  col_map: &HashMap<ColName, ColValN>,
-  subquery_vals: &Vec<ColValN>,
-  next_subquery_idx: &mut usize,
-) -> Result<CExpr, EvalError> {
-  let c_expr = match sql_expr {
-    ValExpr::ColumnRef { col_ref } => CExpr::Value { val: col_map.get(col_ref).unwrap().clone() },
-    ValExpr::UnaryExpr { op, expr } => CExpr::UnaryExpr {
-      op: op.clone(),
-      expr: Box::new(construct_cexpr(expr.deref(), col_map, subquery_vals, next_subquery_idx)?),
-    },
-    ValExpr::BinaryExpr { op, left, right } => CExpr::BinaryExpr {
-      op: op.clone(),
-      left: Box::new(construct_cexpr(left.deref(), col_map, subquery_vals, next_subquery_idx)?),
-      right: Box::new(construct_cexpr(right.deref(), col_map, subquery_vals, next_subquery_idx)?),
-    },
-    ValExpr::Value { val } => {
-      // We parse the `val` into a valid `ColValN` here.
-      CExpr::Value {
-        val: match val {
-          Value::Number(num_string) => {
-            if let Ok(parsed_num) = num_string.parse::<i32>() {
-              Some(ColVal::Int(parsed_num))
-            } else {
-              return Err(EvalError::GenericError);
-            }
-          }
-          Value::QuotedString(string_val) => Some(ColVal::String(string_val.clone())),
-          Value::Boolean(bool_val) => Some(ColVal::Bool(bool_val.clone())),
-          Value::Null => None,
-        },
-      }
-    }
-    ValExpr::Subquery { .. } => {
-      // Here, we simply take the next subquery and increment `next_subquery_idx`.
-      let subquery_val = subquery_vals.get(*next_subquery_idx).unwrap().clone();
-      *next_subquery_idx += 1;
-      CExpr::Value { val: subquery_val }
-    }
-  };
-  Ok(c_expr)
-}
-
 #[derive(Debug, Default)]
 struct EvaluatedSuperSimpleSelect {
   selection: ColValN,
@@ -4420,24 +4379,17 @@ fn mk_eval_error(eval_error: EvalError) -> msg::QueryError {
   msg::QueryError::TypeError { msg: format!("{:?}", eval_error) }
 }
 
-/// This function simply deduces if the given `ColValN` sould be interpreted as true
-/// during query evaluation (e.g. when used in the WHERE clause). An error is returned
-/// if `val` isn't a Bool type.
-fn is_true(val: &ColValN) -> Result<bool, EvalError> {
-  match val {
-    Some(ColVal::Bool(bool_val)) => Ok(bool_val.clone()),
-    _ => Ok(false),
-  }
-}
-
 /// This is used to compute the Keybound of a selection expression for
 /// a given ContextRow containing external columns. Recall that the
 /// selection expression might have ColumnRefs that aren't part of
 /// the TableSchema (i.e. part of the external Context), and we can use
 /// that to compute a tigher Keybound.
 struct ContextKeyboundComputer {
+  /// The `ColName`s here are the ones we must read from the Context, and the `usize`
+  /// points to them in the ContextRows.
   context_col_index: HashMap<ColName, usize>,
   selection: proc::ValExpr,
+  /// These are the KeyColumns we are trying to tighten.
   key_cols: Vec<(ColName, ColType)>,
 }
 
@@ -4492,7 +4444,7 @@ impl ContextKeyboundComputer {
     }
 
     // Then, compute the keybound
-    compute_key_region(&self.selection, &self.key_cols, col_context)
+    compute_key_region(&self.selection, col_context, &self.key_cols)
   }
 }
 
@@ -5036,55 +4988,13 @@ fn get_min_tablets(
   // the key_region of TablePath that we're going to be reading.
   let tablet_groups = sharding_config.get(table_path).unwrap();
   let key_cols = &gossip.gossiped_db_schema.get(table_path).unwrap().key_cols;
-  match &compute_key_region(selection, key_cols, HashMap::new()) {
+  match &compute_key_region(selection, HashMap::new(), key_cols) {
     Ok(_) => {
       // We use a trivial implementation for now, where we just return all TabletGroupIds
       tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone()).collect()
     }
     Err(_) => panic!(),
   }
-}
-
-/// Computes `KeyBound`s that have a corresponding shape to `key_cols`, such that
-/// any key outside of this evalautes `expr` to false, given `col_context`.
-/// TODO: is this some kind of joke? This doesn't do anything. `key_bounds` starts and stays empty.
-fn compute_key_region(
-  expr: &proc::ValExpr,
-  key_cols: &Vec<(ColName, ColType)>,
-  col_context: HashMap<ColName, ColValN>,
-) -> Result<Vec<KeyBound>, EvalError> {
-  let mut key_bounds = Vec::<KeyBound>::new();
-  for (col_name, col_type) in key_cols {
-    // Then, compute the ColBound and extend key_bounds.
-    let col_bounds = compute_bound(col_name, col_type, expr, &col_context)?;
-    let mut new_key_bounds = Vec::<KeyBound>::new();
-    for key_bound in key_bounds {
-      for col_bound in col_bounds.clone() {
-        let mut new_key_bound = key_bound.clone();
-        new_key_bound.key_col_bounds.push(col_bound.clone());
-        new_key_bounds.push(new_key_bound);
-      }
-    }
-    key_bounds = compress_row_region(new_key_bounds);
-  }
-  Ok(key_bounds)
-}
-
-/// This computes a sub-table from `storage` over the given `cols` and `key_bounds`.
-/// This also returns the `ColNames` that correspond ot the subtable returned.
-fn compute_subtable(
-  cols: &Vec<ColName>,
-  key_bounds: &Vec<KeyBound>,
-  storage: &GenericMVTable,
-) -> (Vec<ColName>, Vec<Vec<ColValN>>) {
-  unimplemented!()
-}
-
-/// This function removes redundancy in the `row_region`. Redundancy may easily
-/// arise from different ColumnContexts. In the future, we can be smarter and
-/// sacrifice granularity for a simpler Key Region.
-fn compress_row_region(row_region: Vec<KeyBound>) -> Vec<KeyBound> {
-  row_region
 }
 
 /// Computes if `region` and intersects with any TableRegion in `regions`.

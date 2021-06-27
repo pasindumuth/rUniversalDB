@@ -169,24 +169,31 @@ pub enum SingleBound<T> {
   Unbounded,
 }
 
-/// Here, the Variant that the `ColVal` in each `SingleBound` takes
-/// on has to be the same (i.e. the `ColVal` has to be the same type).
+// A Generic double-sided bound for an orderable value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ColBound {
-  pub start: SingleBound<ColVal>,
-  pub end: SingleBound<ColVal>,
+pub struct ColBound<T> {
+  pub start: SingleBound<T>,
+  pub end: SingleBound<T>,
 }
 
-impl ColBound {
-  pub fn new(start: SingleBound<ColVal>, end: SingleBound<ColVal>) -> ColBound {
+impl<T> ColBound<T> {
+  pub fn new(start: SingleBound<T>, end: SingleBound<T>) -> ColBound<T> {
     ColBound { start, end }
   }
 }
 
-/// A full Boundary for a `PrimaryKey`
+// There is a Variant here for every ColType.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PolyColBound {
+  Int(ColBound<i32>),
+  String(ColBound<String>),
+  Bool(ColBound<bool>),
+}
+
+/// A full Boundary for a `PrimaryKey`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyBound {
-  pub key_col_bounds: Vec<ColBound>,
+  pub col_bounds: Vec<PolyColBound>,
 }
 
 /// TableRegion, used to represent both ReadRegions and WriteRegions.
