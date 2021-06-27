@@ -4,6 +4,7 @@ use crate::common::{
   TMWaitValue, TableSchema, TabletForwardOut,
 };
 use crate::lang;
+use crate::model::common::proc::MSQuery;
 use crate::model::common::{
   iast, proc, ColName, ColType, Context, ContextRow, Gen, NodeGroupId, QueryPath, SlaveGroupId,
   TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
@@ -11,6 +12,7 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
+use crate::model::message::ExternalAbortedData;
 use crate::multiversion_map::MVM;
 use crate::query_converter::convert_to_msquery;
 use crate::slave::CoordState::ReadStage;
@@ -24,16 +26,7 @@ use std::ops::Add;
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
-//  SlaveStatus
-// -----------------------------------------------------------------------------------------------
-#[derive(Debug)]
-enum SlaveStatus {
-  TMStatus(TMStatus),
-  FullMSQueryCoordinationES(FullMSQueryCoordinationES),
-}
-
-// -----------------------------------------------------------------------------------------------
-//  MSQueryCoordinationES
+//  MSQueryCoordES
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 struct CoordQueryPlan {
@@ -52,7 +45,7 @@ enum CoordState {
 }
 
 #[derive(Debug)]
-struct MSQueryCoordinationES {
+struct MSQueryCoordES {
   // Metadata copied from outside.
   request_id: RequestId,
   sender_path: EndpointId,
@@ -75,30 +68,52 @@ struct MSQueryCoordinationES {
 }
 
 #[derive(Debug)]
-enum QueryReplanningES {
+enum MSQueryCoordReplanningS {
   Start,
   MasterQueryReplanning { master_query_id: QueryId },
+  Done(Option<CoordQueryPlan>),
 }
 
 #[derive(Debug)]
-enum FullMSQueryCoordinationES {
-  QueryReplanning {
-    timestamp: Timestamp,
-    query: proc::MSQuery,
-    orig_query: msg::PerformExternalQuery,
-    /// Used for managing MasterQueryReplanning
-    execution_status: QueryReplanningES,
-  },
-  Executing(MSQueryCoordinationES),
+struct MSQueryCoordReplanningES {
+  timestamp: Timestamp,
+  query: proc::MSQuery,
+  orig_query: msg::PerformExternalQuery,
+  orig_p: OrigP,
+  /// Used for managing MasterQueryReplanning
+  state: MSQueryCoordReplanningS,
+}
+
+#[derive(Debug)]
+enum FullMSQueryCoordES {
+  QueryReplanning(MSQueryCoordReplanningES),
+  Executing(MSQueryCoordES),
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Slave Statuses
+// -----------------------------------------------------------------------------------------------
+
+/// This contains every TabletStatus. Every QueryId here is unique across all
+/// other members here.
+#[derive(Debug, Default)]
+pub struct Statuses {
+  ms_coord_ess: HashMap<QueryId, FullMSQueryCoordES>,
+  tm_statuses: HashMap<QueryId, TMStatus>,
 }
 
 // -----------------------------------------------------------------------------------------------
 //  Slave State
 // -----------------------------------------------------------------------------------------------
+#[derive(Debug)]
+pub struct SlaveState<T: IOTypes> {
+  slave_context: SlaveContext<T>,
+  statuses: Statuses,
+}
 
 /// The SlaveState that holds all the state of the Slave
 #[derive(Debug)]
-pub struct SlaveState<T: IOTypes> {
+pub struct SlaveContext<T: IOTypes> {
   /// IO Objects.
   rand: T::RngCoreT,
   clock: T::ClockT,
@@ -119,12 +134,8 @@ pub struct SlaveState<T: IOTypes> {
 
   /// External Query Management
   external_request_id_map: HashMap<RequestId, QueryId>,
-  // TODO: remove. We need to rearchitected the below to have methods
-  // instead of `ms_coord_process_stage_result`.
-  ms_coord_statuses: HashMap<QueryId, FullMSQueryCoordinationES>,
 
   /// Child Queries
-  slave_statuses: HashMap<QueryId, SlaveStatus>,
   master_query_map: HashMap<QueryId, OrigP>,
 }
 
@@ -142,92 +153,115 @@ impl<T: IOTypes> SlaveState<T> {
     master_eid: EndpointId,
   ) -> SlaveState<T> {
     SlaveState {
-      rand,
-      clock,
-      network_output,
-      tablet_forward_output,
-      this_slave_group_id,
-      master_eid,
-      gossip,
-      sharding_config,
-      tablet_address_config,
-      slave_address_config,
-      external_request_id_map: Default::default(),
-      ms_coord_statuses: Default::default(),
-      slave_statuses: Default::default(),
-      master_query_map: Default::default(),
+      slave_context: SlaveContext {
+        rand,
+        clock,
+        network_output,
+        tablet_forward_output,
+        this_slave_group_id,
+        master_eid,
+        gossip,
+        sharding_config,
+        tablet_address_config,
+        slave_address_config,
+        external_request_id_map: Default::default(),
+        master_query_map: Default::default(),
+      },
+      statuses: Default::default(),
     }
   }
 
-  // okay, do we lump the tablet message here? We mooked this
+  pub fn handle_incoming_message(&mut self, message: msg::SlaveMessage) {
+    self.slave_context.handle_incoming_message(&mut self.statuses, message);
+  }
+}
 
-  /// Normally, the sender's metadata would be buried in the message itself.
-  /// However, we also have to handle client messages here, we need the EndpointId
-  /// passed in explicitly.
-  pub fn handle_incoming_message(&mut self, msg: msg::SlaveMessage) {
-    match msg {
+impl<T: IOTypes> SlaveContext<T> {
+  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::SlaveMessage) {
+    match message {
       msg::SlaveMessage::PerformExternalQuery(external_query) => {
-        if self.external_request_id_map.contains_key(&external_query.request_id) {
-          // Duplicate RequestId; respond with an abort.
-          self.network_output.send(
-            &external_query.sender_path,
-            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAbort(
-              msg::ExternalQueryAbort {
-                request_id: external_query.request_id,
-                payload: msg::ExternalAbortedData::NonUniqueRequestId,
-              },
-            )),
-          )
-        } else {
-          // Parse the SQL
-          match Parser::parse_sql(&GenericDialect {}, &external_query.query) {
-            Ok(ast) => {
-              let internal_ast = convert_ast(&ast);
-              // Convert to MSQuery
-              match convert_to_msquery(&self.gossip.gossiped_db_schema, internal_ast) {
-                Ok(ms_query) => {
-                  let query_id = mk_qid(&mut self.rand);
-                  self
-                    .external_request_id_map
-                    .insert(external_query.request_id.clone(), query_id.clone());
-                  self.slave_statuses.insert(
-                    query_id.clone(),
-                    SlaveStatus::FullMSQueryCoordinationES(
-                      FullMSQueryCoordinationES::QueryReplanning {
-                        timestamp: self.clock.now(),
-                        query: ms_query,
-                        orig_query: external_query.clone(),
-                        execution_status: QueryReplanningES::Start,
-                      },
-                    ),
+        match self.init_request(&external_query) {
+          Ok(ms_query) => {
+            let query_id = mk_qid(&mut self.rand);
+            self
+              .external_request_id_map
+              .insert(external_query.request_id.clone(), query_id.clone());
+            let mut plan_es = MSQueryCoordReplanningES {
+              timestamp: self.clock.now(),
+              query: ms_query,
+              orig_query: external_query.clone(),
+              orig_p: OrigP { query_id: query_id.clone() },
+              state: MSQueryCoordReplanningS::Start,
+            };
+            plan_es.start(self);
+            match plan_es.state {
+              MSQueryCoordReplanningS::Done(maybe_plan) => {
+                if let Some(query_plan) = maybe_plan {
+                  // We compute the TierMap here.
+                  let mut tier_map = HashMap::<TablePath, u32>::new();
+                  for (_, stage) in &plan_es.query.trans_tables {
+                    match stage {
+                      proc::MSQueryStage::SuperSimpleSelect(_) => {}
+                      proc::MSQueryStage::Update(update) => {
+                        tier_map.insert(update.table.clone(), 0);
+                      }
+                    }
+                  }
+
+                  // The Tier should be where every Read query should be reading from, except
+                  // if the current stage is an Update, which should be one Tier ahead (i.e.
+                  // lower) for that TablePath.
+                  let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
+                  for (trans_table_name, stage) in plan_es.query.trans_tables.iter().rev() {
+                    all_tier_maps
+                      .insert(trans_table_name.clone(), TierMap { map: tier_map.clone() });
+                    match stage {
+                      proc::MSQueryStage::SuperSimpleSelect(_) => {}
+                      proc::MSQueryStage::Update(update) => {
+                        *tier_map.get_mut(&update.table).unwrap() += 1;
+                      }
+                    }
+                  }
+
+                  let mut coord_es = MSQueryCoordES {
+                    request_id: plan_es.orig_query.request_id.clone(),
+                    sender_path: plan_es.orig_query.sender_path.clone(),
+                    timestamp: plan_es.timestamp.clone(),
+                    query: plan_es.query.clone(),
+                    query_plan,
+                    all_tier_maps,
+                    all_rms: Default::default(),
+                    trans_table_views: vec![],
+                    execution_state: CoordState::Start,
+                    registered_queries: Default::default(),
+                  };
+
+                  // Move onto the next stage.
+                  ms_coord_es_advance::<T>(
+                    &mut coord_es,
+                    &query_id,
+                    0,
+                    // Slave references
+                    &mut self.rand,
+                    &mut self.network_output,
+                    &mut statuses.tm_statuses,
+                    &self.this_slave_group_id,
+                    &self.gossip,
+                    &self.sharding_config,
+                    &self.tablet_address_config,
+                    &self.slave_address_config,
                   );
-                  self.handle_coord(&query_id);
                 }
-                Err(payload) => self.network_output.send(
-                  &external_query.sender_path,
-                  msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAbort(
-                    msg::ExternalQueryAbort { request_id: external_query.request_id, payload },
-                  )),
-                ),
               }
-            }
-            Err(e) => {
-              // Extract error string
-              let err_string = match e {
-                TokenizerError(s) => s,
-                ParserError(s) => s,
-              };
-              self.network_output.send(
-                &external_query.sender_path,
-                msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAbort(
-                  msg::ExternalQueryAbort {
-                    request_id: external_query.request_id,
-                    payload: msg::ExternalAbortedData::ParseError(err_string),
-                  },
-                )),
-              );
+              _ => {}
             }
           }
+          Err(payload) => self.network_output.send(
+            &external_query.sender_path,
+            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAbort(
+              msg::ExternalQueryAbort { request_id: external_query.request_id, payload },
+            )),
+          ),
         }
       }
       msg::SlaveMessage::CancelExternalQuery(_) => unimplemented!(),
@@ -237,10 +271,12 @@ impl<T: IOTypes> SlaveState<T> {
       msg::SlaveMessage::PerformQuery(_) => unimplemented!(),
       msg::SlaveMessage::CancelQuery(_) => unimplemented!(),
       msg::SlaveMessage::QuerySuccess(query_success) => {
-        self.handle_query_success(query_success);
+        self.handle_query_success(statuses, query_success);
       }
       msg::SlaveMessage::QueryAborted(_) => unimplemented!(),
-      msg::SlaveMessage::Query2PCPrepared(_) => unimplemented!(),
+      msg::SlaveMessage::Query2PCPrepared(prepared) => {
+        // Okay, let's get the thing prepared.
+      }
       msg::SlaveMessage::Query2PCAborted(_) => unimplemented!(),
       msg::SlaveMessage::MasterFrozenColUsageAborted(_) => unimplemented!(),
       msg::SlaveMessage::MasterFrozenColUsageSuccess(_) => unimplemented!(),
@@ -248,9 +284,39 @@ impl<T: IOTypes> SlaveState<T> {
     }
   }
 
-  fn handle_query_success(&mut self, query_success: msg::QuerySuccess) {
-    if let Some(slave_status) = self.slave_statuses.get_mut(&query_success.query_id) {
-      let tm_status = cast!(SlaveStatus::TMStatus, slave_status).unwrap();
+  /// Does some initial validations and MSQuery processing before we start
+  /// servicing the request.
+  fn init_request(
+    &mut self,
+    external_query: &msg::PerformExternalQuery,
+  ) -> Result<proc::MSQuery, msg::ExternalAbortedData> {
+    if self.external_request_id_map.contains_key(&external_query.request_id) {
+      // Duplicate RequestId; respond with an abort.
+      Err(msg::ExternalAbortedData::NonUniqueRequestId)
+    } else {
+      // Parse the SQL
+      match Parser::parse_sql(&GenericDialect {}, &external_query.query) {
+        Ok(parsed_ast) => {
+          let internal_ast = convert_ast(&parsed_ast);
+          // Convert to MSQuery
+          match convert_to_msquery(&self.gossip.gossiped_db_schema, internal_ast) {
+            Ok(ms_query) => Ok(ms_query),
+            Err(payload) => Err(payload),
+          }
+        }
+        Err(parse_error) => {
+          // Extract error string
+          Err(msg::ExternalAbortedData::ParseError(match parse_error {
+            TokenizerError(err_msg) => err_msg,
+            ParserError(err_msg) => err_msg,
+          }))
+        }
+      }
+    }
+  }
+
+  fn handle_query_success(&mut self, statuses: &mut Statuses, query_success: msg::QuerySuccess) {
+    if let Some(tm_status) = statuses.tm_statuses.get_mut(&query_success.query_id) {
       // We just add the result of the `query_success` here.
       let tm_wait_value = tm_status.tm_state.get_mut(&query_success.return_path).unwrap();
       *tm_wait_value = TMWaitValue::Result(query_success.result.clone());
@@ -258,8 +324,7 @@ impl<T: IOTypes> SlaveState<T> {
       tm_status.responded_count += 1;
       if tm_status.responded_count == tm_status.tm_state.len() {
         // Remove the `TMStatus` and take ownership
-        let slave_status = self.slave_statuses.remove(&query_success.query_id).unwrap();
-        let tm_status = cast!(SlaveStatus::TMStatus, slave_status).unwrap();
+        let tm_status = statuses.tm_statuses.remove(&query_success.query_id).unwrap();
         // Merge there TableViews together
         let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
         for (_, tm_wait_value) in tm_status.tm_state {
@@ -267,6 +332,7 @@ impl<T: IOTypes> SlaveState<T> {
         }
         let merged_result = merge_table_views(results);
         self.handle_done_state(
+          statuses,
           query_success.query_id,
           tm_status.orig_p.query_id,
           tm_status.new_rms,
@@ -278,16 +344,17 @@ impl<T: IOTypes> SlaveState<T> {
 
   fn handle_done_state(
     &mut self,
+    statuses: &mut Statuses,
     ret_query_id: QueryId,
     orig_path: QueryId,
     new_rms: HashSet<QueryPath>,
     result: (Vec<ColName>, Vec<TableView>),
   ) {
-    // For now, each `query_id` here should point back to an MSQueryCoordinationES.
+    // For now, each `query_id` here should point back to an MSQueryCoordES.
     // It must exist. Recall that if it were cancelled, then it would have deleted the all
     // child ReadTMStatuses.
-    let full_coord = self.ms_coord_statuses.get_mut(&orig_path).unwrap();
-    let coord_es = cast!(FullMSQueryCoordinationES::Executing, full_coord).unwrap();
+    let full_coord = statuses.ms_coord_ess.get_mut(&orig_path).unwrap();
+    let coord_es = cast!(FullMSQueryCoordES::Executing, full_coord).unwrap();
     match &coord_es.execution_state {
       CoordState::Start => panic!(),
       CoordState::ReadStage { stage_idx, stage_query_id } => {
@@ -304,7 +371,7 @@ impl<T: IOTypes> SlaveState<T> {
           // Slave references
           &mut self.rand,
           &mut self.network_output,
-          &mut self.slave_statuses,
+          &mut statuses.tm_statuses,
           &self.this_slave_group_id,
           &self.gossip,
           &self.sharding_config,
@@ -326,7 +393,7 @@ impl<T: IOTypes> SlaveState<T> {
           // Slave references
           &mut self.rand,
           &mut self.network_output,
-          &mut self.slave_statuses,
+          &mut statuses.tm_statuses,
           &self.this_slave_group_id,
           &self.gossip,
           &self.sharding_config,
@@ -338,89 +405,6 @@ impl<T: IOTypes> SlaveState<T> {
       CoordState::Committing => panic!(),
       CoordState::Aborting => panic!(),
     }
-  }
-
-  fn handle_coord(&mut self, root_query_id: &QueryId) {
-    let mut coord = self.ms_coord_statuses.get_mut(root_query_id).unwrap();
-    match coord {
-      FullMSQueryCoordinationES::QueryReplanning { timestamp, query, orig_query, .. } => {
-        let mut planner = ColUsagePlanner {
-          gossiped_db_schema: &self.gossip.gossiped_db_schema,
-          timestamp: *timestamp,
-        };
-        let col_usage_nodes = planner.plan_ms_query(&query);
-
-        // For now, we just confirm that there are no `external_cols` in the top-level
-        // nodes. TODO: PerformMasterFrozenColUsage
-        for (_, (_, child)) in &col_usage_nodes {
-          assert!(
-            !child.external_cols.is_empty(),
-            "PerformMasterFrozenColUsage still needs to be supported."
-          );
-        }
-
-        // We compute the TierMap here.
-        let mut tier_map = HashMap::<TablePath, u32>::new();
-        for (_, stage) in &query.trans_tables {
-          match stage {
-            proc::MSQueryStage::SuperSimpleSelect(_) => {}
-            proc::MSQueryStage::Update(update) => {
-              tier_map.insert(update.table.clone(), 0);
-            }
-          }
-        }
-
-        // The Tier should be where every Read query should be reading from, except
-        // if the current stage is an Update, which should be one Tier ahead (i.e.
-        // lower) for that TablePath.
-        let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
-        for (trans_table_name, stage) in query.trans_tables.iter().rev() {
-          all_tier_maps.insert(trans_table_name.clone(), TierMap { map: tier_map.clone() });
-          match stage {
-            proc::MSQueryStage::SuperSimpleSelect(_) => {}
-            proc::MSQueryStage::Update(update) => {
-              tier_map.get(&update.table).unwrap().add(1);
-            }
-          }
-        }
-
-        let mut coord_es = MSQueryCoordinationES {
-          request_id: orig_query.request_id.clone(),
-          sender_path: orig_query.sender_path.clone(),
-          timestamp: timestamp.clone(),
-          query: query.clone(),
-          query_plan: CoordQueryPlan { gossip_gen: self.gossip.gossip_gen, col_usage_nodes },
-          all_tier_maps,
-          all_rms: Default::default(),
-          trans_table_views: vec![],
-          execution_state: CoordState::Start,
-          registered_queries: Default::default(),
-        };
-
-        // Move onto the next stage.
-        ms_coord_es_advance::<T>(
-          &mut coord_es,
-          root_query_id,
-          0,
-          // Slave references
-          &mut self.rand,
-          &mut self.network_output,
-          &mut self.slave_statuses,
-          &self.this_slave_group_id,
-          &self.gossip,
-          &self.sharding_config,
-          &self.tablet_address_config,
-          &self.slave_address_config,
-        );
-
-        // Advance to the Executing state
-        *coord = FullMSQueryCoordinationES::Executing(coord_es);
-      }
-      FullMSQueryCoordinationES::Executing(_) => {
-        // TODO: I don't think we need to handle this.
-      }
-    }
-    return;
   }
 
   // -----------------------------------------------------------------------------------------------
@@ -449,7 +433,7 @@ fn lookup_location(
 /// This function accepts the results for the subquery, and then decides either
 /// to move onto the next stage, or start 2PC to commit the change.
 fn ms_coord_process_stage_result<T: IOTypes>(
-  coord_es: &mut MSQueryCoordinationES,
+  coord_es: &mut MSQueryCoordES,
   ret_query_id: &QueryId,
   orig_path: &QueryId,
   new_rms: HashSet<QueryPath>,
@@ -460,7 +444,7 @@ fn ms_coord_process_stage_result<T: IOTypes>(
   // Slave references
   rand: &mut T::RngCoreT,
   network_output: &mut T::NetworkOutT,
-  slave_statuses: &mut HashMap<QueryId, SlaveStatus>,
+  tm_statuses: &mut HashMap<QueryId, TMStatus>,
   this_slave_group_id: &SlaveGroupId,
   gossip: &GossipData,
   sharding_config: &HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
@@ -468,15 +452,15 @@ fn ms_coord_process_stage_result<T: IOTypes>(
   slave_address_config: &HashMap<SlaveGroupId, EndpointId>,
 ) {
   let (res_schema, mut res_views) = result;
-  assert!(ret_query_id == stage_query_id);
+  assert_eq!(ret_query_id, stage_query_id);
 
   // Look up the corresponding schema and assert that the incomding schema matches.
   let (trans_table_name, _) = coord_es.query.trans_tables.get(*stage_idx).unwrap();
   let (schema, _) = coord_es.query_plan.col_usage_nodes.get(trans_table_name).unwrap();
-  assert!(schema == &res_schema);
+  assert_eq!(schema, &res_schema);
 
   // There was only one ContextRow, so the result should have 1 TableView as well.
-  assert!(res_views.len() == 1);
+  assert_eq!(res_views.len(), 1);
   let res_view = res_views.into_iter().next().unwrap();
 
   // Add the results to the `trans_table_views`
@@ -492,7 +476,7 @@ fn ms_coord_process_stage_result<T: IOTypes>(
       // Slave references
       rand,
       network_output,
-      slave_statuses,
+      tm_statuses,
       this_slave_group_id,
       gossip,
       sharding_config,
@@ -527,14 +511,14 @@ fn ms_coord_process_stage_result<T: IOTypes>(
 /// This function advances the given `coord_es` to the next `stage_idx`. This stage
 /// is gauranteed to be another `ReadStage` or `WriteStage`.
 fn ms_coord_es_advance<T: IOTypes>(
-  coord_es: &mut MSQueryCoordinationES,
+  coord_es: &mut MSQueryCoordES,
   root_query_id: &QueryId,
   stage_idx: usize,
 
   // Slave references
   rand: &mut T::RngCoreT,
   network_output: &mut T::NetworkOutT,
-  slave_statuses: &mut HashMap<QueryId, SlaveStatus>,
+  tm_statuses: &mut HashMap<QueryId, TMStatus>,
   this_slave_group_id: &SlaveGroupId,
   gossip: &GossipData,
   sharding_config: &HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
@@ -566,7 +550,7 @@ fn ms_coord_es_advance<T: IOTypes>(
     trans_table_schemas.insert(external_trans_table, cols.clone());
   }
 
-  // Compute this MSQueryCoordinationESs QueryPath
+  // Compute this MSQueryCoordESs QueryPath
   let root_query_path = QueryPath {
     slave_group_id: this_slave_group_id.clone(),
     maybe_tablet_group_id: None,
@@ -640,7 +624,7 @@ fn ms_coord_es_advance<T: IOTypes>(
           network_output.send(
             eid,
             msg::NetworkMessage::Slave(msg::SlaveMessage::PerformQuery(msg::PerformQuery {
-              root_query_path: root_query_path,
+              root_query_path,
               sender_path,
               query_id: child_query_id.clone(),
               tier_map: coord_es.all_tier_maps.get(trans_table_name).unwrap().clone(),
@@ -664,7 +648,7 @@ fn ms_coord_es_advance<T: IOTypes>(
         }
       }
 
-      slave_statuses.insert(tm_query_id.clone(), SlaveStatus::TMStatus(status));
+      tm_statuses.insert(tm_query_id.clone(), status);
       CoordState::ReadStage { stage_idx, stage_query_id: tm_query_id }
     }
     proc::MSQueryStage::Update(update_query) => {
@@ -719,7 +703,7 @@ fn ms_coord_es_advance<T: IOTypes>(
         status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
       }
 
-      slave_statuses.insert(tm_query_id.clone(), SlaveStatus::TMStatus(status));
+      tm_statuses.insert(tm_query_id.clone(), status);
       CoordState::WriteStage { stage_idx, stage_query_id: tm_query_id }
     }
   };
@@ -733,7 +717,7 @@ fn ms_coord_es_advance<T: IOTypes>(
 /// AST, `Query`. Recall that we can transform all DML and DQL transactions
 /// together into a single Query, which is what we do here.
 fn convert_ast(raw_query: &Vec<ast::Statement>) -> iast::Query {
-  assert!(raw_query.len() == 1, "Only one SQL statement support atm.");
+  assert_eq!(raw_query.len(), 1, "Only one SQL statement support atm.");
   let stmt = &raw_query[0];
   match stmt {
     ast::Statement::Query(query) => return convert_query(query),
@@ -754,11 +738,11 @@ fn convert_query(query: &ast::Query) -> iast::Query {
     }
     ast::SetExpr::Select(select) => {
       let from_clause = &select.from;
-      assert!(from_clause.len() == 1, "Joins with ',' not supported");
+      assert_eq!(from_clause.len(), 1, "Joins with ',' not supported");
       assert!(from_clause[0].joins.is_empty(), "Joins not supported");
       if let ast::TableFactor::Table { name, .. } = &from_clause[0].relation {
         let ast::ObjectName(idents) = name;
-        assert!(idents.len() == 1, "Multi-part table references not supported");
+        assert_eq!(idents.len(), 1, "Multi-part table references not supported");
         iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
           projection: convert_select_clause(&select.projection),
           from: idents[0].value.clone(),
@@ -775,7 +759,7 @@ fn convert_query(query: &ast::Query) -> iast::Query {
     ast::SetExpr::Insert(stmt) => {
       if let ast::Statement::Update { table_name, assignments, selection } = stmt {
         let ast::ObjectName(idents) = table_name;
-        assert!(idents.len() == 1, "Multi-part table references not supported");
+        assert_eq!(idents.len(), 1, "Multi-part table references not supported");
         iast::QueryBody::Update(iast::Update {
           table: idents[0].value.clone(),
           assignments: assignments
@@ -831,7 +815,7 @@ fn convert_expr(expr: &ast::Expr) -> iast::ValExpr {
   match expr {
     ast::Expr::Identifier(ident) => iast::ValExpr::ColumnRef { col_ref: ident.value.clone() },
     ast::Expr::CompoundIdentifier(idents) => {
-      assert!(idents.len() == 2, "The only prefix fix for a column should be the table.");
+      assert_eq!(idents.len(), 2, "The only prefix fix for a column should be the table.");
       iast::ValExpr::ColumnRef { col_ref: idents[1].value.clone() }
     }
     ast::Expr::UnaryOp { op, expr } => {
@@ -877,5 +861,45 @@ fn convert_expr(expr: &ast::Expr) -> iast::ValExpr {
     ast::Expr::Value(value) => iast::ValExpr::Value { val: convert_value(value) },
     ast::Expr::Subquery(query) => iast::ValExpr::Subquery { query: Box::new(convert_query(query)) },
     _ => panic!("Expr {:?} not supported", expr),
+  }
+}
+
+impl MSQueryCoordReplanningES {
+  fn start<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) {
+    // First, we compute the ColUsageNode.
+    let mut planner = ColUsagePlanner {
+      gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
+      timestamp: self.timestamp.clone(),
+    };
+    let col_usage_nodes = planner.plan_ms_query(&self.query);
+
+    for (_, (_, child)) in &col_usage_nodes {
+      if !child.external_cols.is_empty() {
+        // If there are External Columns in any of the stages, then we need to consult the Master.
+        let master_query_id = mk_qid(&mut ctx.rand);
+
+        ctx.network_output.send(
+          &ctx.master_eid,
+          msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
+            msg::PerformMasterFrozenColUsage {
+              query_id: master_query_id.clone(),
+              timestamp: self.timestamp,
+              trans_table_schemas: HashMap::new(),
+              col_usage_tree: msg::ColUsageTree::MSQuery(self.query.clone()),
+            },
+          )),
+        );
+        ctx.master_query_map.insert(master_query_id.clone(), self.orig_p.clone());
+
+        // Advance Replanning State.
+        self.state = MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id };
+        return;
+      }
+    }
+
+    self.state = MSQueryCoordReplanningS::Done(Some(CoordQueryPlan {
+      gossip_gen: ctx.gossip.gossip_gen,
+      col_usage_nodes,
+    }));
   }
 }

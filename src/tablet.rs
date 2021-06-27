@@ -1723,7 +1723,7 @@ impl<T: IOTypes> TabletContext<T> {
                 let sql_query = comm_plan_es.sql_view.clone();
                 let mut tier_map = plan_es.tier_map.clone();
                 let tier = tier_map.map.get(sql_query.table()).unwrap().clone();
-                tier_map.map.get(sql_query.table()).unwrap().add(1);
+                *tier_map.map.get_mut(sql_query.table()).unwrap() += 1;
 
                 // Then, we construct the MSTableWriteES.
                 *ms_write_es = FullMSTableWriteES::Executing(MSTableWriteES {
@@ -5294,7 +5294,7 @@ impl TransQueryReplanningES {
           );
           ctx.master_query_map.insert(master_query_id.clone(), self.orig_p.clone());
 
-          // Advance Read Status
+          // Advance Replanning State.
           self.state = TransQueryReplanningS::MasterQueryReplanning { master_query_id };
           return;
         }
