@@ -403,26 +403,26 @@ impl<T: IOTypes> SlaveContext<T> {
       query_id: query_id.clone(),
     };
 
+    // Create Construct the TMStatus that's going to be used to coordinate this stage.
+    let tm_query_id = mk_qid(&mut self.rand);
+    let mut tm_status = TMStatus {
+      node_group_ids: Default::default(),
+      new_rms: Default::default(),
+      responded_count: 0,
+      tm_state: Default::default(),
+      orig_p: OrigP::new(query_id.clone()),
+    };
+
+    // The `sender_path` for the TMStatus above.
+    let sender_path = QueryPath {
+      slave_group_id: self.this_slave_group_id.clone(),
+      maybe_tablet_group_id: None,
+      query_id: tm_query_id.clone(),
+    };
+
     // Handle accordingly
     coord_es.state = match ms_query_stage {
       proc::MSQueryStage::SuperSimpleSelect(select_query) => {
-        // Create ReadTMState
-        let tm_query_id = mk_qid(&mut self.rand);
-        let mut status = TMStatus {
-          node_group_ids: Default::default(),
-          new_rms: Default::default(),
-          responded_count: 0,
-          tm_state: Default::default(),
-          orig_p: OrigP::new(query_id.clone()),
-        };
-
-        // Path of this TMStatus to respond to.
-        let sender_path = QueryPath {
-          slave_group_id: self.this_slave_group_id.clone(),
-          maybe_tablet_group_id: None,
-          query_id: tm_query_id.clone(),
-        };
-
         match &select_query.from {
           proc::TableRef::TablePath(table_path) => {
             // Add in the Tablets that manage this TablePath to `tm_state`,
@@ -457,14 +457,15 @@ impl<T: IOTypes> SlaveContext<T> {
               );
 
               let node_group_id = NodeGroupId::Tablet(tablet_group_id.clone());
-              status.node_group_ids.insert(node_group_id, child_query_id.clone());
-              status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
+              tm_status.node_group_ids.insert(node_group_id, child_query_id.clone());
+              tm_status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
             }
           }
           proc::TableRef::TransTableName(trans_table_name) => {
             let location = lookup_location(&context, trans_table_name).unwrap();
 
-            // Add in the Slave to `tm_state`, and send out the PerformQuery
+            // Add in the Slave to `tm_state`, and send out the PerformQuery. Recall that
+            // if we are doing a TransTableRead here, then the TransTable must be located here.
             let child_query_id = mk_qid(&mut self.rand);
             let eid = self.slave_address_config.get(&self.this_slave_group_id).unwrap();
             self.network_output.send(
@@ -489,34 +490,14 @@ impl<T: IOTypes> SlaveContext<T> {
               })),
             );
 
-            status.node_group_ids.insert(location.source, child_query_id.clone());
-            status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
+            tm_status.node_group_ids.insert(location.source, child_query_id.clone());
+            tm_status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
           }
         }
 
-        statuses.tm_statuses.insert(tm_query_id.clone(), status);
-        CoordState::ReadStage { stage_idx, stage_query_id: tm_query_id }
+        CoordState::ReadStage { stage_idx, stage_query_id: tm_query_id.clone() }
       }
       proc::MSQueryStage::Update(update_query) => {
-        // Create WriteTMState
-        // TODO: Should we move the below to a common location, including the
-        // `tm_statuses.insert(tm_query_id.clone(), status);`?
-        let tm_query_id = mk_qid(&mut self.rand);
-        let mut status = TMStatus {
-          node_group_ids: Default::default(),
-          new_rms: Default::default(),
-          responded_count: 0,
-          tm_state: Default::default(),
-          orig_p: OrigP::new(query_id.clone()),
-        };
-
-        // Path of this WriteTMStatus to respond to.
-        let sender_path = QueryPath {
-          slave_group_id: self.this_slave_group_id.clone(),
-          maybe_tablet_group_id: None,
-          query_id: tm_query_id.clone(),
-        };
-
         // Add in the Tablets that manage this TablePath to `write_tm_state`,
         // and send out the PerformQuery
         for (_, tablet_group_id) in self.sharding_config.get(&update_query.table).unwrap() {
@@ -547,14 +528,16 @@ impl<T: IOTypes> SlaveContext<T> {
           );
 
           let node_group_id = NodeGroupId::Tablet(tablet_group_id.clone());
-          status.node_group_ids.insert(node_group_id, child_query_id.clone());
-          status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
+          tm_status.node_group_ids.insert(node_group_id, child_query_id.clone());
+          tm_status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
         }
 
-        statuses.tm_statuses.insert(tm_query_id.clone(), status);
-        CoordState::WriteStage { stage_idx, stage_query_id: tm_query_id }
+        CoordState::WriteStage { stage_idx, stage_query_id: tm_query_id.clone() }
       }
     };
+
+    // Finally, add the TM Status to `statuses`.
+    statuses.tm_statuses.insert(tm_query_id, tm_status);
   }
 
   fn handle_query_success(&mut self, statuses: &mut Statuses, query_success: msg::QuerySuccess) {
