@@ -118,7 +118,7 @@ fn rename_trans_tables_query_R(ctx: &mut RenameContext, query: &mut iast::Query)
   // Remove the TransTables defined this Query from the ctx.
   for (trans_table_name, _) in &mut query.ctes {
     let orig_name = orig_name(&trans_table_name);
-    let mut rename_stack = ctx.trans_table_map.get_mut(&orig_name).unwrap();
+    let rename_stack = ctx.trans_table_map.get_mut(&orig_name).unwrap();
     rename_stack.pop();
     if rename_stack.is_empty() {
       ctx.trans_table_map.remove(trans_table_name);

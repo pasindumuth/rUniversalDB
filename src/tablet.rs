@@ -10,10 +10,8 @@ use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
   construct_kb_expr, evaluate_c_expr, is_true, CExpr, EvalError,
 };
-use crate::model::common::iast::Value;
-use crate::model::common::proc::{TableRef, ValExpr};
 use crate::model::common::{
-  iast, proc, ColType, ColValN, Context, ContextRow, ContextSchema, Gen, NodeGroupId, QueryPath,
+  proc, ColType, ColValN, Context, ContextRow, ContextSchema, Gen, NodeGroupId, QueryPath,
   TableView, TierMap, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::common::{
@@ -21,11 +19,9 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::model::message::{AbortedData, TabletMessage};
+use crate::model::message::AbortedData;
 use crate::multiversion_map::MVM;
-use rand::RngCore;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs::read;
 use std::iter::FromIterator;
 use std::ops::{Add, Bound, Deref, Sub};
 use std::rc::Rc;
@@ -56,7 +52,7 @@ impl QueryReplanningSqlView for proc::SuperSimpleSelect {
     cast!(proc::TableRef::TablePath, &self.from).unwrap()
   }
 
-  fn exprs(&self) -> Vec<ValExpr> {
+  fn exprs(&self) -> Vec<proc::ValExpr> {
     vec![self.selection.clone()]
   }
 
@@ -76,7 +72,7 @@ impl QueryReplanningSqlView for proc::Update {
     &self.table
   }
 
-  fn exprs(&self) -> Vec<ValExpr> {
+  fn exprs(&self) -> Vec<proc::ValExpr> {
     let mut exprs = Vec::new();
     exprs.push(self.selection.clone());
     for (_, expr) in &self.assignment {
@@ -1531,7 +1527,7 @@ impl<T: IOTypes> TabletContext<T> {
           }
           ReadProtectionGrant::MRead { timestamp, protect_request } => {
             // Remove the protect_request, adding the ReadRegion to `m_read_protected`.
-            let mut verifying_write = self.verifying_writes.get_mut(&timestamp).unwrap();
+            let verifying_write = self.verifying_writes.get_mut(&timestamp).unwrap();
             verifying_write.m_waiting_read_protected.remove(&protect_request);
 
             let (orig_p, query_id, read_region) = protect_request;
@@ -3015,7 +3011,7 @@ impl<T: IOTypes> TabletContext<T> {
     let (_, stage) = es.sql_query.trans_tables.get(stage_idx).unwrap();
     let child_sql_query = cast!(proc::GRQueryStage::SuperSimpleSelect, stage).unwrap();
     match &child_sql_query.from {
-      TableRef::TablePath(table_path) => {
+      proc::TableRef::TablePath(table_path) => {
         // Here, we must do a SuperSimpleTableSelectQuery.
         let child_query = msg::SuperSimpleTableSelectQuery {
           timestamp: es.timestamp.clone(),
@@ -3057,7 +3053,7 @@ impl<T: IOTypes> TabletContext<T> {
           tm_status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
         }
       }
-      TableRef::TransTableName(trans_table_name) => {
+      proc::TableRef::TransTableName(trans_table_name) => {
         // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
         let location_prefix = context
           .context_schema
@@ -4724,8 +4720,8 @@ fn compute_subqueries<T: IOTypes, StorageViewT: StorageView>(
       // `context_row.column_context_row`. We also add the `TransTableContextRow`. This
       // results in a set of `ContextRows` that we add to the childs context.
       let key_bounds = keybound_computer.compute_keybounds(&context_row)?;
-      let (_, mut subtable) = storage_view.compute_subtable(&key_bounds, &conv.safe_present_split);
-      for mut row in subtable {
+      let (_, subtable) = storage_view.compute_subtable(&key_bounds, &conv.safe_present_split);
+      for row in subtable {
         let new_context_row = conv.compute_child_context_row(context_row, row);
         if !new_row_set.contains(&new_context_row) {
           new_row_set.insert(new_context_row.clone());
@@ -4919,8 +4915,8 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
     // `context_row.column_context_row`. We also add the `TransTableContextRow`. This
     // results in a set of `ContextRows` that we add to the childs context.
     let key_bounds = keybound_computer.compute_keybounds(&context_row)?;
-    let (_, mut subtable) = storage_view.compute_subtable(&key_bounds, &conv.safe_present_split);
-    for mut row in subtable {
+    let (_, subtable) = storage_view.compute_subtable(&key_bounds, &conv.safe_present_split);
+    for row in subtable {
       let new_context_row = conv.compute_child_context_row(context_row, row);
       if !new_row_set.contains(&new_context_row) {
         new_row_set.insert(new_context_row.clone());
@@ -5083,7 +5079,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         // Now, we need to verify that the `external_cols` are all absent and the
         // `safe_present_cols` are all present.
 
-        let mut does_query_plan_align = (|| {
+        let does_query_plan_align = (|| {
           // First, check that `external_cols are absent.
           for col in &self.query_plan.col_usage_node.external_cols {
             // Since the key_cols are static, no query plan should have a

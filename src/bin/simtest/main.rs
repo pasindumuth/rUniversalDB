@@ -6,7 +6,7 @@ use runiversal::model::common::{
   ColName, ColType, ColVal, EndpointId, PrimaryKey, RequestId, SlaveGroupId, TablePath,
   TabletGroupId, TabletKeyRange,
 };
-use runiversal::model::message::{ExternalMessage, NetworkMessage};
+use runiversal::model::message::{NetworkMessage};
 use runiversal::model::message::{PerformExternalQuery, SlaveMessage};
 use runiversal::test_utils::{cn, cvi, cvs, mk_sid, mk_tab, mk_tid};
 use std::collections::HashMap;

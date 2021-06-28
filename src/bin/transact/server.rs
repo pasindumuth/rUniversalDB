@@ -105,6 +105,7 @@ pub fn start_server(
         Default::default(),
         Default::default(),
         Default::default(),
+        SlaveGroupId("".to_string()),
         TabletGroupId("".to_string()),
         EndpointId("".to_string()),
       );

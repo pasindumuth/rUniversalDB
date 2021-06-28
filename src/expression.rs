@@ -1,5 +1,4 @@
 use crate::common::{ColBound, KeyBound, PolyColBound, SingleBound};
-use crate::expression::EvalError::GenericError;
 use crate::model::common::proc::ValExpr;
 use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
 use std::collections::HashMap;
@@ -439,44 +438,44 @@ fn compute_col_bounds<T: BoundType + Clone>(
           col_name,
           left,
           right,
-          (|val| ColBound::<T>::new(SingleBound::Excluded(val), SingleBound::Unbounded)),
-          (|val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Excluded(val))),
+          |val| ColBound::<T>::new(SingleBound::Excluded(val), SingleBound::Unbounded),
+          |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Excluded(val)),
         ),
         iast::BinaryOp::Lt => boolean_leaf_constraint(
           kb_expr,
           col_name,
           left,
           right,
-          (|val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Excluded(val))),
-          (|val| ColBound::<T>::new(SingleBound::Excluded(val), SingleBound::Unbounded)),
+          |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Excluded(val)),
+          |val| ColBound::<T>::new(SingleBound::Excluded(val), SingleBound::Unbounded),
         ),
         iast::BinaryOp::GtEq => boolean_leaf_constraint(
           kb_expr,
           col_name,
           left,
           right,
-          (|val| ColBound::<T>::new(SingleBound::Included(val), SingleBound::Unbounded)),
-          (|val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Included(val))),
+          |val| ColBound::<T>::new(SingleBound::Included(val), SingleBound::Unbounded),
+          |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Included(val)),
         ),
         iast::BinaryOp::LtEq => boolean_leaf_constraint(
           kb_expr,
           col_name,
           left,
           right,
-          (|val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Included(val))),
-          (|val| ColBound::<T>::new(SingleBound::Included(val), SingleBound::Unbounded)),
+          |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Included(val)),
+          |val| ColBound::<T>::new(SingleBound::Included(val), SingleBound::Unbounded),
         ),
         iast::BinaryOp::Spaceship | iast::BinaryOp::Eq => boolean_leaf_constraint(
           kb_expr,
           col_name,
           left,
           right,
-          (|val: T| {
+          |val: T| {
             ColBound::<T>::new(SingleBound::Included(val.clone()), SingleBound::Included(val))
-          }),
-          (|val: T| {
+          },
+          |val: T| {
             ColBound::<T>::new(SingleBound::Included(val.clone()), SingleBound::Included(val))
-          }),
+          },
         ),
         iast::BinaryOp::NotEq => {
           // For simplicity, we don't try dig into the sides of binary operator. Note that this

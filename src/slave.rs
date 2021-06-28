@@ -1,10 +1,8 @@
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   merge_table_views, mk_qid, Clock, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus,
-  TMWaitValue, TableSchema, TabletForwardOut,
+  TMWaitValue, TabletForwardOut,
 };
-use crate::lang;
-use crate::model::common::proc::MSQuery;
 use crate::model::common::{
   iast, proc, ColName, ColType, Context, ContextRow, Gen, NodeGroupId, QueryPath, SlaveGroupId,
   TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
@@ -12,18 +10,12 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::ExternalAbortedData;
-use crate::multiversion_map::MVM;
 use crate::query_converter::convert_to_msquery;
-use crate::slave::CoordState::ReadStage;
 use crate::sql_parser::convert_ast;
-use rand::RngCore;
-use sqlparser::ast;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::collections::{HashMap, HashSet};
-use std::ops::Add;
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
@@ -339,21 +331,6 @@ impl<T: IOTypes> SlaveContext<T> {
     }
   }
 
-  fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
-    if let Some(ms_coord_es) = statuses.ms_coord_ess.remove(&query_id) {
-      match ms_coord_es {
-        FullMSQueryCoordES::QueryReplanning(plan_es) => {
-          self.external_request_id_map.remove(&plan_es.request_id);
-          // TODO: finish
-        }
-        FullMSQueryCoordES::Executing(es) => {
-          self.external_request_id_map.remove(&es.request_id);
-          // TODO: finish
-        }
-      }
-    }
-  }
-
   /// This function accepts the results for the subquery, and then decides either
   /// to move onto the next stage, or start 2PC to commit the change.
   fn advance_ms_coord_es(&mut self, statuses: &mut Statuses, query_id: QueryId) {
@@ -628,6 +605,21 @@ impl<T: IOTypes> SlaveContext<T> {
     coord_es.trans_table_views.push((trans_table_name.clone(), table_view));
     coord_es.all_rms.extend(new_rms);
     self.advance_ms_coord_es(statuses, query_id);
+  }
+
+  fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    if let Some(ms_coord_es) = statuses.ms_coord_ess.remove(&query_id) {
+      match ms_coord_es {
+        FullMSQueryCoordES::QueryReplanning(plan_es) => {
+          self.external_request_id_map.remove(&plan_es.request_id);
+          // TODO: finish
+        }
+        FullMSQueryCoordES::Executing(es) => {
+          self.external_request_id_map.remove(&es.request_id);
+          // TODO: finish
+        }
+      }
+    }
   }
 }
 
