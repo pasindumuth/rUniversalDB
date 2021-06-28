@@ -3862,6 +3862,7 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
+  // TODO: we aren't accumulating `new_rms`... get that done.
   fn handle_tm_done(
     &mut self,
     statuses: &mut Statuses,

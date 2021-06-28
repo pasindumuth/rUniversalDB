@@ -165,7 +165,7 @@ fn main() {
 
   sim.add_msg(
     NetworkMessage::Slave(SlaveMessage::PerformExternalQuery(PerformExternalQuery {
-      sender_path: client_eid(&0),
+      sender_eid: client_eid(&0),
       request_id: RequestId("rid".to_string()),
       query: query.to_string(),
     })),

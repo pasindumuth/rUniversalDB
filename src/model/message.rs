@@ -234,7 +234,7 @@ pub struct Query2PCCommit {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformExternalQuery {
-  pub sender_path: EndpointId,
+  pub sender_eid: EndpointId,
   pub request_id: RequestId,
   pub query: String,
 }
