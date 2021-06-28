@@ -28,7 +28,7 @@ use std::sync::Arc;
 // -----------------------------------------------------------------------------------------------
 //  MSQueryCoordES
 // -----------------------------------------------------------------------------------------------
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CoordQueryPlan {
   gossip_gen: Gen,
   col_usage_nodes: HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)>,
@@ -98,8 +98,11 @@ enum MSQueryCoordReplanningS {
 #[derive(Debug)]
 struct MSQueryCoordReplanningES {
   timestamp: Timestamp,
+  /// The following are needed for responding.
+  sender_eid: EndpointId,
+  request_id: RequestId,
+  /// The query to do the replanning with.
   query: proc::MSQuery,
-  orig_query: msg::PerformExternalQuery,
   /// The OrigP of the Task holding this MSQueryCoordReplanningES
   // TODO: change this to `QueryId` here, and in tablet.
   orig_p: OrigP,
@@ -208,75 +211,18 @@ impl<T: IOTypes> SlaveContext<T> {
             let query_id = mk_qid(&mut self.rand);
             let request_id = &external_query.request_id;
             self.external_request_id_map.insert(request_id.clone(), query_id.clone());
-            let mut plan_es = MSQueryCoordReplanningES {
-              timestamp: self.clock.now(),
-              query: ms_query,
-              orig_query: external_query.clone(),
-              orig_p: OrigP { query_id: query_id.clone() },
-              state: MSQueryCoordReplanningS::Start,
-            };
-            plan_es.start(self);
-            match plan_es.state {
-              MSQueryCoordReplanningS::Done(maybe_plan) => {
-                if let Some(query_plan) = maybe_plan {
-                  // We compute the TierMap here.
-                  let mut tier_map = HashMap::<TablePath, u32>::new();
-                  for (_, stage) in &plan_es.query.trans_tables {
-                    match stage {
-                      proc::MSQueryStage::SuperSimpleSelect(_) => {}
-                      proc::MSQueryStage::Update(update) => {
-                        tier_map.insert(update.table.clone(), 0);
-                      }
-                    }
-                  }
-
-                  // The Tier should be where every Read query should be reading from, except
-                  // if the current stage is an Update, which should be one Tier ahead (i.e.
-                  // lower) for that TablePath.
-                  let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
-                  for (trans_table_name, stage) in plan_es.query.trans_tables.iter().rev() {
-                    all_tier_maps
-                      .insert(trans_table_name.clone(), TierMap { map: tier_map.clone() });
-                    match stage {
-                      proc::MSQueryStage::SuperSimpleSelect(_) => {}
-                      proc::MSQueryStage::Update(update) => {
-                        *tier_map.get_mut(&update.table).unwrap() += 1;
-                      }
-                    }
-                  }
-
-                  statuses.ms_coord_ess.insert(
-                    query_id.clone(),
-                    FullMSQueryCoordES::Executing(MSQueryCoordES {
-                      request_id: plan_es.orig_query.request_id.clone(),
-                      sender_eid: plan_es.orig_query.sender_eid.clone(),
-                      timestamp: plan_es.timestamp.clone(),
-                      query_id: query_id.clone(),
-                      query: plan_es.query.clone(),
-                      query_plan,
-                      all_tier_maps,
-                      all_rms: Default::default(),
-                      trans_table_views: vec![],
-                      state: CoordState::Start,
-                      registered_queries: Default::default(),
-                    }),
-                  );
-
-                  // Move the ES onto the next stage.
-                  self.advance_ms_coord_es(statuses, query_id);
-                } else {
-                  // Here, the QueryReplanning had failed. Recall that QueryReplanning will
-                  // have sent back the proper error message, so we just need to clean up
-                  // the `external_request_id_map`.
-                  self.external_request_id_map.remove(request_id);
-                }
-              }
-              _ => {
-                // Here, we need to add the `plan_es` to `ms_coord_ess`, since it's not done yet.
-                let full_es = FullMSQueryCoordES::QueryReplanning(plan_es);
-                statuses.ms_coord_ess.insert(query_id.clone(), full_es);
-              }
-            }
+            statuses.ms_coord_ess.insert(
+              query_id.clone(),
+              FullMSQueryCoordES::QueryReplanning(MSQueryCoordReplanningES {
+                timestamp: self.clock.now(),
+                sender_eid: external_query.sender_eid,
+                request_id: external_query.request_id,
+                query: ms_query,
+                orig_p: OrigP { query_id: query_id.clone() },
+                state: MSQueryCoordReplanningS::Start,
+              }),
+            );
+            self.drive_ms_coord(statuses, query_id);
           }
           Err(payload) => self.network_output.send(
             &external_query.sender_eid,
@@ -332,6 +278,76 @@ impl<T: IOTypes> SlaveContext<T> {
             TokenizerError(err_msg) => err_msg,
             ParserError(err_msg) => err_msg,
           }))
+        }
+      }
+    }
+  }
+
+  fn drive_ms_coord(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    let full_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+    let plan_es = cast!(FullMSQueryCoordES::QueryReplanning, full_es).unwrap();
+    plan_es.start(self);
+    if let MSQueryCoordReplanningS::Done(maybe_plan) = &plan_es.state {
+      if let Some(query_plan) = maybe_plan {
+        // We compute the TierMap here.
+        let mut tier_map = HashMap::<TablePath, u32>::new();
+        for (_, stage) in &plan_es.query.trans_tables {
+          match stage {
+            proc::MSQueryStage::SuperSimpleSelect(_) => {}
+            proc::MSQueryStage::Update(update) => {
+              tier_map.insert(update.table.clone(), 0);
+            }
+          }
+        }
+
+        // The Tier should be where every Read query should be reading from, except
+        // if the current stage is an Update, which should be one Tier ahead (i.e.
+        // lower) for that TablePath.
+        let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
+        for (trans_table_name, stage) in plan_es.query.trans_tables.iter().rev() {
+          all_tier_maps.insert(trans_table_name.clone(), TierMap { map: tier_map.clone() });
+          match stage {
+            proc::MSQueryStage::SuperSimpleSelect(_) => {}
+            proc::MSQueryStage::Update(update) => {
+              *tier_map.get_mut(&update.table).unwrap() += 1;
+            }
+          }
+        }
+
+        *full_es = FullMSQueryCoordES::Executing(MSQueryCoordES {
+          request_id: plan_es.request_id.clone(),
+          sender_eid: plan_es.sender_eid.clone(),
+          timestamp: plan_es.timestamp.clone(),
+          query_id: query_id.clone(),
+          query: plan_es.query.clone(),
+          query_plan: query_plan.clone(),
+          all_tier_maps,
+          all_rms: Default::default(),
+          trans_table_views: vec![],
+          state: CoordState::Start,
+          registered_queries: Default::default(),
+        });
+
+        // Move the ES onto the next stage.
+        self.advance_ms_coord_es(statuses, query_id);
+      } else {
+        // Here, the QueryReplanning had failed. Recall that QueryReplanning will
+        // have sent back the proper error message, so we just need to Exit and Clean Up.
+        self.exit_and_clean_up(statuses, query_id);
+      }
+    }
+  }
+
+  fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    if let Some(ms_coord_es) = statuses.ms_coord_ess.remove(&query_id) {
+      match ms_coord_es {
+        FullMSQueryCoordES::QueryReplanning(plan_es) => {
+          self.external_request_id_map.remove(&plan_es.request_id);
+          // TODO: finish
+        }
+        FullMSQueryCoordES::Executing(es) => {
+          self.external_request_id_map.remove(&es.request_id);
+          // TODO: finish
         }
       }
     }
