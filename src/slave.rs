@@ -50,6 +50,8 @@ struct MSQueryCoordES {
   request_id: RequestId,
   sender_path: EndpointId,
   timestamp: Timestamp,
+
+  query_id: QueryId,
   query: proc::MSQuery,
 
   // Results of the query planning.
@@ -61,7 +63,7 @@ struct MSQueryCoordES {
   // The dynamically evolving fields.
   all_rms: HashSet<QueryPath>,
   trans_table_views: Vec<(TransTableName, TableView)>,
-  execution_state: CoordState,
+  state: CoordState,
 
   // Memory management fields
   registered_queries: HashSet<QueryId>,
@@ -79,6 +81,8 @@ struct MSQueryCoordReplanningES {
   timestamp: Timestamp,
   query: proc::MSQuery,
   orig_query: msg::PerformExternalQuery,
+  /// The OrigP of the Task holding this MSQueryCoordReplanningES
+  // TODO: change this to `QueryId` here, and in tablet.
   orig_p: OrigP,
   /// Used for managing MasterQueryReplanning
   state: MSQueryCoordReplanningS,
@@ -227,12 +231,13 @@ impl<T: IOTypes> SlaveContext<T> {
                     request_id: plan_es.orig_query.request_id.clone(),
                     sender_path: plan_es.orig_query.sender_path.clone(),
                     timestamp: plan_es.timestamp.clone(),
+                    query_id: query_id.clone(),
                     query: plan_es.query.clone(),
                     query_plan,
                     all_tier_maps,
                     all_rms: Default::default(),
                     trans_table_views: vec![],
-                    execution_state: CoordState::Start,
+                    state: CoordState::Start,
                     registered_queries: Default::default(),
                   };
 
@@ -315,6 +320,243 @@ impl<T: IOTypes> SlaveContext<T> {
     }
   }
 
+  /// This function accepts the results for the subquery, and then decides either
+  /// to move onto the next stage, or start 2PC to commit the change.
+  fn advance_ms_coord_es(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    let full_coord_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+    let coord_es = cast!(FullMSQueryCoordES::Executing, full_coord_es).unwrap();
+
+    let next_stage_idx = match &coord_es.state {
+      CoordState::Start => 1,
+      CoordState::ReadStage { stage_idx, .. } => stage_idx + 1,
+      CoordState::WriteStage { stage_idx, .. } => stage_idx + 1,
+      _ => panic!(),
+    };
+
+    if next_stage_idx < coord_es.query.trans_tables.len() {
+      self.process_ms_coord_es_stage(statuses, query_id, next_stage_idx);
+    } else {
+      // Finish the ES by sending out Prepared.
+      let sender_path = QueryPath {
+        slave_group_id: self.this_slave_group_id.clone(),
+        maybe_tablet_group_id: None,
+        query_id: coord_es.query_id.clone(),
+      };
+      for query_path in &coord_es.all_rms {
+        let eid = self.slave_address_config.get(&query_path.slave_group_id).unwrap();
+        self.network_output.send(
+          eid,
+          msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
+            query_path.maybe_tablet_group_id.clone().unwrap(),
+            msg::TabletMessage::Query2PCPrepare(msg::Query2PCPrepare {
+              sender_path: sender_path.clone(),
+              ms_query_id: coord_es.query_id.clone(),
+            }),
+          )),
+        );
+      }
+
+      coord_es.state = CoordState::Preparing { tablet_group_ids: coord_es.all_rms.clone() };
+    }
+  }
+
+  /// This function advances the given MSQueryCoordES at `query_id` to the next stage, `stage_idx`.
+  /// This stage is gauranteed to be another `ReadStage` or `WriteStage`.
+  fn process_ms_coord_es_stage(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    stage_idx: usize,
+  ) {
+    let full_coord_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+    let coord_es = cast!(FullMSQueryCoordES::Executing, full_coord_es).unwrap();
+
+    // Get the corresponding MSQueryStage and FrozenColUsageNode.
+    let (trans_table_name, ms_query_stage) = coord_es.query.trans_tables.get(stage_idx).unwrap();
+    let (_, col_usage_node) = coord_es.query_plan.col_usage_nodes.get(trans_table_name).unwrap();
+
+    // Compute the context of this `col_usage_node`. Recall there must be exactly one row.
+    let external_trans_tables = node_external_trans_tables(col_usage_node);
+    let mut context = Context::default();
+    let mut context_row = ContextRow::default();
+    for external_trans_table in &external_trans_tables {
+      context.context_schema.trans_table_context_schema.push(TransTableLocationPrefix {
+        source: NodeGroupId::Slave(self.this_slave_group_id.clone()),
+        query_id: query_id.clone(),
+        trans_table_name: external_trans_table.clone(),
+      });
+      context_row.trans_table_context_row.push(0);
+    }
+    context.context_rows.push(context_row);
+
+    // Compute the `trans_table_schemas` using the `col_usage_nodes`.
+    let mut trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
+    for external_trans_table in external_trans_tables {
+      let (cols, _) = coord_es.query_plan.col_usage_nodes.get(&external_trans_table).unwrap();
+      trans_table_schemas.insert(external_trans_table, cols.clone());
+    }
+
+    // Compute this MSQueryCoordESs QueryPath
+    let root_query_path = QueryPath {
+      slave_group_id: self.this_slave_group_id.clone(),
+      maybe_tablet_group_id: None,
+      query_id: query_id.clone(),
+    };
+
+    // Handle accordingly
+    coord_es.state = match ms_query_stage {
+      proc::MSQueryStage::SuperSimpleSelect(select_query) => {
+        // Create ReadTMState
+        let tm_query_id = mk_qid(&mut self.rand);
+        let mut status = TMStatus {
+          node_group_ids: Default::default(),
+          new_rms: Default::default(),
+          responded_count: 0,
+          tm_state: Default::default(),
+          orig_p: OrigP::new(query_id.clone()),
+        };
+
+        // Path of this TMStatus to respond to.
+        let sender_path = QueryPath {
+          slave_group_id: self.this_slave_group_id.clone(),
+          maybe_tablet_group_id: None,
+          query_id: tm_query_id.clone(),
+        };
+
+        match &select_query.from {
+          proc::TableRef::TablePath(table_path) => {
+            // Add in the Tablets that manage this TablePath to `tm_state`,
+            // and send out the PerformQuery
+            for (_, tablet_group_id) in self.sharding_config.get(table_path).unwrap() {
+              let child_query_id = mk_qid(&mut self.rand);
+              let sid = self.tablet_address_config.get(&tablet_group_id).unwrap();
+              let eid = self.slave_address_config.get(&sid).unwrap();
+              self.network_output.send(
+                eid,
+                msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
+                  tablet_group_id.clone(),
+                  msg::TabletMessage::PerformQuery(msg::PerformQuery {
+                    root_query_path: root_query_path.clone(),
+                    sender_path: sender_path.clone(),
+                    query_id: child_query_id.clone(),
+                    tier_map: coord_es.all_tier_maps.get(trans_table_name).unwrap().clone(),
+                    query: msg::GeneralQuery::SuperSimpleTableSelectQuery(
+                      msg::SuperSimpleTableSelectQuery {
+                        timestamp: coord_es.timestamp.clone(),
+                        context: context.clone(),
+                        sql_query: select_query.clone(),
+                        query_plan: QueryPlan {
+                          gossip_gen: self.gossip.gossip_gen,
+                          trans_table_schemas: trans_table_schemas.clone(),
+                          col_usage_node: col_usage_node.clone(),
+                        },
+                      },
+                    ),
+                  }),
+                )),
+              );
+
+              let node_group_id = NodeGroupId::Tablet(tablet_group_id.clone());
+              status.node_group_ids.insert(node_group_id, child_query_id.clone());
+              status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
+            }
+          }
+          proc::TableRef::TransTableName(trans_table_name) => {
+            let location = lookup_location(&context, trans_table_name).unwrap();
+
+            // Add in the Slave to `tm_state`, and send out the PerformQuery
+            let child_query_id = mk_qid(&mut self.rand);
+            let eid = self.slave_address_config.get(&self.this_slave_group_id).unwrap();
+            self.network_output.send(
+              eid,
+              msg::NetworkMessage::Slave(msg::SlaveMessage::PerformQuery(msg::PerformQuery {
+                root_query_path,
+                sender_path,
+                query_id: child_query_id.clone(),
+                tier_map: coord_es.all_tier_maps.get(trans_table_name).unwrap().clone(),
+                query: msg::GeneralQuery::SuperSimpleTransTableSelectQuery(
+                  msg::SuperSimpleTransTableSelectQuery {
+                    location_prefix: location.clone(),
+                    context: context.clone(),
+                    sql_query: select_query.clone(),
+                    query_plan: QueryPlan {
+                      gossip_gen: self.gossip.gossip_gen,
+                      trans_table_schemas,
+                      col_usage_node: col_usage_node.clone(),
+                    },
+                  },
+                ),
+              })),
+            );
+
+            status.node_group_ids.insert(location.source, child_query_id.clone());
+            status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
+          }
+        }
+
+        statuses.tm_statuses.insert(tm_query_id.clone(), status);
+        CoordState::ReadStage { stage_idx, stage_query_id: tm_query_id }
+      }
+      proc::MSQueryStage::Update(update_query) => {
+        // Create WriteTMState
+        // TODO: Should we move the below to a common location, including the
+        // `tm_statuses.insert(tm_query_id.clone(), status);`?
+        let tm_query_id = mk_qid(&mut self.rand);
+        let mut status = TMStatus {
+          node_group_ids: Default::default(),
+          new_rms: Default::default(),
+          responded_count: 0,
+          tm_state: Default::default(),
+          orig_p: OrigP::new(query_id.clone()),
+        };
+
+        // Path of this WriteTMStatus to respond to.
+        let sender_path = QueryPath {
+          slave_group_id: self.this_slave_group_id.clone(),
+          maybe_tablet_group_id: None,
+          query_id: tm_query_id.clone(),
+        };
+
+        // Add in the Tablets that manage this TablePath to `write_tm_state`,
+        // and send out the PerformQuery
+        for (_, tablet_group_id) in self.sharding_config.get(&update_query.table).unwrap() {
+          let child_query_id = mk_qid(&mut self.rand);
+          let sid = self.tablet_address_config.get(&tablet_group_id).unwrap();
+          let eid = self.slave_address_config.get(&sid).unwrap();
+          self.network_output.send(
+            eid,
+            msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
+              tablet_group_id.clone(),
+              msg::TabletMessage::PerformQuery(msg::PerformQuery {
+                root_query_path: root_query_path.clone(),
+                sender_path: sender_path.clone(),
+                query_id: child_query_id.clone(),
+                tier_map: coord_es.all_tier_maps.get(trans_table_name).unwrap().clone(),
+                query: msg::GeneralQuery::UpdateQuery(msg::UpdateQuery {
+                  timestamp: coord_es.timestamp.clone(),
+                  context: context.clone(),
+                  sql_query: update_query.clone(),
+                  query_plan: QueryPlan {
+                    gossip_gen: self.gossip.gossip_gen,
+                    trans_table_schemas: trans_table_schemas.clone(),
+                    col_usage_node: col_usage_node.clone(),
+                  },
+                }),
+              }),
+            )),
+          );
+
+          let node_group_id = NodeGroupId::Tablet(tablet_group_id.clone());
+          status.node_group_ids.insert(node_group_id, child_query_id.clone());
+          status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
+        }
+
+        statuses.tm_statuses.insert(tm_query_id.clone(), status);
+        CoordState::WriteStage { stage_idx, stage_query_id: tm_query_id }
+      }
+    };
+  }
+
   fn handle_query_success(&mut self, statuses: &mut Statuses, query_success: msg::QuerySuccess) {
     if let Some(tm_status) = statuses.tm_statuses.get_mut(&query_success.query_id) {
       // We just add the result of the `query_success` here.
@@ -331,7 +573,7 @@ impl<T: IOTypes> SlaveContext<T> {
           results.push(cast!(TMWaitValue::Result, tm_wait_value).unwrap());
         }
         let merged_result = merge_table_views(results);
-        self.handle_done_state(
+        self.handle_tm_done(
           statuses,
           query_success.query_id,
           tm_status.orig_p.query_id,
@@ -342,7 +584,7 @@ impl<T: IOTypes> SlaveContext<T> {
     }
   }
 
-  fn handle_done_state(
+  fn handle_tm_done(
     &mut self,
     statuses: &mut Statuses,
     ret_query_id: QueryId,
@@ -355,7 +597,25 @@ impl<T: IOTypes> SlaveContext<T> {
     // child ReadTMStatuses.
     let full_coord = statuses.ms_coord_ess.get_mut(&orig_path).unwrap();
     let coord_es = cast!(FullMSQueryCoordES::Executing, full_coord).unwrap();
-    match &coord_es.execution_state {
+
+    // TODO: the below should be handled here.
+    // let (res_schema, mut res_views) = result;
+    // assert_eq!(ret_query_id, stage_query_id);
+    //
+    // // Look up the corresponding schema and assert that the incomding schema matches.
+    // let (trans_table_name, _) = coord_es.query.trans_tables.get(*stage_idx).unwrap();
+    // let (schema, _) = coord_es.query_plan.col_usage_nodes.get(trans_table_name).unwrap();
+    // assert_eq!(schema, &res_schema);
+    //
+    // // There was only one ContextRow, so the result should have 1 TableView as well.
+    // assert_eq!(res_views.len(), 1);
+    // let res_view = res_views.into_iter().next().unwrap();
+    //
+    // // Add the results to the `trans_table_views`
+    // coord_es.trans_table_views.push((trans_table_name.clone(), res_view));
+    // coord_es.all_rms.extend(new_rms);
+
+    match &coord_es.state {
       CoordState::Start => panic!(),
       CoordState::ReadStage { stage_idx, stage_query_id } => {
         let stage_idx = stage_idx.clone();
@@ -504,7 +764,7 @@ fn ms_coord_process_stage_result<T: IOTypes>(
       );
     }
 
-    coord_es.execution_state = CoordState::Preparing { tablet_group_ids: coord_es.all_rms.clone() };
+    coord_es.state = CoordState::Preparing { tablet_group_ids: coord_es.all_rms.clone() };
   }
 }
 
@@ -558,7 +818,7 @@ fn ms_coord_es_advance<T: IOTypes>(
   };
 
   // Handle accordingly
-  coord_es.execution_state = match ms_query_stage {
+  coord_es.state = match ms_query_stage {
     proc::MSQueryStage::SuperSimpleSelect(select_query) => {
       // Create ReadTMState
       let tm_query_id = mk_qid(rand);
