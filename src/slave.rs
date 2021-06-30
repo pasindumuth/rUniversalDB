@@ -1,7 +1,7 @@
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
-  merge_table_views, mk_qid, Clock, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus,
-  TMWaitValue, TabletForwardOut,
+  lookup_pos, merge_table_views, mk_qid, Clock, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan,
+  TMStatus, TMWaitValue, TabletForwardOut,
 };
 use crate::model::common::{
   iast, proc, ColName, ColType, Context, ContextRow, Gen, NodeGroupId, QueryPath, SlaveGroupId,
@@ -11,6 +11,7 @@ use crate::model::common::{
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
 use crate::query_converter::convert_to_msquery;
+use crate::slave::CoordState::Committing;
 use crate::sql_parser::convert_ast;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -28,11 +29,16 @@ struct CoordQueryPlan {
 }
 
 #[derive(Debug)]
+struct PreparingState {
+  prepared_rms: HashSet<QueryPath>,
+}
+
+#[derive(Debug)]
 enum CoordState {
   Start,
   ReadStage { stage_idx: usize, stage_query_id: QueryId },
   WriteStage { stage_idx: usize, stage_query_id: QueryId },
-  Preparing { tablet_group_ids: HashSet<QueryPath> },
+  Preparing(PreparingState),
   Committing,
   Aborting,
 }
@@ -64,6 +70,7 @@ struct MSQueryCoordES {
   timestamp: Timestamp,
 
   query_id: QueryId,
+  // TODO: rename to `sql_query`.
   query: proc::MSQuery,
 
   // Results of the query planning.
@@ -78,7 +85,7 @@ struct MSQueryCoordES {
   state: CoordState,
 
   // Memory management fields
-  registered_queries: HashSet<QueryId>,
+  registered_queries: HashSet<QueryPath>,
 }
 
 #[derive(Debug)]
@@ -235,14 +242,25 @@ impl<T: IOTypes> SlaveContext<T> {
         self.handle_query_success(statuses, query_success);
       }
       msg::SlaveMessage::QueryAborted(_) => unimplemented!(),
-      msg::SlaveMessage::Query2PCPrepared(prepared) => {
-        // Okay, let's get the thing prepared.
-      }
-      msg::SlaveMessage::Query2PCAborted(_) => unimplemented!(),
+      msg::SlaveMessage::Query2PCPrepared(prepared) => self.handle_prepare(statuses, prepared),
+      msg::SlaveMessage::Query2PCAborted(_) => panic!(),
       msg::SlaveMessage::MasterFrozenColUsageAborted(_) => unimplemented!(),
       msg::SlaveMessage::MasterFrozenColUsageSuccess(_) => unimplemented!(),
-      msg::SlaveMessage::RegisterQuery(_) => {}
+      msg::SlaveMessage::RegisterQuery(register) => self.handle_register_query(statuses, register),
     }
+  }
+
+  /// A convenience function for sending messages to `query_path`s that are Tablets.
+  /// The Slave most often communicates only with Tablets.
+  fn send_to_tablet(&mut self, query_path: &QueryPath, tablet_message: msg::TabletMessage) {
+    let eid = self.slave_address_config.get(&query_path.slave_group_id).unwrap();
+    self.network_output.send(
+      eid,
+      msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
+        query_path.maybe_tablet_group_id.clone().unwrap(),
+        tablet_message,
+      )),
+    );
   }
 
   /// Does some initial validations and MSQuery processing before we start
@@ -276,6 +294,8 @@ impl<T: IOTypes> SlaveContext<T> {
     }
   }
 
+  /// Here, we expect a FullMSQueryCoordES to exist for `query_id` in the QueryReplanning
+  /// state. This is the first function that's called to drive its execution.
   fn drive_ms_coord(&mut self, statuses: &mut Statuses, query_id: QueryId) {
     let full_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
     let plan_es = cast!(FullMSQueryCoordES::QueryReplanning, full_es).unwrap();
@@ -348,20 +368,16 @@ impl<T: IOTypes> SlaveContext<T> {
         query_id: coord_es.query_id.clone(),
       };
       for query_path in &coord_es.all_rms {
-        let eid = self.slave_address_config.get(&query_path.slave_group_id).unwrap();
-        self.network_output.send(
-          eid,
-          msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
-            query_path.maybe_tablet_group_id.clone().unwrap(),
-            msg::TabletMessage::Query2PCPrepare(msg::Query2PCPrepare {
-              sender_path: sender_path.clone(),
-              ms_query_id: coord_es.query_id.clone(),
-            }),
-          )),
+        self.send_to_tablet(
+          &query_path,
+          msg::TabletMessage::Query2PCPrepare(msg::Query2PCPrepare {
+            sender_path: sender_path.clone(),
+            ms_query_id: coord_es.query_id.clone(),
+          }),
         );
       }
 
-      coord_es.state = CoordState::Preparing { tablet_group_ids: coord_es.all_rms.clone() };
+      coord_es.state = CoordState::Preparing(PreparingState { prepared_rms: HashSet::new() });
     }
   }
 
@@ -605,6 +621,81 @@ impl<T: IOTypes> SlaveContext<T> {
     coord_es.trans_table_views.push((trans_table_name.clone(), table_view));
     coord_es.all_rms.extend(new_rms);
     self.advance_ms_coord_es(statuses, query_id);
+  }
+
+  /// Handle a Prepared message sent to an MSQueryCoordES.
+  fn handle_prepare(&mut self, statuses: &mut Statuses, prepared: msg::Query2PCPrepared) {
+    if let Some(ms_coord_es) = statuses.ms_coord_ess.get_mut(&prepared.return_path) {
+      let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
+      let preparing = cast!(CoordState::Preparing, &mut es.state).unwrap();
+
+      // First, insert the QueryPath of the RM into the prepare state.
+      assert!(preparing.prepared_rms.contains(&prepared.rm_path));
+      preparing.prepared_rms.insert(prepared.rm_path);
+
+      // Next see if the prepare state is done.
+      if preparing.prepared_rms.len() == es.all_rms.len() {
+        // Here, we simply send out the commit message.
+        for query_path in &es.all_rms {
+          self.send_to_tablet(
+            query_path,
+            msg::TabletMessage::Query2PCCommit(msg::Query2PCCommit {
+              ms_query_id: es.query_id.clone(),
+            }),
+          );
+        }
+
+        // Next, we need to inform all `registered_query`s that aren't an RM
+        // that they should exit, since they were falsely added to this transaction.
+        for reg_query_path in &es.registered_queries {
+          if !es.all_rms.contains(reg_query_path) {
+            self.send_to_tablet(
+              reg_query_path,
+              msg::TabletMessage::CancelQuery(msg::CancelQuery {
+                query_id: reg_query_path.query_id.clone(),
+              }),
+            );
+          }
+        }
+
+        // Finally, we send out an ExternalQuerySuccess with the appropriate TableView.
+        let (_, table_view) = es
+          .trans_table_views
+          .iter()
+          .find(|(trans_table_name, _)| trans_table_name == &es.query.returning)
+          .unwrap();
+        self.network_output.send(
+          &es.sender_eid,
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
+            msg::ExternalQuerySuccess {
+              request_id: es.request_id.clone(),
+              result: table_view.clone(),
+            },
+          )),
+        );
+
+        // Exit and and Clean Up.
+        self.exit_and_clean_up(statuses, prepared.return_path);
+      }
+    }
+  }
+
+  // Handle a RegisterQuery sent by an MSQuery to an MSQueryCoordES.
+  fn handle_register_query(&mut self, statuses: &mut Statuses, register: msg::RegisterQuery) {
+    if let Some(ms_coord_es) = statuses.ms_coord_ess.get_mut(&register.root_query_id) {
+      // Here, the MSQueryCoordES still exists and we register the incoming MSQueryES.
+      let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
+      es.registered_queries.insert(register.query_path);
+    } else {
+      // Otherwise, the MSQueryCoordES no longer exists, and we should
+      // cancel MSQueryES immediately.
+      self.send_to_tablet(
+        &register.query_path,
+        msg::TabletMessage::CancelQuery(msg::CancelQuery {
+          query_id: register.query_path.query_id.clone(),
+        }),
+      );
+    }
   }
 
   fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
