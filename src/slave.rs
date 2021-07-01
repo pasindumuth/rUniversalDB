@@ -11,6 +11,7 @@ use crate::model::common::{
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
 use crate::query_converter::convert_to_msquery;
+use crate::server::ServerContext;
 use crate::slave::CoordState::Committing;
 use crate::sql_parser::convert_ast;
 use sqlparser::dialect::GenericDialect;
@@ -203,6 +204,21 @@ impl<T: IOTypes> SlaveState<T> {
 }
 
 impl<T: IOTypes> SlaveContext<T> {
+  fn server_context(&mut self) -> ServerContext<T> {
+    ServerContext {
+      rand: &mut self.rand,
+      clock: &mut self.clock,
+      network_output: &mut self.network_output,
+      this_slave_group_id: &mut self.this_slave_group_id,
+      master_eid: &mut self.master_eid,
+      gossip: &mut self.gossip,
+      sharding_config: &mut self.sharding_config,
+      tablet_address_config: &mut self.tablet_address_config,
+      slave_address_config: &mut self.slave_address_config,
+      master_query_map: &mut self.master_query_map,
+    }
+  }
+
   pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::SlaveMessage) {
     match message {
       msg::SlaveMessage::PerformExternalQuery(external_query) => {
@@ -236,7 +252,11 @@ impl<T: IOTypes> SlaveContext<T> {
       msg::SlaveMessage::TabletMessage(tablet_group_id, tablet_msg) => {
         self.tablet_forward_output.forward(&tablet_group_id, tablet_msg);
       }
-      msg::SlaveMessage::PerformQuery(_) => unimplemented!(),
+      msg::SlaveMessage::PerformQuery(perform_query) => {
+        // TODO: Here, we might get TransTableReads that read an MSQueryCoordES's TransTables.
+        // This might produce GRQueries. Thus, we can also get TransTableReads that read
+        // GRQueries here. We should share all of it.
+      }
       msg::SlaveMessage::CancelQuery(_) => unimplemented!(),
       msg::SlaveMessage::QuerySuccess(query_success) => {
         self.handle_query_success(statuses, query_success);

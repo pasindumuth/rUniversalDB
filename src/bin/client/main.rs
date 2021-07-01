@@ -27,7 +27,29 @@
 //   }
 // }
 
-fn main() {}
+#[derive(Debug)]
+struct A {
+  p1: u32,
+  p2: u32,
+}
+
+impl A {
+  fn get_ref(&mut self) -> Ref {
+    return Ref { q: &mut self.p1 };
+  }
+}
+
+#[derive(Debug)]
+struct Ref<'a> {
+  q: &'a mut u32,
+}
+
+fn main() {
+  let mut a = A { p1: 1, p2: 2 };
+  let r = a.get_ref();
+  *r.q += 1;
+  println!("{:?}", a);
+}
 
 //
 // fn sql() {

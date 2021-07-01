@@ -21,6 +21,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::model::message::AbortedData;
 use crate::multiversion_map::MVM;
+use crate::server::{CommonQuery, ServerContext};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::ops::{Add, Bound, Deref, Sub};
@@ -581,34 +582,6 @@ enum ReadProtectionGrant {
   DeadlockSafetyWriteAbort { timestamp: Timestamp, orig_p: OrigP },
 }
 
-/// This is a convenience enum to strealine the sending of PCSA messages to Tablets and Slaves.
-enum CommonQuery {
-  PerformQuery(msg::PerformQuery),
-  CancelQuery(msg::CancelQuery),
-  QueryAborted(msg::QueryAborted),
-  QuerySuccess(msg::QuerySuccess),
-}
-
-impl CommonQuery {
-  fn tablet_msg(self) -> msg::TabletMessage {
-    match self {
-      CommonQuery::PerformQuery(query) => msg::TabletMessage::PerformQuery(query),
-      CommonQuery::CancelQuery(query) => msg::TabletMessage::CancelQuery(query),
-      CommonQuery::QueryAborted(query) => msg::TabletMessage::QueryAborted(query),
-      CommonQuery::QuerySuccess(query) => msg::TabletMessage::QuerySuccess(query),
-    }
-  }
-
-  fn slave_msg(self) -> msg::SlaveMessage {
-    match self {
-      CommonQuery::PerformQuery(query) => msg::SlaveMessage::PerformQuery(query),
-      CommonQuery::CancelQuery(query) => msg::SlaveMessage::CancelQuery(query),
-      CommonQuery::QueryAborted(query) => msg::SlaveMessage::QueryAborted(query),
-      CommonQuery::QuerySuccess(query) => msg::SlaveMessage::QuerySuccess(query),
-    }
-  }
-}
-
 // -----------------------------------------------------------------------------------------------
 //  Storage
 // -----------------------------------------------------------------------------------------------
@@ -842,6 +815,21 @@ impl<T: IOTypes> TabletState<T> {
 }
 
 impl<T: IOTypes> TabletContext<T> {
+  fn server_context(&mut self) -> ServerContext<T> {
+    ServerContext {
+      rand: &mut self.rand,
+      clock: &mut self.clock,
+      network_output: &mut self.network_output,
+      this_slave_group_id: &mut self.this_slave_group_id,
+      master_eid: &mut self.master_eid,
+      gossip: &mut self.gossip,
+      sharding_config: &mut self.sharding_config,
+      tablet_address_config: &mut self.tablet_address_config,
+      slave_address_config: &mut self.slave_address_config,
+      master_query_map: &mut self.master_query_map,
+    }
+  }
+
   fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::TabletMessage) {
     match message {
       msg::TabletMessage::PerformQuery(perform_query) => {
@@ -864,7 +852,7 @@ impl<T: IOTypes> TabletContext<T> {
                 state: TransQueryReplanningS::Start,
                 timestamp: gr_query_es.timestamp.clone(),
               };
-              plan_es.start::<T>(self, gr_query_es);
+              plan_es.start::<T>(self.server_context(), gr_query_es);
               match plan_es.state {
                 TransQueryReplanningS::Done(success) => {
                   if success {
@@ -5222,7 +5210,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
 }
 
 impl TransQueryReplanningES {
-  fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>, gr_query_es: &GRQueryES) {
+  fn start<T: IOTypes>(&mut self, ctx: ServerContext<T>, gr_query_es: &GRQueryES) {
     matches!(self.state, TransQueryReplanningS::Start);
     // First, verify that the select columns are in the TransTable.
     let (_, (schema_cols, _)) = gr_query_es
@@ -5276,7 +5264,7 @@ impl TransQueryReplanningES {
       for col in external_cols {
         if !self.context.context_schema.column_context_schema.contains(&col) {
           // This means we need to consult the Master.
-          let master_query_id = mk_qid(&mut ctx.rand);
+          let master_query_id = mk_qid(ctx.rand);
 
           ctx.network_output.send(
             &ctx.master_eid,

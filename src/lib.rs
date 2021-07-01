@@ -10,6 +10,7 @@ pub mod model;
 pub mod multiversion_map;
 pub mod net;
 pub mod query_converter;
+pub mod server;
 pub mod slave;
 pub mod sql_parser;
 pub mod tablet;
