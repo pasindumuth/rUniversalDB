@@ -3193,16 +3193,7 @@ impl<T: IOTypes> TabletContext<T> {
         }
 
         // Compute the Schema of the TableView that will be returned by this TableReadES.
-        let mut res_col_names = Vec::<(ColName, ColType)>::new();
-        for col_name in &es.sql_query.projection.clone() {
-          let col_type = if let Some(pos) = lookup_pos(&self.table_schema.key_cols, col_name) {
-            let (_, col_type) = self.table_schema.key_cols.get(pos).unwrap();
-            col_type.clone()
-          } else {
-            self.table_schema.val_cols.strong_static_read(col_name, es.timestamp).unwrap()
-          };
-          res_col_names.push((col_name.clone(), col_type));
-        }
+        let mut res_col_names = es.sql_query.projection.clone();
 
         // Compute the set of columns to read from the table. This should should include all
         // top-level ColumnRefs that are in expressions but not subqueries (these are included
@@ -3285,7 +3276,7 @@ impl<T: IOTypes> TabletContext<T> {
                 // This means that the current row should be selected for the result.
                 // First, we take the projected columns.
                 let mut res_row = Vec::<ColValN>::new();
-                for (res_col_name, _) in &res_col_names {
+                for res_col_name in &res_col_names {
                   let idx = subtable_schema.iter().position(|k| res_col_name == k).unwrap();
                   res_row.push(subtable_row.get(idx).unwrap().clone());
                 }
@@ -3363,16 +3354,7 @@ impl<T: IOTypes> TabletContext<T> {
           }
 
           // Compute the Schema of the TableView that will be returned by this TransTableReadES.
-          let mut res_col_names = Vec::<(ColName, ColType)>::new();
-          for col_name in &es.sql_query.projection.clone() {
-            let col_type = if let Some(pos) = lookup_pos(&self.table_schema.key_cols, col_name) {
-              let (_, col_type) = self.table_schema.key_cols.get(pos).unwrap();
-              col_type.clone()
-            } else {
-              self.table_schema.val_cols.strong_static_read(col_name, es.timestamp).unwrap()
-            };
-            res_col_names.push((col_name.clone(), col_type));
-          }
+          let mut res_col_names = es.sql_query.projection.clone();
 
           // Compute the position in the TransTableContextRow that we can use to
           // get the index of current TransTableInstance.
@@ -3446,7 +3428,7 @@ impl<T: IOTypes> TabletContext<T> {
                   // This means that the current row should be selected for the result.
                   // First, we take the projected columns.
                   let mut res_row = Vec::<ColValN>::new();
-                  for (res_col_name, _) in &res_col_names {
+                  for res_col_name in &res_col_names {
                     let idx = trans_table_schema.iter().position(|k| res_col_name == k).unwrap();
                     res_row.push(trans_table_row.get(idx).unwrap().clone());
                   }
@@ -3529,14 +3511,9 @@ impl<T: IOTypes> TabletContext<T> {
         }
 
         // Compute the Schema of the TableView that will be returned by this MSTableWriteES.
-        let mut res_col_names = Vec::<(ColName, ColType)>::new();
-        res_col_names.extend(self.table_schema.key_cols.clone());
-        for (col_name, _) in &es.sql_query.assignment.clone() {
-          res_col_names.push((
-            col_name.clone(),
-            self.table_schema.val_cols.strong_static_read(col_name, es.timestamp).unwrap(),
-          ));
-        }
+        let mut res_col_names = Vec::<ColName>::new();
+        res_col_names.extend(self.table_schema.key_cols.iter().map(|(name, _)| name.clone()));
+        res_col_names.extend(es.sql_query.assignment.iter().map(|(name, _)| name.clone()));
 
         // Compute the set of columns to read from the table. This should should include all
         // top-level ColumnRefs that are in expressions but not subqueries (these are included
@@ -3651,11 +3628,10 @@ impl<T: IOTypes> TabletContext<T> {
         }
 
         // Build the success message and respond.
-        let result_schema = Vec::from_iter(res_col_names.iter().map(|(col, _)| col.clone()));
         let success_msg = msg::QuerySuccess {
           return_path: es.sender_path.query_id.clone(),
           query_id: query_id.clone(),
-          result: (result_schema, vec![res_table_view]),
+          result: (res_col_names, vec![res_table_view]),
           new_rms: es.new_rms.iter().cloned().collect(),
         };
         let sender_path = es.sender_path.clone();
@@ -3715,16 +3691,7 @@ impl<T: IOTypes> TabletContext<T> {
         }
 
         // Compute the Schema of the TableView that will be returned by this MSTableReadES.
-        let mut res_col_names = Vec::<(ColName, ColType)>::new();
-        for col_name in &es.sql_query.projection.clone() {
-          let col_type = if let Some(pos) = lookup_pos(&self.table_schema.key_cols, col_name) {
-            let (_, col_type) = self.table_schema.key_cols.get(pos).unwrap();
-            col_type.clone()
-          } else {
-            self.table_schema.val_cols.strong_static_read(col_name, es.timestamp).unwrap()
-          };
-          res_col_names.push((col_name.clone(), col_type));
-        }
+        let mut res_col_names = es.sql_query.projection.clone();
 
         // Compute the set of columns to read from the table. This should should include all
         // top-level ColumnRefs that are in expressions but not subqueries (these are included
@@ -3808,7 +3775,7 @@ impl<T: IOTypes> TabletContext<T> {
                 // This means that the current row should be selected for the result.
                 // First, we take the projected columns.
                 let mut res_row = Vec::<ColValN>::new();
-                for (res_col_name, _) in &res_col_names {
+                for res_col_name in &res_col_names {
                   let idx = subtable_schema.iter().position(|k| res_col_name == k).unwrap();
                   res_row.push(subtable_row.get(idx).unwrap().clone());
                 }

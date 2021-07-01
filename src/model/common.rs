@@ -72,7 +72,7 @@ pub struct Gen(pub u32);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TableView {
   /// The keys are the rows, and the values are the number of repetitions.
-  pub col_names: Vec<(ColName, ColType)>,
+  pub col_names: Vec<ColName>,
   /// The keys are the rows, and the values are the number of repetitions.
   pub rows: BTreeMap<Vec<ColValN>, u64>,
 }
