@@ -15,3 +15,4 @@ pub mod slave;
 pub mod sql_parser;
 pub mod tablet;
 pub mod test_utils;
+pub mod trans_read_es;

@@ -21,7 +21,9 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::model::message::AbortedData;
 use crate::multiversion_map::MVM;
-use crate::server::{CommonQuery, ServerContext};
+use crate::server::{
+  evaluate_super_simple_select, evaluate_update, mk_eval_error, CommonQuery, ServerContext,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::ops::{Add, Bound, Deref, Sub};
@@ -32,7 +34,7 @@ use std::sync::Arc;
 //  CommonQueryReplanningES
 // -----------------------------------------------------------------------------------------------
 
-trait QueryReplanningSqlView {
+pub trait QueryReplanningSqlView {
   /// Get the projected Columns of the query.
   fn projected_cols(&self, table_schema: &TableSchema) -> Vec<ColName>;
   /// Get the TablePath that the query reads.
@@ -131,7 +133,7 @@ struct CommonQueryReplanningES<T: QueryReplanningSqlView> {
 //  SubqueryStatus
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
-struct SubqueryLockingSchemas {
+pub struct SubqueryLockingSchemas {
   // Recall that we only get to this State if a Subquery had failed. We hold onto
   // the prior ColNames and TransTableNames (rather than computating from the QueryPlan
   // again) so that we don't potentially lose prior ColName amendments.
@@ -142,7 +144,7 @@ struct SubqueryLockingSchemas {
 }
 
 #[derive(Debug)]
-struct SubqueryPendingReadRegion {
+pub struct SubqueryPendingReadRegion {
   new_columns: Vec<ColName>,
   trans_table_names: Vec<TransTableName>,
   read_region: TableRegion,
@@ -150,18 +152,18 @@ struct SubqueryPendingReadRegion {
 }
 
 #[derive(Debug)]
-struct SubqueryPending {
-  context: Rc<Context>,
+pub struct SubqueryPending {
+  pub context: Rc<Context>,
 }
 
 #[derive(Debug)]
-struct SubqueryFinished {
-  context: Rc<Context>,
-  result: Vec<TableView>,
+pub struct SubqueryFinished {
+  pub context: Rc<Context>,
+  pub result: Vec<TableView>,
 }
 
 #[derive(Debug)]
-enum SingleSubqueryStatus {
+pub enum SingleSubqueryStatus {
   LockingSchemas(SubqueryLockingSchemas),
   PendingReadRegion(SubqueryPendingReadRegion),
   Pending(SubqueryPending),
@@ -169,8 +171,8 @@ enum SingleSubqueryStatus {
 }
 
 #[derive(Debug)]
-struct SubqueryStatus {
-  subqueries: HashMap<QueryId, SingleSubqueryStatus>,
+pub struct SubqueryStatus {
+  pub subqueries: HashMap<QueryId, SingleSubqueryStatus>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -183,16 +185,16 @@ struct Pending {
 }
 
 #[derive(Debug)]
-struct Executing {
-  completed: usize,
+pub struct Executing {
+  pub completed: usize,
   /// This fields is used to associate a subquery's QueryId with the position
   /// that it appears in the SQL query.
-  subquery_pos: Vec<QueryId>,
-  subquery_status: SubqueryStatus,
+  pub subquery_pos: Vec<QueryId>,
+  pub subquery_status: SubqueryStatus,
 
   // We remember the row_region we had computed previously. If we have to protected
   // more ReadRegions due to InternalColumnsDNEs, the `row_region` will be the same.
-  row_region: Vec<KeyBound>,
+  pub row_region: Vec<KeyBound>,
 }
 
 #[derive(Debug)]
@@ -314,7 +316,7 @@ enum FullTransTableReadES {
 //  GRQueryES
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
-struct ReadStage {
+pub struct ReadStage {
   stage_idx: usize,
   /// This fields maps the indices of the GRQueryES Context to that of the Context
   /// in this SubqueryStatus. We cache this here since it's computed when the child
@@ -325,12 +327,12 @@ struct ReadStage {
 }
 
 #[derive(Debug)]
-struct MasterQueryReplanning {
+pub struct MasterQueryReplanning {
   master_query_id: QueryId,
 }
 
 #[derive(Debug)]
-enum GRExecutionS {
+pub enum GRExecutionS {
   Start,
   ReadStage(ReadStage),
   MasterQueryReplanning(MasterQueryReplanning),
@@ -339,39 +341,39 @@ enum GRExecutionS {
 // Recall that the elements don't need to preserve the order of the TransTables, since the
 // sql_query does that for us (thus, we can use HashMaps).
 #[derive(Debug)]
-struct GRQueryPlan {
+pub struct GRQueryPlan {
   pub gossip_gen: Gen,
   pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,
   pub col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 }
 
 #[derive(Debug)]
-struct GRQueryES {
-  root_query_path: QueryPath,
-  tier_map: TierMap,
-  timestamp: Timestamp,
-  context: Rc<Context>,
+pub struct GRQueryES {
+  pub root_query_path: QueryPath,
+  pub tier_map: TierMap,
+  pub timestamp: Timestamp,
+  pub context: Rc<Context>,
 
   /// The elements of the outer Vec corresponds to every ContextRow in the
   /// `context`. The elements of the inner vec corresponds to the elements in
   /// `trans_table_view`. The `usize` indexes into an element in the corresponding
   /// Vec<TableView> inside the `trans_table_view`.
-  new_trans_table_context: Vec<Vec<usize>>,
+  pub new_trans_table_context: Vec<Vec<usize>>,
 
   // Fields needed for responding.
-  query_id: QueryId,
+  pub query_id: QueryId,
 
   // Query-related fields.
-  sql_query: proc::GRQuery,
-  query_plan: GRQueryPlan,
+  pub sql_query: proc::GRQuery,
+  pub query_plan: GRQueryPlan,
 
   // The dynamically evolving fields.
-  new_rms: HashSet<QueryPath>,
-  trans_table_view: Vec<(TransTableName, (Vec<ColName>, Vec<TableView>))>,
-  state: GRExecutionS,
+  pub new_rms: HashSet<QueryPath>,
+  pub trans_table_view: Vec<(TransTableName, (Vec<ColName>, Vec<TableView>))>,
+  pub state: GRExecutionS,
 
   /// This holds the path to the parent ES.
-  orig_p: OrigP,
+  pub orig_p: OrigP,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -852,7 +854,7 @@ impl<T: IOTypes> TabletContext<T> {
                 state: TransQueryReplanningS::Start,
                 timestamp: gr_query_es.timestamp.clone(),
               };
-              plan_es.start::<T>(self.server_context(), gr_query_es);
+              plan_es.start::<T>(&mut self.server_context(), gr_query_es);
               match plan_es.state {
                 TransQueryReplanningS::Done(success) => {
                   if success {
@@ -2160,6 +2162,7 @@ impl<T: IOTypes> TabletContext<T> {
 
   fn get_path(&self, statuses: &Statuses, query_id: &QueryId) -> QueryPath {
     if let Some(read_es) = statuses.full_table_read_ess.get(query_id) {
+      // TODO: shouldn't we also switch over the QueryReplanning state?
       let es = cast!(FullTableReadES::Executing, read_es).unwrap();
       es.sender_path.clone()
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get(&query_id) {
@@ -2347,9 +2350,9 @@ impl<T: IOTypes> TabletContext<T> {
 
           let conv = ContextConverter::trans_general_create(
             &es.context.context_schema,
+            trans_table_schema,
             new_columns,
             old_context_schema.trans_table_names(),
-            trans_table_schema,
           );
 
           // Compute the position in the TransTableContextRow that we can use to
@@ -3332,30 +3335,6 @@ impl<T: IOTypes> TabletContext<T> {
         if let Some(gr_query_es) = statuses.gr_query_ess.get(&es.location_prefix.query_id) {
           let num_subqueries = executing_state.subquery_pos.len();
 
-          // Construct the ContextConverters for all subqueries
-          let mut converters = Vec::<ContextConverter>::new();
-          for subquery_id in &executing_state.subquery_pos {
-            let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
-            let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-            let context_schema = &result.context.context_schema;
-            converters.push(ContextConverter::general_create(
-              &es.context.context_schema,
-              context_schema.column_context_schema.clone(),
-              context_schema.trans_table_names(),
-              &es.timestamp,
-              &self.table_schema,
-            ));
-          }
-
-          // Setup the child_context_row_maps that will be populated over time.
-          let mut child_context_row_maps = Vec::<HashMap<ContextRow, usize>>::new();
-          for _ in 0..num_subqueries {
-            child_context_row_maps.push(HashMap::new());
-          }
-
-          // Compute the Schema of the TableView that will be returned by this TransTableReadES.
-          let mut res_col_names = es.sql_query.projection.clone();
-
           // Compute the position in the TransTableContextRow that we can use to
           // get the index of current TransTableInstance.
           let trans_table_name = es.location_prefix.trans_table_name.clone();
@@ -3372,6 +3351,29 @@ impl<T: IOTypes> TabletContext<T> {
             .iter()
             .find(|(name, _)| name == &trans_table_name)
             .unwrap();
+
+          // Construct the ContextConverters for all subqueries
+          let mut converters = Vec::<ContextConverter>::new();
+          for subquery_id in &executing_state.subquery_pos {
+            let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+            let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
+            let context_schema = &result.context.context_schema;
+            converters.push(ContextConverter::trans_general_create(
+              &es.context.context_schema,
+              trans_table_schema,
+              context_schema.column_context_schema.clone(),
+              context_schema.trans_table_names(),
+            ));
+          }
+
+          // Setup the child_context_row_maps that will be populated over time.
+          let mut child_context_row_maps = Vec::<HashMap<ContextRow, usize>>::new();
+          for _ in 0..num_subqueries {
+            child_context_row_maps.push(HashMap::new());
+          }
+
+          // Compute the Schema of the TableView that will be returned by this TransTableReadES.
+          let mut res_col_names = es.sql_query.projection.clone();
 
           let mut res_table_views = Vec::<TableView>::new();
           for context_row in &es.context.context_rows {
@@ -4202,135 +4204,6 @@ impl<T: IOTypes> TabletContext<T> {
   }
 }
 
-/// Maps all `ColName`s to `ColValN`s by first using that in the subtable, and then the context.
-fn mk_col_map(
-  column_context_schema: &Vec<ColName>,
-  column_context_row: &Vec<Option<ColVal>>,
-  subtable_schema: &Vec<ColName>,
-  subtable_row: &Vec<Option<ColVal>>,
-) -> HashMap<ColName, ColValN> {
-  let mut col_map = HashMap::<ColName, ColValN>::new();
-  assert_eq!(subtable_schema.len(), subtable_row.len());
-  for i in 0..subtable_schema.len() {
-    let col_name = subtable_schema.get(i).unwrap().clone();
-    let col_val = subtable_row.get(i).unwrap().clone();
-    col_map.insert(col_name, col_val);
-  }
-
-  assert_eq!(column_context_schema.len(), column_context_row.len());
-  for i in 0..column_context_schema.len() {
-    let col_name = column_context_schema.get(i).unwrap().clone();
-    let col_val = column_context_row.get(i).unwrap().clone();
-    if !col_map.contains_key(&col_name) {
-      // If the ColName was already in the subtable, we don't take the ColValN here.
-      col_map.insert(col_name, col_val);
-    }
-  }
-  return col_map;
-}
-
-/// Verifies that each `TableView` only contains one cell, and then extract that cell value.
-fn extract_subquery_vals(raw_subquery_vals: &Vec<TableView>) -> Result<Vec<ColValN>, EvalError> {
-  // Next, we reduce the subquery values to single values.
-  let mut subquery_vals = Vec::<ColValN>::new();
-  for raw_val in raw_subquery_vals {
-    if raw_val.rows.len() != 1 {
-      return Err(EvalError::InvalidSubqueryResult);
-    }
-
-    // Check that there is one row, and that row has only one column value.
-    let (row, count) = raw_val.rows.iter().next().unwrap();
-    if row.len() != 1 || count != &1 {
-      return Err(EvalError::InvalidSubqueryResult);
-    }
-
-    subquery_vals.push(row.get(0).unwrap().clone());
-  }
-  Ok(subquery_vals)
-}
-
-#[derive(Debug, Default)]
-struct EvaluatedSuperSimpleSelect {
-  selection: ColValN,
-}
-
-/// This evaluates a SuperSimpleSelect completely. When a ColumnRef is encountered
-/// in the `expr`, we first search `subtable_row`, and if that's not present, we search the
-/// `column_context_row`. In addition, `subquery_vals` should have a length equal to that of
-/// how many GRQuerys there are in the `expr`.
-fn evaluate_super_simple_select(
-  select: &proc::SuperSimpleSelect,
-  column_context_schema: &Vec<ColName>,
-  column_context_row: &Vec<ColValN>,
-  subtable_schema: &Vec<ColName>,
-  subtable_row: &Vec<ColValN>,
-  raw_subquery_vals: &Vec<TableView>,
-) -> Result<EvaluatedSuperSimpleSelect, EvalError> {
-  // We map all ColNames to their ColValNs using the Context and subtable.
-  let col_map =
-    mk_col_map(column_context_schema, column_context_row, subtable_schema, subtable_row);
-
-  // Next, we reduce the subquery values to single values.
-  let subquery_vals = extract_subquery_vals(raw_subquery_vals)?;
-
-  // Construct the Evaluated Select
-  let mut next_subquery_idx = 0;
-  Ok(EvaluatedSuperSimpleSelect {
-    selection: evaluate_c_expr(&construct_cexpr(
-      &select.selection,
-      &col_map,
-      &subquery_vals,
-      &mut next_subquery_idx,
-    )?)?,
-  })
-}
-
-#[derive(Debug, Default)]
-struct EvaluatedUpdate {
-  assignment: Vec<(ColName, ColValN)>,
-  selection: ColValN,
-}
-
-/// This evaluates a Update completely. When a ColumnRef is encountered
-/// in the `expr`, we first search `subtable_row`, and if that's not present, we search the
-/// `column_context_row`. In addition, `subquery_vals` should have a length equal to that of
-/// how many GRQuerys there are in the `expr`.
-fn evaluate_update(
-  update: &proc::Update,
-  column_context_schema: &Vec<ColName>,
-  column_context_row: &Vec<ColValN>,
-  subtable_schema: &Vec<ColName>,
-  subtable_row: &Vec<ColValN>,
-  raw_subquery_vals: &Vec<TableView>,
-) -> Result<EvaluatedUpdate, EvalError> {
-  // We map all ColNames to their ColValNs using the Context and subtable.
-  let col_map =
-    mk_col_map(column_context_schema, column_context_row, subtable_schema, subtable_row);
-
-  // Next, we reduce the subquery values to single values.
-  let subquery_vals = extract_subquery_vals(raw_subquery_vals)?;
-
-  // Construct the Evaluated Update
-  let mut evaluated_update = EvaluatedUpdate::default();
-  let mut next_subquery_idx = 0;
-  for (col_name, expr) in &update.assignment {
-    let c_expr = construct_cexpr(expr, &col_map, &subquery_vals, &mut next_subquery_idx)?;
-    evaluated_update.assignment.push((col_name.clone(), evaluate_c_expr(&c_expr)?));
-  }
-  evaluated_update.selection = evaluate_c_expr(&construct_cexpr(
-    &update.selection,
-    &col_map,
-    &subquery_vals,
-    &mut next_subquery_idx,
-  )?)?;
-
-  return Ok(evaluated_update);
-}
-
-fn mk_eval_error(eval_error: EvalError) -> msg::QueryError {
-  msg::QueryError::TypeError { msg: format!("{:?}", eval_error) }
-}
-
 /// This is used to compute the Keybound of a selection expression for
 /// a given ContextRow containing external columns. Recall that the
 /// selection expression might have ColumnRefs that aren't part of
@@ -4408,26 +4281,26 @@ impl ContextKeyboundComputer {
 /// Importantly, order within `safe_present_split`, `external_split`, and
 /// `trans_table_split` aren't guaranteed.
 #[derive(Default)]
-struct ContextConverter {
+pub struct ContextConverter {
   // This is the child query's ContextSchema, and it's computed in the constructor.
-  context_schema: ContextSchema,
+  pub context_schema: ContextSchema,
 
   // These fields are the constituents of the `context_schema` above.
-  safe_present_split: Vec<ColName>,
-  external_split: Vec<ColName>,
-  trans_table_split: Vec<TransTableName>,
+  pub safe_present_split: Vec<ColName>,
+  pub external_split: Vec<ColName>,
+  pub trans_table_split: Vec<TransTableName>,
 
   /// This maps the `ColName`s in `external_split` to their positions in the
   /// parent ColumnContextSchema.
-  context_col_index: HashMap<ColName, usize>,
+  pub context_col_index: HashMap<ColName, usize>,
   /// This maps the `TransTableName`s in `trans_table_split` to their positions in the
   /// parent TransTableContextSchema.
-  context_trans_table_index: HashMap<TransTableName, usize>,
+  pub context_trans_table_index: HashMap<TransTableName, usize>,
 }
 
 impl ContextConverter {
   /// Compute all of the data members from a QueryPlan.
-  fn create_from_query_plan(
+  pub fn create_from_query_plan(
     parent_context_schema: &ContextSchema,
     parent_node: &FrozenColUsageNode,
     subquery_index: usize,
@@ -4466,7 +4339,7 @@ impl ContextConverter {
   /// In addition they must either appear present in the `table_schema`, or in the
   /// `parent_context_schema`. Finally, the `child_trans_table_names` must be contained
   /// in the `parent_context_schema` as well.
-  fn general_create(
+  pub fn general_create(
     parent_context_schema: &ContextSchema,
     child_columns: Vec<ColName>,
     child_trans_table_names: Vec<TransTableName>,
@@ -4497,11 +4370,11 @@ impl ContextConverter {
   /// Here, all ColNames in `child_columns` either appear present in the `trans_table_schema`,
   /// or in the `parent_context_schema`. In addition, the `child_trans_table_names` must be
   /// contained in the `parent_context_schema` as well.
-  fn trans_general_create(
+  pub fn trans_general_create(
     parent_context_schema: &ContextSchema,
+    trans_table_schema: &Vec<ColName>,
     child_columns: Vec<ColName>,
     child_trans_table_names: Vec<TransTableName>,
-    trans_table_schema: &Vec<ColName>,
   ) -> ContextConverter {
     let mut safe_present_split = Vec::<ColName>::new();
     let mut external_split = Vec::<ColName>::new();
@@ -4526,7 +4399,7 @@ impl ContextConverter {
 
   /// Moves the `*_split` variables into a ContextConverter and compute the various
   /// convenience data.
-  fn finish_creation(
+  pub fn finish_creation(
     parent_context_schema: &ContextSchema,
     safe_present_split: Vec<ColName>,
     external_split: Vec<ColName>,
@@ -4571,7 +4444,7 @@ impl ContextConverter {
   /// Computes a child ContextRow. Note that the schema of `row` should be
   /// `self.safe_present_cols`. (Here, `parent_context_row` must have the schema
   /// of the `parent_context_schema` that was passed into the constructors).
-  fn compute_child_context_row(
+  pub fn compute_child_context_row(
     &self,
     parent_context_row: &ContextRow,
     mut row: Vec<ColValN>,
@@ -4593,7 +4466,7 @@ impl ContextConverter {
 
   /// Extracts the subset of `subtable_row` whose ColNames correspond to
   /// `self.safe_present_cols` and returns it in the order of `self.safe_present_cols`.
-  fn extract_child_relevent_cols(
+  pub fn extract_child_relevent_cols(
     &self,
     subtable_schema: &Vec<ColName>,
     subtable_row: &Vec<ColValN>,
@@ -4609,7 +4482,7 @@ impl ContextConverter {
   /// Extracts the column values for the ColNames in `external_split`. Here,
   /// `parent_context_row` must have the schema of `parent_context_schema` that was passed
   /// into the construct, as usual.
-  fn compute_col_context(&self, parent_context_row: &ContextRow) -> HashMap<ColName, ColValN> {
+  pub fn compute_col_context(&self, parent_context_row: &ContextRow) -> HashMap<ColName, ColValN> {
     // First, map all columns in `external_split` to their values in this ContextRow.
     let mut col_context = HashMap::<ColName, ColValN>::new();
     for (col, index) in &self.context_col_index {
@@ -5177,7 +5050,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
 }
 
 impl TransQueryReplanningES {
-  fn start<T: IOTypes>(&mut self, ctx: ServerContext<T>, gr_query_es: &GRQueryES) {
+  fn start<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>, gr_query_es: &GRQueryES) {
     matches!(self.state, TransQueryReplanningS::Start);
     // First, verify that the select columns are in the TransTable.
     let (_, (schema_cols, _)) = gr_query_es
