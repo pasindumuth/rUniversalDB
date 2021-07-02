@@ -92,6 +92,10 @@ enum TransTableAction {
   /// This tells the parent Server that this TransTableReadES is done (having
   /// sent back responses, etc).
   Done,
+  /// This tells the parent Server that this TransTableReadES is completed in
+  /// failure, and that the given `QueryId`s (subqueries) should be Cleaned Up
+  /// along with this one.
+  ExitAndCleanUp(Vec<QueryId>),
 }
 
 #[derive(Debug)]
@@ -158,7 +162,7 @@ impl FullTransTableReadES {
       Ok(gr_query_statuses) => gr_query_statuses,
       Err(eval_error) => {
         self.send_query_error(ctx, mk_eval_error(eval_error));
-        return TransTableAction::Done;
+        return self.exit_and_clean_up(ctx);
       }
     };
 
@@ -185,6 +189,147 @@ impl FullTransTableReadES {
 
     // Return the subqueries so that they can be driven from the parent Server.
     return TransTableAction::SendSubqueries(gr_query_statuses);
+  }
+
+  /// Handles InternalColumnsDNE
+  fn handle_internal_columns_dne<T: IOTypes, SourceT: TransTableSource>(
+    &mut self,
+    ctx: &mut ServerContext<T>,
+    trans_table_source: &mut SourceT,
+    subquery_id: QueryId,
+    rem_cols: Vec<ColName>,
+  ) -> TransTableAction {
+    let es = cast!(FullTransTableReadES::Executing, self).unwrap();
+    let executing = cast!(TransExecutionS::Executing, &mut es.state).unwrap();
+
+    let trans_table_name = es.location_prefix.trans_table_name.clone();
+    let trans_table_schema = trans_table_source.get_schema(&es.location_prefix);
+
+    // First, we need to see if the missing columns are in the context. If not, then
+    // we have to exit and clean up, and send an abort. If so, we need to lookup up
+    // the right subquery, create a new subqueryId, construct a new context with a
+    // recomputesubquery function, and then start executing it.
+
+    // First, we check if all columns in `rem_cols` are at least present in the context.
+    let mut missing_cols = Vec::<ColName>::new();
+    for col in &rem_cols {
+      if !trans_table_schema.contains(col) {
+        if !es.context.context_schema.column_context_schema.contains(col) {
+          missing_cols.push(col.clone());
+        }
+      }
+    }
+
+    if !missing_cols.is_empty() {
+      // If there are missing columns, we construct a ColumnsDNE containing
+      // `missing_cols`, send it back to the originator, and finish the ES.
+      self.send_query_aborted(ctx, msg::AbortedData::ColumnsDNE { missing_cols });
+      self.exit_and_clean_up(ctx)
+    } else {
+      // This means there are no missing columns, and so we can try the
+      // GRQueryES again by extending its Context.
+
+      // Find the subquery that just aborted. There should always be such a Subquery.
+      let single_status = (|| {
+        for (id, state) in &executing.subquery_status.subqueries {
+          if id == &subquery_id {
+            return Some(state);
+          }
+        }
+        return None;
+      })()
+      .unwrap();
+      let pending_status = cast!(SingleSubqueryStatus::Pending, single_status).unwrap();
+
+      // We extend the ColumnContextSchema. Recall that we take the ContextSchema
+      // of the previous subquery, rather than recomputing it from the QueryPlan
+      // (since that might be out-of-date).
+      let old_context_schema = &pending_status.context.context_schema;
+      let mut new_columns = old_context_schema.column_context_schema.clone();
+      new_columns.extend(rem_cols);
+
+      let conv = ContextConverter::trans_general_create(
+        &es.context.context_schema,
+        &trans_table_schema,
+        new_columns,
+        old_context_schema.trans_table_names(),
+      );
+
+      // Compute the position in the TransTableContextRow that we can use to
+      // get the index of current TransTableInstance.
+      let trans_table_name_pos = es
+        .context
+        .context_schema
+        .trans_table_context_schema
+        .iter()
+        .position(|prefix| &prefix.trans_table_name == &trans_table_name)
+        .unwrap();
+
+      // Construct the `ContextRow`s. To do this, we iterate over main Query's
+      // `ContextRow`s and, then the rows of the corresponding TransTableInstance.
+      // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
+      let mut new_context_rows = Vec::<ContextRow>::new();
+      let mut new_row_set = HashSet::<ContextRow>::new();
+      for context_row in &es.context.context_rows {
+        // Lookup the relevent TransTableInstance at the given ContextRow
+        let trans_table_instance_pos =
+          context_row.trans_table_context_row.get(trans_table_name_pos).unwrap();
+        let trans_table_instance =
+          trans_table_source.get_instance(&es.location_prefix, *trans_table_instance_pos);
+        // We take each row in the TransTableInstance, couple it with the main ContextRow, and
+        // then get the child ContextRow from `conv`.
+        for (row, _) in &trans_table_instance.rows {
+          let new_context_row = conv.compute_child_context_row(context_row, row.clone());
+          if !new_row_set.contains(&new_context_row) {
+            new_row_set.insert(new_context_row.clone());
+            new_context_rows.push(new_context_row);
+          }
+        }
+      }
+
+      // Finally, compute the context.
+      let context =
+        Rc::new(Context { context_schema: conv.context_schema, context_rows: new_context_rows });
+
+      // We generate a new subquery ID to assign the new SingleSubqueryStatus,
+      // as well as the corresponding GRQueryES.
+      let new_subquery_id = mk_qid(ctx.rand);
+
+      // Construct the GRQueryES
+      let subqueries = collect_select_subqueries(&es.sql_query);
+      let subquery_idx = executing.subquery_pos.iter().position(|id| &subquery_id == id).unwrap();
+      let sql_subquery = subqueries.get(subquery_idx).unwrap().clone();
+      let child = es.query_plan.col_usage_node.children.get(subquery_idx).unwrap();
+      let gr_query_es = GRQueryES {
+        root_query_path: es.root_query_path.clone(),
+        tier_map: es.tier_map.clone(),
+        timestamp: es.timestamp.clone(),
+        context: context.clone(),
+        new_trans_table_context: vec![],
+        query_id: new_subquery_id.clone(),
+        sql_query: sql_subquery,
+        query_plan: GRQueryPlan {
+          gossip_gen: es.query_plan.gossip_gen.clone(),
+          trans_table_schemas: es.query_plan.trans_table_schemas.clone(),
+          col_usage_nodes: child.clone(),
+        },
+        new_rms: Default::default(),
+        trans_table_view: vec![],
+        state: GRExecutionS::Start,
+        orig_p: OrigP::new(es.query_id.clone()),
+      };
+
+      // Update the `executing` state to contain the new subquery_id.
+      executing.subquery_status.subqueries.remove(&subquery_id);
+      executing.subquery_pos[subquery_idx] = new_subquery_id.clone();
+      executing.subquery_status.subqueries.insert(
+        new_subquery_id.clone(),
+        SingleSubqueryStatus::Pending(SubqueryPending { context }),
+      );
+
+      // Return the GRQueryESs for execution.
+      TransTableAction::SendSubqueries(vec![gr_query_es])
+    }
   }
 
   /// Handles a Subquery completing
@@ -321,7 +466,7 @@ impl FullTransTableReadES {
 
           if let Err(eval_error) = eval_res {
             self.send_query_error(ctx, mk_eval_error(eval_error));
-            return TransTableAction::Done;
+            return self.exit_and_clean_up(ctx);
           }
         }
 
@@ -344,11 +489,62 @@ impl FullTransTableReadES {
     }
   }
 
-  /// Sends a QueryError back to location of the `sender_path` in this ES.
-  fn send_query_error<T: IOTypes>(
+  fn handle_cancel_query<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> TransTableAction {
+    self.exit_and_clean_up(ctx)
+  }
+
+  /// This Cleans up any Master queries we launched and it returns instructions for the
+  /// parent Server to follow to clean up subqueries.
+  fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> TransTableAction {
+    match self {
+      FullTransTableReadES::QueryReplanning(es) => {
+        match &es.state {
+          TransQueryReplanningS::Start => {}
+          TransQueryReplanningS::MasterQueryReplanning { master_query_id } => {
+            // Remove if present
+            if ctx.master_query_map.remove(&master_query_id).is_some() {
+              // If the removal was successful, we should also send a Cancellation
+              // message to the Master.
+              ctx.network_output.send(
+                &ctx.master_eid,
+                msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+                  msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
+                )),
+              );
+            }
+          }
+          TransQueryReplanningS::Done(_) => {}
+        }
+        TransTableAction::ExitAndCleanUp(Vec::new())
+      }
+      FullTransTableReadES::Executing(es) => {
+        let mut subquery_ids = Vec::<QueryId>::new();
+        match &es.state {
+          TransExecutionS::Start => {}
+          TransExecutionS::Executing(executing) => {
+            // Here, we need to cancel every Subquery.
+            for (query_id, single_query) in &executing.subquery_status.subqueries {
+              match single_query {
+                SingleSubqueryStatus::LockingSchemas(_) => panic!(),
+                SingleSubqueryStatus::PendingReadRegion(_) => panic!(),
+                SingleSubqueryStatus::Pending(_) => {
+                  subquery_ids.push(query_id.clone());
+                }
+                SingleSubqueryStatus::Finished(_) => {}
+              }
+            }
+          }
+        }
+        TransTableAction::ExitAndCleanUp(subquery_ids)
+      }
+    }
+  }
+
+  /// Sends a QueryAborted with `payload` back to location of the `sender_path` in this ES.
+  fn send_query_aborted<T: IOTypes>(
     &mut self,
     ctx: &mut ServerContext<T>,
-    query_error: msg::QueryError,
+    payload: msg::AbortedData,
   ) {
     let sender_path = match &self {
       FullTransTableReadES::QueryReplanning(es) => es.sender_path.clone(),
@@ -360,9 +556,18 @@ impl FullTransTableReadES {
         FullTransTableReadES::QueryReplanning(es) => es.query_id.clone(),
         FullTransTableReadES::Executing(es) => es.query_id.clone(),
       },
-      payload: msg::AbortedData::QueryError(query_error),
+      payload,
     };
     ctx.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
+  }
+
+  /// Sends a QueryError back to location of the `sender_path` in this ES.
+  fn send_query_error<T: IOTypes>(
+    &mut self,
+    ctx: &mut ServerContext<T>,
+    query_error: msg::QueryError,
+  ) {
+    self.send_query_aborted(ctx, msg::AbortedData::QueryError(query_error));
   }
 }
 
