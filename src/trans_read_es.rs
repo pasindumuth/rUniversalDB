@@ -17,42 +17,42 @@ use crate::trans_read_es::TransTableAction::Wait;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-trait TransTableSource {
-  fn get_instance(&mut self, prefix: &TransTableLocationPrefix, idx: usize) -> &TableView;
+pub trait TransTableSource {
+  fn get_instance(&self, prefix: &TransTableLocationPrefix, idx: usize) -> &TableView;
   fn get_schema(&self, prefix: &TransTableLocationPrefix) -> Vec<ColName>;
 }
 
 #[derive(Debug)]
-enum TransExecutionS {
+pub enum TransExecutionS {
   Start,
   Executing(Executing),
 }
 
 #[derive(Debug)]
-struct TransTableReadES {
-  root_query_path: QueryPath,
-  tier_map: TierMap,
-  location_prefix: TransTableLocationPrefix,
-  context: Rc<Context>,
+pub struct TransTableReadES {
+  pub root_query_path: QueryPath,
+  pub tier_map: TierMap,
+  pub location_prefix: TransTableLocationPrefix,
+  pub context: Rc<Context>,
 
   // Fields needed for responding.
-  sender_path: QueryPath,
-  query_id: QueryId,
+  pub sender_path: QueryPath,
+  pub query_id: QueryId,
 
   // Query-related fields.
-  sql_query: proc::SuperSimpleSelect,
-  query_plan: QueryPlan,
+  pub sql_query: proc::SuperSimpleSelect,
+  pub query_plan: QueryPlan,
 
   // Dynamically evolving fields.
-  new_rms: HashSet<QueryPath>,
-  state: TransExecutionS,
+  pub new_rms: HashSet<QueryPath>,
+  pub state: TransExecutionS,
 
   // Convenience fields
-  timestamp: Timestamp, // The timestamp read from the GRQueryES
+  pub timestamp: Timestamp, // The timestamp read from the GRQueryES
 }
 
 #[derive(Debug)]
-enum TransQueryReplanningS {
+pub enum TransQueryReplanningS {
   Start,
   /// Used to wait on the master
   MasterQueryReplanning {
@@ -62,30 +62,30 @@ enum TransQueryReplanningS {
 }
 
 #[derive(Debug)]
-struct TransQueryReplanningES {
+pub struct TransQueryReplanningES {
   /// The below fields are from PerformQuery and are passed through to TableReadES.
-  root_query_path: QueryPath,
-  tier_map: TierMap,
-  query_id: QueryId,
+  pub root_query_path: QueryPath,
+  pub tier_map: TierMap,
+  pub query_id: QueryId,
 
   // These members are parallel to the messages in `msg::GeneralQuery`.
-  location_prefix: TransTableLocationPrefix,
-  context: Rc<Context>,
-  sql_query: proc::SuperSimpleSelect,
-  query_plan: QueryPlan,
+  pub location_prefix: TransTableLocationPrefix,
+  pub context: Rc<Context>,
+  pub sql_query: proc::SuperSimpleSelect,
+  pub query_plan: QueryPlan,
 
   /// Path of the original sender (needed for responding with errors).
-  sender_path: QueryPath,
+  pub sender_path: QueryPath,
   /// The OrigP of the Task holding this CommonQueryReplanningES
-  orig_p: OrigP,
+  pub orig_p: OrigP,
   /// The state of the CommonQueryReplanningES
-  state: TransQueryReplanningS,
+  pub state: TransQueryReplanningS,
 
   // Convenience fields
-  timestamp: Timestamp, // The timestamp read from the GRQueryES
+  pub timestamp: Timestamp, // The timestamp read from the GRQueryES
 }
 
-enum TransTableAction {
+pub enum TransTableAction {
   /// This tells the parent Server to wait. This is used after this ES sends
   /// out a MasterQueryReplanning, while it's waiting for subqueries, etc.
   Wait,
@@ -101,16 +101,23 @@ enum TransTableAction {
 }
 
 #[derive(Debug)]
-enum FullTransTableReadES {
+pub enum FullTransTableReadES {
   QueryReplanning(TransQueryReplanningES),
   Executing(TransTableReadES),
 }
 
 impl FullTransTableReadES {
-  fn start<T: IOTypes, SourceT: TransTableSource>(
+  pub fn location_prefix(&self) -> &TransTableLocationPrefix {
+    match self {
+      FullTransTableReadES::QueryReplanning(es) => &es.location_prefix,
+      FullTransTableReadES::Executing(es) => &es.location_prefix,
+    }
+  }
+
+  pub fn start<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
-    trans_table_source: &mut SourceT,
+    trans_table_source: &SourceT,
   ) -> TransTableAction {
     let plan_es = cast!(FullTransTableReadES::QueryReplanning, self).unwrap();
     plan_es.start::<T, SourceT>(ctx, trans_table_source);
@@ -142,10 +149,10 @@ impl FullTransTableReadES {
     }
   }
 
-  fn start_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
+  pub fn start_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
-    trans_table_source: &mut SourceT,
+    trans_table_source: &SourceT,
   ) -> TransTableAction {
     let es = cast!(FullTransTableReadES::Executing, self).unwrap();
     assert!(matches!(&es.state, &TransExecutionS::Start));
@@ -253,10 +260,10 @@ impl FullTransTableReadES {
   }
 
   /// Handles InternalColumnsDNE
-  fn handle_internal_columns_dne<T: IOTypes, SourceT: TransTableSource>(
+  pub fn handle_internal_columns_dne<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
-    trans_table_source: &mut SourceT,
+    trans_table_source: &SourceT,
     subquery_id: QueryId,
     rem_cols: Vec<ColName>,
   ) -> TransTableAction {
@@ -394,10 +401,10 @@ impl FullTransTableReadES {
   }
 
   /// Handles a Subquery completing
-  fn handle_subquery_done<T: IOTypes, SourceT: TransTableSource>(
+  pub fn handle_subquery_done<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
-    trans_table_source: &mut SourceT,
+    trans_table_source: &SourceT,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<QueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
@@ -550,13 +557,9 @@ impl FullTransTableReadES {
     }
   }
 
-  fn handle_cancel_query<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> TransTableAction {
-    self.exit_and_clean_up(ctx)
-  }
-
   /// This Cleans up any Master queries we launched and it returns instructions for the
   /// parent Server to follow to clean up subqueries.
-  fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> TransTableAction {
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> TransTableAction {
     match self {
       FullTransTableReadES::QueryReplanning(es) => {
         match &es.state {
@@ -602,7 +605,7 @@ impl FullTransTableReadES {
   }
 
   /// Sends a QueryAborted with `payload` back to location of the `sender_path` in this ES.
-  fn send_query_aborted<T: IOTypes>(
+  pub fn send_query_aborted<T: IOTypes>(
     &mut self,
     ctx: &mut ServerContext<T>,
     payload: msg::AbortedData,
@@ -623,7 +626,7 @@ impl FullTransTableReadES {
   }
 
   /// Sends a QueryError back to location of the `sender_path` in this ES.
-  fn send_query_error<T: IOTypes>(
+  pub fn send_query_error<T: IOTypes>(
     &mut self,
     ctx: &mut ServerContext<T>,
     query_error: msg::QueryError,
