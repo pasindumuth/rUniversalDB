@@ -47,10 +47,9 @@ pub fn lookup_pos<K: Eq, V>(assoc: &Vec<(K, V)>, key: &K) -> Option<usize> {
   assoc.iter().position(|(k, _)| k == key)
 }
 
-// NOTE: We run into annoying lifetime problems here. Figure out later.
-// pub fn lookup<'a, K: Eq, V>(assoc: &Vec<(K, V)>, key: &K) -> Option<&'a V> {
-//   assoc.iter().find(|(k, _)| k == key).map(|(_, v)| v)
-// }
+pub fn lookup<'a, K: Eq, V>(assoc: &'a Vec<(K, V)>, key: &K) -> Option<&'a V> {
+  assoc.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
 
 // -----------------------------------------------------------------------------------------------
 //  Table Schema

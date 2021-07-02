@@ -3,7 +3,7 @@ use crate::col_usage::{
   node_external_trans_tables, nodes_external_trans_tables, ColUsagePlanner, FrozenColUsageNode,
 };
 use crate::common::{
-  lookup_pos, merge_table_views, mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
+  lookup, lookup_pos, merge_table_views, mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
   QueryPlan, TMStatus, TMWaitValue, TableRegion, TableSchema,
 };
 use crate::expression::{
@@ -310,25 +310,17 @@ pub struct GRQueryES {
 }
 
 // TODO: create an auxiliary struct to hold the `trans_table_instances` to avoid
-// constant lookup. Also, fix the lookup function for vector maps.
+// constant lookup.
 
 impl TransTableSource for GRQueryES {
   fn get_instance(&self, prefix: &TransTableLocationPrefix, idx: usize) -> &TableView {
-    let (_, (_, trans_table_instances)) = self
-      .trans_table_view
-      .iter()
-      .find(|(trans_table_name, _)| trans_table_name == &prefix.trans_table_name)
-      .unwrap();
-    trans_table_instances.get(idx).unwrap()
+    let (_, instances) = lookup(&self.trans_table_view, &prefix.trans_table_name).unwrap();
+    instances.get(idx).unwrap()
   }
 
   fn get_schema(&self, prefix: &TransTableLocationPrefix) -> Vec<ColName> {
-    let (_, (trans_table_schema, _)) = self
-      .trans_table_view
-      .iter()
-      .find(|(trans_table_name, _)| trans_table_name == &prefix.trans_table_name)
-      .unwrap();
-    trans_table_schema.clone()
+    let (schema, _) = lookup(&self.trans_table_view, &prefix.trans_table_name).unwrap();
+    schema.clone()
   }
 }
 
