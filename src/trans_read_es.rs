@@ -6,10 +6,12 @@ use crate::model::common::{
 };
 use crate::model::common::{Context, QueryId, QueryPath, TierMap, TransTableLocationPrefix};
 use crate::model::message as msg;
-use crate::server::{evaluate_super_simple_select, mk_eval_error, CommonQuery, ServerContext};
+use crate::server::{
+  evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConverter, ServerContext,
+};
 use crate::tablet::{
-  ContextConverter, Executing, GRExecutionS, GRQueryES, GRQueryPlan, QueryReplanningSqlView,
-  SingleSubqueryStatus, SubqueryFinished, SubqueryPending, SubqueryStatus,
+  Executing, GRExecutionS, GRQueryES, GRQueryPlan, QueryReplanningSqlView, SingleSubqueryStatus,
+  SubqueryFinished, SubqueryPending, SubqueryStatus,
 };
 use crate::trans_read_es::TransTableAction::Wait;
 use std::collections::{HashMap, HashSet};
@@ -147,24 +149,83 @@ impl FullTransTableReadES {
   ) -> TransTableAction {
     let es = cast!(FullTransTableReadES::Executing, self).unwrap();
     assert!(matches!(&es.state, &TransExecutionS::Start));
-    let gr_query_statuses = match compute_trans_table_subqueries::<T, SourceT>(
-      ctx.rand,
-      &es.location_prefix,
-      trans_table_source,
-      &es.query_id,
-      &es.root_query_path,
-      &es.tier_map,
-      &collect_select_subqueries(&es.sql_query),
-      &es.timestamp,
-      &es.context,
-      &es.query_plan,
-    ) {
-      Ok(gr_query_statuses) => gr_query_statuses,
-      Err(eval_error) => {
-        self.send_query_error(ctx, mk_eval_error(eval_error));
-        return self.exit_and_clean_up(ctx);
+
+    // We first compute all GRQueryESs before adding them to `tablet_status`, in case
+    // an error occurs here and we need to abort.
+
+    // Compute the position in the TransTableContextRow that we can use to
+    // get the index of current TransTableInstance.
+    let trans_table_name_pos = es
+      .context
+      .context_schema
+      .trans_table_context_schema
+      .iter()
+      .position(|prefix| &prefix.trans_table_name == &es.location_prefix.trans_table_name)
+      .unwrap();
+
+    let subqueries = collect_select_subqueries(&es.sql_query);
+
+    let mut gr_query_statuses = Vec::<GRQueryES>::new();
+    for subquery_index in 0..subqueries.len() {
+      let subquery = subqueries.get(subquery_index).unwrap();
+      let child = es.query_plan.col_usage_node.children.get(subquery_index).unwrap();
+
+      // This computes a ContextSchema for the subquery, as well as exposes a conversion
+      // utility to compute ContextRows.
+      let conv = ContextConverter::create_from_query_plan(
+        &es.context.context_schema,
+        &es.query_plan.col_usage_node,
+        subquery_index,
+      );
+
+      // Construct the `ContextRow`s. To do this, we iterate over main Query's
+      // `ContextRow`s and then the corresponding `ContextRow`s for the subquery.
+      // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
+      let mut new_context_rows = Vec::<ContextRow>::new();
+      let mut new_row_set = HashSet::<ContextRow>::new();
+      for context_row in &es.context.context_rows {
+        // Lookup the relevent TransTableInstance at the given ContextRow
+        let trans_table_instance_pos =
+          context_row.trans_table_context_row.get(trans_table_name_pos).unwrap();
+        let trans_table_instance =
+          trans_table_source.get_instance(&es.location_prefix, *trans_table_instance_pos);
+        // We take each row in the TransTableInstance, couple it with the main ContextRow, and
+        // then get the child ContextRow from `conv`.
+        for (row, _) in &trans_table_instance.rows {
+          let new_context_row = conv.compute_child_context_row(context_row, row.clone());
+          if !new_row_set.contains(&new_context_row) {
+            new_row_set.insert(new_context_row.clone());
+            new_context_rows.push(new_context_row);
+          }
+        }
       }
-    };
+
+      // Finally, compute the context.
+      let context =
+        Rc::new(Context { context_schema: conv.context_schema, context_rows: new_context_rows });
+
+      // Construct the GRQueryES
+      let gr_query_id = mk_qid(ctx.rand);
+      let gr_query_es = GRQueryES {
+        root_query_path: es.root_query_path.clone(),
+        tier_map: es.tier_map.clone(),
+        timestamp: es.timestamp.clone(),
+        context,
+        new_trans_table_context: vec![],
+        query_id: gr_query_id.clone(),
+        sql_query: subquery.clone(),
+        query_plan: GRQueryPlan {
+          gossip_gen: es.query_plan.gossip_gen.clone(),
+          trans_table_schemas: es.query_plan.trans_table_schemas.clone(),
+          col_usage_nodes: child.clone(),
+        },
+        new_rms: Default::default(),
+        trans_table_view: vec![],
+        state: GRExecutionS::Start,
+        orig_p: OrigP::new(es.query_id.clone()),
+      };
+      gr_query_statuses.push(gr_query_es)
+    }
 
     // Here, we have computed all GRQueryESs, and we can now add them to
     // `subquery_status`.
@@ -569,98 +630,6 @@ impl FullTransTableReadES {
   ) {
     self.send_query_aborted(ctx, msg::AbortedData::QueryError(query_error));
   }
-}
-
-/// This computes GRQueryESs corresponding to every element in `subqueries` for TransTableReadESs.
-fn compute_trans_table_subqueries<T: IOTypes, SourceT: TransTableSource>(
-  // TabletContext params
-  rand: &mut T::RngCoreT,
-  location_prefix: &TransTableLocationPrefix,
-  trans_table_source: &mut SourceT,
-  // TabletStatus params
-  query_id: &QueryId,
-  root_query_path: &QueryPath,
-  tier_map: &TierMap,
-  subqueries: &Vec<proc::GRQuery>,
-  timestamp: &Timestamp,
-  context: &Context,
-  query_plan: &QueryPlan,
-) -> Result<Vec<GRQueryES>, EvalError> {
-  // We first compute all GRQueryESs before adding them to `tablet_status`, in case
-  // an error occurs here and we need to abort.
-
-  // Compute the position in the TransTableContextRow that we can use to
-  // get the index of current TransTableInstance.
-  let trans_table_name_pos = context
-    .context_schema
-    .trans_table_context_schema
-    .iter()
-    .position(|prefix| &prefix.trans_table_name == &location_prefix.trans_table_name)
-    .unwrap();
-
-  let mut gr_query_statuses = Vec::<GRQueryES>::new();
-  for subquery_index in 0..subqueries.len() {
-    let subquery = subqueries.get(subquery_index).unwrap();
-    let child = query_plan.col_usage_node.children.get(subquery_index).unwrap();
-
-    // This computes a ContextSchema for the subquery, as well as exposes a conversion
-    // utility to compute ContextRows.
-    let conv = ContextConverter::create_from_query_plan(
-      &context.context_schema,
-      &query_plan.col_usage_node,
-      subquery_index,
-    );
-
-    // Construct the `ContextRow`s. To do this, we iterate over main Query's
-    // `ContextRow`s and then the corresponding `ContextRow`s for the subquery.
-    // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
-    let mut new_context_rows = Vec::<ContextRow>::new();
-    let mut new_row_set = HashSet::<ContextRow>::new();
-    for context_row in &context.context_rows {
-      // Lookup the relevent TransTableInstance at the given ContextRow
-      let trans_table_instance_pos =
-        context_row.trans_table_context_row.get(trans_table_name_pos).unwrap();
-      let trans_table_instance =
-        trans_table_source.get_instance(location_prefix, *trans_table_instance_pos);
-      // We take each row in the TransTableInstance, couple it with the main ContextRow, and
-      // then get the child ContextRow from `conv`.
-      for (row, _) in &trans_table_instance.rows {
-        let new_context_row = conv.compute_child_context_row(context_row, row.clone());
-        if !new_row_set.contains(&new_context_row) {
-          new_row_set.insert(new_context_row.clone());
-          new_context_rows.push(new_context_row);
-        }
-      }
-    }
-
-    // Finally, compute the context.
-    let context =
-      Rc::new(Context { context_schema: conv.context_schema, context_rows: new_context_rows });
-
-    // Construct the GRQueryES
-    let gr_query_id = mk_qid(rand);
-    let gr_query_es = GRQueryES {
-      root_query_path: root_query_path.clone(),
-      tier_map: tier_map.clone(),
-      timestamp: timestamp.clone(),
-      context,
-      new_trans_table_context: vec![],
-      query_id: gr_query_id.clone(),
-      sql_query: subquery.clone(),
-      query_plan: GRQueryPlan {
-        gossip_gen: query_plan.gossip_gen.clone(),
-        trans_table_schemas: query_plan.trans_table_schemas.clone(),
-        col_usage_nodes: child.clone(),
-      },
-      new_rms: Default::default(),
-      trans_table_view: vec![],
-      state: GRExecutionS::Start,
-      orig_p: OrigP::new(query_id.clone()),
-    };
-    gr_query_statuses.push(gr_query_es)
-  }
-
-  Ok(gr_query_statuses)
 }
 
 impl TransQueryReplanningES {

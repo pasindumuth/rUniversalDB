@@ -1,12 +1,20 @@
-use crate::common::{GossipData, IOTypes, NetworkOut, OrigP};
-use crate::expression::{construct_cexpr, evaluate_c_expr, EvalError};
+use crate::col_usage::{collect_top_level_cols, nodes_external_trans_tables, FrozenColUsageNode};
+use crate::common::{lookup_pos, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, TableSchema};
+use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
-  proc, ColName, ColVal, ColValN, EndpointId, QueryId, QueryPath, SlaveGroupId, TablePath,
-  TableView, TabletGroupId, TabletKeyRange,
+  proc, ColName, ColType, ColVal, ColValN, ContextRow, ContextSchema, EndpointId, QueryId,
+  QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, Timestamp,
+  TransTableName,
 };
 use crate::model::message as msg;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+// -----------------------------------------------------------------------------------------------
+//  Common ServerContext
+// -----------------------------------------------------------------------------------------------
+// This is used to present a consistent view of Tablets and Slave to shared ESs so
+// that they can execute agnotisticly.
 
 pub struct ServerContext<'a, T: IOTypes> {
   /// IO Objects.
@@ -216,4 +224,249 @@ pub fn evaluate_update(
 
 pub fn mk_eval_error(eval_error: EvalError) -> msg::QueryError {
   msg::QueryError::TypeError { msg: format!("{:?}", eval_error) }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Tablet Utilities
+// -----------------------------------------------------------------------------------------------
+// These are here solely so other shared code can compile (normally, Tablet related thins
+// shouldn't be shared between Tablet and Slave).
+
+/// Computes whether `col` is in `table_schema` at `timestamp`. Note that it must be
+/// ensured that `col` is a locked column at this Timestamp.
+pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
+  if lookup_pos(&table_schema.key_cols, col).is_some() {
+    return true;
+  }
+  // If the `col` wasn't part of the PrimaryKey, then we need to
+  // check the `val_cols` to check for presence
+  if table_schema.val_cols.strong_static_read(col, *timestamp).is_some() {
+    return true;
+  }
+  return false;
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Context Computation
+// -----------------------------------------------------------------------------------------------
+// These enums are used for communication between algorithms.
+
+/// This container computes and remembers how to construct a child ContextRow
+/// from a parent ContexRow + Table row. We have to initially pass in the
+/// the parent's ContextRowSchema, the parent's ColUsageNode, as well as `i`,
+/// which points to the Subquery we want to compute child ContextRows for.
+///
+/// Importantly, order within `safe_present_split`, `external_split`, and
+/// `trans_table_split` aren't guaranteed.
+#[derive(Default)]
+pub struct ContextConverter {
+  // This is the child query's ContextSchema, and it's computed in the constructor.
+  pub context_schema: ContextSchema,
+
+  // These fields are the constituents of the `context_schema` above.
+  pub safe_present_split: Vec<ColName>,
+  pub external_split: Vec<ColName>,
+  pub trans_table_split: Vec<TransTableName>,
+
+  /// This maps the `ColName`s in `external_split` to their positions in the
+  /// parent ColumnContextSchema.
+  pub context_col_index: HashMap<ColName, usize>,
+  /// This maps the `TransTableName`s in `trans_table_split` to their positions in the
+  /// parent TransTableContextSchema.
+  pub context_trans_table_index: HashMap<TransTableName, usize>,
+}
+
+impl ContextConverter {
+  /// Compute all of the data members from a QueryPlan.
+  pub fn create_from_query_plan(
+    parent_context_schema: &ContextSchema,
+    parent_node: &FrozenColUsageNode,
+    subquery_index: usize,
+  ) -> ContextConverter {
+    let child = parent_node.children.get(subquery_index).unwrap();
+
+    let mut safe_present_split = Vec::<ColName>::new();
+    let mut external_split = Vec::<ColName>::new();
+    let trans_table_split = nodes_external_trans_tables(child);
+
+    // Construct the ContextSchema of the GRQueryES.
+    let mut subquery_external_cols = HashSet::<ColName>::new();
+    for (_, (_, node)) in child {
+      subquery_external_cols.extend(node.external_cols.clone());
+    }
+
+    // Split the `subquery_external_cols` by which of those cols are in this Table,
+    // and which aren't.
+    for col in &subquery_external_cols {
+      if parent_node.safe_present_cols.contains(col) {
+        safe_present_split.push(col.clone());
+      } else {
+        external_split.push(col.clone());
+      }
+    }
+
+    ContextConverter::finish_creation(
+      parent_context_schema,
+      safe_present_split,
+      external_split,
+      trans_table_split,
+    )
+  }
+
+  /// Here, all ColNames in `child_columns` must be locked in the `table_schema`.
+  /// In addition they must either appear present in the `table_schema`, or in the
+  /// `parent_context_schema`. Finally, the `child_trans_table_names` must be contained
+  /// in the `parent_context_schema` as well.
+  pub fn general_create(
+    parent_context_schema: &ContextSchema,
+    child_columns: Vec<ColName>,
+    child_trans_table_names: Vec<TransTableName>,
+    timestamp: &Timestamp,
+    table_schema: &TableSchema,
+  ) -> ContextConverter {
+    let mut safe_present_split = Vec::<ColName>::new();
+    let mut external_split = Vec::<ColName>::new();
+
+    // Whichever `ColName`s in `child_columns` that are also present in `table_schema` should
+    // be added to `safe_present_cols`. Otherwise, they should be added to `external_split`.
+    for col in child_columns {
+      if contains_col(table_schema, &col, timestamp) {
+        safe_present_split.push(col);
+      } else {
+        external_split.push(col);
+      }
+    }
+
+    ContextConverter::finish_creation(
+      parent_context_schema,
+      safe_present_split,
+      external_split,
+      child_trans_table_names,
+    )
+  }
+
+  /// Here, all ColNames in `child_columns` either appear present in the `trans_table_schema`,
+  /// or in the `parent_context_schema`. In addition, the `child_trans_table_names` must be
+  /// contained in the `parent_context_schema` as well.
+  pub fn trans_general_create(
+    parent_context_schema: &ContextSchema,
+    trans_table_schema: &Vec<ColName>,
+    child_columns: Vec<ColName>,
+    child_trans_table_names: Vec<TransTableName>,
+  ) -> ContextConverter {
+    let mut safe_present_split = Vec::<ColName>::new();
+    let mut external_split = Vec::<ColName>::new();
+
+    // Whichever `ColName`s in `child_columns` that are also present in `trans_table_schema`
+    // should be added to `safe_present_cols`. Otherwise, they should be added to `external_split`.
+    for col in child_columns {
+      if trans_table_schema.contains(&col) {
+        safe_present_split.push(col);
+      } else {
+        external_split.push(col);
+      }
+    }
+
+    ContextConverter::finish_creation(
+      parent_context_schema,
+      safe_present_split,
+      external_split,
+      child_trans_table_names,
+    )
+  }
+
+  /// Moves the `*_split` variables into a ContextConverter and compute the various
+  /// convenience data.
+  pub fn finish_creation(
+    parent_context_schema: &ContextSchema,
+    safe_present_split: Vec<ColName>,
+    external_split: Vec<ColName>,
+    trans_table_split: Vec<TransTableName>,
+  ) -> ContextConverter {
+    let mut conv = ContextConverter::default();
+    conv.safe_present_split = safe_present_split;
+    conv.external_split = external_split;
+    conv.trans_table_split = trans_table_split;
+
+    // Point all `conv.external_split` columns to their index in main Query's ContextSchema.
+    let col_schema = &parent_context_schema.column_context_schema;
+    for (index, col) in col_schema.iter().enumerate() {
+      if conv.external_split.contains(col) {
+        conv.context_col_index.insert(col.clone(), index);
+      }
+    }
+
+    // Compute the ColumnContextSchema so that `safe_present_split` is first, and
+    // `external_split` is second. This is relevent when we compute ContextRows.
+    conv.context_schema.column_context_schema.extend(conv.safe_present_split.clone());
+    conv.context_schema.column_context_schema.extend(conv.external_split.clone());
+
+    // Point all `trans_table_split` to their index in main Query's ContextSchema.
+    let trans_table_context_schema = &parent_context_schema.trans_table_context_schema;
+    for (index, prefix) in trans_table_context_schema.iter().enumerate() {
+      if conv.trans_table_split.contains(&prefix.trans_table_name) {
+        conv.context_trans_table_index.insert(prefix.trans_table_name.clone(), index);
+      }
+    }
+
+    // Compute the TransTableContextSchema
+    for trans_table_name in &conv.trans_table_split {
+      let index = conv.context_trans_table_index.get(trans_table_name).unwrap();
+      let trans_table_prefix = trans_table_context_schema.get(*index).unwrap().clone();
+      conv.context_schema.trans_table_context_schema.push(trans_table_prefix);
+    }
+
+    conv
+  }
+
+  /// Computes a child ContextRow. Note that the schema of `row` should be
+  /// `self.safe_present_cols`. (Here, `parent_context_row` must have the schema
+  /// of the `parent_context_schema` that was passed into the constructors).
+  pub fn compute_child_context_row(
+    &self,
+    parent_context_row: &ContextRow,
+    mut row: Vec<ColValN>,
+  ) -> ContextRow {
+    for col in &self.external_split {
+      let index = self.context_col_index.get(col).unwrap();
+      row.push(parent_context_row.column_context_row.get(*index).unwrap().clone());
+    }
+    let mut new_context_row = ContextRow::default();
+    new_context_row.column_context_row = row;
+    // Compute the `TransTableContextRow`
+    for trans_table_name in &self.trans_table_split {
+      let index = self.context_trans_table_index.get(trans_table_name).unwrap();
+      let trans_index = parent_context_row.trans_table_context_row.get(*index).unwrap();
+      new_context_row.trans_table_context_row.push(*trans_index);
+    }
+    new_context_row
+  }
+
+  /// Extracts the subset of `subtable_row` whose ColNames correspond to
+  /// `self.safe_present_cols` and returns it in the order of `self.safe_present_cols`.
+  pub fn extract_child_relevent_cols(
+    &self,
+    subtable_schema: &Vec<ColName>,
+    subtable_row: &Vec<ColValN>,
+  ) -> Vec<ColValN> {
+    let mut row = Vec::<ColValN>::new();
+    for col in &self.safe_present_split {
+      let pos = subtable_schema.iter().position(|sub_col| col == sub_col).unwrap();
+      row.push(subtable_row.get(pos).unwrap().clone());
+    }
+    row
+  }
+
+  /// Extracts the column values for the ColNames in `external_split`. Here,
+  /// `parent_context_row` must have the schema of `parent_context_schema` that was passed
+  /// into the construct, as usual.
+  pub fn compute_col_context(&self, parent_context_row: &ContextRow) -> HashMap<ColName, ColValN> {
+    // First, map all columns in `external_split` to their values in this ContextRow.
+    let mut col_context = HashMap::<ColName, ColValN>::new();
+    for (col, index) in &self.context_col_index {
+      col_context
+        .insert(col.clone(), parent_context_row.column_context_row.get(*index).unwrap().clone());
+    }
+    col_context
+  }
 }
