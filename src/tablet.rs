@@ -289,8 +289,8 @@ pub struct GRQueryES {
 
   /// The elements of the outer Vec corresponds to every ContextRow in the
   /// `context`. The elements of the inner vec corresponds to the elements in
-  /// `trans_table_view`. The `usize` indexes into an element in the corresponding
-  /// Vec<TableView> inside the `trans_table_view`.
+  /// `trans_table_views`. The `usize` indexes into an element in the corresponding
+  /// Vec<TableView> inside the `trans_table_views`.
   pub new_trans_table_context: Vec<Vec<usize>>,
 
   // Fields needed for responding.
@@ -302,7 +302,7 @@ pub struct GRQueryES {
 
   // The dynamically evolving fields.
   pub new_rms: HashSet<QueryPath>,
-  pub trans_table_view: Vec<(TransTableName, (Vec<ColName>, Vec<TableView>))>,
+  pub trans_table_views: Vec<(TransTableName, (Vec<ColName>, Vec<TableView>))>,
   pub state: GRExecutionS,
 
   /// This holds the path to the parent ES.
@@ -314,12 +314,12 @@ pub struct GRQueryES {
 
 impl TransTableSource for GRQueryES {
   fn get_instance(&self, prefix: &TransTableLocationPrefix, idx: usize) -> &TableView {
-    let (_, instances) = lookup(&self.trans_table_view, &prefix.trans_table_name).unwrap();
+    let (_, instances) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
     instances.get(idx).unwrap()
   }
 
   fn get_schema(&self, prefix: &TransTableLocationPrefix) -> Vec<ColName> {
-    let (schema, _) = lookup(&self.trans_table_view, &prefix.trans_table_name).unwrap();
+    let (schema, _) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
     schema.clone()
   }
 }
@@ -765,7 +765,7 @@ impl<T: IOTypes> TabletState<T> {
 }
 
 impl<T: IOTypes> TabletContext<T> {
-  fn server_context(&mut self) -> ServerContext<T> {
+  fn ctx(&mut self) -> ServerContext<T> {
     ServerContext {
       rand: &mut self.rand,
       clock: &mut self.clock,
@@ -808,7 +808,7 @@ impl<T: IOTypes> TabletContext<T> {
 
               let full_trans_table_es =
                 statuses.full_trans_table_read_ess.get_mut(&perform_query.query_id).unwrap();
-              let action = full_trans_table_es.start(&mut self.server_context(), gr_query_es);
+              let action = full_trans_table_es.start(&mut self.ctx(), gr_query_es);
               self.handle_trans_es_action(statuses, perform_query.query_id, action);
             } else {
               // This means that the target GRQueryES was deleted. We can send back an
@@ -2084,8 +2084,7 @@ impl<T: IOTypes> TabletContext<T> {
       let es = cast!(FullTableReadES::Executing, read_es).unwrap();
       es.sender_path.clone()
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get(&query_id) {
-      let es = cast!(FullTransTableReadES::Executing, trans_read_es).unwrap();
-      es.sender_path.clone()
+      trans_read_es.get_sender_path::<T>()
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get(&query_id) {
       let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
       es.sender_path.clone()
@@ -2208,7 +2207,7 @@ impl<T: IOTypes> TabletContext<T> {
       let prefix = trans_read_es.location_prefix();
       if let Some(gr_query_es) = statuses.gr_query_ess.get(&prefix.query_id) {
         let action = trans_read_es.handle_internal_columns_dne(
-          &mut self.server_context(),
+          &mut self.ctx(),
           gr_query_es,
           query_id.clone(),
           rem_cols,
@@ -2218,7 +2217,9 @@ impl<T: IOTypes> TabletContext<T> {
         // This means that at some point, the GRQueryES containg the TransTable was cancelled.
         // Thus, we no longer need to continue with the TransTableReadES, and can Exit and Clean
         // Up, sending back a LateralError.
-        self.abort_with_query_error(statuses, &query_id, msg::QueryError::LateralError);
+        let action =
+          trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError);
+        self.handle_trans_es_action(statuses, query_id, action);
       }
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
@@ -2526,8 +2527,8 @@ impl<T: IOTypes> TabletContext<T> {
       // This means the GRQueryES is done, so we send the desired result
       // back to the originator.
       let return_trans_table_pos =
-        lookup_pos(&es.trans_table_view, &es.sql_query.returning).unwrap();
-      let (_, (schema, table_views)) = es.trans_table_view.get(return_trans_table_pos).unwrap();
+        lookup_pos(&es.trans_table_views, &es.sql_query.returning).unwrap();
+      let (_, (schema, table_views)) = es.trans_table_views.get(return_trans_table_pos).unwrap();
 
       // To compute the result, recall that we need to associate the Context to each TableView.
       let mut result = Vec::<TableView>::new();
@@ -2605,7 +2606,7 @@ impl<T: IOTypes> TabletContext<T> {
     let mut local_trans_table_split = Vec::<TransTableName>::new();
     let mut external_trans_table_split = Vec::<TransTableName>::new();
     let completed_local_trans_tables: HashSet<TransTableName> =
-      es.trans_table_view.iter().map(|(name, _)| name).cloned().collect();
+      es.trans_table_views.iter().map(|(name, _)| name).cloned().collect();
     for trans_table_name in context_trans_tables {
       if completed_local_trans_tables.contains(&trans_table_name) {
         local_trans_table_split.push(trans_table_name);
@@ -2686,7 +2687,7 @@ impl<T: IOTypes> TabletContext<T> {
     let mut child_trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
     for trans_table_name in &local_trans_table_split {
       let (_, (schema, _)) =
-        es.trans_table_view.iter().find(|(name, _)| trans_table_name == name).unwrap();
+        es.trans_table_views.iter().find(|(name, _)| trans_table_name == name).unwrap();
       child_trans_table_schemas.insert(trans_table_name.clone(), schema.clone());
     }
     for trans_table_name in &external_trans_table_split {
@@ -3036,7 +3037,7 @@ impl<T: IOTypes> TabletContext<T> {
       let prefix = trans_read_es.location_prefix();
       if let Some(gr_query_es) = statuses.gr_query_ess.get(&prefix.query_id) {
         let action = trans_read_es.handle_subquery_done(
-          &mut self.server_context(),
+          &mut self.ctx(),
           gr_query_es,
           subquery_id,
           subquery_new_rms,
@@ -3044,9 +3045,12 @@ impl<T: IOTypes> TabletContext<T> {
         );
         self.handle_trans_es_action(statuses, query_id, action);
       } else {
-        // The GRQueryES was aborted, so we can stop processing this TransTableReadES.
-        self.abort_with_query_error(statuses, &query_id, msg::QueryError::LateralError);
-        return;
+        // This means that at some point, the GRQueryES containg the TransTable was cancelled.
+        // Thus, we no longer need to continue with the TransTableReadES, and can Exit and Clean
+        // Up, sending back a LateralError.
+        let action =
+          trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError);
+        self.handle_trans_es_action(statuses, query_id, action);
       }
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
@@ -3424,7 +3428,7 @@ impl<T: IOTypes> TabletContext<T> {
     }
 
     // Add the `table_views` to the GRQueryES and advance it.
-    es.trans_table_view.push((trans_table_name.clone(), (schema, table_views)));
+    es.trans_table_views.push((trans_table_name.clone(), (schema, table_views)));
     self.advance_gr_query(statuses, query_id);
   }
 
@@ -3510,7 +3514,7 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// This routes the QueryError to the appropriate top-level ES.
+  /// This routes the QueryError propagated by a GRQueryES up to the appropriate top-level ES.
   fn propagate_query_error(
     &mut self,
     statuses: &mut Statuses,
@@ -3520,8 +3524,9 @@ impl<T: IOTypes> TabletContext<T> {
     let query_id = orig_p.query_id;
     if statuses.full_table_read_ess.contains_key(&query_id) {
       self.abort_with_query_error(statuses, &query_id, query_error)
-    } else if statuses.full_trans_table_read_ess.contains_key(&query_id) {
-      self.abort_with_query_error(statuses, &query_id, query_error)
+    } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+      let action = trans_read_es.handle_query_error(&mut self.ctx(), query_error);
+      self.handle_trans_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get(&query_id) {
       let ms_query_id = ms_write_es.ms_query_id().clone();
       self.abort_ms_with_query_error(statuses, ms_query_id, query_error);
@@ -3630,7 +3635,9 @@ impl<T: IOTypes> TabletContext<T> {
         },
       }
     } else if let Some(mut trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-      let action = trans_read_es.exit_and_clean_up(&mut self.server_context());
+      // Here, we only get a `&mut` to the TransTableRead, since `handle_trans_es_action`
+      // needs it to be present before deleting it.
+      let action = trans_read_es.exit_and_clean_up(&mut self.ctx());
       self.handle_trans_es_action(statuses, query_id, action);
     } else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all remaining participants)
@@ -3935,7 +3942,7 @@ fn compute_subqueries<T: IOTypes, StorageViewT: StorageView>(
         col_usage_nodes: child.clone(),
       },
       new_rms: Default::default(),
-      trans_table_view: vec![],
+      trans_table_views: vec![],
       state: GRExecutionS::Start,
       orig_p: OrigP::new(query_id.clone()),
     };
@@ -4026,7 +4033,7 @@ fn compute_trans_table_subqueries<T: IOTypes>(
         col_usage_nodes: child.clone(),
       },
       new_rms: Default::default(),
-      trans_table_view: vec![],
+      trans_table_views: vec![],
       state: GRExecutionS::Start,
       orig_p: OrigP::new(query_id.clone()),
     };
@@ -4130,7 +4137,7 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
       col_usage_nodes: child.clone(),
     },
     new_rms: Default::default(),
-    trans_table_view: vec![],
+    trans_table_views: vec![],
     state: GRExecutionS::Start,
     orig_p: OrigP::new(query_id.clone()),
   };

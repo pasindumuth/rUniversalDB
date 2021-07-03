@@ -227,7 +227,7 @@ impl FullTransTableReadES {
           col_usage_nodes: child.clone(),
         },
         new_rms: Default::default(),
-        trans_table_view: vec![],
+        trans_table_views: vec![],
         state: GRExecutionS::Start,
         orig_p: OrigP::new(es.query_id.clone()),
       };
@@ -382,7 +382,7 @@ impl FullTransTableReadES {
           col_usage_nodes: child.clone(),
         },
         new_rms: Default::default(),
-        trans_table_view: vec![],
+        trans_table_views: vec![],
         state: GRExecutionS::Start,
         orig_p: OrigP::new(es.query_id.clone()),
       };
@@ -604,22 +604,44 @@ impl FullTransTableReadES {
     }
   }
 
+  /// This is can be called both for if a subquery fails, or if there is a LateralError
+  /// due to the ES owning the TransTable disappears. This simply responds to the sender
+  /// and Exits and Clean Ups this ES.
+  pub fn handle_query_error<T: IOTypes>(
+    &mut self,
+    ctx: &mut ServerContext<T>,
+    query_error: msg::QueryError,
+  ) -> TransTableAction {
+    self.send_query_error(ctx, query_error);
+    self.exit_and_clean_up(ctx)
+  }
+
+  /// Get the `QueryPath` of the sender of this ES.
+  pub fn get_sender_path<T: IOTypes>(&self) -> QueryPath {
+    match &self {
+      FullTransTableReadES::QueryReplanning(es) => es.sender_path.clone(),
+      FullTransTableReadES::Executing(es) => es.sender_path.clone(),
+    }
+  }
+
+  /// Get the `QueryId` of the sender of this ES.
+  pub fn get_query_id<T: IOTypes>(&self) -> QueryId {
+    match &self {
+      FullTransTableReadES::QueryReplanning(es) => es.query_id.clone(),
+      FullTransTableReadES::Executing(es) => es.query_id.clone(),
+    }
+  }
+
   /// Sends a QueryAborted with `payload` back to location of the `sender_path` in this ES.
   pub fn send_query_aborted<T: IOTypes>(
     &mut self,
     ctx: &mut ServerContext<T>,
     payload: msg::AbortedData,
   ) {
-    let sender_path = match &self {
-      FullTransTableReadES::QueryReplanning(es) => es.sender_path.clone(),
-      FullTransTableReadES::Executing(es) => es.sender_path.clone(),
-    };
+    let sender_path = self.get_sender_path::<T>();
     let aborted = msg::QueryAborted {
       return_path: sender_path.query_id.clone(),
-      query_id: match &self {
-        FullTransTableReadES::QueryReplanning(es) => es.query_id.clone(),
-        FullTransTableReadES::Executing(es) => es.query_id.clone(),
-      },
+      query_id: self.get_query_id::<T>(),
       payload,
     };
     ctx.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
