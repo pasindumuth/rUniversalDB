@@ -2090,22 +2090,17 @@ impl<T: IOTypes> TabletContext<T> {
       );
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
       let prefix = trans_read_es.location_prefix();
-      if let Some(gr_query_es) = statuses.gr_query_ess.get(&prefix.query_id) {
-        let action = trans_read_es.handle_internal_columns_dne(
+      let action = if let Some(gr_query_es) = statuses.gr_query_ess.get(&prefix.query_id) {
+        trans_read_es.handle_internal_columns_dne(
           &mut self.ctx(),
           gr_query_es,
           query_id.clone(),
           rem_cols,
-        );
-        self.handle_trans_es_action(statuses, query_id, action);
+        )
       } else {
-        // This means that at some point, the GRQueryES containg the TransTable was cancelled.
-        // Thus, we no longer need to continue with the TransTableReadES, and can Exit and Clean
-        // Up, sending back a LateralError.
-        let action =
-          trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError);
-        self.handle_trans_es_action(statuses, query_id, action);
-      }
+        trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+      };
+      self.handle_trans_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
       let executing = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
@@ -2633,23 +2628,18 @@ impl<T: IOTypes> TabletContext<T> {
       }
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
       let prefix = trans_read_es.location_prefix();
-      if let Some(gr_query_es) = statuses.gr_query_ess.get(&prefix.query_id) {
-        let action = trans_read_es.handle_subquery_done(
+      let action = if let Some(gr_query_es) = statuses.gr_query_ess.get(&prefix.query_id) {
+        trans_read_es.handle_subquery_done(
           &mut self.ctx(),
           gr_query_es,
           subquery_id,
           subquery_new_rms,
           (table_schema, table_views),
-        );
-        self.handle_trans_es_action(statuses, query_id, action);
+        )
       } else {
-        // This means that at some point, the GRQueryES containg the TransTable was cancelled.
-        // Thus, we no longer need to continue with the TransTableReadES, and can Exit and Clean
-        // Up, sending back a LateralError.
-        let action =
-          trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError);
-        self.handle_trans_es_action(statuses, query_id, action);
-      }
+        trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+      };
+      self.handle_trans_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
 

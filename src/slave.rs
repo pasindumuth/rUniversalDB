@@ -845,34 +845,26 @@ impl<T: IOTypes> SlaveContext<T> {
     let query_id = orig_p.query_id;
     let trans_read_es = statuses.full_trans_table_read_ess.get_mut(&query_id).unwrap();
     let prefix = trans_read_es.location_prefix();
-    if let Some(es) = statuses.gr_query_ess.get(&prefix.query_id) {
-      // This handles the case that the TransTable is in a GRQueryES
-      let action = trans_read_es.handle_subquery_done(
+    let action = if let Some(es) = statuses.gr_query_ess.get(&prefix.query_id) {
+      trans_read_es.handle_subquery_done(
         &mut self.ctx(),
         es,
         subquery_id,
         subquery_new_rms,
         (table_schema, table_views),
-      );
-      self.handle_trans_es_action(statuses, query_id, action);
+      )
     } else if let Some(ms_coord_es) = statuses.ms_coord_ess.get(&prefix.query_id) {
-      let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
-      // This handles the case that the TransTable is in a MSQueryCoordES.
-      let action = trans_read_es.handle_subquery_done(
+      trans_read_es.handle_subquery_done(
         &mut self.ctx(),
-        es,
+        cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap(),
         subquery_id,
         subquery_new_rms,
         (table_schema, table_views),
-      );
-      self.handle_trans_es_action(statuses, query_id, action);
+      )
     } else {
-      // This means that at some point, the source containg the TransTable was cancelled.
-      // Thus, we no longer need to continue with the TransTableReadES, and can Exit and Clean
-      // Up, sending back a LateralError.
-      let action = trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError);
-      self.handle_trans_es_action(statuses, query_id, action);
-    }
+      trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+    };
+    self.handle_trans_es_action(statuses, query_id, action);
   }
 
   // This function just routes the InternalColumnsDNE notification
@@ -886,31 +878,15 @@ impl<T: IOTypes> SlaveContext<T> {
     let query_id = orig_p.query_id;
     if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
       let prefix = trans_read_es.location_prefix();
-      if let Some(es) = statuses.gr_query_ess.get(&prefix.query_id) {
-        let action = trans_read_es.handle_internal_columns_dne(
-          &mut self.ctx(),
-          es,
-          query_id.clone(),
-          rem_cols,
-        );
-        self.handle_trans_es_action(statuses, query_id, action);
+      let action = if let Some(es) = statuses.gr_query_ess.get(&prefix.query_id) {
+        trans_read_es.handle_internal_columns_dne(&mut self.ctx(), es, query_id.clone(), rem_cols)
       } else if let Some(ms_coord_es) = statuses.ms_coord_ess.get(&prefix.query_id) {
         let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
-        let action = trans_read_es.handle_internal_columns_dne(
-          &mut self.ctx(),
-          es,
-          query_id.clone(),
-          rem_cols,
-        );
-        self.handle_trans_es_action(statuses, query_id, action);
+        trans_read_es.handle_internal_columns_dne(&mut self.ctx(), es, query_id.clone(), rem_cols)
       } else {
-        // This means that at some point, the GRQueryES containg the TransTable was cancelled.
-        // Thus, we no longer need to continue with the TransTableReadES, and can Exit and Clean
-        // Up, sending back a LateralError.
-        let action =
-          trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError);
-        self.handle_trans_es_action(statuses, query_id, action);
-      }
+        trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+      };
+      self.handle_trans_es_action(statuses, query_id, action);
     }
   }
 
