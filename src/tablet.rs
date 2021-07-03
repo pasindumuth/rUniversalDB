@@ -2199,9 +2199,6 @@ impl<T: IOTypes> TabletContext<T> {
           for query_id in gr_query_ids {
             let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
             let action = es.start::<T>(&mut self.ctx());
-            // TODO: verify that we call handle_action for every one of these now, audit, and
-            // commit. Then use this in the Slave. Then, extract out TMStatus better so it
-            // can have common accumulation logic between Tablet and Slave.
             self.handle_gr_query_es_action(statuses, query_id, action);
           }
         }
@@ -3000,7 +2997,7 @@ impl<T: IOTypes> TabletContext<T> {
   fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
     if let Some(tm_status) = statuses.tm_statuss.remove(&query_aborted.return_path) {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all
-      // remaining participants) and send the QueryAborted back to the orig_path
+      // remaining participants) and send the QueryAborted back to the orig_p
       for (node_group_id, child_query_id) in tm_status.node_group_ids {
         if tm_status.tm_state.get(&child_query_id).unwrap() == &TMWaitValue::Nothing
           && child_query_id != query_aborted.query_id

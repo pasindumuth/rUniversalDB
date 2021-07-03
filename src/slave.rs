@@ -3,6 +3,7 @@ use crate::common::{
   lookup, lookup_pos, merge_table_views, mk_qid, Clock, GossipData, IOTypes, NetworkOut, OrigP,
   QueryPlan, TMStatus, TMWaitValue, TabletForwardOut,
 };
+use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
   iast, proc, ColName, ColType, Context, ContextRow, Gen, NodeGroupId, QueryPath, SlaveGroupId,
   TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
@@ -144,8 +145,9 @@ enum FullMSQueryCoordES {
 #[derive(Debug, Default)]
 pub struct Statuses {
   ms_coord_ess: HashMap<QueryId, FullMSQueryCoordES>,
+  gr_query_ess: HashMap<QueryId, GRQueryES>,
   full_trans_table_read_ess: HashMap<QueryId, FullTransTableReadES>,
-  tm_statuses: HashMap<QueryId, TMStatus>,
+  tm_statuss: HashMap<QueryId, TMStatus>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -283,6 +285,29 @@ impl<T: IOTypes> SlaveContext<T> {
             // if so and aborting if not.
             if let Some(ms_coord_es) = statuses.ms_coord_ess.get(&query.location_prefix.query_id) {
               let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
+              // Construct and start the TransQueryReplanningES
+              statuses.full_trans_table_read_ess.insert(
+                perform_query.query_id.clone(),
+                FullTransTableReadES::QueryReplanning(TransQueryReplanningES {
+                  root_query_path: perform_query.root_query_path,
+                  tier_map: perform_query.tier_map,
+                  query_id: perform_query.query_id.clone(),
+                  location_prefix: query.location_prefix,
+                  context: Rc::new(query.context),
+                  sql_query: query.sql_query,
+                  query_plan: query.query_plan,
+                  sender_path: perform_query.sender_path,
+                  orig_p: OrigP::new(perform_query.query_id.clone()),
+                  state: TransQueryReplanningS::Start,
+                  timestamp: es.timestamp.clone(),
+                }),
+              );
+
+              let full_trans_table_es =
+                statuses.full_trans_table_read_ess.get_mut(&perform_query.query_id).unwrap();
+              let action = full_trans_table_es.start(&mut self.ctx(), es);
+              self.handle_trans_es_action(statuses, perform_query.query_id, action);
+            } else if let Some(es) = statuses.gr_query_ess.get(&query.location_prefix.query_id) {
               // Construct and start the TransQueryReplanningES
               statuses.full_trans_table_read_ess.insert(
                 perform_query.query_id.clone(),
@@ -645,13 +670,13 @@ impl<T: IOTypes> SlaveContext<T> {
     };
 
     // Finally, add the TM Status to `statuses`.
-    statuses.tm_statuses.insert(tm_query_id, tm_status);
+    statuses.tm_statuss.insert(tm_query_id, tm_status);
   }
 
   /// Called when one of the child queries in the current Stages respond successfully.
   /// This accumulates the results and sends the result to the MSQueryCoordES when done.
   fn handle_query_success(&mut self, statuses: &mut Statuses, query_success: msg::QuerySuccess) {
-    if let Some(tm_status) = statuses.tm_statuses.get_mut(&query_success.query_id) {
+    if let Some(tm_status) = statuses.tm_statuss.get_mut(&query_success.query_id) {
       // We just add the result of the `query_success` here.
       let tm_wait_value = tm_status.tm_state.get_mut(&query_success.return_path).unwrap();
       *tm_wait_value = TMWaitValue::Result(query_success.result.clone());
@@ -659,7 +684,7 @@ impl<T: IOTypes> SlaveContext<T> {
       tm_status.responded_count += 1;
       if tm_status.responded_count == tm_status.tm_state.len() {
         // Remove the `TMStatus` and take ownership
-        let tm_status = statuses.tm_statuses.remove(&query_success.query_id).unwrap();
+        let tm_status = statuses.tm_statuss.remove(&query_success.query_id).unwrap();
         // Merge there TableViews together
         let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
         for (_, tm_wait_value) in tm_status.tm_state {
@@ -668,8 +693,8 @@ impl<T: IOTypes> SlaveContext<T> {
         let merged_result = merge_table_views(results);
         self.handle_tm_done(
           statuses,
-          query_success.query_id,
-          tm_status.orig_p.query_id,
+          tm_status.orig_p,
+          tm_status.query_id,
           tm_status.new_rms,
           merged_result,
         );
@@ -681,33 +706,74 @@ impl<T: IOTypes> SlaveContext<T> {
   fn handle_tm_done(
     &mut self,
     statuses: &mut Statuses,
-    query_id: QueryId,
+    orig_p: OrigP,
     tm_query_id: QueryId,
     new_rms: HashSet<QueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) {
-    // For now, each `query_id` here should point back to an MSQueryCoordES. Note that it must
-    // exist, since if it were cancelled, then it would have deleted the all child TMStatuses.
-    let full_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
-    let coord_es = cast!(FullMSQueryCoordES::Executing, full_coord).unwrap();
+    let query_id = orig_p.query_id;
+    if let Some(full_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
+      let coord_es = cast!(FullMSQueryCoordES::Executing, full_coord).unwrap();
 
-    // Next, we do some santity check on the result
+      // We do some santity check on the result. We verify that the
+      // TMStatus that just finished had the right QueryId.
+      assert_eq!(tm_query_id, coord_es.state.stage_query_id().unwrap());
+      // Look up the schema for the stage in the QueryPlan, and assert it's the same as the result.
+      let stage_idx = coord_es.state.stage_idx().unwrap();
+      let (trans_table_name, _) = coord_es.sql_query.trans_tables.get(stage_idx).unwrap();
+      let (plan_schema, _) = coord_es.query_plan.col_usage_nodes.get(trans_table_name).unwrap();
+      assert_eq!(plan_schema, &schema);
+      // Recall that since we only send out one ContextRow, there should only be one TableView.
+      assert_eq!(table_views.len(), 1);
 
-    // Verify that the TMStatus that just finished had the right QueryId.
-    assert_eq!(tm_query_id, coord_es.state.stage_query_id().unwrap());
-    // Look up the schema for the stage in the QueryPlan, and assert it's the same as the result.
-    let stage_idx = coord_es.state.stage_idx().unwrap();
-    let (trans_table_name, _) = coord_es.sql_query.trans_tables.get(stage_idx).unwrap();
-    let (plan_schema, _) = coord_es.query_plan.col_usage_nodes.get(trans_table_name).unwrap();
-    assert_eq!(plan_schema, &schema);
-    // Recall that since we only send out one ContextRow, there should only be one TableView.
-    assert_eq!(table_views.len(), 1);
+      // Then, the results to the `trans_table_views`
+      let table_view = table_views.into_iter().next().unwrap();
+      coord_es.trans_table_views.push((trans_table_name.clone(), (schema, table_view)));
+      coord_es.all_rms.extend(new_rms);
+      self.advance_ms_coord_es(statuses, query_id);
+    } else if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+      let action =
+        es.handle_tm_success(&mut self.ctx(), tm_query_id, new_rms, (schema, table_views));
+      self.handle_gr_query_es_action(statuses, query_id, action);
+    }
+  }
 
-    // Add the results to the `trans_table_views`
-    let table_view = table_views.into_iter().next().unwrap();
-    coord_es.trans_table_views.push((trans_table_name.clone(), (schema, table_view)));
-    coord_es.all_rms.extend(new_rms);
-    self.advance_ms_coord_es(statuses, query_id);
+  fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
+    if let Some(tm_status) = statuses.tm_statuss.remove(&query_aborted.return_path) {
+      // We Exit and Clean up this TMStatus (sending CancelQuery to all
+      // remaining participants) and send the QueryAborted back to the orig_p
+      for (node_group_id, child_query_id) in tm_status.node_group_ids {
+        if tm_status.tm_state.get(&child_query_id).unwrap() == &TMWaitValue::Nothing
+          && child_query_id != query_aborted.query_id
+        {
+          // If the child Query hasn't responded yet, and isn't also the Query that
+          // just aborted, then we send it a CancelQuery
+          self.ctx().send_to_node(
+            node_group_id,
+            CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
+          );
+        }
+      }
+
+      // Finally, we propagate up the AbortData to the ES that owns this TMStatus
+      self.handle_tm_aborted(statuses, tm_status.orig_p, query_aborted.payload);
+    }
+  }
+
+  fn handle_tm_aborted(
+    &mut self,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    aborted_data: msg::AbortedData,
+  ) {
+    // Finally, we propagate up the AbortData to the GRQueryES that owns this TMStatus
+    let query_id = orig_p.query_id;
+    if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+      let action = es.handle_tm_aborted(&mut self.ctx(), aborted_data);
+      self.handle_gr_query_es_action(statuses, query_id, action);
+    } else if let Some(ms_coord_es) = statuses.ms_coord_ess.get_mut(&query_id) {
+      // TODO: do
+    }
   }
 
   /// Handle a Prepared message sent to an MSQueryCoordES.
@@ -767,6 +833,87 @@ impl<T: IOTypes> SlaveContext<T> {
     }
   }
 
+  /// Routes the GRQueryES results the appropriate TransTableES.
+  fn handle_gr_query_done(
+    &mut self,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    subquery_id: QueryId,
+    subquery_new_rms: HashSet<QueryPath>,
+    (table_schema, table_views): (Vec<ColName>, Vec<TableView>),
+  ) {
+    let query_id = orig_p.query_id;
+    let trans_read_es = statuses.full_trans_table_read_ess.get_mut(&query_id).unwrap();
+    let prefix = trans_read_es.location_prefix();
+    if let Some(es) = statuses.gr_query_ess.get(&prefix.query_id) {
+      // This handles the case that the TransTable is in a GRQueryES
+      let action = trans_read_es.handle_subquery_done(
+        &mut self.ctx(),
+        es,
+        subquery_id,
+        subquery_new_rms,
+        (table_schema, table_views),
+      );
+      self.handle_trans_es_action(statuses, query_id, action);
+    } else if let Some(ms_coord_es) = statuses.ms_coord_ess.get(&prefix.query_id) {
+      let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
+      // This handles the case that the TransTable is in a MSQueryCoordES.
+      let action = trans_read_es.handle_subquery_done(
+        &mut self.ctx(),
+        es,
+        subquery_id,
+        subquery_new_rms,
+        (table_schema, table_views),
+      );
+      self.handle_trans_es_action(statuses, query_id, action);
+    } else {
+      // This means that at some point, the source containg the TransTable was cancelled.
+      // Thus, we no longer need to continue with the TransTableReadES, and can Exit and Clean
+      // Up, sending back a LateralError.
+      let action = trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError);
+      self.handle_trans_es_action(statuses, query_id, action);
+    }
+  }
+
+  // This function just routes the InternalColumnsDNE notification
+  // (from the GRQueryES) to the right ES.
+  fn handle_internal_columns_dne(
+    &mut self,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    rem_cols: Vec<ColName>,
+  ) {
+    let query_id = orig_p.query_id;
+    if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+      let prefix = trans_read_es.location_prefix();
+      if let Some(es) = statuses.gr_query_ess.get(&prefix.query_id) {
+        let action = trans_read_es.handle_internal_columns_dne(
+          &mut self.ctx(),
+          es,
+          query_id.clone(),
+          rem_cols,
+        );
+        self.handle_trans_es_action(statuses, query_id, action);
+      } else if let Some(ms_coord_es) = statuses.ms_coord_ess.get(&prefix.query_id) {
+        let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
+        let action = trans_read_es.handle_internal_columns_dne(
+          &mut self.ctx(),
+          es,
+          query_id.clone(),
+          rem_cols,
+        );
+        self.handle_trans_es_action(statuses, query_id, action);
+      } else {
+        // This means that at some point, the GRQueryES containg the TransTable was cancelled.
+        // Thus, we no longer need to continue with the TransTableReadES, and can Exit and Clean
+        // Up, sending back a LateralError.
+        let action =
+          trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError);
+        self.handle_trans_es_action(statuses, query_id, action);
+      }
+    }
+  }
+
   /// Handles the actions specified by a TransTableReadES.
   fn handle_trans_es_action(
     &mut self,
@@ -777,18 +924,19 @@ impl<T: IOTypes> SlaveContext<T> {
     match action {
       TransTableAction::Wait => {}
       TransTableAction::SendSubqueries(gr_query_ess) => {
-        // TODO: enable this
-        // /// Here, we have to add in the GRQueryESs and start them.
-        // let mut subquery_ids = Vec::<QueryId>::new();
-        // for gr_query_es in gr_query_ess {
-        //   let subquery_id = gr_query_es.query_id.clone();
-        //   statuses.gr_query_ess.insert(gr_query_es.query_id.clone(), gr_query_es);
-        //   subquery_ids.push(subquery_id);
-        // }
-        //
-        // for subquery_id in subquery_ids {
-        //   self.advance_gr_query(statuses, subquery_id);
-        // }
+        /// Here, we have to add in the GRQueryESs and start them.
+        let mut subquery_ids = Vec::<QueryId>::new();
+        for gr_query_es in gr_query_ess {
+          let subquery_id = gr_query_es.query_id.clone();
+          statuses.gr_query_ess.insert(gr_query_es.query_id.clone(), gr_query_es);
+          subquery_ids.push(subquery_id);
+        }
+
+        for subquery_id in subquery_ids {
+          let es = statuses.gr_query_ess.get_mut(&subquery_id).unwrap();
+          let action = es.start::<T>(&mut self.ctx());
+          self.handle_gr_query_es_action(statuses, subquery_id, action);
+        }
       }
       TransTableAction::Done => {
         // Recall that all responses will have been sent. Here, the ES should not be
@@ -799,6 +947,47 @@ impl<T: IOTypes> SlaveContext<T> {
         // Recall that all responses will have been sent. There only resources that the ES
         // has are subqueries, so we Exit and Clean Up them here.
         statuses.full_trans_table_read_ess.remove(&query_id);
+        for subquery_id in subquery_ids {
+          self.exit_and_clean_up(statuses, subquery_id);
+        }
+      }
+    }
+  }
+
+  /// Handles the actions specified by a GRQueryES.
+  fn handle_gr_query_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: GRQueryAction,
+  ) {
+    match action {
+      GRQueryAction::ExecuteTMStatus(tm_status) => {
+        statuses.tm_statuss.insert(tm_status.query_id.clone(), tm_status);
+      }
+      GRQueryAction::Done(res) => {
+        let es = statuses.gr_query_ess.remove(&query_id).unwrap();
+        self.handle_gr_query_done(
+          statuses,
+          es.orig_p,
+          es.query_id,
+          res.new_rms,
+          (res.schema, res.result),
+        );
+      }
+      GRQueryAction::InternalColumnsDNE(rem_cols) => {
+        let es = statuses.gr_query_ess.remove(&query_id).unwrap();
+        self.handle_internal_columns_dne(statuses, es.orig_p, rem_cols);
+      }
+      GRQueryAction::QueryError(query_error) => {
+        // TODO: finish
+        // let es = statuses.gr_query_ess.remove(&query_id).unwrap();
+        // self.propagate_query_error(statuses, es.orig_p, query_error);
+      }
+      GRQueryAction::ExitAndCleanUp(subquery_ids) => {
+        // Recall that all responses will have been sent. There only resources that the ES
+        // has are subqueries, so we Exit and Clean Up them here.
+        statuses.gr_query_ess.remove(&query_id);
         for subquery_id in subquery_ids {
           self.exit_and_clean_up(statuses, subquery_id);
         }
