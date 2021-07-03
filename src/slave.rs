@@ -77,8 +77,7 @@ struct MSQueryCoordES {
   timestamp: Timestamp,
 
   query_id: QueryId,
-  // TODO: rename to `sql_query`.
-  query: proc::MSQuery,
+  sql_query: proc::MSQuery,
 
   // Results of the query planning.
   query_plan: CoordQueryPlan,
@@ -122,7 +121,7 @@ struct MSQueryCoordReplanningES {
   sender_eid: EndpointId,
   request_id: RequestId,
   /// The query to do the replanning with.
-  query: proc::MSQuery,
+  sql_query: proc::MSQuery,
   /// The OrigP of the Task holding this MSQueryCoordReplanningES
   // TODO: change this to `QueryId` here, and in tablet.
   orig_p: OrigP,
@@ -253,7 +252,7 @@ impl<T: IOTypes> SlaveContext<T> {
                 timestamp: self.clock.now(),
                 sender_eid: external_query.sender_eid,
                 request_id: external_query.request_id,
-                query: ms_query,
+                sql_query: ms_query,
                 orig_p: OrigP { query_id: query_id.clone() },
                 state: MSQueryCoordReplanningS::Start,
               }),
@@ -389,7 +388,7 @@ impl<T: IOTypes> SlaveContext<T> {
       if let Some(query_plan) = maybe_plan {
         // We compute the TierMap here.
         let mut tier_map = HashMap::<TablePath, u32>::new();
-        for (_, stage) in &plan_es.query.trans_tables {
+        for (_, stage) in &plan_es.sql_query.trans_tables {
           match stage {
             proc::MSQueryStage::SuperSimpleSelect(_) => {}
             proc::MSQueryStage::Update(update) => {
@@ -402,7 +401,7 @@ impl<T: IOTypes> SlaveContext<T> {
         // if the current stage is an Update, which should be one Tier ahead (i.e.
         // lower) for that TablePath.
         let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
-        for (trans_table_name, stage) in plan_es.query.trans_tables.iter().rev() {
+        for (trans_table_name, stage) in plan_es.sql_query.trans_tables.iter().rev() {
           all_tier_maps.insert(trans_table_name.clone(), TierMap { map: tier_map.clone() });
           match stage {
             proc::MSQueryStage::SuperSimpleSelect(_) => {}
@@ -417,7 +416,7 @@ impl<T: IOTypes> SlaveContext<T> {
           sender_eid: plan_es.sender_eid.clone(),
           timestamp: plan_es.timestamp.clone(),
           query_id: query_id.clone(),
-          query: plan_es.query.clone(),
+          sql_query: plan_es.sql_query.clone(),
           query_plan: query_plan.clone(),
           all_tier_maps,
           all_rms: Default::default(),
@@ -443,7 +442,7 @@ impl<T: IOTypes> SlaveContext<T> {
     let coord_es = cast!(FullMSQueryCoordES::Executing, full_coord_es).unwrap();
 
     let next_stage_idx = coord_es.state.stage_idx().unwrap() + 1;
-    if next_stage_idx < coord_es.query.trans_tables.len() {
+    if next_stage_idx < coord_es.sql_query.trans_tables.len() {
       self.process_ms_coord_es_stage(statuses, query_id, next_stage_idx);
     } else {
       // Finish the ES by sending out Prepared.
@@ -478,7 +477,8 @@ impl<T: IOTypes> SlaveContext<T> {
     let coord_es = cast!(FullMSQueryCoordES::Executing, full_coord_es).unwrap();
 
     // Get the corresponding MSQueryStage and FrozenColUsageNode.
-    let (trans_table_name, ms_query_stage) = coord_es.query.trans_tables.get(stage_idx).unwrap();
+    let (trans_table_name, ms_query_stage) =
+      coord_es.sql_query.trans_tables.get(stage_idx).unwrap();
     let (_, col_usage_node) = coord_es.query_plan.col_usage_nodes.get(trans_table_name).unwrap();
 
     // Compute the context of this `col_usage_node`. Recall there must be exactly one row.
@@ -695,7 +695,7 @@ impl<T: IOTypes> SlaveContext<T> {
     assert_eq!(tm_query_id, coord_es.state.stage_query_id().unwrap());
     // Look up the schema for the stage in the QueryPlan, and assert it's the same as the result.
     let stage_idx = coord_es.state.stage_idx().unwrap();
-    let (trans_table_name, _) = coord_es.query.trans_tables.get(stage_idx).unwrap();
+    let (trans_table_name, _) = coord_es.sql_query.trans_tables.get(stage_idx).unwrap();
     let (plan_schema, _) = coord_es.query_plan.col_usage_nodes.get(trans_table_name).unwrap();
     assert_eq!(plan_schema, &schema);
     // Recall that since we only send out one ContextRow, there should only be one TableView.
@@ -747,7 +747,7 @@ impl<T: IOTypes> SlaveContext<T> {
         let (_, (_, table_view)) = es
           .trans_table_views
           .iter()
-          .find(|(trans_table_name, _)| trans_table_name == &es.query.returning)
+          .find(|(trans_table_name, _)| trans_table_name == &es.sql_query.returning)
           .unwrap();
         self.network_output.send(
           &es.sender_eid,
@@ -861,7 +861,7 @@ impl MSQueryCoordReplanningES {
       gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
       timestamp: self.timestamp.clone(),
     };
-    let col_usage_nodes = planner.plan_ms_query(&self.query);
+    let col_usage_nodes = planner.plan_ms_query(&self.sql_query);
 
     for (_, (_, child)) in &col_usage_nodes {
       if !child.external_cols.is_empty() {
@@ -875,7 +875,7 @@ impl MSQueryCoordReplanningES {
               query_id: master_query_id.clone(),
               timestamp: self.timestamp,
               trans_table_schemas: HashMap::new(),
-              col_usage_tree: msg::ColUsageTree::MSQuery(self.query.clone()),
+              col_usage_tree: msg::ColUsageTree::MSQuery(self.sql_query.clone()),
             },
           )),
         );
