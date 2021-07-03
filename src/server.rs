@@ -23,8 +23,9 @@ pub struct ServerContext<'a, T: IOTypes> {
   pub network_output: &'a mut T::NetworkOutT,
 
   /// Metadata
-  pub this_slave_group_id: &'a mut SlaveGroupId,
-  pub master_eid: &'a mut EndpointId,
+  pub this_slave_group_id: &'a SlaveGroupId,
+  pub maybe_this_tablet_group_id: Option<&'a TabletGroupId>,
+  pub master_eid: &'a EndpointId,
 
   /// Gossip
   pub gossip: &'a mut Arc<GossipData>,
@@ -75,6 +76,35 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
         self.network_output.send(eid, msg::NetworkMessage::Slave(common_query.slave_msg()));
       }
     };
+  }
+
+  /// This function computes a minimum set of `TabletGroupId`s whose `TabletKeyRange`
+  /// has a non-empty intersect with the KeyRegion we compute from the given `selection`.
+  pub fn get_min_tablets(
+    &self,
+    table_path: &TablePath,
+    selection: &proc::ValExpr,
+  ) -> Vec<TabletGroupId> {
+    // Next, we try to reduce the number of TabletGroups we must contact by computing
+    // the key_region of TablePath that we're going to be reading.
+    let tablet_groups = self.sharding_config.get(table_path).unwrap();
+    let key_cols = &self.gossip.gossiped_db_schema.get(table_path).unwrap().key_cols;
+    match &compute_key_region(selection, HashMap::new(), key_cols) {
+      Ok(_) => {
+        // We use a trivial implementation for now, where we just return all TabletGroupIds
+        tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone()).collect()
+      }
+      Err(_) => panic!(),
+    }
+  }
+
+  /// Get the NodeGroupId of this Server.
+  pub fn node_group_id(&self) -> NodeGroupId {
+    if let Some(tablet_group_id) = self.maybe_this_tablet_group_id {
+      NodeGroupId::Tablet(tablet_group_id.clone())
+    } else {
+      NodeGroupId::Slave(self.this_slave_group_id.clone())
+    }
   }
 }
 

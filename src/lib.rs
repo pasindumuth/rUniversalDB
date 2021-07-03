@@ -6,6 +6,7 @@ pub mod col_usage;
 pub mod common;
 pub mod experimental;
 pub mod expression;
+pub mod gr_query_es;
 pub mod model;
 pub mod multiversion_map;
 pub mod net;

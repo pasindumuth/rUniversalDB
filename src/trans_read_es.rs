@@ -91,12 +91,12 @@ pub enum TransTableAction {
   Wait,
   /// This tells the parent Server to perform subqueries.
   SendSubqueries(Vec<GRQueryES>),
-  /// This tells the parent Server that this TransTableReadES is done (having
-  /// sent back responses, etc).
+  /// This tells the parent Server that this TransTableReadES has completed
+  /// successfully (having already responded, etc).
   Done,
-  /// This tells the parent Server that this TransTableReadES is completed in
-  /// failure, and that the given `QueryId`s (subqueries) should be Cleaned Up
-  /// along with this one.
+  /// This tells the parent Server that this TransTableReadES has completed
+  /// unsuccessfully, and that the given `QueryId`s (subqueries) should be
+  /// Exit and Cleaned Up, along with this one.
   ExitAndCleanUp(Vec<QueryId>),
 }
 
@@ -142,7 +142,7 @@ impl FullTransTableReadES {
       } else {
         // If the replanning was unsuccessful, the Abort message should already have
         // been sent, and we may exit.
-        TransTableAction::Done
+        TransTableAction::ExitAndCleanUp(Vec::new())
       }
     } else {
       TransTableAction::Wait
@@ -607,6 +607,8 @@ impl FullTransTableReadES {
   /// This is can be called both for if a subquery fails, or if there is a LateralError
   /// due to the ES owning the TransTable disappears. This simply responds to the sender
   /// and Exits and Clean Ups this ES.
+  /// TODO: I believe that this and `handle_internal_columns_dne` should be unified into
+  /// one function that is essentially called when a child GRQueryES fails.
   pub fn handle_query_error<T: IOTypes>(
     &mut self,
     ctx: &mut ServerContext<T>,

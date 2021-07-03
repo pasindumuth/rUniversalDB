@@ -770,8 +770,9 @@ impl<T: IOTypes> TabletContext<T> {
       rand: &mut self.rand,
       clock: &mut self.clock,
       network_output: &mut self.network_output,
-      this_slave_group_id: &mut self.this_slave_group_id,
-      master_eid: &mut self.master_eid,
+      this_slave_group_id: &self.this_slave_group_id,
+      maybe_this_tablet_group_id: Some(&self.this_tablet_group_id),
+      master_eid: &self.master_eid,
       gossip: &mut self.gossip,
       sharding_config: &mut self.sharding_config,
       tablet_address_config: &mut self.tablet_address_config,
@@ -2695,12 +2696,7 @@ impl<T: IOTypes> TabletContext<T> {
         let general_query = msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query);
 
         // Compute the TabletGroups involved.
-        for tablet_group_id in get_min_tablets(
-          &self.sharding_config,
-          &self.gossip,
-          table_path,
-          &child_sql_query.selection,
-        ) {
+        for tablet_group_id in self.ctx().get_min_tablets(table_path, &child_sql_query.selection) {
           let child_query_id = mk_qid(&mut self.rand);
           let sid = self.tablet_address_config.get(&tablet_group_id).unwrap();
           let eid = self.slave_address_config.get(&sid).unwrap();
@@ -4112,27 +4108,6 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
   *single_status = SingleSubqueryStatus::Pending(SubqueryPending { context });
 
   Ok((subquery_id.clone(), gr_query_es))
-}
-
-/// This function computes a minimum set of `TabletGroupId`s whose `TabletKeyRange`
-/// has a non-empty intersect with the KeyRegion we compute from the given `selection`.
-fn get_min_tablets(
-  sharding_config: &HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-  gossip: &GossipData,
-  table_path: &TablePath,
-  selection: &proc::ValExpr,
-) -> Vec<TabletGroupId> {
-  // Next, we try to reduce the number of TabletGroups we must contact by computing
-  // the key_region of TablePath that we're going to be reading.
-  let tablet_groups = sharding_config.get(table_path).unwrap();
-  let key_cols = &gossip.gossiped_db_schema.get(table_path).unwrap().key_cols;
-  match &compute_key_region(selection, HashMap::new(), key_cols) {
-    Ok(_) => {
-      // We use a trivial implementation for now, where we just return all TabletGroupIds
-      tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone()).collect()
-    }
-    Err(_) => panic!(),
-  }
 }
 
 /// Computes if `region` and intersects with any TableRegion in `regions`.
