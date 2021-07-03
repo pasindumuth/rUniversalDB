@@ -14,7 +14,6 @@ use crate::model::message as msg;
 use crate::model::message::GeneralQuery;
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContext};
-use crate::slave::CoordState::Committing;
 use crate::sql_parser::convert_ast;
 use crate::trans_read_es::{
   FullTransTableReadES, TransQueryReplanningES, TransQueryReplanningS, TransTableAction,
@@ -44,8 +43,16 @@ struct PreparingState {
 #[derive(Debug)]
 enum CoordState {
   Start,
-  ReadStage { stage_idx: usize, stage_query_id: QueryId },
-  WriteStage { stage_idx: usize, stage_query_id: QueryId },
+  /// Here, `stage_query_id` is the QueryId of the TMStatus
+  ReadStage {
+    stage_idx: usize,
+    stage_query_id: QueryId,
+  },
+  /// Here, `stage_query_id` is the QueryId of the TMStatus
+  WriteStage {
+    stage_idx: usize,
+    stage_query_id: QueryId,
+  },
   Preparing(PreparingState),
   Committing,
   Aborting,
@@ -275,10 +282,6 @@ impl<T: IOTypes> SlaveContext<T> {
         self.tablet_forward_output.forward(&tablet_group_id, tablet_msg);
       }
       msg::SlaveMessage::PerformQuery(perform_query) => {
-        // TODO: Here, we might get TransTableReads that read an MSQueryCoordES's TransTables.
-        // This might produce GRQueries. Thus, we can also get TransTableReads that read
-        // GRQueries here. We should share all of it.
-
         match perform_query.query {
           msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
             // First, we check if the GRQueryES still exists in the Statuses, continuing
@@ -347,7 +350,9 @@ impl<T: IOTypes> SlaveContext<T> {
           GeneralQuery::UpdateQuery(_) => panic!(),
         }
       }
-      msg::SlaveMessage::CancelQuery(_) => unimplemented!(),
+      msg::SlaveMessage::CancelQuery(cancel_query) => {
+        self.exit_and_clean_up(statuses, cancel_query.query_id);
+      }
       msg::SlaveMessage::QuerySuccess(query_success) => {
         self.handle_query_success(statuses, query_success);
       }
@@ -772,13 +777,14 @@ impl<T: IOTypes> SlaveContext<T> {
       let action = es.handle_tm_aborted(&mut self.ctx(), aborted_data);
       self.handle_gr_query_es_action(statuses, query_id, action);
     } else if let Some(ms_coord_es) = statuses.ms_coord_ess.get_mut(&query_id) {
-      // TODO: do
+      // TODO: finish this.
     }
   }
 
   /// Handle a Prepared message sent to an MSQueryCoordES.
   fn handle_prepare(&mut self, statuses: &mut Statuses, prepared: msg::Query2PCPrepared) {
-    if let Some(ms_coord_es) = statuses.ms_coord_ess.get_mut(&prepared.return_path) {
+    let query_id = prepared.return_path;
+    if let Some(ms_coord_es) = statuses.ms_coord_ess.get_mut(&query_id) {
       let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
       let preparing = cast!(CoordState::Preparing, &mut es.state).unwrap();
 
@@ -828,7 +834,7 @@ impl<T: IOTypes> SlaveContext<T> {
         );
 
         // Exit and and Clean Up.
-        self.exit_and_clean_up(statuses, prepared.return_path);
+        self.exit_and_clean_up(statuses, query_id);
       }
     }
   }
@@ -867,8 +873,13 @@ impl<T: IOTypes> SlaveContext<T> {
     self.handle_trans_es_action(statuses, query_id, action);
   }
 
-  // This function just routes the InternalColumnsDNE notification
-  // (from the GRQueryES) to the right ES.
+  // TODO: I feel like we should be able to pull out the TransTableSource lookup
+  // into a function that takes in a generic lambda where the trait bound is defined
+  // in the lambda itself. The function would assume the `query_id` points to a valid
+  // TransTableRead, so it may take in the whole `statuses`.
+
+  /// This function just routes the InternalColumnsDNE notification
+  /// (from the GRQueryES) to the right ES.
   fn handle_internal_columns_dne(
     &mut self,
     statuses: &mut Statuses,
@@ -957,6 +968,8 @@ impl<T: IOTypes> SlaveContext<T> {
       }
       GRQueryAction::QueryError(query_error) => {
         // TODO: finish
+        // TODO: this is significantly more complicated for MSQueryCoordES, since
+        // we need to do retries here.
         // let es = statuses.gr_query_ess.remove(&query_id).unwrap();
         // self.propagate_query_error(statuses, es.orig_p, query_error);
       }
@@ -989,16 +1002,81 @@ impl<T: IOTypes> SlaveContext<T> {
     }
   }
 
+  /// This function is used to cancel an ES both for the case of CancelQuery, but also
+  /// to generally Exit and Clean Up an ES from whatever state it's in. Thus, we don't
+  /// require the ES to be in their valid state; an ES might reference another ES
+  /// that no longer exists (because the calling function did some pre-cleanup).
   fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
     if let Some(ms_coord_es) = statuses.ms_coord_ess.remove(&query_id) {
       match ms_coord_es {
         FullMSQueryCoordES::QueryReplanning(plan_es) => {
           self.external_request_id_map.remove(&plan_es.request_id);
-          // TODO: finish
+          match plan_es.state {
+            MSQueryCoordReplanningS::Start => {}
+            MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id } => {
+              // Remove if present
+              if self.master_query_map.remove(&master_query_id).is_some() {
+                // If the removal was successful, we should also send a Cancellation
+                // message to the Master.
+                self.network_output.send(
+                  &self.master_eid,
+                  msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+                    msg::CancelMasterFrozenColUsage { query_id: master_query_id },
+                  )),
+                );
+              }
+            }
+            MSQueryCoordReplanningS::Done(_) => {}
+          }
         }
         FullMSQueryCoordES::Executing(es) => {
           self.external_request_id_map.remove(&es.request_id);
-          // TODO: finish
+          match es.state {
+            // TODO: generally, we should look to see if we can eliminate these Immediate
+            // States here and in the Pseudocode in favor of using Actions to perform Immediate
+            // calculations.
+            CoordState::Start => {}
+            CoordState::ReadStage { stage_query_id, .. }
+            | CoordState::WriteStage { stage_query_id, .. } => {
+              // Clean up any Registered Queries in the MSQueryCoordES. Recall that in the
+              // absence of Commit/Abort, this is the only way that MSQueryESs can get cleaned up.
+              for registered_query in es.registered_queries {
+                self.ctx().send_to_path(
+                  registered_query.clone(),
+                  CommonQuery::CancelQuery(msg::CancelQuery {
+                    query_id: registered_query.query_id,
+                  }),
+                )
+              }
+              // Clean up the child TMStatus that's currently executing.
+              self.exit_and_clean_up(statuses, stage_query_id);
+            }
+            CoordState::Preparing(_) => {
+              // Recall that here, all non-`all_rms` in `registered_queries` should have gotten
+              // a CancelQuery, so we don't have to do that again.
+              for query_path in es.all_rms {
+                self.send_to_tablet(
+                  &query_path,
+                  msg::TabletMessage::Query2PCAbort(msg::Query2PCAbort {
+                    ms_query_id: es.query_id.clone(),
+                  }),
+                )
+              }
+            }
+            CoordState::Committing => {}
+            CoordState::Aborting => {}
+          }
+        }
+      }
+    } else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
+      // We Exit and Clean up this TMStatus (sending CancelQuery to all remaining participants)
+      for (node_group_id, child_query_id) in tm_status.node_group_ids {
+        if tm_status.tm_state.get(&child_query_id).unwrap() == &TMWaitValue::Nothing {
+          // If the child Query hasn't responded, then sent it a CancelQuery
+          self.ctx().send_to_node(
+            node_group_id,
+            CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
+          );
         }
       }
     }
