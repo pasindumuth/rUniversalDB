@@ -309,9 +309,9 @@ pub struct GRQueryES {
   pub orig_p: OrigP,
 }
 
-// TODO: create an auxiliary struct to hold the `trans_table_instances` to avoid
-// constant lookup.
-
+/// Ideally, we should create a create an auxiliary struct to cache `schema` and `instances`
+/// so that they don't constantly have to be looked up. However, we would need to access `prefix`
+/// here at the Server level, so we avoid doing this for now.
 impl TransTableSource for GRQueryES {
   fn get_instance(&self, prefix: &TransTableLocationPrefix, idx: usize) -> &TableView {
     let (_, instances) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
@@ -3498,6 +3498,7 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
+  /// Handles the actions specified by a TransTableReadES.
   fn handle_trans_es_action(
     &mut self,
     statuses: &mut Statuses,

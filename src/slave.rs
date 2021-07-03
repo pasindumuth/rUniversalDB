@@ -1,7 +1,7 @@
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
-  lookup_pos, merge_table_views, mk_qid, Clock, GossipData, IOTypes, NetworkOut, OrigP, QueryPlan,
-  TMStatus, TMWaitValue, TabletForwardOut,
+  lookup, lookup_pos, merge_table_views, mk_qid, Clock, GossipData, IOTypes, NetworkOut, OrigP,
+  QueryPlan, TMStatus, TMWaitValue, TabletForwardOut,
 };
 use crate::model::common::{
   iast, proc, ColName, ColType, Context, ContextRow, Gen, NodeGroupId, QueryPath, SlaveGroupId,
@@ -10,14 +10,20 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
+use crate::model::message::GeneralQuery;
 use crate::query_converter::convert_to_msquery;
-use crate::server::ServerContext;
+use crate::server::{CommonQuery, ServerContext};
 use crate::slave::CoordState::Committing;
 use crate::sql_parser::convert_ast;
+use crate::trans_read_es::{
+  FullTransTableReadES, TransQueryReplanningES, TransQueryReplanningS, TransTableAction,
+  TransTableSource,
+};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
@@ -82,11 +88,24 @@ struct MSQueryCoordES {
 
   // The dynamically evolving fields.
   all_rms: HashSet<QueryPath>,
-  trans_table_views: Vec<(TransTableName, TableView)>,
+  trans_table_views: Vec<(TransTableName, (Vec<ColName>, TableView))>,
   state: CoordState,
 
   // Memory management fields
   registered_queries: HashSet<QueryPath>,
+}
+
+impl TransTableSource for MSQueryCoordES {
+  fn get_instance(&self, prefix: &TransTableLocationPrefix, idx: usize) -> &TableView {
+    assert_eq!(idx, 1);
+    let (_, instance) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
+    instance
+  }
+
+  fn get_schema(&self, prefix: &TransTableLocationPrefix) -> Vec<ColName> {
+    let (schema, _) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
+    schema.clone()
+  }
 }
 
 #[derive(Debug)]
@@ -126,6 +145,7 @@ enum FullMSQueryCoordES {
 #[derive(Debug, Default)]
 pub struct Statuses {
   ms_coord_ess: HashMap<QueryId, FullMSQueryCoordES>,
+  full_trans_table_read_ess: HashMap<QueryId, FullTransTableReadES>,
   tm_statuses: HashMap<QueryId, TMStatus>,
 }
 
@@ -204,7 +224,7 @@ impl<T: IOTypes> SlaveState<T> {
 }
 
 impl<T: IOTypes> SlaveContext<T> {
-  fn server_context(&mut self) -> ServerContext<T> {
+  fn ctx(&mut self) -> ServerContext<T> {
     ServerContext {
       rand: &mut self.rand,
       clock: &mut self.clock,
@@ -256,6 +276,51 @@ impl<T: IOTypes> SlaveContext<T> {
         // TODO: Here, we might get TransTableReads that read an MSQueryCoordES's TransTables.
         // This might produce GRQueries. Thus, we can also get TransTableReads that read
         // GRQueries here. We should share all of it.
+
+        match perform_query.query {
+          msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
+            // First, we check if the GRQueryES still exists in the Statuses, continuing
+            // if so and aborting if not.
+            if let Some(ms_coord_es) = statuses.ms_coord_ess.get(&query.location_prefix.query_id) {
+              let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
+              // Construct and start the TransQueryReplanningES
+              statuses.full_trans_table_read_ess.insert(
+                perform_query.query_id.clone(),
+                FullTransTableReadES::QueryReplanning(TransQueryReplanningES {
+                  root_query_path: perform_query.root_query_path,
+                  tier_map: perform_query.tier_map,
+                  query_id: perform_query.query_id.clone(),
+                  location_prefix: query.location_prefix,
+                  context: Rc::new(query.context),
+                  sql_query: query.sql_query,
+                  query_plan: query.query_plan,
+                  sender_path: perform_query.sender_path,
+                  orig_p: OrigP::new(perform_query.query_id.clone()),
+                  state: TransQueryReplanningS::Start,
+                  timestamp: es.timestamp.clone(),
+                }),
+              );
+
+              let full_trans_table_es =
+                statuses.full_trans_table_read_ess.get_mut(&perform_query.query_id).unwrap();
+              let action = full_trans_table_es.start(&mut self.ctx(), es);
+              self.handle_trans_es_action(statuses, perform_query.query_id, action);
+            } else {
+              // This means that the target GRQueryES was deleted. We can send back an
+              // Abort with LateralError. Exit and Clean Up will be done later.
+              let sender_path = perform_query.sender_path;
+              let aborted_msg = msg::QueryAborted {
+                return_path: sender_path.query_id.clone(),
+                query_id: perform_query.query_id,
+                payload: msg::AbortedData::QueryError(msg::QueryError::LateralError),
+              };
+              self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
+              return;
+            }
+          }
+          GeneralQuery::SuperSimpleTableSelectQuery(_) => panic!(),
+          GeneralQuery::UpdateQuery(_) => panic!(),
+        }
       }
       msg::SlaveMessage::CancelQuery(_) => unimplemented!(),
       msg::SlaveMessage::QuerySuccess(query_success) => {
@@ -638,7 +703,7 @@ impl<T: IOTypes> SlaveContext<T> {
 
     // Add the results to the `trans_table_views`
     let table_view = table_views.into_iter().next().unwrap();
-    coord_es.trans_table_views.push((trans_table_name.clone(), table_view));
+    coord_es.trans_table_views.push((trans_table_name.clone(), (schema, table_view)));
     coord_es.all_rms.extend(new_rms);
     self.advance_ms_coord_es(statuses, query_id);
   }
@@ -679,7 +744,7 @@ impl<T: IOTypes> SlaveContext<T> {
         }
 
         // Finally, we send out an ExternalQuerySuccess with the appropriate TableView.
-        let (_, table_view) = es
+        let (_, (_, table_view)) = es
           .trans_table_views
           .iter()
           .find(|(trans_table_name, _)| trans_table_name == &es.query.returning)
@@ -696,6 +761,45 @@ impl<T: IOTypes> SlaveContext<T> {
 
         // Exit and and Clean Up.
         self.exit_and_clean_up(statuses, prepared.return_path);
+      }
+    }
+  }
+
+  /// Handles the actions specified by a TransTableReadES.
+  fn handle_trans_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: TransTableAction,
+  ) {
+    match action {
+      TransTableAction::Wait => {}
+      TransTableAction::SendSubqueries(gr_query_ess) => {
+        // TODO: enable this
+        // /// Here, we have to add in the GRQueryESs and start them.
+        // let mut subquery_ids = Vec::<QueryId>::new();
+        // for gr_query_es in gr_query_ess {
+        //   let subquery_id = gr_query_es.query_id.clone();
+        //   statuses.gr_query_ess.insert(gr_query_es.query_id.clone(), gr_query_es);
+        //   subquery_ids.push(subquery_id);
+        // }
+        //
+        // for subquery_id in subquery_ids {
+        //   self.advance_gr_query(statuses, subquery_id);
+        // }
+      }
+      TransTableAction::Done => {
+        // Recall that all responses will have been sent. Here, the ES should not be
+        // holding onto any other resources, so we can simply remove it.
+        statuses.full_trans_table_read_ess.remove(&query_id);
+      }
+      TransTableAction::ExitAndCleanUp(subquery_ids) => {
+        // Recall that all responses will have been sent. There only resources that the ES
+        // has are subqueries, so we Exit and Clean Up them here.
+        statuses.full_trans_table_read_ess.remove(&query_id);
+        for subquery_id in subquery_ids {
+          self.exit_and_clean_up(statuses, subquery_id);
+        }
       }
     }
   }
