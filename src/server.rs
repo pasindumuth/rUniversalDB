@@ -2,8 +2,8 @@ use crate::col_usage::{collect_top_level_cols, nodes_external_trans_tables, Froz
 use crate::common::{lookup_pos, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, TableSchema};
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
-  proc, ColName, ColType, ColVal, ColValN, ContextRow, ContextSchema, EndpointId, QueryId,
-  QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, Timestamp,
+  proc, ColName, ColType, ColVal, ColValN, ContextRow, ContextSchema, EndpointId, NodeGroupId,
+  QueryId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, Timestamp,
   TransTableName,
 };
 use crate::model::message as msg;
@@ -54,6 +54,27 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
         },
       ),
     );
+  }
+
+  /// This is similar to the above, except uses a `node_group_id`.
+  pub fn send_to_node(&mut self, node_group_id: NodeGroupId, common_query: CommonQuery) {
+    match node_group_id {
+      NodeGroupId::Tablet(tid) => {
+        let sid = self.tablet_address_config.get(&tid).unwrap();
+        let eid = self.slave_address_config.get(sid).unwrap();
+        self.network_output.send(
+          eid,
+          msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
+            tid,
+            common_query.tablet_msg(),
+          )),
+        );
+      }
+      NodeGroupId::Slave(sid) => {
+        let eid = self.slave_address_config.get(&sid).unwrap();
+        self.network_output.send(eid, msg::NetworkMessage::Slave(common_query.slave_msg()));
+      }
+    };
   }
 }
 

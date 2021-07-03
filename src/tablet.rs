@@ -819,7 +819,7 @@ impl<T: IOTypes> TabletContext<T> {
                 query_id: perform_query.query_id,
                 payload: msg::AbortedData::QueryError(msg::QueryError::LateralError),
               };
-              self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
+              self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
               return;
             }
           }
@@ -846,7 +846,7 @@ impl<T: IOTypes> TabletContext<T> {
                     query_id: perform_query.query_id.clone(),
                     payload: msg::AbortedData::QueryError(msg::QueryError::TimestampConflict),
                   };
-                  self.send_to_path(sender_path, CommonQuery::QueryAborted(abort_msg));
+                  self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(abort_msg));
                   return;
                 } else {
                   // This means that we can add an MSQueryES at the Timestamp
@@ -967,7 +967,7 @@ impl<T: IOTypes> TabletContext<T> {
                   query_id: perform_query.query_id.clone(),
                   payload: msg::AbortedData::QueryError(msg::QueryError::TimestampConflict),
                 };
-                self.send_to_path(sender_path, CommonQuery::QueryAborted(abort_msg));
+                self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(abort_msg));
                 return;
               } else {
                 // This means that we can add an MSQueryES at the Timestamp
@@ -1149,44 +1149,6 @@ impl<T: IOTypes> TabletContext<T> {
       }
     }
     return None;
-  }
-
-  /// This function infers weather the CommonQuery is destined for a Slave or a Tablet
-  /// by using the `sender_path`, and then acts accordingly.
-  fn send_to_path(&mut self, sender_path: QueryPath, common_query: CommonQuery) {
-    let sid = &sender_path.slave_group_id;
-    let eid = self.slave_address_config.get(sid).unwrap();
-    self.network_output.send(
-      &eid,
-      msg::NetworkMessage::Slave(
-        if let Some(tablet_group_id) = sender_path.maybe_tablet_group_id {
-          msg::SlaveMessage::TabletMessage(tablet_group_id.clone(), common_query.tablet_msg())
-        } else {
-          common_query.slave_msg()
-        },
-      ),
-    );
-  }
-
-  /// This is similar to the above, except uses a `node_group_id`.
-  fn send_to_node(&mut self, node_group_id: NodeGroupId, common_query: CommonQuery) {
-    match node_group_id {
-      NodeGroupId::Tablet(tid) => {
-        let sid = self.tablet_address_config.get(&tid).unwrap();
-        let eid = self.slave_address_config.get(sid).unwrap();
-        self.network_output.send(
-          eid,
-          msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
-            tid,
-            common_query.tablet_msg(),
-          )),
-        );
-      }
-      NodeGroupId::Slave(sid) => {
-        let eid = self.slave_address_config.get(&sid).unwrap();
-        self.network_output.send(eid, msg::NetworkMessage::Slave(common_query.slave_msg()));
-      }
-    };
   }
 
   fn check_write_region_isolation(
@@ -1558,7 +1520,7 @@ impl<T: IOTypes> TabletContext<T> {
               payload: msg::AbortedData::ColumnsDNE { missing_cols },
             };
             let sender_path = es.sender_path.clone();
-            self.send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
+            self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
 
             // Finally, Exit and Clean Up this TableReadES.
             self.exit_and_clean_up(statuses, query_id);
@@ -1705,7 +1667,7 @@ impl<T: IOTypes> TabletContext<T> {
               payload: msg::AbortedData::ColumnsDNE { missing_cols },
             };
             let sender_path = es.sender_path.clone();
-            self.send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
+            self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
 
             // Finally, Exit and Clean Up this MSWriteTableES.
             self.exit_and_clean_up(statuses, query_id);
@@ -1846,7 +1808,7 @@ impl<T: IOTypes> TabletContext<T> {
               payload: msg::AbortedData::ColumnsDNE { missing_cols },
             };
             let sender_path = es.sender_path.clone();
-            self.send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
+            self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
 
             // Finally, Exit and Clean Up this MSWriteTableES.
             self.exit_and_clean_up(statuses, query_id);
@@ -1993,7 +1955,7 @@ impl<T: IOTypes> TabletContext<T> {
     if !self.check_write_region_isolation(&write_region, &timestamp) {
       // Send an abortion.
       let sender_path = es.sender_path.clone();
-      self.send_to_path(
+      self.ctx().send_to_path(
         sender_path.clone(),
         CommonQuery::QueryAborted(msg::QueryAborted {
           return_path: sender_path.query_id.clone(),
@@ -2112,7 +2074,7 @@ impl<T: IOTypes> TabletContext<T> {
       payload: msg::AbortedData::QueryError(query_error),
     };
 
-    self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
+    self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
     self.exit_and_clean_up(statuses, query_id.clone());
   }
 
@@ -2794,7 +2756,7 @@ impl<T: IOTypes> TabletContext<T> {
         // Send out PerformQuery, wrapping it according to if the
         // TransTable is on a Slave or a Tablet
         let node_group_id = location_prefix.source.clone();
-        self.send_to_node(node_group_id.clone(), CommonQuery::PerformQuery(perform_query));
+        self.ctx().send_to_node(node_group_id.clone(), CommonQuery::PerformQuery(perform_query));
 
         // Add the TabletGroup into the TMStatus.
         tm_status.node_group_ids.insert(node_group_id, child_query_id.clone());
@@ -3028,7 +2990,7 @@ impl<T: IOTypes> TabletContext<T> {
           new_rms: es.new_rms.iter().cloned().collect(),
         };
         let sender_path = es.sender_path.clone();
-        self.send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
+        self.ctx().send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
 
         // Remove the TableReadES.
         statuses.remove(&query_id);
@@ -3218,7 +3180,7 @@ impl<T: IOTypes> TabletContext<T> {
           new_rms: es.new_rms.iter().cloned().collect(),
         };
         let sender_path = es.sender_path.clone();
-        self.send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
+        self.ctx().send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
 
         // Update the MSQuery. In particular, amend the `update_view` and remove this
         // MSTableWriteES from the pending queries.
@@ -3388,7 +3350,7 @@ impl<T: IOTypes> TabletContext<T> {
           new_rms: es.new_rms.iter().cloned().collect(),
         };
         let sender_path = es.sender_path.clone();
-        self.send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
+        self.ctx().send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
 
         // Remove the TableReadES.
         statuses.remove(&query_id);
@@ -3442,7 +3404,7 @@ impl<T: IOTypes> TabletContext<T> {
         {
           // If the child Query hasn't responded yet, and isn't also the Query that
           // just aborted, then we send it a CancelQuery
-          self.send_to_node(
+          self.ctx().send_to_node(
             node_group_id,
             CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
           );
@@ -3644,7 +3606,7 @@ impl<T: IOTypes> TabletContext<T> {
       for (node_group_id, child_query_id) in tm_status.node_group_ids {
         if tm_status.tm_state.get(&child_query_id).unwrap() == &TMWaitValue::Nothing {
           // If the child Query hasn't responded, then sent it a CancelQuery
-          self.send_to_node(
+          self.ctx().send_to_node(
             node_group_id,
             CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
           );
@@ -4208,7 +4170,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
                 msg: String::new(),
               }),
             };
-            ctx.send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
+            ctx.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
             self.state = CommonQueryReplanningS::Done(false);
             return;
           }
