@@ -101,6 +101,7 @@ pub enum TMWaitValue {
 #[derive(Debug)]
 pub struct TMStatus {
   pub node_group_ids: HashMap<NodeGroupId, QueryId>,
+  pub query_id: QueryId,
   pub new_rms: HashSet<QueryPath>,
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   pub responded_count: usize,

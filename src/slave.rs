@@ -514,6 +514,7 @@ impl<T: IOTypes> SlaveContext<T> {
     let tm_query_id = mk_qid(&mut self.rand);
     let mut tm_status = TMStatus {
       node_group_ids: Default::default(),
+      query_id: tm_query_id.clone(),
       new_rms: Default::default(),
       responded_count: 0,
       tm_state: Default::default(),

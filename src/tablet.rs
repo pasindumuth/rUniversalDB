@@ -10,6 +10,7 @@ use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
   construct_kb_expr, evaluate_c_expr, is_true, CExpr, EvalError,
 };
+use crate::gr_query_es::{GRExecutionS, GRQueryAction, GRQueryES, GRQueryPlan, ReadStage};
 use crate::model::common::{
   proc, ColType, ColValN, Context, ContextRow, ContextSchema, Gen, NodeGroupId, QueryPath,
   TableView, TierMap, TransTableLocationPrefix, TransTableName,
@@ -243,85 +244,6 @@ struct QueryReplanningES {
 enum FullTableReadES {
   QueryReplanning(QueryReplanningES),
   Executing(TableReadES),
-}
-
-// -----------------------------------------------------------------------------------------------
-//  GRQueryES
-// -----------------------------------------------------------------------------------------------
-#[derive(Debug)]
-pub struct ReadStage {
-  stage_idx: usize,
-  /// This fields maps the indices of the GRQueryES Context to that of the Context
-  /// in this SubqueryStatus. We cache this here since it's computed when the child
-  /// context is computed.
-  parent_context_map: Vec<usize>,
-  subquery_id: QueryId,
-  single_subquery_status: SingleSubqueryStatus,
-}
-
-#[derive(Debug)]
-pub struct MasterQueryReplanning {
-  master_query_id: QueryId,
-}
-
-#[derive(Debug)]
-pub enum GRExecutionS {
-  Start,
-  ReadStage(ReadStage),
-  MasterQueryReplanning(MasterQueryReplanning),
-}
-
-// Recall that the elements don't need to preserve the order of the TransTables, since the
-// sql_query does that for us (thus, we can use HashMaps).
-#[derive(Debug)]
-pub struct GRQueryPlan {
-  pub gossip_gen: Gen,
-  pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,
-  pub col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
-}
-
-#[derive(Debug)]
-pub struct GRQueryES {
-  pub root_query_path: QueryPath,
-  pub tier_map: TierMap,
-  pub timestamp: Timestamp,
-  pub context: Rc<Context>,
-
-  /// The elements of the outer Vec corresponds to every ContextRow in the
-  /// `context`. The elements of the inner vec corresponds to the elements in
-  /// `trans_table_views`. The `usize` indexes into an element in the corresponding
-  /// Vec<TableView> inside the `trans_table_views`.
-  pub new_trans_table_context: Vec<Vec<usize>>,
-
-  // Fields needed for responding.
-  pub query_id: QueryId,
-
-  // Query-related fields.
-  pub sql_query: proc::GRQuery,
-  pub query_plan: GRQueryPlan,
-
-  // The dynamically evolving fields.
-  pub new_rms: HashSet<QueryPath>,
-  pub trans_table_views: Vec<(TransTableName, (Vec<ColName>, Vec<TableView>))>,
-  pub state: GRExecutionS,
-
-  /// This holds the path to the parent ES.
-  pub orig_p: OrigP,
-}
-
-/// Ideally, we should create a create an auxiliary struct to cache `schema` and `instances`
-/// so that they don't constantly have to be looked up. However, we would need to access `prefix`
-/// here at the Server level, so we avoid doing this for now.
-impl TransTableSource for GRQueryES {
-  fn get_instance(&self, prefix: &TransTableLocationPrefix, idx: usize) -> &TableView {
-    let (_, instances) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
-    instances.get(idx).unwrap()
-  }
-
-  fn get_schema(&self, prefix: &TransTableLocationPrefix) -> Vec<ColName> {
-    let (schema, _) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
-    schema.clone()
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -2275,7 +2197,12 @@ impl<T: IOTypes> TabletContext<T> {
 
           // Drive GRQueries
           for query_id in gr_query_ids {
-            self.advance_gr_query(statuses, query_id);
+            let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
+            let action = es.start::<T>(&mut self.ctx());
+            // TODO: verify that we call handle_action for every one of these now, audit, and
+            // commit. Then use this in the Slave. Then, extract out TMStatus better so it
+            // can have common accumulation logic between Tablet and Slave.
+            self.handle_gr_query_es_action(statuses, query_id, action);
           }
         }
         ExecutionS::Executing(executing) => {
@@ -2301,7 +2228,9 @@ impl<T: IOTypes> TabletContext<T> {
           };
 
           statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
-          self.advance_gr_query(statuses, subquery_id);
+          let es = statuses.gr_query_ess.get_mut(&subquery_id).unwrap();
+          let action = es.start::<T>(&mut self.ctx());
+          self.handle_gr_query_es_action(statuses, subquery_id, action);
         }
       }
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
@@ -2357,7 +2286,9 @@ impl<T: IOTypes> TabletContext<T> {
 
           // Drive GRQueries
           for query_id in gr_query_ids {
-            self.advance_gr_query(statuses, query_id);
+            let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
+            let action = es.start::<T>(&mut self.ctx());
+            self.handle_gr_query_es_action(statuses, query_id, action);
           }
         }
         MSWriteExecutionS::Executing(executing) => {
@@ -2384,7 +2315,9 @@ impl<T: IOTypes> TabletContext<T> {
           };
 
           statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
-          self.advance_gr_query(statuses, subquery_id);
+          let es = statuses.gr_query_ess.get_mut(&subquery_id).unwrap();
+          let action = es.start::<T>(&mut self.ctx());
+          self.handle_gr_query_es_action(statuses, subquery_id, action);
         }
       }
     } else if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
@@ -2440,7 +2373,9 @@ impl<T: IOTypes> TabletContext<T> {
 
           // Drive GRQueries
           for query_id in gr_query_ids {
-            self.advance_gr_query(statuses, query_id);
+            let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
+            let action = es.start::<T>(&mut self.ctx());
+            self.handle_gr_query_es_action(statuses, query_id, action);
           }
         }
         MSReadExecutionS::Executing(executing) => {
@@ -2467,311 +2402,12 @@ impl<T: IOTypes> TabletContext<T> {
           };
 
           statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
-          self.advance_gr_query(statuses, subquery_id);
+          let es = statuses.gr_query_ess.get_mut(&subquery_id).unwrap();
+          let action = es.start::<T>(&mut self.ctx());
+          self.handle_gr_query_es_action(statuses, subquery_id, action);
         }
       }
     }
-  }
-
-  fn advance_gr_query(&mut self, statuses: &mut Statuses, query_id: QueryId) {
-    let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
-
-    // Compute the next stage
-    let next_stage_idx = match &es.state {
-      GRExecutionS::Start => 0,
-      GRExecutionS::ReadStage(read_stage) => read_stage.stage_idx + 1,
-      _ => panic!(),
-    };
-
-    if next_stage_idx < es.query_plan.col_usage_nodes.len() {
-      // This means that we have still have stages to evaluate, so we move on.
-      self.process_gr_query_stage(statuses, query_id, next_stage_idx);
-    } else {
-      // This means the GRQueryES is done, so we send the desired result
-      // back to the originator.
-      let return_trans_table_pos =
-        lookup_pos(&es.trans_table_views, &es.sql_query.returning).unwrap();
-      let (_, (schema, table_views)) = es.trans_table_views.get(return_trans_table_pos).unwrap();
-
-      // To compute the result, recall that we need to associate the Context to each TableView.
-      let mut result = Vec::<TableView>::new();
-      for extended_trans_tables_row in &es.new_trans_table_context {
-        let idx = extended_trans_tables_row.get(return_trans_table_pos).unwrap();
-        result.push(table_views.get(*idx).unwrap().clone());
-      }
-
-      // Finally, we Exit and Clean Up the GRQueryES and send the results back to the
-      // originator.
-      let orig_p = es.orig_p.clone();
-      let schema = schema.clone();
-      let new_rms = es.new_rms.clone();
-      self.exit_and_clean_up(statuses, query_id.clone());
-      self.handle_gr_query_done(statuses, orig_p, query_id, new_rms, (schema, result));
-    }
-  }
-
-  /// This function moves the GRQueryES to the Stage indicated by `stage_idx`.
-  /// This index must be valid (an actual stage).
-  fn process_gr_query_stage(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: QueryId,
-    stage_idx: usize,
-  ) {
-    let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
-    assert!(stage_idx < es.query_plan.col_usage_nodes.len());
-    let (_, (_, child)) = es.query_plan.col_usage_nodes.get(stage_idx).unwrap();
-
-    // Compute the `ColName`s and `TransTableNames` that we want in the child Query, and
-    // process that.
-    let context_cols = child.external_cols.clone();
-    let context_trans_tables = node_external_trans_tables(child);
-    self.process_gr_query_stage_simple(
-      statuses,
-      query_id,
-      stage_idx,
-      &context_cols,
-      context_trans_tables,
-    );
-  }
-
-  /// This is a common function used for sending processing a GRQueryES stage that
-  /// doesn't use the child QueryPlan to process the child ContextSchema, but rather
-  /// uses the `context_cols` and `context_trans_table`.
-  fn process_gr_query_stage_simple(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: QueryId,
-    stage_idx: usize,
-    context_cols: &Vec<ColName>,
-    context_trans_tables: Vec<TransTableName>,
-  ) {
-    let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
-    assert!(stage_idx < es.query_plan.col_usage_nodes.len());
-
-    // We first compute the Context
-    let mut context_schema = ContextSchema::default();
-
-    // Point all `context_cols` columns to their index in main Query's ContextSchema.
-    let mut context_col_index = HashMap::<ColName, usize>::new();
-    let col_schema = &es.context.context_schema.column_context_schema;
-    for (index, col) in col_schema.iter().enumerate() {
-      if context_cols.contains(col) {
-        context_col_index.insert(col.clone(), index);
-      }
-    }
-
-    // Compute the ColumnContextSchema
-    context_schema.column_context_schema.extend(context_cols.clone());
-
-    // Split the `context_trans_tables` according to which of them are defined
-    // in this GRQueryES, and which come from the outside.
-    let mut local_trans_table_split = Vec::<TransTableName>::new();
-    let mut external_trans_table_split = Vec::<TransTableName>::new();
-    let completed_local_trans_tables: HashSet<TransTableName> =
-      es.trans_table_views.iter().map(|(name, _)| name).cloned().collect();
-    for trans_table_name in context_trans_tables {
-      if completed_local_trans_tables.contains(&trans_table_name) {
-        local_trans_table_split.push(trans_table_name);
-      } else {
-        assert!(es.query_plan.trans_table_schemas.contains_key(&trans_table_name));
-        external_trans_table_split.push(trans_table_name);
-      }
-    }
-
-    // Point all `external_trans_table_split` to their index in main Query's ContextSchema.
-    let trans_table_context_schema = &es.context.context_schema.trans_table_context_schema;
-    let mut context_external_trans_table_index = HashMap::<TransTableName, usize>::new();
-    for (index, prefix) in trans_table_context_schema.iter().enumerate() {
-      if external_trans_table_split.contains(&prefix.trans_table_name) {
-        context_external_trans_table_index.insert(prefix.trans_table_name.clone(), index);
-      }
-    }
-
-    // Compute the TransTableContextSchema
-    for trans_table_name in &local_trans_table_split {
-      context_schema.trans_table_context_schema.push(TransTableLocationPrefix {
-        source: NodeGroupId::Tablet(self.this_tablet_group_id.clone()),
-        query_id: query_id.clone(),
-        trans_table_name: trans_table_name.clone(),
-      });
-    }
-    for trans_table_name in &external_trans_table_split {
-      let index = context_external_trans_table_index.get(trans_table_name).unwrap();
-      let trans_table_prefix = trans_table_context_schema.get(*index).unwrap().clone();
-      context_schema.trans_table_context_schema.push(trans_table_prefix);
-    }
-
-    // Construct the `ContextRow`s. To do this, we iterate over main Query's
-    // `ContextRow`s and then the corresponding `ContextRow`s for the subquery.
-    // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
-    let mut new_context_rows = Vec::<ContextRow>::new();
-    let mut new_row_map = HashMap::<ContextRow, usize>::new();
-    // We also map the indices of the GRQueryES Context to that of the SubqueryStatus.
-    let mut parent_context_map = Vec::<usize>::new();
-    for (row_idx, context_row) in es.context.context_rows.iter().enumerate() {
-      let mut new_context_row = ContextRow::default();
-
-      // Compute the `ColumnContextRow`
-      for col in context_cols {
-        let index = context_col_index.get(col).unwrap();
-        let col_val = context_row.column_context_row.get(*index).unwrap().clone();
-        new_context_row.column_context_row.push(col_val);
-      }
-
-      // Compute the `TransTableContextRow`
-      for local_trans_table_idx in 0..local_trans_table_split.len() {
-        let trans_table_context_row = es.new_trans_table_context.get(row_idx).unwrap();
-        let row_elem = trans_table_context_row.get(local_trans_table_idx).unwrap();
-        new_context_row.trans_table_context_row.push(*row_elem);
-      }
-      for trans_table_name in &external_trans_table_split {
-        let index = context_external_trans_table_index.get(trans_table_name).unwrap();
-        let trans_index = context_row.trans_table_context_row.get(*index).unwrap();
-        new_context_row.trans_table_context_row.push(*trans_index);
-      }
-
-      if !new_row_map.contains_key(&new_context_row) {
-        new_row_map.insert(new_context_row.clone(), new_context_rows.len());
-        new_context_rows.push(new_context_row.clone());
-      }
-
-      parent_context_map.push(new_row_map.get(&new_context_row).unwrap().clone());
-    }
-
-    // Finally, compute the context.
-    let context = Rc::new(Context { context_schema, context_rows: new_context_rows });
-
-    // Next, we compute the QueryPlan we should send out.
-
-    // Compute the TransTable schemas. We use the true TransTables for all prior
-    // locally defined TransTables.
-    let trans_table_schemas = &es.query_plan.trans_table_schemas;
-    let mut child_trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
-    for trans_table_name in &local_trans_table_split {
-      let (_, (schema, _)) =
-        es.trans_table_views.iter().find(|(name, _)| trans_table_name == name).unwrap();
-      child_trans_table_schemas.insert(trans_table_name.clone(), schema.clone());
-    }
-    for trans_table_name in &external_trans_table_split {
-      let schema = trans_table_schemas.get(trans_table_name).unwrap();
-      child_trans_table_schemas.insert(trans_table_name.clone(), schema.clone());
-    }
-
-    let (_, (_, child)) = es.query_plan.col_usage_nodes.get(stage_idx).unwrap();
-    let query_plan = QueryPlan {
-      gossip_gen: es.query_plan.gossip_gen.clone(),
-      trans_table_schemas: child_trans_table_schemas,
-      col_usage_node: child.clone(),
-    };
-
-    // Construct the TMStatus
-    let tm_query_id = mk_qid(&mut self.rand);
-    let mut tm_status = TMStatus {
-      node_group_ids: Default::default(),
-      new_rms: Default::default(),
-      responded_count: 0,
-      tm_state: Default::default(),
-      orig_p: OrigP::new(es.query_id.clone()),
-    };
-
-    let sender_path = QueryPath {
-      slave_group_id: self.this_slave_group_id.clone(),
-      maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
-      query_id: tm_query_id.clone(),
-    };
-
-    // Send out the PerformQuery and populate TMStatus accordingly.
-    let (_, stage) = es.sql_query.trans_tables.get(stage_idx).unwrap();
-    let child_sql_query = cast!(proc::GRQueryStage::SuperSimpleSelect, stage).unwrap();
-    match &child_sql_query.from {
-      proc::TableRef::TablePath(table_path) => {
-        // Here, we must do a SuperSimpleTableSelectQuery.
-        let child_query = msg::SuperSimpleTableSelectQuery {
-          timestamp: es.timestamp.clone(),
-          context: context.deref().clone(),
-          sql_query: child_sql_query.clone(),
-          query_plan,
-        };
-        let general_query = msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query);
-
-        // Compute the TabletGroups involved.
-        for tablet_group_id in self.ctx().get_min_tablets(table_path, &child_sql_query.selection) {
-          let child_query_id = mk_qid(&mut self.rand);
-          let sid = self.tablet_address_config.get(&tablet_group_id).unwrap();
-          let eid = self.slave_address_config.get(&sid).unwrap();
-
-          // Send out PerformQuery.
-          self.network_output.send(
-            eid,
-            msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
-              tablet_group_id.clone(),
-              msg::TabletMessage::PerformQuery(msg::PerformQuery {
-                root_query_path: es.root_query_path.clone(),
-                sender_path: sender_path.clone(),
-                query_id: child_query_id.clone(),
-                tier_map: es.tier_map.clone(),
-                query: general_query.clone(),
-              }),
-            )),
-          );
-
-          // Add the TabletGroup into the TMStatus.
-          let node_group_id = NodeGroupId::Tablet(tablet_group_id);
-          tm_status.node_group_ids.insert(node_group_id, child_query_id.clone());
-          tm_status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
-        }
-      }
-      proc::TableRef::TransTableName(trans_table_name) => {
-        // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
-        let location_prefix = context
-          .context_schema
-          .trans_table_context_schema
-          .iter()
-          .find(|prefix| &prefix.trans_table_name == trans_table_name)
-          .unwrap()
-          .clone();
-        let child_query = msg::SuperSimpleTransTableSelectQuery {
-          location_prefix: location_prefix.clone(),
-          context: context.deref().clone(),
-          sql_query: child_sql_query.clone(),
-          query_plan,
-        };
-
-        // Construct PerformQuery
-        let general_query = msg::GeneralQuery::SuperSimpleTransTableSelectQuery(child_query);
-        let child_query_id = mk_qid(&mut self.rand);
-        let perform_query = msg::PerformQuery {
-          root_query_path: es.root_query_path.clone(),
-          sender_path: sender_path.clone(),
-          query_id: child_query_id.clone(),
-          tier_map: es.tier_map.clone(),
-          query: general_query.clone(),
-        };
-
-        // Send out PerformQuery, wrapping it according to if the
-        // TransTable is on a Slave or a Tablet
-        let node_group_id = location_prefix.source.clone();
-        self.ctx().send_to_node(node_group_id.clone(), CommonQuery::PerformQuery(perform_query));
-
-        // Add the TabletGroup into the TMStatus.
-        tm_status.node_group_ids.insert(node_group_id, child_query_id.clone());
-        tm_status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
-      }
-    };
-
-    // Create a SubqueryStatus and move the GRQueryES to the next Stage.
-    es.state = GRExecutionS::ReadStage(ReadStage {
-      stage_idx,
-      parent_context_map,
-      subquery_id: tm_query_id.clone(),
-      single_subquery_status: SingleSubqueryStatus::Pending(SubqueryPending {
-        context: context.clone(),
-      }),
-    });
-
-    // Add the TMStatus into read_statuses
-    statuses.tm_statuss.insert(tm_query_id, tm_status);
   }
 
   fn handle_query_success(&mut self, statuses: &mut Statuses, query_success: msg::QuerySuccess) {
@@ -2792,7 +2428,14 @@ impl<T: IOTypes> TabletContext<T> {
         }
         let merged_result = merge_table_views(results);
         let gr_query_id = tm_status.orig_p.query_id;
-        self.handle_tm_done(statuses, gr_query_id, tm_query_id.clone(), merged_result);
+        let es = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
+        let action = es.handle_tm_success(
+          &mut self.ctx(),
+          tm_query_id.clone(),
+          tm_status.new_rms,
+          merged_result,
+        );
+        self.handle_gr_query_es_action(statuses, gr_query_id, action);
       }
     }
   }
@@ -3354,42 +2997,6 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  // TODO: we aren't accumulating `new_rms`... get that done.
-  fn handle_tm_done(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: QueryId,
-    tm_query_id: QueryId,
-    (schema, table_views): (Vec<ColName>, Vec<TableView>),
-  ) {
-    let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
-    let read_stage = cast!(GRExecutionS::ReadStage, &mut es.state).unwrap();
-    let child_query_id = &read_stage.subquery_id;
-    let single_status = &read_stage.single_subquery_status;
-
-    // Extract the `context` from the SingleSubqueryStatus and verify
-    // that it corresponds to `table_views`.
-    let subquery_context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
-    assert_eq!(child_query_id, &tm_query_id);
-    assert_eq!(table_views.len(), subquery_context.context_rows.len());
-
-    // For now, just assert assert that the schema that we get corresponds
-    // to that in the QueryPlan.
-    let (trans_table_name, (cur_schema, _)) =
-      es.query_plan.col_usage_nodes.get(read_stage.stage_idx).unwrap();
-    assert_eq!(&schema, cur_schema);
-
-    // Amend the `new_trans_table_context`
-    for i in 0..es.context.context_rows.len() {
-      let idx = read_stage.parent_context_map.get(i).unwrap();
-      es.new_trans_table_context.get_mut(i).unwrap().push(*idx);
-    }
-
-    // Add the `table_views` to the GRQueryES and advance it.
-    es.trans_table_views.push((trans_table_name.clone(), (schema, table_views)));
-    self.advance_gr_query(statuses, query_id);
-  }
-
   fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
     if let Some(tm_status) = statuses.tm_statuss.remove(&query_aborted.return_path) {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all
@@ -3409,66 +3016,9 @@ impl<T: IOTypes> TabletContext<T> {
 
       // Finally, we propagate up the AbortData to the GRQueryES that owns this TMStatus
       let gr_query_id = tm_status.orig_p.query_id;
-      self.handle_abort_gr_query_es(statuses, gr_query_id, query_aborted.payload);
-    }
-  }
-
-  /// Propagate up an abort from a TMStatus up the owning GRQueryES.
-  /// Note that the GRQueryES must exist.
-  fn handle_abort_gr_query_es(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: QueryId,
-    aborted_data: AbortedData,
-  ) {
-    let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
-    let read_stage = cast!(GRExecutionS::ReadStage, &es.state).unwrap();
-    let pending = cast!(SingleSubqueryStatus::Pending, &read_stage.single_subquery_status).unwrap();
-    match aborted_data {
-      AbortedData::ColumnsDNE { missing_cols } => {
-        // First, assert that the missing columns are indeed not already a part of the Context.
-        for col in &missing_cols {
-          assert!(!pending.context.context_schema.column_context_schema.contains(col));
-        }
-
-        // Next, we compute the subset of `missing_cols` that are not in the Context here.
-        let mut rem_cols = Vec::<ColName>::new();
-        for col in &missing_cols {
-          if !es.context.context_schema.column_context_schema.contains(col) {
-            rem_cols.push(col.clone());
-          }
-        }
-
-        if !rem_cols.is_empty() {
-          // If the Context has the missing columns, then we Exit and Clean Up this
-          // GRQueryES and propagate the error upward.
-          let orig_p = es.orig_p.clone();
-          self.exit_and_clean_up(statuses, query_id.clone());
-          self.handle_internal_columns_dne(statuses, orig_p, query_id, rem_cols);
-        } else {
-          // If the GRQueryES Context is sufficient, we simply amend the new columns
-          // to the Context and reprocess the ReadStage.
-          let context_schema = &pending.context.context_schema;
-          let mut context_cols = context_schema.column_context_schema.clone();
-          context_cols.extend(missing_cols);
-          let context_trans_tables = context_schema.trans_table_names();
-          let stage_idx = read_stage.stage_idx.clone();
-          self.process_gr_query_stage_simple(
-            statuses,
-            query_id,
-            stage_idx,
-            &context_cols,
-            context_trans_tables,
-          );
-        }
-      }
-      AbortedData::QueryError(query_error) => {
-        // Here, we Exit and Clean Up the GRQueryES, and we propagate up the QueryError
-        // Note that the only Subquery has already just been cleaned up.
-        let orig_p = es.orig_p.clone();
-        self.exit_and_clean_up(statuses, query_id.clone());
-        self.propagate_query_error(statuses, orig_p, query_error);
-      }
+      let es = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
+      let action = es.handle_tm_aborted(&mut self.ctx(), query_aborted.payload);
+      self.handle_gr_query_es_action(statuses, gr_query_id, action);
     }
   }
 
@@ -3513,7 +3063,9 @@ impl<T: IOTypes> TabletContext<T> {
         }
 
         for subquery_id in subquery_ids {
-          self.advance_gr_query(statuses, subquery_id);
+          let es = statuses.gr_query_ess.get_mut(&subquery_id).unwrap();
+          let action = es.start::<T>(&mut self.ctx());
+          self.handle_gr_query_es_action(statuses, subquery_id, action);
         }
       }
       TransTableAction::Done => {
@@ -3525,6 +3077,46 @@ impl<T: IOTypes> TabletContext<T> {
         // Recall that all responses will have been sent. There only resources that the ES
         // has are subqueries, so we Exit and Clean Up them here.
         statuses.full_trans_table_read_ess.remove(&query_id);
+        for subquery_id in subquery_ids {
+          self.exit_and_clean_up(statuses, subquery_id);
+        }
+      }
+    }
+  }
+
+  /// Handles the actions specified by a GRQueryES.
+  fn handle_gr_query_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: GRQueryAction,
+  ) {
+    match action {
+      GRQueryAction::ExecuteTMStatus(tm_status) => {
+        statuses.tm_statuss.insert(tm_status.query_id.clone(), tm_status);
+      }
+      GRQueryAction::Done(res) => {
+        let es = statuses.gr_query_ess.remove(&query_id).unwrap();
+        self.handle_gr_query_done(
+          statuses,
+          es.orig_p,
+          es.query_id,
+          res.new_rms,
+          (res.schema, res.result),
+        );
+      }
+      GRQueryAction::InternalColumnsDNE(rem_cols) => {
+        let es = statuses.gr_query_ess.remove(&query_id).unwrap();
+        self.handle_internal_columns_dne(statuses, es.orig_p, es.query_id, rem_cols);
+      }
+      GRQueryAction::QueryError(query_error) => {
+        let es = statuses.gr_query_ess.remove(&query_id).unwrap();
+        self.propagate_query_error(statuses, es.orig_p, query_error);
+      }
+      GRQueryAction::ExitAndCleanUp(subquery_ids) => {
+        // Recall that all responses will have been sent. There only resources that the ES
+        // has are subqueries, so we Exit and Clean Up them here.
+        statuses.gr_query_ess.remove(&query_id);
         for subquery_id in subquery_ids {
           self.exit_and_clean_up(statuses, subquery_id);
         }

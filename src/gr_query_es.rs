@@ -23,11 +23,9 @@ pub enum InternalError {
 }
 
 pub struct GRQueryResult {
-  orig_p: OrigP,
-  query_id: QueryId,
-  new_rms: HashSet<QueryPath>,
-  schema: Vec<ColName>,
-  result: Vec<TableView>,
+  pub new_rms: HashSet<QueryPath>,
+  pub schema: Vec<ColName>,
+  pub result: Vec<TableView>,
 }
 
 pub enum GRQueryAction {
@@ -53,18 +51,18 @@ pub enum GRQueryAction {
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct ReadStage {
-  stage_idx: usize,
+  pub stage_idx: usize,
   /// This fields maps the indices of the GRQueryES Context to that of the Context
   /// in this SubqueryStatus. We cache this here since it's computed when the child
   /// context is computed.
-  parent_context_map: Vec<usize>,
-  subquery_id: QueryId,
-  single_subquery_status: SingleSubqueryStatus,
+  pub parent_context_map: Vec<usize>,
+  pub subquery_id: QueryId,
+  pub single_subquery_status: SingleSubqueryStatus,
 }
 
 #[derive(Debug)]
 pub struct MasterQueryReplanning {
-  master_query_id: QueryId,
+  pub master_query_id: QueryId,
 }
 
 #[derive(Debug)]
@@ -138,7 +136,7 @@ impl GRQueryES {
     &mut self,
     ctx: &mut ServerContext<T>,
     tm_query_id: QueryId,
-    new_rms: Vec<QueryPath>,
+    new_rms: HashSet<QueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
@@ -275,8 +273,6 @@ impl GRQueryES {
 
       // Finally, we signal that the GRQueryES is done and send back the results.
       GRQueryAction::Done(GRQueryResult {
-        orig_p: self.orig_p.clone(),
-        query_id: self.query_id.clone(),
         new_rms: self.new_rms.clone(),
         schema: schema.clone(),
         result,
@@ -433,6 +429,7 @@ impl GRQueryES {
     let tm_query_id = mk_qid(ctx.rand);
     let mut tm_status = TMStatus {
       node_group_ids: Default::default(),
+      query_id: tm_query_id.clone(),
       new_rms: Default::default(),
       responded_count: 0,
       tm_state: Default::default(),

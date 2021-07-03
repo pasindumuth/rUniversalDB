@@ -1,6 +1,7 @@
 use crate::col_usage::{collect_select_subqueries, ColUsagePlanner};
 use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan};
 use crate::expression::{is_true, EvalError};
+use crate::gr_query_es::{GRExecutionS, GRQueryES, GRQueryPlan};
 use crate::model::common::{
   proc, ColName, ColType, ColValN, ContextRow, TableView, Timestamp, TransTableName,
 };
@@ -10,8 +11,8 @@ use crate::server::{
   evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConverter, ServerContext,
 };
 use crate::tablet::{
-  Executing, GRExecutionS, GRQueryES, GRQueryPlan, QueryReplanningSqlView, SingleSubqueryStatus,
-  SubqueryFinished, SubqueryPending, SubqueryStatus,
+  Executing, QueryReplanningSqlView, SingleSubqueryStatus, SubqueryFinished, SubqueryPending,
+  SubqueryStatus,
 };
 use crate::trans_read_es::TransTableAction::Wait;
 use std::collections::{HashMap, HashSet};
