@@ -107,6 +107,7 @@ impl<'a> ColUsagePlanner<'a> {
         }
       }
     }
+
     for col in &node.requested_cols {
       all_cols.insert(col.clone());
     }

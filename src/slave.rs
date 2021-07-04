@@ -131,8 +131,7 @@ struct MSQueryCoordReplanningES {
   /// The query to do the replanning with.
   sql_query: proc::MSQuery,
   /// The OrigP of the Task holding this MSQueryCoordReplanningES
-  // TODO: change this to `QueryId` here, and in tablet.
-  orig_p: OrigP,
+  query_id: QueryId,
   /// Used for managing MasterQueryReplanning
   state: MSQueryCoordReplanningS,
 }
@@ -263,7 +262,7 @@ impl<T: IOTypes> SlaveContext<T> {
                 sender_eid: external_query.sender_eid,
                 request_id: external_query.request_id,
                 sql_query: ms_query,
-                orig_p: OrigP { query_id: query_id.clone() },
+                query_id: query_id.clone(),
                 state: MSQueryCoordReplanningS::Start,
               }),
             );
@@ -814,7 +813,7 @@ impl<T: IOTypes> SlaveContext<T> {
             sender_eid: es.sender_eid.clone(),
             request_id: es.request_id.clone(),
             sql_query: es.sql_query.clone(),
-            orig_p: OrigP { query_id: query_id.clone() },
+            query_id: query_id.clone(),
             state: MSQueryCoordReplanningS::Start,
           });
 
@@ -1195,7 +1194,7 @@ impl MSQueryCoordReplanningES {
             },
           )),
         );
-        ctx.master_query_map.insert(master_query_id.clone(), self.orig_p.clone());
+        ctx.master_query_map.insert(master_query_id.clone(), OrigP::new(self.query_id.clone()));
 
         // Advance Replanning State.
         self.state = MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id };
