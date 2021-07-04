@@ -3,8 +3,8 @@ use crate::col_usage::{
   node_external_trans_tables, nodes_external_trans_tables, ColUsagePlanner, FrozenColUsageNode,
 };
 use crate::common::{
-  lookup, lookup_pos, merge_table_views, mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
-  QueryPlan, TMStatus, TMWaitValue, TableRegion, TableSchema,
+  lookup, lookup_pos, map_insert, merge_table_views, mk_qid, GossipData, IOTypes, KeyBound,
+  NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue, TableRegion, TableSchema,
 };
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
@@ -712,8 +712,9 @@ impl<T: IOTypes> TabletContext<T> {
             // if so and aborting if not.
             if let Some(gr_query_es) = statuses.gr_query_ess.get(&query.location_prefix.query_id) {
               // Construct and start the TransQueryReplanningES
-              statuses.full_trans_table_read_ess.insert(
-                perform_query.query_id.clone(),
+              let full_trans_table_es = map_insert(
+                &mut statuses.full_trans_table_read_ess,
+                &perform_query.query_id,
                 FullTransTableReadES::QueryReplanning(TransQueryReplanningES {
                   root_query_path: perform_query.root_query_path,
                   tier_map: perform_query.tier_map,
@@ -729,8 +730,6 @@ impl<T: IOTypes> TabletContext<T> {
                 }),
               );
 
-              let full_trans_table_es =
-                statuses.full_trans_table_read_ess.get_mut(&perform_query.query_id).unwrap();
               let action = full_trans_table_es.start(&mut self.ctx(), gr_query_es);
               self.handle_trans_es_action(statuses, perform_query.query_id, action);
             } else {

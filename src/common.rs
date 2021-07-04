@@ -9,6 +9,7 @@ use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::hash::Hash;
 
 pub trait Clock {
   fn now(&mut self) -> Timestamp;
@@ -144,6 +145,18 @@ pub fn merge_table_views(
     }
   }
   (schema, views)
+}
+
+/// This is a simple insert-get operation for HashMaps. We usually want to create a value
+/// in the same expression as the insert operation, but we also want to get a &mut to the
+/// inserted value. This function does this.
+pub fn map_insert<'a, K: Clone + Eq + Hash, V>(
+  map: &'a mut HashMap<K, V>,
+  key: &K,
+  value: V,
+) -> &'a mut V {
+  map.insert(key.clone(), value);
+  map.get_mut(key).unwrap()
 }
 
 // -----------------------------------------------------------------------------------------------
