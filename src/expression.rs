@@ -126,7 +126,7 @@ fn evaluate_binary_op(
       Ok(Some(ColVal::Int(left_val * right_val)))
     }
     (iast::BinaryOp::Divide, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
-      if left_val % right_val == 0 {
+      if right_val != 0 && left_val % right_val == 0 {
         Ok(Some(ColVal::Int(left_val / right_val)))
       } else {
         Err(EvalError::InvalidBinaryOp)

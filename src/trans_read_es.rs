@@ -292,7 +292,11 @@ impl FullTransTableReadES {
     if !missing_cols.is_empty() {
       // If there are missing columns, we construct a ColumnsDNE containing
       // `missing_cols`, send it back to the originator, and finish the ES.
-      self.send_query_aborted(ctx, msg::AbortedData::ColumnsDNE { missing_cols });
+      ctx.send_abort_data(
+        self.sender_path(),
+        self.query_id(),
+        msg::AbortedData::ColumnsDNE { missing_cols },
+      );
       self.exit_and_clean_up(ctx)
     } else {
       // This means there are no missing columns, and so we can try the
@@ -534,7 +538,7 @@ impl FullTransTableReadES {
           })();
 
           if let Err(eval_error) = eval_res {
-            self.send_query_error(ctx, mk_eval_error(eval_error));
+            ctx.send_query_error(self.sender_path(), self.query_id(), mk_eval_error(eval_error));
             return self.exit_and_clean_up(ctx);
           }
         }
@@ -568,7 +572,7 @@ impl FullTransTableReadES {
     ctx: &mut ServerContext<T>,
     query_error: msg::QueryError,
   ) -> TransTableAction {
-    self.send_query_error(ctx, query_error);
+    ctx.send_query_error(self.sender_path(), self.query_id(), query_error);
     self.exit_and_clean_up(ctx)
   }
 
@@ -620,7 +624,7 @@ impl FullTransTableReadES {
   }
 
   /// Get the `QueryPath` of the sender of this ES.
-  pub fn get_sender_path(&self) -> QueryPath {
+  pub fn sender_path(&self) -> QueryPath {
     match &self {
       FullTransTableReadES::QueryReplanning(es) => es.sender_path.clone(),
       FullTransTableReadES::Executing(es) => es.sender_path.clone(),
@@ -628,35 +632,11 @@ impl FullTransTableReadES {
   }
 
   /// Get the `QueryId` of the sender of this ES.
-  pub fn get_query_id(&self) -> QueryId {
+  pub fn query_id(&self) -> QueryId {
     match &self {
       FullTransTableReadES::QueryReplanning(es) => es.query_id.clone(),
       FullTransTableReadES::Executing(es) => es.query_id.clone(),
     }
-  }
-
-  /// Sends a QueryAborted with `payload` back to location of the `sender_path` in this ES.
-  pub fn send_query_aborted<T: IOTypes>(
-    &mut self,
-    ctx: &mut ServerContext<T>,
-    payload: msg::AbortedData,
-  ) {
-    let sender_path = self.get_sender_path();
-    let aborted = msg::QueryAborted {
-      return_path: sender_path.query_id.clone(),
-      query_id: self.get_query_id(),
-      payload,
-    };
-    ctx.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
-  }
-
-  /// Sends a QueryError back to location of the `sender_path` in this ES.
-  pub fn send_query_error<T: IOTypes>(
-    &mut self,
-    ctx: &mut ServerContext<T>,
-    query_error: msg::QueryError,
-  ) {
-    self.send_query_aborted(ctx, msg::AbortedData::QueryError(query_error));
   }
 }
 

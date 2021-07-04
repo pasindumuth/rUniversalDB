@@ -333,13 +333,11 @@ impl<T: IOTypes> SlaveContext<T> {
             } else {
               // This means that the target GRQueryES was deleted. We can send back an
               // Abort with LateralError. Exit and Clean Up will be done later.
-              let sender_path = perform_query.sender_path;
-              let aborted_msg = msg::QueryAborted {
-                return_path: sender_path.query_id.clone(),
-                query_id: perform_query.query_id,
-                payload: msg::AbortedData::QueryError(msg::QueryError::LateralError),
-              };
-              self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
+              self.ctx().send_query_error(
+                perform_query.sender_path,
+                perform_query.query_id,
+                msg::QueryError::LateralError,
+              );
               return;
             }
           }

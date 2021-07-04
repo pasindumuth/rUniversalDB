@@ -57,6 +57,33 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
     );
   }
 
+  /// This responds to the given `sender_path` with a QueryAborted containing the given
+  /// `abort_data`. Here, the `query_id` is that of the ES that's responding.
+  pub fn send_abort_data(
+    &mut self,
+    sender_path: QueryPath,
+    query_id: QueryId,
+    abort_data: msg::AbortedData,
+  ) {
+    let aborted = msg::QueryAborted {
+      return_path: sender_path.query_id.clone(),
+      query_id: query_id.clone(),
+      payload: abort_data,
+    };
+    self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
+  }
+
+  /// This responds to the given `sender_path` with a QueryAborted containing the given
+  /// `query_error`. Here, the `query_id` is that of the ES that's responding.
+  pub fn send_query_error(
+    &mut self,
+    sender_path: QueryPath,
+    query_id: QueryId,
+    query_error: msg::QueryError,
+  ) {
+    self.send_abort_data(sender_path, query_id, msg::AbortedData::QueryError(query_error));
+  }
+
   /// This is similar to the above, except uses a `node_group_id`.
   pub fn send_to_node(&mut self, node_group_id: NodeGroupId, common_query: CommonQuery) {
     match node_group_id {

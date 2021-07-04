@@ -730,15 +730,13 @@ impl<T: IOTypes> TabletContext<T> {
               let action = full_trans_table_es.start(&mut self.ctx(), gr_query_es);
               self.handle_trans_es_action(statuses, perform_query.query_id, action);
             } else {
-              // This means that the target GRQueryES was deleted. We can send back an
-              // Abort with LateralError. Exit and Clean Up will be done later.
-              let sender_path = perform_query.sender_path;
-              let aborted_msg = msg::QueryAborted {
-                return_path: sender_path.query_id.clone(),
-                query_id: perform_query.query_id,
-                payload: msg::AbortedData::QueryError(msg::QueryError::LateralError),
-              };
-              self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
+              // This means that the target GRQueryES was deleted, so we send back
+              // an Abort with LateralError.
+              self.ctx().send_query_error(
+                perform_query.sender_path,
+                perform_query.query_id,
+                msg::QueryError::LateralError,
+              );
               return;
             }
           }
@@ -759,13 +757,11 @@ impl<T: IOTypes> TabletContext<T> {
                   || self.committed_writes.contains_key(&timestamp)
                 {
                   // This means the Timestamp is already in use, so we have to Abort.
-                  let sender_path = perform_query.sender_path;
-                  let abort_msg = msg::QueryAborted {
-                    return_path: sender_path.query_id.clone(),
-                    query_id: perform_query.query_id.clone(),
-                    payload: msg::AbortedData::QueryError(msg::QueryError::TimestampConflict),
-                  };
-                  self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(abort_msg));
+                  self.ctx().send_query_error(
+                    perform_query.sender_path,
+                    perform_query.query_id,
+                    msg::QueryError::TimestampConflict,
+                  );
                   return;
                 } else {
                   // This means that we can add an MSQueryES at the Timestamp
@@ -878,13 +874,11 @@ impl<T: IOTypes> TabletContext<T> {
                 || self.committed_writes.contains_key(&timestamp)
               {
                 // This means the Timestamp is already in use, so we have to Abort.
-                let sender_path = perform_query.sender_path;
-                let abort_msg = msg::QueryAborted {
-                  return_path: sender_path.query_id.clone(),
-                  query_id: perform_query.query_id.clone(),
-                  payload: msg::AbortedData::QueryError(msg::QueryError::TimestampConflict),
-                };
-                self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(abort_msg));
+                self.ctx().send_query_error(
+                  perform_query.sender_path,
+                  perform_query.query_id,
+                  msg::QueryError::TimestampConflict,
+                );
                 return;
               } else {
                 // This means that we can add an MSQueryES at the Timestamp
@@ -1431,13 +1425,11 @@ impl<T: IOTypes> TabletContext<T> {
 
             // Construct a ColumnsDNE containing `missing_cols` and send it
             // back to the originator.
-            let columns_dne_msg = msg::QueryAborted {
-              return_path: es.sender_path.query_id.clone(),
-              query_id: query_id.clone(),
-              payload: msg::AbortedData::ColumnsDNE { missing_cols },
-            };
-            let sender_path = es.sender_path.clone();
-            self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
+            self.ctx().send_abort_data(
+              es.sender_path.clone(),
+              query_id.clone(),
+              msg::AbortedData::ColumnsDNE { missing_cols },
+            );
 
             // Finally, Exit and Clean Up this TableReadES.
             self.exit_and_clean_up(statuses, query_id);
@@ -1578,13 +1570,11 @@ impl<T: IOTypes> TabletContext<T> {
 
             // Construct a ColumnsDNE containing `missing_cols` and send it
             // back to the originator.
-            let columns_dne_msg = msg::QueryAborted {
-              return_path: es.sender_path.query_id.clone(),
-              query_id: query_id.clone(),
-              payload: msg::AbortedData::ColumnsDNE { missing_cols },
-            };
-            let sender_path = es.sender_path.clone();
-            self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
+            self.ctx().send_abort_data(
+              es.sender_path.clone(),
+              query_id.clone(),
+              msg::AbortedData::ColumnsDNE { missing_cols },
+            );
 
             // Finally, Exit and Clean Up this MSWriteTableES.
             self.exit_and_clean_up(statuses, query_id);
@@ -1719,13 +1709,11 @@ impl<T: IOTypes> TabletContext<T> {
 
             // Construct a ColumnsDNE containing `missing_cols` and send it
             // back to the originator.
-            let columns_dne_msg = msg::QueryAborted {
-              return_path: es.sender_path.query_id.clone(),
-              query_id: query_id.clone(),
-              payload: msg::AbortedData::ColumnsDNE { missing_cols },
-            };
-            let sender_path = es.sender_path.clone();
-            self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(columns_dne_msg));
+            self.ctx().send_abort_data(
+              es.sender_path.clone(),
+              query_id.clone(),
+              msg::AbortedData::ColumnsDNE { missing_cols },
+            );
 
             // Finally, Exit and Clean Up this MSWriteTableES.
             self.exit_and_clean_up(statuses, query_id);
@@ -1810,7 +1798,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Move the TableReadES to the Pending state with the given ReadRegion.
     let protect_query_id = mk_qid(&mut self.rand);
-    let col_region: Vec<ColName> = col_region.into_iter().collect();
+    let col_region = Vec::from_iter(col_region.into_iter());
     let read_region = TableRegion { col_region, row_region };
     es.state = ExecutionS::Pending(Pending {
       read_region: read_region.clone(),
@@ -1871,16 +1859,10 @@ impl<T: IOTypes> TabletContext<T> {
     let timestamp = es.timestamp.clone();
     if !self.check_write_region_isolation(&write_region, &timestamp) {
       // Send an abortion.
-      let sender_path = es.sender_path.clone();
-      self.ctx().send_to_path(
-        sender_path.clone(),
-        CommonQuery::QueryAborted(msg::QueryAborted {
-          return_path: sender_path.query_id.clone(),
-          query_id: query_id.clone(),
-          payload: msg::AbortedData::QueryError(
-            msg::QueryError::WriteRegionConflictWithSubsequentRead,
-          ),
-        }),
+      self.ctx().send_query_error(
+        es.sender_path.clone(),
+        query_id.clone(),
+        msg::QueryError::WriteRegionConflictWithSubsequentRead,
       );
       self.exit_and_clean_up(statuses, query_id.clone());
     } else {
@@ -1963,7 +1945,7 @@ impl<T: IOTypes> TabletContext<T> {
       let es = cast!(FullTableReadES::Executing, read_es).unwrap();
       es.sender_path.clone()
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get(&query_id) {
-      trans_read_es.get_sender_path()
+      trans_read_es.sender_path()
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get(&query_id) {
       let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
       es.sender_path.clone()
@@ -1975,7 +1957,8 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// This is called whi
+  /// This looks up the ES of `query_id` and sends the `query_error` back to that ES's
+  /// sender_path, and also Exit and Cleans Up the ES.
   fn abort_with_query_error(
     &mut self,
     statuses: &mut Statuses,
@@ -1983,16 +1966,7 @@ impl<T: IOTypes> TabletContext<T> {
     query_error: msg::QueryError,
   ) {
     let sender_path = self.get_path(statuses, query_id);
-
-    // If an error occurs here, we simply abort this whole query and respond
-    // to the sender with an Abort.
-    let aborted = msg::QueryAborted {
-      return_path: sender_path.query_id.clone(),
-      query_id: query_id.clone(),
-      payload: msg::AbortedData::QueryError(query_error),
-    };
-
-    self.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
+    self.ctx().send_query_error(sender_path, query_id.clone(), query_error);
     self.exit_and_clean_up(statuses, query_id.clone());
   }
 
@@ -3352,7 +3326,7 @@ impl ContextKeyboundComputer {
   }
 
   /// Compute the tightest keybound for the given `parent_context_row` (whose schema
-  /// must correspond to `parent_context_schema` passed in teh constructor.
+  /// must correspond to `parent_context_schema` passed in the constructor).
   fn compute_keybounds(&self, parent_context_row: &ContextRow) -> Result<Vec<KeyBound>, EvalError> {
     // First, map all External Columns names to the corresponding values
     // in this ContextRow
@@ -3690,15 +3664,11 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         for col in &self.sql_view.projected_cols(&ctx.table_schema) {
           if !contains_col(&ctx.table_schema, col, &self.timestamp) {
             // This means a projected column doesn't exist. Thus, we Exit and Clean Up.
-            let sender_path = self.sender_path.clone();
-            let aborted_msg = msg::QueryAborted {
-              return_path: sender_path.query_id.clone(),
-              query_id: self.query_id.clone(),
-              payload: msg::AbortedData::QueryError(msg::QueryError::ProjectedColumnsDNE {
-                msg: String::new(),
-              }),
-            };
-            ctx.ctx().send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
+            ctx.ctx().send_query_error(
+              self.sender_path.clone(),
+              self.query_id.clone(),
+              msg::QueryError::ProjectedColumnsDNE { msg: String::new() },
+            );
             self.state = CommonQueryReplanningS::Done(false);
             return;
           }

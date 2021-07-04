@@ -231,6 +231,8 @@ impl<'a> ColUsagePlanner<'a> {
   }
 }
 
+/// This function returns all `ColName`s in the `expr` that don't fall
+/// under a `Subquery`.
 pub fn collect_top_level_cols(expr: &proc::ValExpr) -> Vec<ColName> {
   let mut cols = Vec::<ColName>::new();
   collect_top_level_cols_R(expr, &mut cols);
