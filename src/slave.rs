@@ -11,7 +11,7 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::GeneralQuery;
+use crate::model::message::{GeneralQuery, QueryError};
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContext};
 use crate::sql_parser::convert_ast;
@@ -357,7 +357,7 @@ impl<T: IOTypes> SlaveContext<T> {
         self.handle_query_success(statuses, query_success);
       }
       msg::SlaveMessage::QueryAborted(_) => unimplemented!(),
-      msg::SlaveMessage::Query2PCPrepared(prepared) => self.handle_prepare(statuses, prepared),
+      msg::SlaveMessage::Query2PCPrepared(prepared) => self.handle_prepared(statuses, prepared),
       msg::SlaveMessage::Query2PCAborted(_) => panic!(),
       msg::SlaveMessage::MasterFrozenColUsageAborted(_) => unimplemented!(),
       msg::SlaveMessage::MasterFrozenColUsageSuccess(_) => unimplemented!(),
@@ -765,6 +765,9 @@ impl<T: IOTypes> SlaveContext<T> {
     }
   }
 
+  /// Handles a TMStatus aborting. If the originator was a GRQueryES, we can simply forward the
+  /// `aborted_data` to that. Otherwise, if it was the MSQueryCoordES, then either the MSQuery
+  /// has failed, either requiring an response to be sent or for the MSQuery to be retried.
   fn handle_tm_aborted(
     &mut self,
     statuses: &mut Statuses,
@@ -777,12 +780,62 @@ impl<T: IOTypes> SlaveContext<T> {
       let action = es.handle_tm_aborted(&mut self.ctx(), aborted_data);
       self.handle_gr_query_es_action(statuses, query_id, action);
     } else if let Some(ms_coord_es) = statuses.ms_coord_ess.get_mut(&query_id) {
-      // TODO: finish this.
+      let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
+      match aborted_data {
+        msg::AbortedData::ColumnsDNE { .. }
+        | msg::AbortedData::QueryError(QueryError::TypeError { .. })
+        | msg::AbortedData::QueryError(QueryError::RuntimeError { .. })
+        | msg::AbortedData::QueryError(QueryError::ProjectedColumnsDNE { .. }) => {
+          // Here, we simply respond to the External with a `QueryExecutionError`,
+          // and Exit and Clean Up.
+          self.network_output.send(
+            &es.sender_eid,
+            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAbort(
+              msg::ExternalQueryAbort {
+                request_id: es.request_id.clone(),
+                payload: msg::ExternalAbortedData::QueryExecutionError,
+              },
+            )),
+          );
+          self.exit_and_clean_up(statuses, query_id);
+        }
+        msg::AbortedData::QueryError(QueryError::WriteRegionConflictWithSubsequentRead)
+        | msg::AbortedData::QueryError(QueryError::DeadlockSafetyAbortion)
+        | msg::AbortedData::QueryError(QueryError::TimestampConflict) => {
+          // Here, we need to Exit and Clean Up the MSQueryCoordES, but we need to try
+          // everything again at a higher timestamp (as opposed to respond to the External).
+
+          // First, we create a new MSQueryCoordES back in the initial state, using a Timestamp
+          // that's strictly greater than the prior one.
+          let query_id = mk_qid(&mut self.rand);
+          let request_id = es.request_id.clone();
+          let new_timestamp = self.clock.now();
+          assert!(new_timestamp > es.timestamp);
+          let new_ms_coord_es = FullMSQueryCoordES::QueryReplanning(MSQueryCoordReplanningES {
+            timestamp: new_timestamp,
+            sender_eid: es.sender_eid.clone(),
+            request_id: es.request_id.clone(),
+            sql_query: es.sql_query.clone(),
+            orig_p: OrigP { query_id: query_id.clone() },
+            state: MSQueryCoordReplanningS::Start,
+          });
+
+          // Next, we Exit and Clean Up the old MSQueryCoordES.
+          self.exit_and_clean_up(statuses, query_id.clone());
+
+          // Finally, we add the new MSQueryCoordES into the Slave and then execute it.
+          self.external_request_id_map.insert(request_id.clone(), query_id.clone());
+          statuses.ms_coord_ess.insert(query_id.clone(), new_ms_coord_es);
+          self.drive_ms_coord(statuses, query_id);
+        }
+        // Recall that LateralErrors should never make it back to the MSQueryCoordES.
+        msg::AbortedData::QueryError(QueryError::LateralError) => panic!(),
+      }
     }
   }
 
   /// Handle a Prepared message sent to an MSQueryCoordES.
-  fn handle_prepare(&mut self, statuses: &mut Statuses, prepared: msg::Query2PCPrepared) {
+  fn handle_prepared(&mut self, statuses: &mut Statuses, prepared: msg::Query2PCPrepared) {
     let query_id = prepared.return_path;
     if let Some(ms_coord_es) = statuses.ms_coord_ess.get_mut(&query_id) {
       let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
@@ -868,7 +921,7 @@ impl<T: IOTypes> SlaveContext<T> {
         (table_schema, table_views),
       )
     } else {
-      trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+      trans_read_es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
     };
     self.handle_trans_es_action(statuses, query_id, action);
   }
@@ -878,8 +931,9 @@ impl<T: IOTypes> SlaveContext<T> {
   // in the lambda itself. The function would assume the `query_id` points to a valid
   // TransTableRead, so it may take in the whole `statuses`.
 
-  /// This function just routes the InternalColumnsDNE notification
-  /// (from the GRQueryES) to the right ES.
+  /// This function just routes the InternalColumnsDNE notification from the GRQueryES.
+  /// Recall that the originator can only be a TransTableReadES and it must exist (since
+  /// the GRQueryES had existed).
   fn handle_internal_columns_dne(
     &mut self,
     statuses: &mut Statuses,
@@ -887,18 +941,31 @@ impl<T: IOTypes> SlaveContext<T> {
     rem_cols: Vec<ColName>,
   ) {
     let query_id = orig_p.query_id;
-    if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-      let prefix = trans_read_es.location_prefix();
-      let action = if let Some(es) = statuses.gr_query_ess.get(&prefix.query_id) {
-        trans_read_es.handle_internal_columns_dne(&mut self.ctx(), es, query_id.clone(), rem_cols)
-      } else if let Some(ms_coord_es) = statuses.ms_coord_ess.get(&prefix.query_id) {
-        let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
-        trans_read_es.handle_internal_columns_dne(&mut self.ctx(), es, query_id.clone(), rem_cols)
-      } else {
-        trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-      };
-      self.handle_trans_es_action(statuses, query_id, action);
-    }
+    let trans_read_es = statuses.full_trans_table_read_ess.get_mut(&query_id).unwrap();
+    let prefix = trans_read_es.location_prefix();
+    let action = if let Some(es) = statuses.gr_query_ess.get(&prefix.query_id) {
+      trans_read_es.handle_internal_columns_dne(&mut self.ctx(), es, query_id.clone(), rem_cols)
+    } else if let Some(ms_coord_es) = statuses.ms_coord_ess.get(&prefix.query_id) {
+      let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
+      trans_read_es.handle_internal_columns_dne(&mut self.ctx(), es, query_id.clone(), rem_cols)
+    } else {
+      trans_read_es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+    };
+    self.handle_trans_es_action(statuses, query_id, action);
+  }
+
+  /// Handles a `query_error` propagated up from a GRQueryES. Recall that the originator
+  /// can only be a TransTableReadES and it must exist (since the GRQueryES had existed).
+  fn handle_internal_query_error(
+    &mut self,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    query_error: msg::QueryError,
+  ) {
+    let query_id = orig_p.query_id;
+    let trans_read_es = statuses.full_trans_table_read_ess.get_mut(&query_id).unwrap();
+    let action = trans_read_es.handle_internal_query_error(&mut self.ctx(), query_error);
+    self.handle_trans_es_action(statuses, query_id, action);
   }
 
   /// Handles the actions specified by a TransTableReadES.
@@ -967,11 +1034,8 @@ impl<T: IOTypes> SlaveContext<T> {
         self.handle_internal_columns_dne(statuses, es.orig_p, rem_cols);
       }
       GRQueryAction::QueryError(query_error) => {
-        // TODO: finish
-        // TODO: this is significantly more complicated for MSQueryCoordES, since
-        // we need to do retries here.
-        // let es = statuses.gr_query_ess.remove(&query_id).unwrap();
-        // self.propagate_query_error(statuses, es.orig_p, query_error);
+        let es = statuses.gr_query_ess.remove(&query_id).unwrap();
+        self.handle_internal_query_error(statuses, es.orig_p, query_error);
       }
       GRQueryAction::ExitAndCleanUp(subquery_ids) => {
         // Recall that all responses will have been sent. There only resources that the ES
@@ -1002,10 +1066,9 @@ impl<T: IOTypes> SlaveContext<T> {
     }
   }
 
-  /// This function is used to cancel an ES both for the case of CancelQuery, but also
-  /// to generally Exit and Clean Up an ES from whatever state it's in. Thus, we don't
-  /// require the ES to be in their valid state; an ES might reference another ES
-  /// that no longer exists (because the calling function did some pre-cleanup).
+  /// This function is used to initiate an Exit and Clean Up of ESs. This is needed to handle
+  /// CancelQuery's, as well as when one on ES wants to Exit and Clean Up another ES. Note that
+  /// We allow the ES at `query_id` to be in any state, and to not even exist.
   fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
     if let Some(ms_coord_es) = statuses.ms_coord_ess.remove(&query_id) {
       match ms_coord_es {
@@ -1068,6 +1131,16 @@ impl<T: IOTypes> SlaveContext<T> {
           }
         }
       }
+    } else if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+      // Here, we only take a `&mut` to the GRQueryES, since `handle_gr_query_es_action`
+      // needs it to be present before deleting it.
+      let action = es.exit_and_clean_up(&mut self.ctx());
+      self.handle_gr_query_es_action(statuses, query_id, action);
+    } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+      // Here, we only take a `&mut` to the TransTableRead, since `handle_trans_es_action`
+      // needs it to be present before deleting it.
+      let action = trans_read_es.exit_and_clean_up(&mut self.ctx());
+      self.handle_trans_es_action(statuses, query_id, action);
     } else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all remaining participants)
       for (node_group_id, child_query_id) in tm_status.node_group_ids {

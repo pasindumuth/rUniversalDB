@@ -1969,7 +1969,7 @@ impl<T: IOTypes> TabletContext<T> {
       let es = cast!(FullTableReadES::Executing, read_es).unwrap();
       es.sender_path.clone()
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get(&query_id) {
-      trans_read_es.get_sender_path::<T>()
+      trans_read_es.get_sender_path()
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get(&query_id) {
       let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
       es.sender_path.clone()
@@ -1981,6 +1981,7 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
+  /// This is called whi
   fn abort_with_query_error(
     &mut self,
     statuses: &mut Statuses,
@@ -2069,7 +2070,8 @@ impl<T: IOTypes> TabletContext<T> {
     );
   }
 
-  // This function just routes the internal columns DNE notification to the right ES.
+  /// This function just routes the InternalColumnsDNE notification from the GRQueryES.
+  /// Recall that the originator must exist (since the GRQueryES had existed).
   fn handle_internal_columns_dne(
     &mut self,
     statuses: &mut Statuses,
@@ -2094,11 +2096,11 @@ impl<T: IOTypes> TabletContext<T> {
         trans_read_es.handle_internal_columns_dne(
           &mut self.ctx(),
           gr_query_es,
-          query_id.clone(),
+          subquery_id.clone(),
           rem_cols,
         )
       } else {
-        trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+        trans_read_es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
       };
       self.handle_trans_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
@@ -2637,7 +2639,7 @@ impl<T: IOTypes> TabletContext<T> {
           (table_schema, table_views),
         )
       } else {
-        trans_read_es.handle_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+        trans_read_es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
       };
       self.handle_trans_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
@@ -2810,12 +2812,9 @@ impl<T: IOTypes> TabletContext<T> {
 
         // Update the MSQuery. In particular, amend the `update_view` and remove this
         // MSTableWriteES from the pending queries.
-        let tier = es.tier.clone();
-        // TODO: Go through my code and see how many auxiliary variables can now be inlined
-        // because of our Unpolymorphic TabletStatuses.
         let ms_query = statuses.ms_query_ess.get_mut(&es.ms_query_id).unwrap();
         ms_query.pending_queries.remove(&query_id);
-        ms_query.update_views.insert(tier, update_view);
+        ms_query.update_views.insert(es.tier.clone(), update_view);
 
         // Remove the MSTableWriteES.
         statuses.remove(&query_id);
@@ -3010,7 +3009,7 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   /// This routes the QueryError propagated by a GRQueryES up to the appropriate top-level ES.
-  fn propagate_query_error(
+  fn handle_internal_query_error(
     &mut self,
     statuses: &mut Statuses,
     orig_p: OrigP,
@@ -3020,7 +3019,7 @@ impl<T: IOTypes> TabletContext<T> {
     if statuses.full_table_read_ess.contains_key(&query_id) {
       self.abort_with_query_error(statuses, &query_id, query_error)
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-      let action = trans_read_es.handle_query_error(&mut self.ctx(), query_error);
+      let action = trans_read_es.handle_internal_query_error(&mut self.ctx(), query_error);
       self.handle_trans_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get(&query_id) {
       let ms_query_id = ms_write_es.ms_query_id().clone();
@@ -3098,7 +3097,7 @@ impl<T: IOTypes> TabletContext<T> {
       }
       GRQueryAction::QueryError(query_error) => {
         let es = statuses.gr_query_ess.remove(&query_id).unwrap();
-        self.propagate_query_error(statuses, es.orig_p, query_error);
+        self.handle_internal_query_error(statuses, es.orig_p, query_error);
       }
       GRQueryAction::ExitAndCleanUp(subquery_ids) => {
         // Recall that all responses will have been sent. There only resources that the ES
@@ -3111,36 +3110,15 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// This function is used to cancel an ES both for the case of CancelQuery, but also
-  /// to generally Exit and Clean Up an ES from whatever state it's in. Thus, we don't
-  /// require the ES to be in their valid state; an ES might reference another ES
-  /// that no longer exists (because the calling function did some pre-cleanup).
+  /// This function is used to initiate an Exit and Clean Up of ESs. This is needed to handle
+  /// CancelQuery's, as well as when one on ES wants to Exit and Clean Up another ES. Note that
+  /// We allow the ES at `query_id` to be in any state, and to not even exist.
   fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
-    if let Some(es) = statuses.gr_query_ess.remove(&query_id) {
-      match es.state {
-        GRExecutionS::Start => {}
-        GRExecutionS::ReadStage(read_stage) => match read_stage.single_subquery_status {
-          SingleSubqueryStatus::LockingSchemas(_) => panic!(),
-          SingleSubqueryStatus::PendingReadRegion(_) => panic!(),
-          SingleSubqueryStatus::Pending(_) => {
-            self.exit_and_clean_up(statuses, read_stage.subquery_id);
-          }
-          SingleSubqueryStatus::Finished(_) => {}
-        },
-        GRExecutionS::MasterQueryReplanning(planning) => {
-          // Remove if present
-          if self.master_query_map.remove(&planning.master_query_id).is_some() {
-            // If the removal was successful, we should also send a Cancellation
-            // message to the Master.
-            self.network_output.send(
-              &self.master_eid,
-              msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-                msg::CancelMasterFrozenColUsage { query_id: planning.master_query_id },
-              )),
-            );
-          }
-        }
-      }
+    if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+      // Here, we only take a `&mut` to the GRQueryES, since `handle_trans_es_action`
+      // needs it to be present before deleting it.
+      let action = es.exit_and_clean_up(&mut self.ctx());
+      self.handle_gr_query_es_action(statuses, query_id, action);
     } else if let Some(read_es) = statuses.full_table_read_ess.remove(&query_id) {
       match read_es {
         FullTableReadES::QueryReplanning(es) => self.exit_planning(es.status.state),
@@ -3172,8 +3150,8 @@ impl<T: IOTypes> TabletContext<T> {
           }
         },
       }
-    } else if let Some(mut trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-      // Here, we only get a `&mut` to the TransTableRead, since `handle_trans_es_action`
+    } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+      // Here, we only take a `&mut` to the TransTableRead, since `handle_gr_query_es_action`
       // needs it to be present before deleting it.
       let action = trans_read_es.exit_and_clean_up(&mut self.ctx());
       self.handle_trans_es_action(statuses, query_id, action);

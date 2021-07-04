@@ -558,6 +558,20 @@ impl FullTransTableReadES {
     }
   }
 
+  /// This is can be called both for if a subquery fails, or if there is a LateralError
+  /// due to the ES owning the TransTable disappears. This simply responds to the sender
+  /// and Exits and Clean Ups this ES.
+  /// TODO: I believe that this and `handle_internal_columns_dne` should be unified into
+  /// one function that is essentially called when a child GRQueryES fails.
+  pub fn handle_internal_query_error<T: IOTypes>(
+    &mut self,
+    ctx: &mut ServerContext<T>,
+    query_error: msg::QueryError,
+  ) -> TransTableAction {
+    self.send_query_error(ctx, query_error);
+    self.exit_and_clean_up(ctx)
+  }
+
   /// This Cleans up any Master queries we launched and it returns instructions for the
   /// parent Server to follow to clean up subqueries.
   pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> TransTableAction {
@@ -605,22 +619,8 @@ impl FullTransTableReadES {
     }
   }
 
-  /// This is can be called both for if a subquery fails, or if there is a LateralError
-  /// due to the ES owning the TransTable disappears. This simply responds to the sender
-  /// and Exits and Clean Ups this ES.
-  /// TODO: I believe that this and `handle_internal_columns_dne` should be unified into
-  /// one function that is essentially called when a child GRQueryES fails.
-  pub fn handle_query_error<T: IOTypes>(
-    &mut self,
-    ctx: &mut ServerContext<T>,
-    query_error: msg::QueryError,
-  ) -> TransTableAction {
-    self.send_query_error(ctx, query_error);
-    self.exit_and_clean_up(ctx)
-  }
-
   /// Get the `QueryPath` of the sender of this ES.
-  pub fn get_sender_path<T: IOTypes>(&self) -> QueryPath {
+  pub fn get_sender_path(&self) -> QueryPath {
     match &self {
       FullTransTableReadES::QueryReplanning(es) => es.sender_path.clone(),
       FullTransTableReadES::Executing(es) => es.sender_path.clone(),
@@ -628,7 +628,7 @@ impl FullTransTableReadES {
   }
 
   /// Get the `QueryId` of the sender of this ES.
-  pub fn get_query_id<T: IOTypes>(&self) -> QueryId {
+  pub fn get_query_id(&self) -> QueryId {
     match &self {
       FullTransTableReadES::QueryReplanning(es) => es.query_id.clone(),
       FullTransTableReadES::Executing(es) => es.query_id.clone(),
@@ -641,10 +641,10 @@ impl FullTransTableReadES {
     ctx: &mut ServerContext<T>,
     payload: msg::AbortedData,
   ) {
-    let sender_path = self.get_sender_path::<T>();
+    let sender_path = self.get_sender_path();
     let aborted = msg::QueryAborted {
       return_path: sender_path.query_id.clone(),
-      query_id: self.get_query_id::<T>(),
+      query_id: self.get_query_id(),
       payload,
     };
     ctx.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));

@@ -1,5 +1,5 @@
 use crate::col_usage::FrozenColUsageNode;
-use crate::common::{QueryPlan};
+use crate::common::QueryPlan;
 use crate::model::common::{
   proc, ColName, ColType, Context, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, RequestId,
   SlaveGroupId, TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
@@ -262,6 +262,11 @@ pub enum ExternalAbortedData {
   /// This occurs if an Update appears as a Subquery (i.e. not at the top-level
   /// of the SQL transaction).
   InvalidUpdate,
+  /// This is a fatal Query Execution error, including non-recoverable QueryErrors
+  /// and ColumnsDNEs. We don't give any details for simplicity. The External should just
+  /// understand that their query was invalid, but might become valid for the same timestamp
+  /// later (i.e. the invalidity is not idempotent).
+  QueryExecutionError,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
