@@ -150,6 +150,40 @@ impl FullTransTableReadES {
     }
   }
 
+  /// This is used to compute a Context.
+  fn compute_context<SourceT: TransTableSource>(
+    parent_context: &Context,
+    conv: ContextConverter,
+    trans_table_source: &SourceT,
+    location_prefix: &TransTableLocationPrefix,
+    trans_table_name_pos: usize,
+  ) -> Rc<Context> {
+    // Construct the `ContextRow`s. To do this, we iterate over main Query's
+    // `ContextRow`s and, then the rows of the corresponding TransTableInstance.
+    // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
+    let mut new_context_rows = Vec::<ContextRow>::new();
+    let mut new_row_set = HashSet::<ContextRow>::new();
+    for context_row in &parent_context.context_rows {
+      // Lookup the relevent TransTableInstance at the given ContextRow
+      let trans_table_instance_pos =
+        context_row.trans_table_context_row.get(trans_table_name_pos).unwrap();
+      let trans_table_instance =
+        trans_table_source.get_instance(location_prefix, *trans_table_instance_pos);
+      // We take each row in the TransTableInstance, couple it with the main ContextRow, and
+      // then get the child ContextRow from `conv`.
+      for (row, _) in &trans_table_instance.rows {
+        let new_context_row = conv.compute_child_context_row(context_row, row.clone());
+        if !new_row_set.contains(&new_context_row) {
+          new_row_set.insert(new_context_row.clone());
+          new_context_rows.push(new_context_row);
+        }
+      }
+    }
+
+    // Finally, compute the context.
+    Rc::new(Context { context_schema: conv.context_schema, context_rows: new_context_rows })
+  }
+
   pub fn start_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
@@ -186,31 +220,14 @@ impl FullTransTableReadES {
         subquery_index,
       );
 
-      // Construct the `ContextRow`s. To do this, we iterate over main Query's
-      // `ContextRow`s and then the corresponding `ContextRow`s for the subquery.
-      // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
-      let mut new_context_rows = Vec::<ContextRow>::new();
-      let mut new_row_set = HashSet::<ContextRow>::new();
-      for context_row in &es.context.context_rows {
-        // Lookup the relevent TransTableInstance at the given ContextRow
-        let trans_table_instance_pos =
-          context_row.trans_table_context_row.get(trans_table_name_pos).unwrap();
-        let trans_table_instance =
-          trans_table_source.get_instance(&es.location_prefix, *trans_table_instance_pos);
-        // We take each row in the TransTableInstance, couple it with the main ContextRow, and
-        // then get the child ContextRow from `conv`.
-        for (row, _) in &trans_table_instance.rows {
-          let new_context_row = conv.compute_child_context_row(context_row, row.clone());
-          if !new_row_set.contains(&new_context_row) {
-            new_row_set.insert(new_context_row.clone());
-            new_context_rows.push(new_context_row);
-          }
-        }
-      }
-
-      // Finally, compute the context.
-      let context =
-        Rc::new(Context { context_schema: conv.context_schema, context_rows: new_context_rows });
+      // Compute the context.
+      let context = Self::compute_context(
+        &es.context,
+        conv,
+        trans_table_source,
+        &es.location_prefix,
+        trans_table_name_pos,
+      );
 
       // Construct the GRQueryES
       let gr_query_id = mk_qid(ctx.rand);
@@ -338,31 +355,14 @@ impl FullTransTableReadES {
         .position(|prefix| &prefix.trans_table_name == &trans_table_name)
         .unwrap();
 
-      // Construct the `ContextRow`s. To do this, we iterate over main Query's
-      // `ContextRow`s and, then the rows of the corresponding TransTableInstance.
-      // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
-      let mut new_context_rows = Vec::<ContextRow>::new();
-      let mut new_row_set = HashSet::<ContextRow>::new();
-      for context_row in &es.context.context_rows {
-        // Lookup the relevent TransTableInstance at the given ContextRow
-        let trans_table_instance_pos =
-          context_row.trans_table_context_row.get(trans_table_name_pos).unwrap();
-        let trans_table_instance =
-          trans_table_source.get_instance(&es.location_prefix, *trans_table_instance_pos);
-        // We take each row in the TransTableInstance, couple it with the main ContextRow, and
-        // then get the child ContextRow from `conv`.
-        for (row, _) in &trans_table_instance.rows {
-          let new_context_row = conv.compute_child_context_row(context_row, row.clone());
-          if !new_row_set.contains(&new_context_row) {
-            new_row_set.insert(new_context_row.clone());
-            new_context_rows.push(new_context_row);
-          }
-        }
-      }
-
-      // Finally, compute the context.
-      let context =
-        Rc::new(Context { context_schema: conv.context_schema, context_rows: new_context_rows });
+      // Compute the context.
+      let context = Self::compute_context(
+        &es.context,
+        conv,
+        trans_table_source,
+        &es.location_prefix,
+        trans_table_name_pos,
+      );
 
       // We generate a new subquery ID to assign the new SingleSubqueryStatus,
       // as well as the corresponding GRQueryES.

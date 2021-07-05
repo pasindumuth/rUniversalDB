@@ -455,12 +455,15 @@ enum ReadProtectionGrant {
 //  Storage
 // -----------------------------------------------------------------------------------------------
 
-// A trait for reading subtables from some kind of underlying table data view.
+/// A trait for reading subtables from some kind of underlying table data view. The `key_region`
+/// indicates the set of rows to read from the Table, and the `col_region` are the columns to read.
+///
+/// This function must a pure function; the order of the returned vectors matter.
 trait StorageView {
   fn compute_subtable(
     &self,
     key_region: &Vec<KeyBound>,
-    column_region: &Vec<ColName>,
+    col_region: &Vec<ColName>,
   ) -> (Vec<ColName>, Vec<Vec<ColValN>>);
 }
 
@@ -609,6 +612,7 @@ pub struct TabletContext<T: IOTypes> {
   prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
   committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
 
+  // TODO: make (OrigP, QueryId, TableRegion) into a proper type.
   waiting_read_protected: BTreeMap<Timestamp, BTreeSet<(OrigP, QueryId, TableRegion)>>,
   read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
 
@@ -976,7 +980,7 @@ impl<T: IOTypes> TabletContext<T> {
     self.run_main_loop(statuses);
   }
 
-  /// Add the following triple into `requested_locked_columns`, making sure to update
+  /// Adds the following triple into `requested_locked_columns`, making sure to update
   /// `request_index` as well. Here, `orig_p` is the origiator who should get the locking
   /// result.
   fn add_requested_locked_columns(
@@ -1351,7 +1355,7 @@ impl<T: IOTypes> TabletContext<T> {
         FullTableReadES::QueryReplanning(plan_es) => {
           // Advance the QueryReplanning now that the desired columns have been locked.
           let comm_plan_es = &mut plan_es.status;
-          comm_plan_es.column_locked::<T>(self);
+          comm_plan_es.columns_locked::<T>(self);
           // We check if the QueryReplanning is done.
           match comm_plan_es.state {
             CommonQueryReplanningS::Done(success) => {
@@ -1454,8 +1458,8 @@ impl<T: IOTypes> TabletContext<T> {
 
             // Add a read protection requested
             let protect_query_id = mk_qid(&mut self.rand);
-            let orig_p = OrigP::new(es.query_id.clone());
-            let protect_request = (orig_p, protect_query_id.clone(), new_read_region.clone());
+            let protect_request =
+              (OrigP::new(es.query_id.clone()), protect_query_id.clone(), new_read_region.clone());
             if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
               waiting.insert(protect_request);
             } else {
@@ -1483,7 +1487,7 @@ impl<T: IOTypes> TabletContext<T> {
         FullMSTableWriteES::QueryReplanning(plan_es) => {
           // Advance the QueryReplanning now that the desired columns have been locked.
           let comm_plan_es = &mut plan_es.status;
-          comm_plan_es.column_locked::<T>(self);
+          comm_plan_es.columns_locked::<T>(self);
 
           // We check if the QueryReplanning is done.
           let ms_query_id = plan_es.ms_query_id.clone();
@@ -1624,7 +1628,7 @@ impl<T: IOTypes> TabletContext<T> {
         FullMSTableReadES::QueryReplanning(plan_es) => {
           // Advance the QueryReplanning now that the desired columns have been locked.
           let comm_plan_es = &mut plan_es.status;
-          comm_plan_es.column_locked::<T>(self);
+          comm_plan_es.columns_locked::<T>(self);
 
           // We check if the QueryReplanning is done.
           let ms_query_id = plan_es.ms_query_id.clone();
@@ -1808,7 +1812,8 @@ impl<T: IOTypes> TabletContext<T> {
     // Add a read protection requested
     let orig_p = OrigP::new(es.query_id.clone());
     let protect_request = (orig_p, protect_query_id, read_region);
-    // TODO: make a multimap insertion abstraction.
+    // TODO: (+1) make a multimap insertion abstraction. This is also useful in
+    // columns_locked_for_query
     if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
       waiting.insert(protect_request);
     } else {
@@ -2152,19 +2157,14 @@ impl<T: IOTypes> TabletContext<T> {
             row_region: pending.read_region.row_region.clone(),
           });
 
-          // TODO: the issue with this strategy is that a GRQueryES can generally abort
-          // during the first phase (GRQUeryES in particular won't rn, but generally it
-          // could), which would Exit and Clean Up this TableReadES and remove all child
-          // GRQueryESs. However, when the callstack unwinds, we will still be trying to
-          // to advance GRQueryESs that no longer exist. One way would be to have a vector
-          // of QueryIds that are driven by the main loop, first by seeing if they exist. Or we
-          // can make it a special enum. Basically a deferred function call.
-
           // Drive GRQueries
           for query_id in gr_query_ids {
-            let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
-            let action = es.start::<T>(&mut self.ctx());
-            self.handle_gr_query_es_action(statuses, query_id, action);
+            if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+              // Generally, we use an `if` guard in case one child Query aborts the parent and
+              // thus all other children. (This won't happen for GRQueryESs, though)
+              let action = es.start::<T>(&mut self.ctx());
+              self.handle_gr_query_es_action(statuses, query_id, action);
+            }
           }
         }
         ExecutionS::Executing(executing) => {
@@ -2189,8 +2189,7 @@ impl<T: IOTypes> TabletContext<T> {
             }
           };
 
-          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
-          let es = statuses.gr_query_ess.get_mut(&subquery_id).unwrap();
+          let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
           let action = es.start::<T>(&mut self.ctx());
           self.handle_gr_query_es_action(statuses, subquery_id, action);
         }
@@ -2248,9 +2247,12 @@ impl<T: IOTypes> TabletContext<T> {
 
           // Drive GRQueries
           for query_id in gr_query_ids {
-            let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
-            let action = es.start::<T>(&mut self.ctx());
-            self.handle_gr_query_es_action(statuses, query_id, action);
+            if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+              // Generally, we use an `if` guard in case one child Query aborts the parent and
+              // thus all other children. (This won't happen for GRQueryESs, though)
+              let action = es.start::<T>(&mut self.ctx());
+              self.handle_gr_query_es_action(statuses, query_id, action);
+            }
           }
         }
         MSWriteExecutionS::Executing(executing) => {
@@ -2276,8 +2278,7 @@ impl<T: IOTypes> TabletContext<T> {
             }
           };
 
-          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
-          let es = statuses.gr_query_ess.get_mut(&subquery_id).unwrap();
+          let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
           let action = es.start::<T>(&mut self.ctx());
           self.handle_gr_query_es_action(statuses, subquery_id, action);
         }
@@ -2335,9 +2336,12 @@ impl<T: IOTypes> TabletContext<T> {
 
           // Drive GRQueries
           for query_id in gr_query_ids {
-            let es = statuses.gr_query_ess.get_mut(&query_id).unwrap();
-            let action = es.start::<T>(&mut self.ctx());
-            self.handle_gr_query_es_action(statuses, query_id, action);
+            if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+              // Generally, we use an `if` guard in case one child Query aborts the parent and
+              // thus all other children. (This won't happen for GRQueryESs, though)
+              let action = es.start::<T>(&mut self.ctx());
+              self.handle_gr_query_es_action(statuses, query_id, action);
+            }
           }
         }
         MSReadExecutionS::Executing(executing) => {
@@ -2363,8 +2367,7 @@ impl<T: IOTypes> TabletContext<T> {
             }
           };
 
-          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
-          let es = statuses.gr_query_ess.get_mut(&subquery_id).unwrap();
+          let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
           let action = es.start::<T>(&mut self.ctx());
           self.handle_gr_query_es_action(statuses, subquery_id, action);
         }
@@ -2465,10 +2468,10 @@ impl<T: IOTypes> TabletContext<T> {
           let context_schema = &result.context.context_schema;
           converters.push(ContextConverter::general_create(
             &es.context.context_schema,
-            context_schema.column_context_schema.clone(),
-            context_schema.trans_table_names(),
             &es.timestamp,
             &self.table_schema,
+            context_schema.column_context_schema.clone(),
+            context_schema.trans_table_names(),
           ));
         }
 
@@ -2638,10 +2641,10 @@ impl<T: IOTypes> TabletContext<T> {
           let context_schema = &result.context.context_schema;
           converters.push(ContextConverter::general_create(
             &es.context.context_schema,
-            context_schema.column_context_schema.clone(),
-            context_schema.trans_table_names(),
             &es.timestamp,
             &self.table_schema,
+            context_schema.column_context_schema.clone(),
+            context_schema.trans_table_names(),
           ));
         }
 
@@ -2815,10 +2818,10 @@ impl<T: IOTypes> TabletContext<T> {
           let context_schema = &result.context.context_schema;
           converters.push(ContextConverter::general_create(
             &es.context.context_schema,
-            context_schema.column_context_schema.clone(),
-            context_schema.trans_table_names(),
             &es.timestamp,
             &self.table_schema,
+            context_schema.column_context_schema.clone(),
+            context_schema.trans_table_names(),
           ));
         }
 
@@ -3012,14 +3015,18 @@ impl<T: IOTypes> TabletContext<T> {
         let mut subquery_ids = Vec::<QueryId>::new();
         for gr_query_es in gr_query_ess {
           let subquery_id = gr_query_es.query_id.clone();
-          statuses.gr_query_ess.insert(gr_query_es.query_id.clone(), gr_query_es);
+          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
           subquery_ids.push(subquery_id);
         }
 
-        for subquery_id in subquery_ids {
-          let es = statuses.gr_query_ess.get_mut(&subquery_id).unwrap();
-          let action = es.start::<T>(&mut self.ctx());
-          self.handle_gr_query_es_action(statuses, subquery_id, action);
+        // Drive GRQueries
+        for query_id in subquery_ids {
+          if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+            // Generally, we use an `if` guard in case one child Query aborts the parent and
+            // thus all other children. (This won't happen for GRQueryESs, though)
+            let action = es.start::<T>(&mut self.ctx());
+            self.handle_gr_query_es_action(statuses, query_id, action);
+          }
         }
       }
       TransTableAction::Done => {
@@ -3292,6 +3299,9 @@ impl ContextKeyboundComputer {
   /// to help reduce the KeyBound. However, we need `table_schema` and the `timestamp` of
   /// the Query to determine which of these External columns are shadowed so we can avoid
   /// using them.
+  ///
+  /// Formally, `selection`'s Top-Level Cols must all be locked in `table_schema` at `timestamp`.
+  /// They must either be in the `table_schema` or in the `parent_context_schema`.
   fn new(
     selection: &proc::ValExpr,
     table_schema: &TableSchema,
@@ -3325,8 +3335,10 @@ impl ContextKeyboundComputer {
     }
   }
 
-  /// Compute the tightest keybound for the given `parent_context_row` (whose schema
-  /// must correspond to `parent_context_schema` passed in the constructor).
+  /// Compute the tightest keybound for the given `parent_context_row`.
+  ///
+  /// Formally, these `parent_context_row` must correspond to the `parent_context_schema`
+  /// provided in the constructor.
   fn compute_keybounds(&self, parent_context_row: &ContextRow) -> Result<Vec<KeyBound>, EvalError> {
     // First, map all External Columns names to the corresponding values
     // in this ContextRow
@@ -3389,16 +3401,16 @@ fn compute_subqueries<T: IOTypes, StorageViewT: StorageView>(
   context: &Context,
   query_plan: &QueryPlan,
 ) -> Result<Vec<GRQueryES>, EvalError> {
-  // Iterate over every GRQuery. Compute the external_cols (by just taking the union of
+  // Iterate over every GRQuery. Compute the external_cols by just taking the union of
   // all external_cols in the nodes in the corresponding element in `children` in the
-  // query plan). This is the ColumnContextSchema. Then trivially compute TransTableSchema.
+  // query plan. This is the ColumnContextSchema. Then trivially compute TransTableSchema.
 
   // Then, split the ColumnContextSchema over `safe_present_cols` and `external_cols`
   // at the top-level. Start building the child Context by iterating over the main
-  // Context.  We can take the `external_cols` split to take columns from the main
-  // ContextRow, and use those columns to compute a tight Keybound for the table. From this
-  // Keybound, we take the columns in `safe_present_cols`. Combining that with the first set of
-  // columns, we have a ContextRow for the subquery.
+  // Context. We compute a tight Keybound for the table using the whole parent ContextRow.
+  // From this Keybound, we take the columns in `safe_present_cols`. We also take the
+  // columns in `external_cols` in the parent ContextRow. Together, these columns form
+  // the child ColumnContextRow.
 
   // Setup ability to compute a tight Keybound for every ContextRow.
   let keybound_computer =
@@ -3422,6 +3434,11 @@ fn compute_subqueries<T: IOTypes, StorageViewT: StorageView>(
     let context = compute_context(context, conv, &storage_view, &keybound_computer)?;
 
     // Construct the GRQueryES
+    // TODO: I believe we can create a View Container that is both passed in as an argument
+    // here and in the above, and where we can easily create a GRQueryES (where things are just
+    // copied forward) where we only have to specify an index (for the subquery (the function will
+    // extract the right sql_query, query_plan, and trim down trans_table_schemas), the context, and
+    // the right QueryId for the GRQueryES to take on.
     let gr_query_id = mk_qid(rand);
     let gr_query_es = GRQueryES {
       root_query_path: root_query_path.clone(),
@@ -3433,7 +3450,7 @@ fn compute_subqueries<T: IOTypes, StorageViewT: StorageView>(
       sql_query: subquery.clone(),
       query_plan: GRQueryPlan {
         gossip_gen: query_plan.gossip_gen.clone(),
-        // TODO: should we trim this down?
+        // TODO: should we trim trans_table_schemas down?
         trans_table_schemas: query_plan.trans_table_schemas.clone(),
         col_usage_nodes: child.clone(),
       },
@@ -3484,7 +3501,7 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
 
   // Setup ability to compute a tight Keybound for every ContextRow.
   let keybound_computer =
-    ContextKeyboundComputer::new(&selection, table_schema, &timestamp, &context.context_schema);
+    ContextKeyboundComputer::new(selection, table_schema, timestamp, &context.context_schema);
 
   // Find the GRQuery that corresponds to this subquery
   let subquery_index = executing.subquery_pos.iter().position(|id| id == subquery_id).unwrap();
@@ -3495,10 +3512,10 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
   // since it's out-of-date by this point.
   let conv = ContextConverter::general_create(
     &context.context_schema,
-    protect_status.new_columns.clone(),
-    protect_status.trans_table_names.clone(),
     &timestamp,
     table_schema,
+    protect_status.new_columns.clone(),
+    protect_status.trans_table_names.clone(),
   );
 
   // Compute the context.
@@ -3556,7 +3573,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
   /// Note: The reason that `start` above is not just another case statement in this function
   /// because functions are generally  suppose to take in arguments specific to the states
   /// that they are transitioning. however, many of the other states do wait for column locking.
-  fn column_locked<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
+  fn columns_locked<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
     match &self.state {
       CommonQueryReplanningS::ProjectedColumnLocking { .. } => {
         // We need to verify that the projected columns are present.

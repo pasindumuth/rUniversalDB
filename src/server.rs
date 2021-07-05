@@ -330,9 +330,7 @@ pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Times
 // These enums are used for communication between algorithms.
 
 /// This container computes and remembers how to construct a child ContextRow
-/// from a parent ContexRow + Table row. We have to initially pass in the
-/// the parent's ContextRowSchema, the parent's ColUsageNode, as well as `i`,
-/// which points to the Subquery we want to compute child ContextRows for.
+/// from a parent ContexRow + Table row.
 ///
 /// Importantly, order within `safe_present_split`, `external_split`, and
 /// `trans_table_split` aren't guaranteed.
@@ -341,21 +339,23 @@ pub struct ContextConverter {
   // This is the child query's ContextSchema, and it's computed in the constructor.
   pub context_schema: ContextSchema,
 
-  // These fields are the constituents of the `context_schema` above.
+  // These fields partition `context_schema` above. However, we split the
+  // ColumnContextSchema according to which are in the Table and which are not.
   pub safe_present_split: Vec<ColName>,
   pub external_split: Vec<ColName>,
   pub trans_table_split: Vec<TransTableName>,
 
   /// This maps the `ColName`s in `external_split` to their positions in the
   /// parent ColumnContextSchema.
-  pub context_col_index: HashMap<ColName, usize>,
+  context_col_index: HashMap<ColName, usize>,
   /// This maps the `TransTableName`s in `trans_table_split` to their positions in the
   /// parent TransTableContextSchema.
-  pub context_trans_table_index: HashMap<TransTableName, usize>,
+  context_trans_table_index: HashMap<TransTableName, usize>,
 }
 
 impl ContextConverter {
-  /// Compute all of the data members from a QueryPlan.
+  /// This function is best understood as being a way to compute all data members of
+  /// `ContextConverter` for the subquery at `subquery_index` inside the `parent_node`.
   pub fn create_from_query_plan(
     parent_context_schema: &ContextSchema,
     parent_node: &FrozenColUsageNode,
@@ -397,10 +397,10 @@ impl ContextConverter {
   /// in the `parent_context_schema` as well.
   pub fn general_create(
     parent_context_schema: &ContextSchema,
-    child_columns: Vec<ColName>,
-    child_trans_table_names: Vec<TransTableName>,
     timestamp: &Timestamp,
     table_schema: &TableSchema,
+    child_columns: Vec<ColName>,
+    child_trans_table_names: Vec<TransTableName>,
   ) -> ContextConverter {
     let mut safe_present_split = Vec::<ColName>::new();
     let mut external_split = Vec::<ColName>::new();

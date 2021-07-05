@@ -977,14 +977,18 @@ impl<T: IOTypes> SlaveContext<T> {
         let mut subquery_ids = Vec::<QueryId>::new();
         for gr_query_es in gr_query_ess {
           let subquery_id = gr_query_es.query_id.clone();
-          statuses.gr_query_ess.insert(gr_query_es.query_id.clone(), gr_query_es);
+          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
           subquery_ids.push(subquery_id);
         }
 
-        for subquery_id in subquery_ids {
-          let es = statuses.gr_query_ess.get_mut(&subquery_id).unwrap();
-          let action = es.start::<T>(&mut self.ctx());
-          self.handle_gr_query_es_action(statuses, subquery_id, action);
+        // Drive GRQueries
+        for query_id in subquery_ids {
+          if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+            // Generally, we use an `if` guard in case one child Query aborts the parent and
+            // thus all other children. (This won't happen for GRQueryESs, though)
+            let action = es.start::<T>(&mut self.ctx());
+            self.handle_gr_query_es_action(statuses, query_id, action);
+          }
         }
       }
       TransTableAction::Done => {
