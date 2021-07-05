@@ -7,7 +7,7 @@ use crate::model::message as msg;
 use crate::multiversion_map::MVM;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -157,6 +157,35 @@ pub fn map_insert<'a, K: Clone + Eq + Hash, V>(
 ) -> &'a mut V {
   map.insert(key.clone(), value);
   map.get_mut(key).unwrap()
+}
+
+/// Used to add elements form a BTree MultiMap
+pub fn btree_multimap_insert<K: Ord + Clone, V: Ord>(
+  map: &mut BTreeMap<K, BTreeSet<V>>,
+  key: &K,
+  value: V,
+) {
+  if let Some(set) = map.get_mut(key) {
+    set.insert(value);
+  } else {
+    let mut set = BTreeSet::<V>::new();
+    set.insert(value);
+    map.insert(key.clone(), set);
+  }
+}
+
+/// Used to removed elements form a BTree MultiMap
+pub fn btree_multimap_remove<K: Ord, V: Ord>(
+  map: &mut BTreeMap<K, BTreeSet<V>>,
+  key: &K,
+  value: &V,
+) {
+  if let Some(set) = map.get_mut(key) {
+    set.remove(value);
+    if set.is_empty() {
+      map.remove(key);
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

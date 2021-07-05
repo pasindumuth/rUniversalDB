@@ -3,8 +3,9 @@ use crate::col_usage::{
   node_external_trans_tables, nodes_external_trans_tables, ColUsagePlanner, FrozenColUsageNode,
 };
 use crate::common::{
-  lookup, lookup_pos, map_insert, merge_table_views, mk_qid, GossipData, IOTypes, KeyBound,
-  NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue, TableRegion, TableSchema,
+  btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
+  mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue,
+  TableRegion, TableSchema,
 };
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
@@ -993,13 +994,7 @@ impl<T: IOTypes> TabletContext<T> {
     // Add column locking
     self.requested_locked_columns.insert(locked_cols_qid.clone(), (orig_p, timestamp, cols));
     // Update index
-    if let Some(set) = self.request_index.get_mut(&timestamp) {
-      set.insert(locked_cols_qid.clone());
-    } else {
-      let mut set = BTreeSet::<QueryId>::new();
-      set.insert(locked_cols_qid.clone());
-      self.request_index.insert(timestamp, set);
-    };
+    btree_multimap_insert(&mut self.request_index, &timestamp, locked_cols_qid.clone());
     locked_cols_qid
   }
 
@@ -1012,10 +1007,7 @@ impl<T: IOTypes> TabletContext<T> {
     // Remove if present
     if let Some((orig_p, timestamp, cols)) = self.requested_locked_columns.remove(&query_id) {
       // Maintain the request_index.
-      self.request_index.get_mut(&timestamp).unwrap().remove(&query_id);
-      if self.request_index.get_mut(&timestamp).unwrap().is_empty() {
-        self.request_index.remove(&timestamp);
-      }
+      btree_multimap_remove(&mut self.request_index, &timestamp, &query_id);
       return Some((orig_p, timestamp, cols));
     }
     return None;
@@ -1300,12 +1292,7 @@ impl<T: IOTypes> TabletContext<T> {
               self.remove_read_protected_request(timestamp, query_id).unwrap();
 
             // Add the ReadRegion to `read_protected`.
-            if let Some(set) = self.read_protected.get_mut(&timestamp) {
-              set.insert(read_region.clone());
-            } else {
-              let read_regions = vec![read_region.clone()];
-              self.read_protected.insert(timestamp, read_regions.into_iter().collect());
-            }
+            btree_multimap_insert(&mut self.read_protected, &timestamp, read_region.clone());
 
             // Inform the originator.
             self.read_protected_for_query(statuses, orig_p, query_id);
@@ -1460,13 +1447,7 @@ impl<T: IOTypes> TabletContext<T> {
             let protect_query_id = mk_qid(&mut self.rand);
             let protect_request =
               (OrigP::new(es.query_id.clone()), protect_query_id.clone(), new_read_region.clone());
-            if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
-              waiting.insert(protect_request);
-            } else {
-              self
-                .waiting_read_protected
-                .insert(es.timestamp, vec![protect_request].into_iter().collect());
-            }
+            btree_multimap_insert(&mut self.waiting_read_protected, &es.timestamp, protect_request);
 
             // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
             let subquery_id = subquery_id.clone();
@@ -1810,15 +1791,8 @@ impl<T: IOTypes> TabletContext<T> {
     });
 
     // Add a read protection requested
-    let orig_p = OrigP::new(es.query_id.clone());
-    let protect_request = (orig_p, protect_query_id, read_region);
-    // TODO: (+1) make a multimap insertion abstraction. This is also useful in
-    // columns_locked_for_query
-    if let Some(waiting) = self.waiting_read_protected.get_mut(&es.timestamp) {
-      waiting.insert(protect_request);
-    } else {
-      self.waiting_read_protected.insert(es.timestamp, vec![protect_request].into_iter().collect());
-    }
+    let protect_request = (OrigP::new(es.query_id.clone()), protect_query_id, read_region);
+    btree_multimap_insert(&mut self.waiting_read_protected, &es.timestamp, protect_request);
   }
 
   /// Processes the Start state of MSTableWrite.
