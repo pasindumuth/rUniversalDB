@@ -1094,9 +1094,6 @@ impl<T: IOTypes> SlaveContext<T> {
         FullMSQueryCoordES::Executing(es) => {
           self.external_request_id_map.remove(&es.request_id);
           match es.state {
-            // TODO: generally, we should look to see if we can eliminate these Immediate
-            // States here and in the Pseudocode in favor of using Actions to perform Immediate
-            // calculations.
             CoordState::Start => {}
             CoordState::ReadStage { stage_query_id, .. }
             | CoordState::WriteStage { stage_query_id, .. } => {

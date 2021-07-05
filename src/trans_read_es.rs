@@ -12,7 +12,6 @@ use crate::server::{
 };
 use crate::tablet::{
   Executing, QueryReplanningSqlView, SingleSubqueryStatus, SubqueryFinished, SubqueryPending,
-  SubqueryStatus,
 };
 use crate::trans_read_es::TransTableAction::Wait;
 use std::collections::{HashMap, HashSet};
@@ -255,21 +254,20 @@ impl FullTransTableReadES {
     // Here, we have computed all GRQueryESs, and we can now add them to
     // `subquery_status`.
     let mut gr_query_ids = Vec::<QueryId>::new();
-    let mut subquery_status = SubqueryStatus { subqueries: Default::default() };
+    let mut subqueries = Vec::<SingleSubqueryStatus>::new();
     for gr_query_es in &gr_query_statuses {
       let query_id = gr_query_es.query_id.clone();
       gr_query_ids.push(query_id.clone());
-      subquery_status.subqueries.insert(
-        query_id.clone(),
-        SingleSubqueryStatus::Pending(SubqueryPending { context: gr_query_es.context.clone() }),
-      );
+      subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+        context: gr_query_es.context.clone(),
+        query_id,
+      }));
     }
 
     // Move the ES to the Executing state.
     es.state = TransExecutionS::Executing(Executing {
       completed: 0,
-      subquery_pos: gr_query_ids.clone(),
-      subquery_status,
+      subqueries,
       row_region: vec![], // This doesn't make sense for TransTables...
     });
 
@@ -320,15 +318,8 @@ impl FullTransTableReadES {
       // GRQueryES again by extending its Context.
 
       // Find the subquery that just aborted. There should always be such a Subquery.
-      let single_status = (|| {
-        for (id, state) in &executing.subquery_status.subqueries {
-          if id == &subquery_id {
-            return Some(state);
-          }
-        }
-        return None;
-      })()
-      .unwrap();
+      let subquery_idx = executing.find_subquery(&subquery_id).unwrap();
+      let single_status = executing.subqueries.get_mut(subquery_idx).unwrap();
       let pending_status = cast!(SingleSubqueryStatus::Pending, single_status).unwrap();
 
       // We extend the ColumnContextSchema. Recall that we take the ContextSchema
@@ -370,7 +361,6 @@ impl FullTransTableReadES {
 
       // Construct the GRQueryES
       let subqueries = collect_select_subqueries(&es.sql_query);
-      let subquery_idx = executing.subquery_pos.iter().position(|id| &subquery_id == id).unwrap();
       let sql_subquery = subqueries.get(subquery_idx).unwrap().clone();
       let child = es.query_plan.col_usage_node.children.get(subquery_idx).unwrap();
       let gr_query_es = GRQueryES {
@@ -393,12 +383,8 @@ impl FullTransTableReadES {
       };
 
       // Update the `executing` state to contain the new subquery_id.
-      executing.subquery_status.subqueries.remove(&subquery_id);
-      executing.subquery_pos[subquery_idx] = new_subquery_id.clone();
-      executing.subquery_status.subqueries.insert(
-        new_subquery_id.clone(),
-        SingleSubqueryStatus::Pending(SubqueryPending { context }),
-      );
+      *single_status =
+        SingleSubqueryStatus::Pending(SubqueryPending { query_id: new_subquery_id, context });
 
       // Return the GRQueryESs for execution.
       TransTableAction::SendSubqueries(vec![gr_query_es])
@@ -419,8 +405,8 @@ impl FullTransTableReadES {
     // Add the subquery results into the TableReadES.
     es.new_rms.extend(subquery_new_rms);
     let executing_state = cast!(TransExecutionS::Executing, &mut es.state).unwrap();
-    let subquery_status = &mut executing_state.subquery_status;
-    let single_status = subquery_status.subqueries.get_mut(&subquery_id).unwrap();
+    let subquery_idx = executing_state.find_subquery(&subquery_id).unwrap();
+    let single_status = executing_state.subqueries.get_mut(subquery_idx).unwrap();
     let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context.clone();
     *single_status = SingleSubqueryStatus::Finished(SubqueryFinished {
       context: context.clone(),
@@ -430,10 +416,8 @@ impl FullTransTableReadES {
 
     // If all subqueries have been evaluated, finish the TransTableReadES
     // and respond to the client.
-    if executing_state.completed == subquery_status.subqueries.len() {
-      // Get the GRQueryES so that
-      let num_subqueries = executing_state.subquery_pos.len();
-
+    let num_subqueries = executing_state.subqueries.len();
+    if executing_state.completed == num_subqueries {
       // Compute the position in the TransTableContextRow that we can use to
       // get the index of current TransTableInstance.
       let trans_table_name = es.location_prefix.trans_table_name.clone();
@@ -449,8 +433,7 @@ impl FullTransTableReadES {
 
       // Construct the ContextConverters for all subqueries
       let mut converters = Vec::<ContextConverter>::new();
-      for subquery_id in &executing_state.subquery_pos {
-        let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+      for single_status in &executing_state.subqueries {
         let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
         let context_schema = &result.context.context_schema;
         converters.push(ContextConverter::trans_general_create(
@@ -501,8 +484,7 @@ impl FullTransTableReadES {
             // Get the child_context_idx to get the relevent TableView from the subquery
             // results, and populate `subquery_vals`.
             let child_context_idx = child_context_row_map.get(&new_context_row).unwrap();
-            let subquery_id = executing_state.subquery_pos.get(index).unwrap();
-            let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+            let single_status = executing_state.subqueries.get(index).unwrap();
             let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
             subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
           }
@@ -565,8 +547,6 @@ impl FullTransTableReadES {
   /// This is can be called both for if a subquery fails, or if there is a LateralError
   /// due to the ES owning the TransTable disappears. This simply responds to the sender
   /// and Exits and Clean Ups this ES.
-  /// TODO: I believe that this and `handle_internal_columns_dne` should be unified into
-  /// one function that is essentially called when a child GRQueryES fails.
   pub fn handle_internal_query_error<T: IOTypes>(
     &mut self,
     ctx: &mut ServerContext<T>,
@@ -606,12 +586,12 @@ impl FullTransTableReadES {
           TransExecutionS::Start => {}
           TransExecutionS::Executing(executing) => {
             // Here, we need to cancel every Subquery.
-            for (query_id, single_query) in &executing.subquery_status.subqueries {
-              match single_query {
+            for single_status in &executing.subqueries {
+              match single_status {
                 SingleSubqueryStatus::LockingSchemas(_) => panic!(),
                 SingleSubqueryStatus::PendingReadRegion(_) => panic!(),
-                SingleSubqueryStatus::Pending(_) => {
-                  subquery_ids.push(query_id.clone());
+                SingleSubqueryStatus::Pending(pending_status) => {
+                  subquery_ids.push(pending_status.query_id.clone());
                 }
                 SingleSubqueryStatus::Finished(_) => {}
               }

@@ -56,8 +56,7 @@ pub struct ReadStage {
   /// in this SubqueryStatus. We cache this here since it's computed when the child
   /// context is computed.
   pub parent_context_map: Vec<usize>,
-  pub subquery_id: QueryId,
-  pub single_subquery_status: SingleSubqueryStatus,
+  pub pending_status: SubqueryPending,
 }
 
 #[derive(Debug)]
@@ -140,14 +139,12 @@ impl GRQueryES {
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
-    let child_query_id = &read_stage.subquery_id;
-    let single_status = &read_stage.single_subquery_status;
 
-    // Extract the `context` from the SingleSubqueryStatus and verify
+    // Extract the `context` from the SubqueryPending status and verify
     // that it corresponds to `table_views`.
-    let subquery_context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
-    assert_eq!(child_query_id, &tm_query_id);
-    assert_eq!(table_views.len(), subquery_context.context_rows.len());
+    let pending_status = &read_stage.pending_status;
+    assert_eq!(pending_status.query_id, tm_query_id);
+    assert_eq!(table_views.len(), pending_status.context.context_rows.len());
 
     // For now, just assert assert that the schema that we get corresponds
     // to that in the QueryPlan.
@@ -176,12 +173,12 @@ impl GRQueryES {
     aborted_data: msg::AbortedData,
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &self.state).unwrap();
-    let pending = cast!(SingleSubqueryStatus::Pending, &read_stage.single_subquery_status).unwrap();
+    let pending_status = &read_stage.pending_status;
     match aborted_data {
       msg::AbortedData::ColumnsDNE { missing_cols } => {
         // First, assert that the missing columns are indeed not already a part of the Context.
         for col in &missing_cols {
-          assert!(!pending.context.context_schema.column_context_schema.contains(col));
+          assert!(!pending_status.context.context_schema.column_context_schema.contains(col));
         }
 
         // Next, we compute the subset of `missing_cols` that are not in the Context here.
@@ -199,7 +196,7 @@ impl GRQueryES {
         } else {
           // If the GRQueryES Context is sufficient, we simply amend the new columns
           // to the Context and reprocess the ReadStage.
-          let context_schema = &pending.context.context_schema;
+          let context_schema = &pending_status.context.context_schema;
           let mut context_cols = context_schema.column_context_schema.clone();
           context_cols.extend(missing_cols);
           let context_trans_tables = context_schema.trans_table_names();
@@ -219,14 +216,9 @@ impl GRQueryES {
   pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> GRQueryAction {
     match &self.state {
       GRExecutionS::Start => GRQueryAction::ExitAndCleanUp(vec![]),
-      GRExecutionS::ReadStage(read_stage) => match read_stage.single_subquery_status {
-        SingleSubqueryStatus::LockingSchemas(_) => panic!(),
-        SingleSubqueryStatus::PendingReadRegion(_) => panic!(),
-        SingleSubqueryStatus::Pending(_) => {
-          GRQueryAction::ExitAndCleanUp(vec![read_stage.subquery_id.clone()])
-        }
-        SingleSubqueryStatus::Finished(_) => GRQueryAction::ExitAndCleanUp(vec![]),
-      },
+      GRExecutionS::ReadStage(read_stage) => {
+        GRQueryAction::ExitAndCleanUp(vec![read_stage.pending_status.query_id.clone()])
+      }
       GRExecutionS::MasterQueryReplanning(planning) => {
         // Remove if present
         if ctx.master_query_map.remove(&planning.master_query_id).is_some() {
@@ -525,10 +517,7 @@ impl GRQueryES {
     self.state = GRExecutionS::ReadStage(ReadStage {
       stage_idx,
       parent_context_map,
-      subquery_id: tm_query_id.clone(),
-      single_subquery_status: SingleSubqueryStatus::Pending(SubqueryPending {
-        context: context.clone(),
-      }),
+      pending_status: SubqueryPending { context: context.clone(), query_id: tm_query_id.clone() },
     });
 
     // Return the TMStatus for the parent Server to execute.

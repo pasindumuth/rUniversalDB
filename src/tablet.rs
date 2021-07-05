@@ -161,6 +161,7 @@ pub struct SubqueryPendingReadRegion {
 #[derive(Debug)]
 pub struct SubqueryPending {
   pub context: Rc<Context>,
+  pub query_id: QueryId,
 }
 
 #[derive(Debug)]
@@ -177,11 +178,6 @@ pub enum SingleSubqueryStatus {
   Finished(SubqueryFinished),
 }
 
-#[derive(Debug)]
-pub struct SubqueryStatus {
-  pub subqueries: HashMap<QueryId, SingleSubqueryStatus>,
-}
-
 // -----------------------------------------------------------------------------------------------
 //  TableReadES
 // -----------------------------------------------------------------------------------------------
@@ -194,14 +190,30 @@ struct Pending {
 #[derive(Debug)]
 pub struct Executing {
   pub completed: usize,
-  /// This fields is used to associate a subquery's QueryId with the position
-  /// that it appears in the SQL query.
-  pub subquery_pos: Vec<QueryId>,
-  pub subquery_status: SubqueryStatus,
-
-  // We remember the row_region we had computed previously. If we have to protected
-  // more ReadRegions due to InternalColumnsDNEs, the `row_region` will be the same.
+  /// Here, the position of every SingleSubqueryStatus corresponds to the position
+  /// of the subquery in the SQL query.
+  pub subqueries: Vec<SingleSubqueryStatus>,
+  /// We remember the row_region we had computed previously. If we have to protected
+  /// more ReadRegions due to InternalColumnsDNEs, the `row_region` will be the same.
   pub row_region: Vec<KeyBound>,
+}
+
+impl Executing {
+  pub fn find_subquery(&self, qid: &QueryId) -> Option<usize> {
+    for i in 1..self.subqueries.len() {
+      match &self.subqueries.get(i).unwrap() {
+        SingleSubqueryStatus::LockingSchemas(SubqueryLockingSchemas { query_id, .. })
+        | SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion { query_id, .. })
+        | SingleSubqueryStatus::Pending(SubqueryPending { query_id, .. }) => {
+          if query_id == qid {
+            return Some(i);
+          }
+        }
+        SingleSubqueryStatus::Finished(_) => {}
+      }
+    }
+    None
+  }
 }
 
 #[derive(Debug)]
@@ -1376,22 +1388,11 @@ impl<T: IOTypes> TabletContext<T> {
         FullTableReadES::Executing(es) => {
           let executing = cast!(ExecutionS::Executing, &mut es.state).unwrap();
 
-          // Find the Subquery that sent out this requested_locked_columns. There should
-          // always be such a Subquery.
-          let (subquery_id, locking_status) = (|| {
-            for (subquery_id, state) in &executing.subquery_status.subqueries {
-              match state {
-                SingleSubqueryStatus::LockingSchemas(locking_status) => {
-                  if locking_status.query_id == locked_cols_qid {
-                    return Some((subquery_id, locking_status));
-                  }
-                }
-                _ => {}
-              }
-            }
-            return None;
-          })()
-          .unwrap();
+          // Find the SingleSubqueryStatus that sent out this requested_locked_columns.
+          // There should always be such a Subquery.
+          let subquery_idx = executing.find_subquery(&locked_cols_qid).unwrap();
+          let single_status = executing.subqueries.get_mut(subquery_idx).unwrap();
+          let locking_status = cast!(SingleSubqueryStatus::LockingSchemas, single_status).unwrap();
 
           // None of the `new_cols` should already exist in the old subquery Context schema
           // (since they didn't exist when the GRQueryES complained).
@@ -1450,13 +1451,9 @@ impl<T: IOTypes> TabletContext<T> {
             btree_multimap_insert(&mut self.waiting_read_protected, &es.timestamp, protect_request);
 
             // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
-            let subquery_id = subquery_id.clone();
-            let trans_table_names = locking_status.trans_table_names.clone();
-            let subqueries = &mut executing.subquery_status.subqueries;
-            let single_status = subqueries.get_mut(&subquery_id).unwrap();
             *single_status = SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
               new_columns,
-              trans_table_names,
+              trans_table_names: locking_status.trans_table_names.clone(),
               read_region: new_read_region,
               query_id: protect_query_id,
             })
@@ -1515,22 +1512,11 @@ impl<T: IOTypes> TabletContext<T> {
         FullMSTableWriteES::Executing(es) => {
           let executing = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
 
-          // Find the Subquery that sent out this requested_locked_columns. There should
-          // always be such a Subquery.
-          let (subquery_id, locking_status) = (|| {
-            for (subquery_id, state) in &executing.subquery_status.subqueries {
-              match state {
-                SingleSubqueryStatus::LockingSchemas(locking_status) => {
-                  if locking_status.query_id == locked_cols_qid {
-                    return Some((subquery_id, locking_status));
-                  }
-                }
-                _ => {}
-              }
-            }
-            return None;
-          })()
-          .unwrap();
+          // Find the SingleSubqueryStatus that sent out this requested_locked_columns.
+          // There should always be such a Subquery.
+          let subquery_idx = executing.find_subquery(&locked_cols_qid).unwrap();
+          let single_status = executing.subqueries.get_mut(subquery_idx).unwrap();
+          let locking_status = cast!(SingleSubqueryStatus::LockingSchemas, single_status).unwrap();
 
           // None of the `new_cols` should already exist in the old subquery Context schema
           // (since they didn't exist when the GRQueryES complained).
@@ -1591,13 +1577,9 @@ impl<T: IOTypes> TabletContext<T> {
             verifying_write.m_waiting_read_protected.insert(protect_request);
 
             // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
-            let subquery_id = subquery_id.clone();
-            let trans_table_names = locking_status.trans_table_names.clone();
-            let subqueries = &mut executing.subquery_status.subqueries;
-            let single_status = subqueries.get_mut(&subquery_id).unwrap();
             *single_status = SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
               new_columns,
-              trans_table_names,
+              trans_table_names: locking_status.trans_table_names.clone(),
               read_region: new_read_region,
               query_id: protect_query_id,
             })
@@ -1654,22 +1636,11 @@ impl<T: IOTypes> TabletContext<T> {
         FullMSTableReadES::Executing(es) => {
           let executing = cast!(MSReadExecutionS::Executing, &mut es.state).unwrap();
 
-          // Find the Subquery that sent out this requested_locked_columns. There should
-          // always be such a Subquery.
-          let (subquery_id, locking_status) = (|| {
-            for (subquery_id, state) in &executing.subquery_status.subqueries {
-              match state {
-                SingleSubqueryStatus::LockingSchemas(locking_status) => {
-                  if locking_status.query_id == locked_cols_qid {
-                    return Some((subquery_id, locking_status));
-                  }
-                }
-                _ => {}
-              }
-            }
-            return None;
-          })()
-          .unwrap();
+          // Find the SingleSubqueryStatus that sent out this requested_locked_columns.
+          // There should always be such a Subquery.
+          let subquery_idx = executing.find_subquery(&locked_cols_qid).unwrap();
+          let single_status = executing.subqueries.get_mut(subquery_idx).unwrap();
+          let locking_status = cast!(SingleSubqueryStatus::LockingSchemas, single_status).unwrap();
 
           // None of the `new_cols` should already exist in the old subquery Context schema
           // (since they didn't exist when the GRQueryES complained).
@@ -1730,13 +1701,9 @@ impl<T: IOTypes> TabletContext<T> {
             verifying_write.m_waiting_read_protected.insert(protect_request);
 
             // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
-            let subquery_id = subquery_id.clone();
-            let trans_table_names = locking_status.trans_table_names.clone();
-            let subqueries = &mut executing.subquery_status.subqueries;
-            let single_status = subqueries.get_mut(&subquery_id).unwrap();
             *single_status = SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
               new_columns,
-              trans_table_names,
+              trans_table_names: locking_status.trans_table_names.clone(),
               read_region: new_read_region,
               query_id: protect_query_id,
             })
@@ -1997,24 +1964,19 @@ impl<T: IOTypes> TabletContext<T> {
     let locked_cols_qid =
       self.add_requested_locked_columns(OrigP::new(query_id.clone()), timestamp, rem_cols.clone());
 
-    // We replace `subquery_id` with a new one to guarantee it never gets mangled
-    // when we create a new GRQueryES. We also update `executing` accordingly.
-    let new_subquery_id = mk_qid(&mut self.rand);
-    let pos = executing.subquery_pos.iter().position(|id| &subquery_id == id).unwrap();
-    executing.subquery_pos.insert(pos, new_subquery_id.clone());
+    // Get the SingleStatus
+    let pos = executing.find_subquery(&subquery_id).unwrap();
+    let single_status = executing.subqueries.get_mut(pos).unwrap();
 
-    let old_subquery = executing.subquery_status.subqueries.remove(&subquery_id).unwrap();
-    let old_pending = cast!(SingleSubqueryStatus::Pending, old_subquery).unwrap();
-    let old_context_schema = &old_pending.context.context_schema;
-    executing.subquery_status.subqueries.insert(
-      new_subquery_id.clone(),
-      SingleSubqueryStatus::LockingSchemas(SubqueryLockingSchemas {
-        old_columns: old_context_schema.column_context_schema.clone(),
-        trans_table_names: old_context_schema.trans_table_names(),
-        new_cols: rem_cols,
-        query_id: locked_cols_qid,
-      }),
-    );
+    // Replace the the new SingleSubqueryStatus.
+    let old_pending = cast!(SingleSubqueryStatus::Pending, single_status).unwrap();
+    let old_context_schema = old_pending.context.context_schema.clone();
+    *single_status = SingleSubqueryStatus::LockingSchemas(SubqueryLockingSchemas {
+      old_columns: old_context_schema.column_context_schema.clone(),
+      trans_table_names: old_context_schema.trans_table_names(),
+      new_cols: rem_cols,
+      query_id: locked_cols_qid,
+    });
   }
 
   /// This function just routes the InternalColumnsDNE notification from the GRQueryES.
@@ -2107,27 +2069,23 @@ impl<T: IOTypes> TabletContext<T> {
             }
           };
 
-          // Here, we have computed all GRQueryESs, and we can now add them to
-          // `subquery_status` and `statuses`.
+          // Here, we have computed all GRQueryESs, and we can now add them to Executing.
           let mut gr_query_ids = Vec::<QueryId>::new();
-          let mut subquery_status = SubqueryStatus { subqueries: Default::default() };
+          let mut subqueries = Vec::<SingleSubqueryStatus>::new();
           for gr_query_es in gr_query_statuses {
             let query_id = gr_query_es.query_id.clone();
             gr_query_ids.push(query_id.clone());
-            subquery_status.subqueries.insert(
-              query_id.clone(),
-              SingleSubqueryStatus::Pending(SubqueryPending {
-                context: gr_query_es.context.clone(),
-              }),
-            );
+            subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+              context: gr_query_es.context.clone(),
+              query_id: query_id.clone(),
+            }));
             statuses.gr_query_ess.insert(query_id, gr_query_es);
           }
 
           // Move the ES to the Executing state.
           es.state = ExecutionS::Executing(Executing {
             completed: 0,
-            subquery_pos: gr_query_ids.clone(),
-            subquery_status,
+            subqueries,
             row_region: pending.read_region.row_region.clone(),
           });
 
@@ -2143,6 +2101,7 @@ impl<T: IOTypes> TabletContext<T> {
         }
         ExecutionS::Executing(executing) => {
           let (subquery_id, gr_query_es) = match recompute_subquery::<T, SimpleStorageView>(
+            &mut self.rand,
             &self.table_schema,
             SimpleStorageView::new(&self.storage),
             executing,
@@ -2163,6 +2122,7 @@ impl<T: IOTypes> TabletContext<T> {
             }
           };
 
+          // Add in the GRQueryES to `table_statuses`, and start evaluating the it.
           let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
           let action = es.start::<T>(&mut self.ctx());
           self.handle_gr_query_es_action(statuses, subquery_id, action);
@@ -2195,27 +2155,23 @@ impl<T: IOTypes> TabletContext<T> {
             }
           };
 
-          // Here, we have computed all GRQueryESs, and we can now add them to
-          // `subquery_status` and `statuses`.
+          // Here, we have computed all GRQueryESs, and we can now add them to Executing.
           let mut gr_query_ids = Vec::<QueryId>::new();
-          let mut subquery_status = SubqueryStatus { subqueries: Default::default() };
+          let mut subqueries = Vec::<SingleSubqueryStatus>::new();
           for gr_query_es in gr_query_statuses {
             let query_id = gr_query_es.query_id.clone();
             gr_query_ids.push(query_id.clone());
-            subquery_status.subqueries.insert(
-              query_id.clone(),
-              SingleSubqueryStatus::Pending(SubqueryPending {
-                context: gr_query_es.context.clone(),
-              }),
-            );
+            subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+              context: gr_query_es.context.clone(),
+              query_id: query_id.clone(),
+            }));
             statuses.gr_query_ess.insert(query_id, gr_query_es);
           }
 
           // Move the ES to the Executing state.
           es.state = MSWriteExecutionS::Executing(Executing {
             completed: 0,
-            subquery_pos: gr_query_ids.clone(),
-            subquery_status,
+            subqueries,
             row_region: pending.read_region.row_region.clone(),
           });
 
@@ -2232,6 +2188,7 @@ impl<T: IOTypes> TabletContext<T> {
         MSWriteExecutionS::Executing(executing) => {
           let ms_query_es = statuses.ms_query_ess.get(&es.ms_query_id).unwrap();
           let (subquery_id, gr_query_es) = match recompute_subquery::<T, MSStorageView>(
+            &mut self.rand,
             &self.table_schema,
             MSStorageView::new(&self.storage, &ms_query_es.update_views, es.tier.clone()),
             executing,
@@ -2252,6 +2209,7 @@ impl<T: IOTypes> TabletContext<T> {
             }
           };
 
+          // Add in the GRQueryES to `table_statuses`, and start evaluating the it.
           let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
           let action = es.start::<T>(&mut self.ctx());
           self.handle_gr_query_es_action(statuses, subquery_id, action);
@@ -2284,27 +2242,23 @@ impl<T: IOTypes> TabletContext<T> {
             }
           };
 
-          // Here, we have computed all GRQueryESs, and we can now add them to
-          // `subquery_status` and `statuses`.
+          // Here, we have computed all GRQueryESs, and we can now add them to Executing.
           let mut gr_query_ids = Vec::<QueryId>::new();
-          let mut subquery_status = SubqueryStatus { subqueries: Default::default() };
+          let mut subqueries = Vec::<SingleSubqueryStatus>::new();
           for gr_query_es in gr_query_statuses {
             let query_id = gr_query_es.query_id.clone();
             gr_query_ids.push(query_id.clone());
-            subquery_status.subqueries.insert(
-              query_id.clone(),
-              SingleSubqueryStatus::Pending(SubqueryPending {
-                context: gr_query_es.context.clone(),
-              }),
-            );
+            subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+              context: gr_query_es.context.clone(),
+              query_id: query_id.clone(),
+            }));
             statuses.gr_query_ess.insert(query_id, gr_query_es);
           }
 
           // Move the ES to the Executing state.
           es.state = MSReadExecutionS::Executing(Executing {
             completed: 0,
-            subquery_pos: gr_query_ids.clone(),
-            subquery_status,
+            subqueries,
             row_region: pending.read_region.row_region.clone(),
           });
 
@@ -2321,6 +2275,7 @@ impl<T: IOTypes> TabletContext<T> {
         MSReadExecutionS::Executing(executing) => {
           let ms_query_es = statuses.ms_query_ess.get(&es.ms_query_id).unwrap();
           let (subquery_id, gr_query_es) = match recompute_subquery::<T, MSStorageView>(
+            &mut self.rand,
             &self.table_schema,
             MSStorageView::new(&self.storage, &ms_query_es.update_views, es.tier.clone()),
             executing,
@@ -2341,6 +2296,7 @@ impl<T: IOTypes> TabletContext<T> {
             }
           };
 
+          // Add in the GRQueryES to `table_statuses`, and start evaluating the it.
           let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
           let action = es.start::<T>(&mut self.ctx());
           self.handle_gr_query_es_action(statuses, subquery_id, action);
@@ -2395,8 +2351,8 @@ impl<T: IOTypes> TabletContext<T> {
       // Add the subquery results into the TableReadES.
       es.new_rms.extend(subquery_new_rms);
       let executing_state = cast!(ExecutionS::Executing, &mut es.state).unwrap();
-      let subquery_status = &mut executing_state.subquery_status;
-      let single_status = subquery_status.subqueries.get_mut(&subquery_id).unwrap();
+      let subquery_idx = executing_state.find_subquery(&subquery_id).unwrap();
+      let single_status = executing_state.subqueries.get_mut(subquery_idx).unwrap();
       let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
       *single_status = SingleSubqueryStatus::Finished(SubqueryFinished {
         context: context.clone(),
@@ -2406,7 +2362,7 @@ impl<T: IOTypes> TabletContext<T> {
 
       // If all subqueries have been evaluated, finish the TableReadES
       // and respond to the client.
-      if executing_state.completed == subquery_status.subqueries.len() {
+      if executing_state.completed == executing_state.subqueries.len() {
         /*
          We are trying to compute the final Vec<TableView> that we send off to the
          request sender. We iterator ContextRow by ContextRow. For each, we read
@@ -2432,12 +2388,11 @@ impl<T: IOTypes> TabletContext<T> {
         ones in order to update the HashMap<ContextRow, usize>.
         */
 
-        let num_subqueries = executing_state.subquery_pos.len();
+        let num_subqueries = executing_state.subqueries.len();
 
         // Construct the ContextConverters for all subqueries
         let mut converters = Vec::<ContextConverter>::new();
-        for subquery_id in &executing_state.subquery_pos {
-          let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+        for single_status in &executing_state.subqueries {
           let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
           let context_schema = &result.context.context_schema;
           converters.push(ContextConverter::general_create(
@@ -2516,8 +2471,7 @@ impl<T: IOTypes> TabletContext<T> {
               // Get the child_context_idx to get the relevent TableView from the subquery
               // results, and populate `subquery_vals`.
               let child_context_idx = child_context_row_map.get(&new_context_row).unwrap();
-              let subquery_id = executing_state.subquery_pos.get(index).unwrap();
-              let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+              let single_status = executing_state.subqueries.get(index).unwrap();
               let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
               subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
             }
@@ -2593,8 +2547,8 @@ impl<T: IOTypes> TabletContext<T> {
       // Add the subquery results into the MSTableWriteES.
       es.new_rms.extend(subquery_new_rms);
       let executing_state = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
-      let subquery_status = &mut executing_state.subquery_status;
-      let single_status = subquery_status.subqueries.get_mut(&subquery_id).unwrap();
+      let subquery_idx = executing_state.find_subquery(&subquery_id).unwrap();
+      let single_status = executing_state.subqueries.get_mut(subquery_idx).unwrap();
       let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
       *single_status = SingleSubqueryStatus::Finished(SubqueryFinished {
         context: context.clone(),
@@ -2604,13 +2558,12 @@ impl<T: IOTypes> TabletContext<T> {
 
       // If all subqueries have been evaluated, finish the MSTableWriteES
       // and respond to the client.
-      if executing_state.completed == subquery_status.subqueries.len() {
-        let num_subqueries = executing_state.subquery_pos.len();
+      if executing_state.completed == executing_state.subqueries.len() {
+        let num_subqueries = executing_state.subqueries.len();
 
         // Construct the ContextConverters for all subqueries
         let mut converters = Vec::<ContextConverter>::new();
-        for subquery_id in &executing_state.subquery_pos {
-          let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+        for single_status in &executing_state.subqueries {
           let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
           let context_schema = &result.context.context_schema;
           converters.push(ContextConverter::general_create(
@@ -2694,8 +2647,7 @@ impl<T: IOTypes> TabletContext<T> {
             // Get the child_context_idx to get the relevent TableView from the subquery
             // results, and populate `subquery_vals`.
             let child_context_idx = child_context_row_map.get(&new_context_row).unwrap();
-            let subquery_id = executing_state.subquery_pos.get(index).unwrap();
-            let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+            let single_status = executing_state.subqueries.get(index).unwrap();
             let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
             subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
           }
@@ -2770,8 +2722,8 @@ impl<T: IOTypes> TabletContext<T> {
       // Add the subquery results into the MSTableReadES.
       es.new_rms.extend(subquery_new_rms);
       let executing_state = cast!(MSReadExecutionS::Executing, &mut es.state).unwrap();
-      let subquery_status = &mut executing_state.subquery_status;
-      let single_status = subquery_status.subqueries.get_mut(&subquery_id).unwrap();
+      let subquery_idx = executing_state.find_subquery(&subquery_id).unwrap();
+      let single_status = executing_state.subqueries.get_mut(subquery_idx).unwrap();
       let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
       *single_status = SingleSubqueryStatus::Finished(SubqueryFinished {
         context: context.clone(),
@@ -2781,13 +2733,12 @@ impl<T: IOTypes> TabletContext<T> {
 
       // If all subqueries have been evaluated, finish the MSTableReadES
       // and respond to the client.
-      if executing_state.completed == subquery_status.subqueries.len() {
-        let num_subqueries = executing_state.subquery_pos.len();
+      if executing_state.completed == executing_state.subqueries.len() {
+        let num_subqueries = executing_state.subqueries.len();
 
         // Construct the ContextConverters for all subqueries
         let mut converters = Vec::<ContextConverter>::new();
-        for subquery_id in &executing_state.subquery_pos {
-          let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+        for single_status in &executing_state.subqueries {
           let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
           let context_schema = &result.context.context_schema;
           converters.push(ContextConverter::general_create(
@@ -2867,8 +2818,7 @@ impl<T: IOTypes> TabletContext<T> {
               // Get the child_context_idx to get the relevent TableView from the subquery
               // results, and populate `subquery_vals`.
               let child_context_idx = child_context_row_map.get(&new_context_row).unwrap();
-              let subquery_id = executing_state.subquery_pos.get(index).unwrap();
-              let single_status = subquery_status.subqueries.get(subquery_id).unwrap();
+              let single_status = executing_state.subqueries.get(index).unwrap();
               let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
               subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
             }
@@ -3081,8 +3031,8 @@ impl<T: IOTypes> TabletContext<T> {
             // Here, we need to cancel every Subquery. Depending on the state of the
             // SingleSubqueryStatus, we either need to either clean up the column locking request,
             // the ReadRegion from read protection, or abort the underlying GRQueryES.
-            for (query_id, single_query) in executing.subquery_status.subqueries {
-              match single_query {
+            for single_status in executing.subqueries {
+              match single_status {
                 SingleSubqueryStatus::LockingSchemas(locking_status) => {
                   self.remove_col_locking_request(locking_status.query_id);
                 }
@@ -3090,8 +3040,8 @@ impl<T: IOTypes> TabletContext<T> {
                   let protect_query_id = protect_status.query_id;
                   self.remove_read_protected_request(es.timestamp.clone(), protect_query_id);
                 }
-                SingleSubqueryStatus::Pending(_) => {
-                  self.exit_and_clean_up(statuses, query_id);
+                SingleSubqueryStatus::Pending(pending_status) => {
+                  self.exit_and_clean_up(statuses, pending_status.query_id);
                 }
                 SingleSubqueryStatus::Finished(_) => {}
               }
@@ -3153,8 +3103,8 @@ impl<T: IOTypes> TabletContext<T> {
 
               // Note that we leave `m_read_protected` and `m_write_protected` in-tact
               // since they are inconvenient to change (since they don't have `query_id`.
-              for (query_id, single_query) in executing.subquery_status.subqueries {
-                match single_query {
+              for single_status in executing.subqueries {
+                match single_status {
                   SingleSubqueryStatus::LockingSchemas(locking_status) => {
                     self.remove_col_locking_request(locking_status.query_id);
                   }
@@ -3162,8 +3112,8 @@ impl<T: IOTypes> TabletContext<T> {
                     let protect_query_id = protect_status.query_id;
                     self.remove_m_read_protected_request(es.timestamp.clone(), protect_query_id);
                   }
-                  SingleSubqueryStatus::Pending(_) => {
-                    self.exit_and_clean_up(statuses, query_id);
+                  SingleSubqueryStatus::Pending(pending_status) => {
+                    self.exit_and_clean_up(statuses, pending_status.query_id);
                   }
                   SingleSubqueryStatus::Finished(_) => {}
                 }
@@ -3201,8 +3151,8 @@ impl<T: IOTypes> TabletContext<T> {
 
               // Note that we leave `m_read_protected` and `m_write_protected` in-tact
               // since they are inconvenient to change (since they don't have `query_id`.
-              for (query_id, single_query) in executing.subquery_status.subqueries {
-                match single_query {
+              for single_status in executing.subqueries {
+                match single_status {
                   SingleSubqueryStatus::LockingSchemas(locking_status) => {
                     self.remove_col_locking_request(locking_status.query_id);
                   }
@@ -3210,8 +3160,8 @@ impl<T: IOTypes> TabletContext<T> {
                     let protect_query_id = protect_status.query_id;
                     self.remove_m_read_protected_request(es.timestamp.clone(), protect_query_id);
                   }
-                  SingleSubqueryStatus::Pending(_) => {
-                    self.exit_and_clean_up(statuses, query_id);
+                  SingleSubqueryStatus::Pending(pending_status) => {
+                    self.exit_and_clean_up(statuses, pending_status.query_id);
                   }
                   SingleSubqueryStatus::Finished(_) => {}
                 }
@@ -3442,6 +3392,7 @@ fn compute_subqueries<T: IOTypes, StorageViewT: StorageView>(
 /// This recomputes GRQueryESs that corresponds to `protect_query_id`.
 fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
   // TabletContext params
+  rand: &mut T::RngCoreT,
   table_schema: &TableSchema,
   storage_view: StorageViewT,
   // TabletStatus params
@@ -3458,27 +3409,15 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
 ) -> Result<(QueryId, GRQueryES), EvalError> {
   // Find the subquery that this `protect_query_id` is referring to. There should
   // always be such a Subquery.
-  let (subquery_id, protect_status) = (|| {
-    for (subquery_id, state) in &executing.subquery_status.subqueries {
-      match state {
-        SingleSubqueryStatus::PendingReadRegion(protect_status) => {
-          if &protect_status.query_id == protect_query_id {
-            return Some((subquery_id, protect_status));
-          }
-        }
-        _ => {}
-      }
-    }
-    return None;
-  })()
-  .unwrap();
+  let subquery_index = executing.find_subquery(protect_query_id).unwrap();
+  let single_status = executing.subqueries.get_mut(subquery_index).unwrap();
+  let protect_status = cast!(SingleSubqueryStatus::PendingReadRegion, single_status).unwrap();
 
   // Setup ability to compute a tight Keybound for every ContextRow.
   let keybound_computer =
     ContextKeyboundComputer::new(selection, table_schema, timestamp, &context.context_schema);
 
   // Find the GRQuery that corresponds to this subquery
-  let subquery_index = executing.subquery_pos.iter().position(|id| id == subquery_id).unwrap();
   let subquery = subqueries.get(subquery_index).unwrap();
 
   // This computes a ContextSchema for the subquery, as well as expose a conversion
@@ -3497,13 +3436,14 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
 
   // Construct the GRQueryES
   let child = query_plan.col_usage_node.children.get(subquery_index).unwrap();
+  let gr_query_id = mk_qid(rand);
   let gr_query_es = GRQueryES {
     root_query_path: root_query_path.clone(),
     tier_map: tier_map.clone(),
     timestamp: timestamp.clone(),
     context: context.clone(),
     new_trans_table_context: vec![],
-    query_id: subquery_id.clone(),
+    query_id: gr_query_id.clone(),
     sql_query: subquery.clone(),
     query_plan: GRQueryPlan {
       gossip_gen: query_plan.gossip_gen.clone(),
@@ -3516,13 +3456,11 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
     orig_p: OrigP::new(query_id.clone()),
   };
 
-  // Advance the SingleSubqueryStatus, add in the subquery to `table_statuses`,
-  // and start evaluating the GRQueryES
-  let subquery_id = subquery_id.clone();
-  let single_status = executing.subquery_status.subqueries.get_mut(&subquery_id).unwrap();
-  *single_status = SingleSubqueryStatus::Pending(SubqueryPending { context });
+  // Advance the SingleSubqueryStatus.
+  *single_status =
+    SingleSubqueryStatus::Pending(SubqueryPending { context, query_id: gr_query_id.clone() });
 
-  Ok((subquery_id.clone(), gr_query_es))
+  Ok((gr_query_id, gr_query_es))
 }
 
 /// Computes if `region` and intersects with any TableRegion in `regions`.
