@@ -1,5 +1,6 @@
 use crate::col_usage::{
-  collect_select_subqueries, collect_top_level_cols, nodes_external_trans_tables, ColUsagePlanner,
+  collect_select_subqueries, collect_top_level_cols, nodes_external_cols,
+  nodes_external_trans_tables, ColUsagePlanner,
 };
 use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan};
 use crate::expression::{is_true, EvalError};
@@ -17,7 +18,7 @@ use crate::tablet::{
   compute_contexts, Executing, QueryReplanningSqlView, SingleSubqueryStatus, SubqueryFinished,
   SubqueryPending,
 };
-use crate::trans_read_es::TransTableAction::Wait;
+use crate::trans_table_read_es::TransTableAction::Wait;
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 use std::ops::Deref;
@@ -179,13 +180,6 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
 // -----------------------------------------------------------------------------------------------
 
 impl FullTransTableReadES {
-  pub fn location_prefix(&self) -> &TransTableLocationPrefix {
-    match self {
-      FullTransTableReadES::QueryReplanning(es) => &es.location_prefix,
-      FullTransTableReadES::Executing(es) => &es.location_prefix,
-    }
-  }
-
   pub fn start<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
@@ -221,6 +215,7 @@ impl FullTransTableReadES {
     }
   }
 
+  /// Constructs and returns subqueries.
   pub fn start_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
@@ -234,11 +229,7 @@ impl FullTransTableReadES {
     // Compute children.
     let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
     for child in &es.query_plan.col_usage_node.children {
-      let mut col_name_set = HashSet::<ColName>::new();
-      for (_, (_, node)) in child {
-        col_name_set.extend(node.external_cols.clone())
-      }
-      children.push((col_name_set.iter().cloned().collect(), nodes_external_trans_tables(child)));
+      children.push((nodes_external_cols(child), nodes_external_trans_tables(child)));
     }
 
     // Create the child context. Recall that we are able to unwrap `compute_contexts`
@@ -371,6 +362,18 @@ impl FullTransTableReadES {
     }
   }
 
+  /// This is can be called both for if a subquery fails, or if there is a LateralError
+  /// due to the ES owning the TransTable disappears. This simply responds to the sender
+  /// and Exits and Clean Ups this ES.
+  pub fn handle_internal_query_error<T: IOTypes>(
+    &mut self,
+    ctx: &mut ServerContext<T>,
+    query_error: msg::QueryError,
+  ) -> TransTableAction {
+    ctx.send_query_error(self.sender_path(), self.query_id(), query_error);
+    self.exit_and_clean_up(ctx)
+  }
+
   /// Handles a Subquery completing
   pub fn handle_subquery_done<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
@@ -486,18 +489,6 @@ impl FullTransTableReadES {
     }
   }
 
-  /// This is can be called both for if a subquery fails, or if there is a LateralError
-  /// due to the ES owning the TransTable disappears. This simply responds to the sender
-  /// and Exits and Clean Ups this ES.
-  pub fn handle_internal_query_error<T: IOTypes>(
-    &mut self,
-    ctx: &mut ServerContext<T>,
-    query_error: msg::QueryError,
-  ) -> TransTableAction {
-    ctx.send_query_error(self.sender_path(), self.query_id(), query_error);
-    self.exit_and_clean_up(ctx)
-  }
-
   /// This Cleans up any Master queries we launched and it returns instructions for the
   /// parent Server to follow to clean up subqueries.
   pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> TransTableAction {
@@ -542,6 +533,14 @@ impl FullTransTableReadES {
         }
         TransTableAction::ExitAndCleanUp(subquery_ids)
       }
+    }
+  }
+
+  /// Get the `TransTableLocationPrefix` of this ES.
+  pub fn location_prefix(&self) -> &TransTableLocationPrefix {
+    match self {
+      FullTransTableReadES::QueryReplanning(es) => &es.location_prefix,
+      FullTransTableReadES::Executing(es) => &es.location_prefix,
     }
   }
 

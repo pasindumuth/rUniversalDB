@@ -304,7 +304,7 @@ pub fn nodes_external_trans_tables(
   accum
 }
 
-// Accumulates external TransTables in `node`.
+/// Accumulates external TransTables in `node`.
 fn node_external_trans_tables_R(
   node: &FrozenColUsageNode,
   defined_trans_tables: &mut HashSet<TransTableName>,
@@ -320,7 +320,7 @@ fn node_external_trans_tables_R(
   }
 }
 
-// Accumulates external TransTables in `nodes`.
+/// Accumulates external TransTables in `nodes`.
 fn nodes_external_trans_tables_R(
   nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
   defined_trans_tables: &mut HashSet<TransTableName>,
@@ -333,6 +333,17 @@ fn nodes_external_trans_tables_R(
   for (trans_table_name, _) in nodes {
     defined_trans_tables.remove(trans_table_name);
   }
+}
+
+/// Accumulates all External Columns in `nodes`.
+pub fn nodes_external_cols(
+  nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
+) -> Vec<ColName> {
+  let mut col_name_set = HashSet::<ColName>::new();
+  for (_, (_, node)) in nodes {
+    col_name_set.extend(node.external_cols.clone())
+  }
+  col_name_set.into_iter().collect()
 }
 
 #[cfg(test)]

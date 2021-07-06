@@ -1,6 +1,7 @@
 use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, collect_update_subqueries,
-  node_external_trans_tables, nodes_external_trans_tables, ColUsagePlanner, FrozenColUsageNode,
+  node_external_trans_tables, nodes_external_cols, nodes_external_trans_tables, ColUsagePlanner,
+  FrozenColUsageNode,
 };
 use crate::common::{
   btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
@@ -3273,11 +3274,7 @@ fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryCo
   // Compute children.
   let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
   for child in &subquery_view.query_plan.col_usage_node.children {
-    let mut col_name_set = HashSet::<ColName>::new();
-    for (_, (_, node)) in child {
-      col_name_set.extend(node.external_cols.clone())
-    }
-    children.push((col_name_set.iter().cloned().collect(), nodes_external_trans_tables(child)));
+    children.push((nodes_external_cols(child), nodes_external_trans_tables(child)));
   }
 
   // Create the child context.
