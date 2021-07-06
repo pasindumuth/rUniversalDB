@@ -103,14 +103,14 @@ struct MSQueryCoordES {
 }
 
 impl TransTableSource for MSQueryCoordES {
-  fn get_instance(&self, prefix: &TransTableLocationPrefix, idx: usize) -> &TableView {
+  fn get_instance(&self, trans_table_name: &TransTableName, idx: usize) -> &TableView {
     assert_eq!(idx, 1);
-    let (_, instance) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
+    let (_, instance) = lookup(&self.trans_table_views, trans_table_name).unwrap();
     instance
   }
 
-  fn get_schema(&self, prefix: &TransTableLocationPrefix) -> Vec<ColName> {
-    let (schema, _) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
+  fn get_schema(&self, trans_table_name: &TransTableName) -> Vec<ColName> {
+    let (schema, _) = lookup(&self.trans_table_views, trans_table_name).unwrap();
     schema.clone()
   }
 }

@@ -113,13 +113,13 @@ pub struct GRQueryES {
 /// so that they don't constantly have to be looked up. However, we would need to access `prefix`
 /// here at the Server level, so we avoid doing this for now.
 impl TransTableSource for GRQueryES {
-  fn get_instance(&self, prefix: &TransTableLocationPrefix, idx: usize) -> &TableView {
-    let (_, instances) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
+  fn get_instance(&self, trans_table_name: &TransTableName, idx: usize) -> &TableView {
+    let (_, instances) = lookup(&self.trans_table_views, trans_table_name).unwrap();
     instances.get(idx).unwrap()
   }
 
-  fn get_schema(&self, prefix: &TransTableLocationPrefix) -> Vec<ColName> {
-    let (schema, _) = lookup(&self.trans_table_views, &prefix.trans_table_name).unwrap();
+  fn get_schema(&self, trans_table_name: &TransTableName) -> Vec<ColName> {
+    let (schema, _) = lookup(&self.trans_table_views, trans_table_name).unwrap();
     schema.clone()
   }
 }

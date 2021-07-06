@@ -1,25 +1,31 @@
-use crate::col_usage::{collect_select_subqueries, ColUsagePlanner};
+use crate::col_usage::{
+  collect_select_subqueries, collect_top_level_cols, nodes_external_trans_tables, ColUsagePlanner,
+};
 use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRExecutionS, GRQueryES, GRQueryPlan};
 use crate::model::common::{
-  proc, ColName, ColType, ColValN, ContextRow, TableView, Timestamp, TransTableName,
+  proc, ColName, ColType, ColValN, ContextRow, ContextSchema, TableView, Timestamp, TransTableName,
 };
 use crate::model::common::{Context, QueryId, QueryPath, TierMap, TransTableLocationPrefix};
 use crate::model::message as msg;
 use crate::server::{
-  evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConverter, ServerContext,
+  evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor, LocalTable,
+  ServerContext,
 };
 use crate::tablet::{
-  Executing, QueryReplanningSqlView, SingleSubqueryStatus, SubqueryFinished, SubqueryPending,
+  compute_contexts, Executing, QueryReplanningSqlView, SingleSubqueryStatus, SubqueryFinished,
+  SubqueryPending,
 };
 use crate::trans_read_es::TransTableAction::Wait;
 use std::collections::{HashMap, HashSet};
+use std::iter::FromIterator;
+use std::ops::Deref;
 use std::rc::Rc;
 
 pub trait TransTableSource {
-  fn get_instance(&self, prefix: &TransTableLocationPrefix, idx: usize) -> &TableView;
-  fn get_schema(&self, prefix: &TransTableLocationPrefix) -> Vec<ColName>;
+  fn get_instance(&self, prefix: &TransTableName, idx: usize) -> &TableView;
+  fn get_schema(&self, prefix: &TransTableName) -> Vec<ColName>;
 }
 
 #[derive(Debug)]
@@ -106,6 +112,72 @@ pub enum FullTransTableReadES {
   Executing(TransTableReadES),
 }
 
+// -----------------------------------------------------------------------------------------------
+//  LocalTable
+// -----------------------------------------------------------------------------------------------
+
+struct TransLocalTable<'a, SourceT: TransTableSource> {
+  /// The TransTableSource the ES is operating on.
+  trans_table_source: &'a SourceT,
+  trans_table_name: &'a TransTableName,
+  /// The schema read TransTable.
+  schema: Vec<ColName>,
+}
+
+impl<'a, SourceT: TransTableSource> TransLocalTable<'a, SourceT> {
+  fn new(
+    trans_table_source: &'a SourceT,
+    trans_table_name: &'a TransTableName,
+  ) -> TransLocalTable<'a, SourceT> {
+    TransLocalTable {
+      trans_table_source,
+      trans_table_name,
+      schema: trans_table_source.get_schema(trans_table_name),
+    }
+  }
+}
+
+impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> {
+  fn contains_col(&self, col: &ColName) -> bool {
+    self.schema.contains(col)
+  }
+
+  fn get_rows(
+    &self,
+    parent_context_schema: &ContextSchema,
+    parent_context_row: &ContextRow,
+    col_names: &Vec<ColName>,
+  ) -> Result<Vec<(Vec<ColValN>, u64)>, EvalError> {
+    // First, we look up the TransTableInstance
+    let trans_table_name_pos = parent_context_schema
+      .trans_table_context_schema
+      .iter()
+      .position(|prefix| &prefix.trans_table_name == self.trans_table_name)
+      .unwrap();
+    let trans_table_instance_pos =
+      parent_context_row.trans_table_context_row.get(trans_table_name_pos).unwrap();
+    let trans_table_instance =
+      self.trans_table_source.get_instance(&self.trans_table_name, *trans_table_instance_pos);
+
+    // Next, we select the desired columns and compress them before returning it.
+    let mut sub_view = TableView::new(col_names.clone());
+    for (row, count) in &trans_table_instance.rows {
+      let mut new_row = Vec::<ColValN>::new();
+      for col in col_names {
+        let pos = trans_table_instance.col_names.iter().position(|cur_col| cur_col == col).unwrap();
+        new_row.push(row.get(pos).unwrap().clone());
+      }
+      sub_view.add_row_multi(new_row, *count);
+    }
+
+    Ok(sub_view.rows.into_iter().collect())
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Implementation
+// -----------------------------------------------------------------------------------------------
+
 impl FullTransTableReadES {
   pub fn location_prefix(&self) -> &TransTableLocationPrefix {
     match self {
@@ -149,40 +221,6 @@ impl FullTransTableReadES {
     }
   }
 
-  /// This is used to compute a Context.
-  fn compute_context<SourceT: TransTableSource>(
-    parent_context: &Context,
-    conv: ContextConverter,
-    trans_table_source: &SourceT,
-    location_prefix: &TransTableLocationPrefix,
-    trans_table_name_pos: usize,
-  ) -> Rc<Context> {
-    // Construct the `ContextRow`s. To do this, we iterate over main Query's
-    // `ContextRow`s and, then the rows of the corresponding TransTableInstance.
-    // We hold the child `ContextRow`s in Vec, and we use a HashSet to avoid duplicates.
-    let mut new_context_rows = Vec::<ContextRow>::new();
-    let mut new_row_set = HashSet::<ContextRow>::new();
-    for context_row in &parent_context.context_rows {
-      // Lookup the relevent TransTableInstance at the given ContextRow
-      let trans_table_instance_pos =
-        context_row.trans_table_context_row.get(trans_table_name_pos).unwrap();
-      let trans_table_instance =
-        trans_table_source.get_instance(location_prefix, *trans_table_instance_pos);
-      // We take each row in the TransTableInstance, couple it with the main ContextRow, and
-      // then get the child ContextRow from `conv`.
-      for (row, _) in &trans_table_instance.rows {
-        let new_context_row = conv.compute_child_context_row(context_row, row.clone());
-        if !new_row_set.contains(&new_context_row) {
-          new_row_set.insert(new_context_row.clone());
-          new_context_rows.push(new_context_row);
-        }
-      }
-    }
-
-    // Finally, compute the context.
-    Rc::new(Context { context_schema: conv.context_schema, context_rows: new_context_rows })
-  }
-
   pub fn start_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
@@ -190,51 +228,37 @@ impl FullTransTableReadES {
   ) -> TransTableAction {
     let es = cast!(FullTransTableReadES::Executing, self).unwrap();
     assert!(matches!(&es.state, &TransExecutionS::Start));
+    // Here, we first construct all of the subquery Contexts using the
+    // ContextConstructor, and then we construct GRQueryESs.
 
-    // We first compute all GRQueryESs before adding them to `tablet_status`, in case
-    // an error occurs here and we need to abort.
+    // Compute children.
+    let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+    for child in &es.query_plan.col_usage_node.children {
+      let mut col_name_set = HashSet::<ColName>::new();
+      for (_, (_, node)) in child {
+        col_name_set.extend(node.external_cols.clone())
+      }
+      children.push((col_name_set.iter().cloned().collect(), nodes_external_trans_tables(child)));
+    }
 
-    // Compute the position in the TransTableContextRow that we can use to
-    // get the index of current TransTableInstance.
-    let trans_table_name_pos = es
-      .context
-      .context_schema
-      .trans_table_context_schema
-      .iter()
-      .position(|prefix| &prefix.trans_table_name == &es.location_prefix.trans_table_name)
-      .unwrap();
+    // Create the child context. Recall that we are able to unwrap `compute_contexts`
+    // for the case TransTables.
+    let trans_table_name = &es.location_prefix.trans_table_name;
+    let local_table = TransLocalTable::new(trans_table_source, trans_table_name);
+    let child_contexts = compute_contexts(es.context.deref(), local_table, children).unwrap();
 
+    // Finally, compute the GRQueryESs.
     let subqueries = collect_select_subqueries(&es.sql_query);
-
     let mut gr_query_statuses = Vec::<GRQueryES>::new();
-    for subquery_index in 0..subqueries.len() {
-      let subquery = subqueries.get(subquery_index).unwrap();
-      let child = es.query_plan.col_usage_node.children.get(subquery_index).unwrap();
-
-      // This computes a ContextSchema for the subquery, as well as exposes a conversion
-      // utility to compute ContextRows.
-      let conv = ContextConverter::create_from_query_plan(
-        &es.context.context_schema,
-        &es.query_plan.col_usage_node,
-        subquery_index,
-      );
-
-      // Compute the context.
-      let context = Self::compute_context(
-        &es.context,
-        conv,
-        trans_table_source,
-        &es.location_prefix,
-        trans_table_name_pos,
-      );
-
-      // Construct the GRQueryES
+    for (subquery_idx, child_context) in child_contexts.into_iter().enumerate() {
+      let subquery = subqueries.get(subquery_idx).unwrap();
+      let child = es.query_plan.col_usage_node.children.get(subquery_idx).unwrap();
       let gr_query_id = mk_qid(ctx.rand);
       let gr_query_es = GRQueryES {
         root_query_path: es.root_query_path.clone(),
         tier_map: es.tier_map.clone(),
         timestamp: es.timestamp.clone(),
-        context,
+        context: Rc::new(child_context),
         new_trans_table_context: vec![],
         query_id: gr_query_id.clone(),
         sql_query: subquery.clone(),
@@ -285,9 +309,8 @@ impl FullTransTableReadES {
   ) -> TransTableAction {
     let es = cast!(FullTransTableReadES::Executing, self).unwrap();
     let executing = cast!(TransExecutionS::Executing, &mut es.state).unwrap();
-
-    let trans_table_name = es.location_prefix.trans_table_name.clone();
-    let trans_table_schema = trans_table_source.get_schema(&es.location_prefix);
+    let trans_table_name = &es.location_prefix.trans_table_name;
+    let trans_table_schema = trans_table_source.get_schema(trans_table_name);
 
     // First, we need to see if the missing columns are in the context. If not, then
     // we have to exit and clean up, and send an abort. If so, we need to lookup up
@@ -321,56 +344,32 @@ impl FullTransTableReadES {
       let subquery_idx = executing.find_subquery(&subquery_id).unwrap();
       let single_status = executing.subqueries.get_mut(subquery_idx).unwrap();
       let pending_status = cast!(SingleSubqueryStatus::Pending, single_status).unwrap();
+      let context_schema = &pending_status.context.context_schema;
 
-      // We extend the ColumnContextSchema. Recall that we take the ContextSchema
-      // of the previous subquery, rather than recomputing it from the QueryPlan
-      // (since that might be out-of-date).
-      let old_context_schema = &pending_status.context.context_schema;
-      let mut new_columns = old_context_schema.column_context_schema.clone();
-      new_columns.extend(rem_cols);
-
-      let conv = ContextConverter::trans_general_create(
-        &es.context.context_schema,
-        &trans_table_schema,
-        new_columns,
-        old_context_schema.trans_table_names(),
-      );
-
-      // Compute the position in the TransTableContextRow that we can use to
-      // get the index of current TransTableInstance.
-      let trans_table_name_pos = es
-        .context
-        .context_schema
-        .trans_table_context_schema
-        .iter()
-        .position(|prefix| &prefix.trans_table_name == &trans_table_name)
-        .unwrap();
-
-      // Compute the context.
-      let context = Self::compute_context(
-        &es.context,
-        conv,
-        trans_table_source,
-        &es.location_prefix,
-        trans_table_name_pos,
-      );
-
-      // We generate a new subquery ID to assign the new SingleSubqueryStatus,
-      // as well as the corresponding GRQueryES.
-      let new_subquery_id = mk_qid(ctx.rand);
+      // Create the child context.
+      let local_table = TransLocalTable::new(trans_table_source, trans_table_name);
+      let child_contexts = compute_contexts(
+        es.context.deref(),
+        local_table,
+        vec![(context_schema.column_context_schema.clone(), context_schema.trans_table_names())],
+      )
+      .unwrap();
+      assert_eq!(child_contexts.len(), 1);
 
       // Construct the GRQueryES
+      let context = Rc::new(child_contexts.into_iter().next().unwrap());
       let subqueries = collect_select_subqueries(&es.sql_query);
-      let sql_subquery = subqueries.get(subquery_idx).unwrap().clone();
+      let subquery = subqueries.get(subquery_idx).unwrap().clone();
       let child = es.query_plan.col_usage_node.children.get(subquery_idx).unwrap();
+      let gr_query_id = mk_qid(ctx.rand);
       let gr_query_es = GRQueryES {
         root_query_path: es.root_query_path.clone(),
         tier_map: es.tier_map.clone(),
         timestamp: es.timestamp.clone(),
         context: context.clone(),
         new_trans_table_context: vec![],
-        query_id: new_subquery_id.clone(),
-        sql_query: sql_subquery,
+        query_id: gr_query_id.clone(),
+        sql_query: subquery,
         query_plan: GRQueryPlan {
           gossip_gen: es.query_plan.gossip_gen.clone(),
           trans_table_schemas: es.query_plan.trans_table_schemas.clone(),
@@ -384,7 +383,7 @@ impl FullTransTableReadES {
 
       // Update the `executing` state to contain the new subquery_id.
       *single_status =
-        SingleSubqueryStatus::Pending(SubqueryPending { query_id: new_subquery_id, context });
+        SingleSubqueryStatus::Pending(SubqueryPending { query_id: gr_query_id, context });
 
       // Return the GRQueryESs for execution.
       TransTableAction::SendSubqueries(vec![gr_query_es])
@@ -418,115 +417,77 @@ impl FullTransTableReadES {
     // and respond to the client.
     let num_subqueries = executing_state.subqueries.len();
     if executing_state.completed == num_subqueries {
-      // Compute the position in the TransTableContextRow that we can use to
-      // get the index of current TransTableInstance.
-      let trans_table_name = es.location_prefix.trans_table_name.clone();
-      let trans_table_name_pos = context
-        .context_schema
-        .trans_table_context_schema
-        .iter()
-        .position(|prefix| &prefix.trans_table_name == &trans_table_name)
-        .unwrap();
-
-      // Get all TransTableInstances.
-      let trans_table_schema = trans_table_source.get_schema(&es.location_prefix);
-
-      // Construct the ContextConverters for all subqueries
-      let mut converters = Vec::<ContextConverter>::new();
+      // Compute children.
+      let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
       for single_status in &executing_state.subqueries {
         let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
         let context_schema = &result.context.context_schema;
-        converters.push(ContextConverter::trans_general_create(
-          &es.context.context_schema,
-          &trans_table_schema,
-          context_schema.column_context_schema.clone(),
-          context_schema.trans_table_names(),
-        ));
+        children
+          .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
       }
 
-      // Setup the child_context_row_maps that will be populated over time.
-      let mut child_context_row_maps = Vec::<HashMap<ContextRow, usize>>::new();
-      for _ in 0..num_subqueries {
-        child_context_row_maps.push(HashMap::new());
-      }
+      // Create the ContextConstructor.
+      let context_constructor = ContextConstructor::new(
+        es.context.context_schema.clone(),
+        TransLocalTable::new(trans_table_source, &es.location_prefix.trans_table_name),
+        children,
+      );
 
-      // Compute the Schema of the TableView that will be returned by this TransTableReadES.
-      let mut res_col_names = es.sql_query.projection.clone();
+      // These are all of the `ColNames` we need to evaluate things.
+      let mut top_level_cols_set = HashSet::<ColName>::new();
+      top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
+      top_level_cols_set.extend(es.sql_query.projection.clone());
+      let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
+
+      // Finally, iterate over the Context Rows of the subqueries and compute the final values.
       let mut res_table_views = Vec::<TableView>::new();
-      for context_row in &es.context.context_rows {
-        // Lookup the relevent TransTableInstance at the given ContextRow
-        let trans_table_instance_pos =
-          context_row.trans_table_context_row.get(trans_table_name_pos).unwrap();
-        let trans_table_instance =
-          trans_table_source.get_instance(&es.location_prefix, *trans_table_instance_pos);
+      for _ in 0..es.context.context_rows.len() {
+        res_table_views.push(TableView::new(es.sql_query.projection.clone()));
+      }
 
-        // Next, we initialize the TableView that we are trying to construct
-        // for this `context_row`.
-        let mut res_table_view =
-          TableView { col_names: res_col_names.clone(), rows: Default::default() };
-
-        for (trans_table_row, count) in &trans_table_instance.rows {
-          // Now, we compute the subquery result for all subqueries for this
-          // `context_row` + `trans_table_row`.
+      let eval_res = context_constructor.run(
+        &es.context.context_rows,
+        top_level_col_names.clone(),
+        &mut |context_row_idx: usize,
+              top_level_col_vals: Vec<ColValN>,
+              contexts: Vec<(ContextRow, usize)>,
+              count: u64| {
+          // First, we extract the subquery values using the child Context indices.
           let mut subquery_vals = Vec::<TableView>::new();
-          for index in 0..num_subqueries {
-            // Compute the child ContextRow for this subquery, and populate
-            // `child_context_row_map` accordingly.
-            let conv = converters.get(index).unwrap();
-            let child_context_row_map = child_context_row_maps.get_mut(index).unwrap();
-            let row = conv.extract_child_relevent_cols(&trans_table_schema, trans_table_row);
-            let new_context_row = conv.compute_child_context_row(context_row, row);
-            if !child_context_row_map.contains_key(&new_context_row) {
-              let idx = child_context_row_map.len();
-              child_context_row_map.insert(new_context_row.clone(), idx);
-            }
-
-            // Get the child_context_idx to get the relevent TableView from the subquery
-            // results, and populate `subquery_vals`.
-            let child_context_idx = child_context_row_map.get(&new_context_row).unwrap();
+          for index in 0..contexts.len() {
+            let (_, child_context_idx) = contexts.get(index).unwrap();
+            let executing_state = cast!(TransExecutionS::Executing, &es.state).unwrap();
             let single_status = executing_state.subqueries.get(index).unwrap();
             let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
             subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
           }
 
-          /// Now, we evaluate all expressions in the SQL query and amend the
-          /// result to this TableView (if the WHERE clause evaluates to true).
-          let query = &es.sql_query;
-          let context = &es.context;
-          let eval_res = (|| {
-            let evaluated_select = evaluate_super_simple_select(
-              query,
-              &context.context_schema.column_context_schema,
-              &context_row.column_context_row,
-              &trans_table_schema,
-              &trans_table_row,
-              &subquery_vals,
-            )?;
-            if is_true(&evaluated_select.selection)? {
-              // This means that the current row should be selected for the result.
-              // First, we take the projected columns.
-              let mut res_row = Vec::<ColValN>::new();
-              for res_col_name in &res_col_names {
-                let idx = trans_table_schema.iter().position(|k| res_col_name == k).unwrap();
-                res_row.push(trans_table_row.get(idx).unwrap().clone());
-              }
+          // Now, we evaluate all expressions in the SQL query and amend the
+          // result to this TableView (if the WHERE clause evaluates to true).
+          let evaluated_select = evaluate_super_simple_select(
+            &es.sql_query,
+            &top_level_col_names,
+            &top_level_col_vals,
+            &subquery_vals,
+          )?;
+          if is_true(&evaluated_select.selection)? {
+            // This means that the current row should be selected for the result. Thus, we take
+            // the values of the project columns and insert it into the appropriate TableView.
+            let mut res_row = Vec::<ColValN>::new();
+            for res_col_name in &es.sql_query.projection {
+              let idx = top_level_col_names.iter().position(|k| res_col_name == k).unwrap();
+              res_row.push(top_level_col_vals.get(idx).unwrap().clone());
+            }
 
-              // Then, we add the `res_row` into the TableView. Note that since every row in
-              // a TransTableInstance has a count associated, we need to add that many rows
-              // to `res_table_view` as well.
-              res_table_view.add_row_multi(res_row, *count);
-            };
-            Ok(())
-          })();
+            res_table_views[context_row_idx].add_row_multi(res_row, count);
+          };
+          Ok(())
+        },
+      );
 
-          if let Err(eval_error) = eval_res {
-            ctx.send_query_error(self.sender_path(), self.query_id(), mk_eval_error(eval_error));
-            return self.exit_and_clean_up(ctx);
-          }
-        }
-
-        // Finally, accumulate the resulting TableView.
-        res_table_views.push(res_table_view);
+      if let Err(eval_error) = eval_res {
+        ctx.send_query_error(self.sender_path(), self.query_id(), mk_eval_error(eval_error));
+        return self.exit_and_clean_up(ctx);
       }
 
       // Build the success message and respond.
@@ -628,7 +589,7 @@ impl TransQueryReplanningES {
   ) {
     matches!(self.state, TransQueryReplanningS::Start);
     // First, verify that the select columns are in the TransTable.
-    let schema_cols = trans_table_source.get_schema(&self.location_prefix);
+    let schema_cols = trans_table_source.get_schema(&self.location_prefix.trans_table_name);
     for col in &self.sql_query.projection {
       if !schema_cols.contains(col) {
         // One of the projected columns aren't in the schema, indicating that the

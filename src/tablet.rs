@@ -24,8 +24,8 @@ use crate::model::message as msg;
 use crate::model::message::AbortedData;
 use crate::multiversion_map::MVM;
 use crate::server::{
-  contains_col, evaluate_super_simple_select, evaluate_super_simple_select_2, evaluate_update,
-  mk_eval_error, CommonQuery, ContextConstructor, ContextConverter, LocalTable, ServerContext,
+  contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error, CommonQuery,
+  ContextConstructor, LocalTable, ServerContext,
 };
 use crate::trans_read_es::{
   FullTransTableReadES, TransQueryReplanningES, TransQueryReplanningS, TransTableAction,
@@ -477,7 +477,7 @@ trait StorageView {
     &self,
     key_region: &Vec<KeyBound>,
     col_region: &Vec<ColName>,
-  ) -> (Vec<ColName>, Vec<Vec<ColValN>>);
+  ) -> (Vec<ColName>, Vec<(Vec<ColValN>, u64)>);
 }
 
 /// This is used to directly read data from persistent storage.
@@ -496,7 +496,7 @@ impl<'a> StorageView for SimpleStorageView<'a> {
     &self,
     key_region: &Vec<KeyBound>,
     column_region: &Vec<ColName>,
-  ) -> (Vec<ColName>, Vec<Vec<ColValN>>) {
+  ) -> (Vec<ColName>, Vec<(Vec<ColValN>, u64)>) {
     // TODO: We can probably change the key type used in the GenericMVTable so that we
     // can do range querys in BTreeMaps, where we can directly use the KeyBound bounds
     // (inclusive, exclusive, and unbounded bounds) to get what we need directly. This
@@ -530,7 +530,7 @@ impl<'a> StorageView for MSStorageView<'a> {
     &self,
     key_region: &Vec<KeyBound>,
     column_region: &Vec<ColName>,
-  ) -> (Vec<ColName>, Vec<Vec<ColValN>>) {
+  ) -> (Vec<ColName>, Vec<(Vec<ColValN>, u64)>) {
     unimplemented!()
   }
 }
@@ -570,7 +570,7 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
     parent_context_schema: &ContextSchema,
     parent_context_row: &ContextRow,
     col_names: &Vec<ColName>,
-  ) -> Result<Vec<Vec<ColValN>>, EvalError> {
+  ) -> Result<Vec<(Vec<ColValN>, u64)>, EvalError> {
     // We extract all `ColNames` in `parent_context_schema` that aren't shadowed by the LocalTable,
     // and then map them to their values in `parent_context_row`.
     let mut col_map = HashMap::<ColName, ColValN>::new();
@@ -2464,7 +2464,7 @@ impl<T: IOTypes> TabletContext<T> {
           children,
         );
 
-        // These are all of the `ColNames` we need to evaluat evaluate things.
+        // These are all of the `ColNames` we need to evaluate things.
         let mut top_level_cols_set = HashSet::<ColName>::new();
         top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
         top_level_cols_set.extend(es.sql_query.projection.clone());
@@ -2481,7 +2481,8 @@ impl<T: IOTypes> TabletContext<T> {
           top_level_col_names.clone(),
           &mut |context_row_idx: usize,
                 top_level_col_vals: Vec<ColValN>,
-                contexts: Vec<(ContextRow, usize)>| {
+                contexts: Vec<(ContextRow, usize)>,
+                count: u64| {
             // First, we extract the subquery values using the child Context indices.
             let mut subquery_vals = Vec::<TableView>::new();
             for index in 0..contexts.len() {
@@ -2494,7 +2495,7 @@ impl<T: IOTypes> TabletContext<T> {
 
             // Now, we evaluate all expressions in the SQL query and amend the
             // result to this TableView (if the WHERE clause evaluates to true).
-            let evaluated_select = evaluate_super_simple_select_2(
+            let evaluated_select = evaluate_super_simple_select(
               &es.sql_query,
               &top_level_col_names,
               &top_level_col_vals,
@@ -2509,7 +2510,7 @@ impl<T: IOTypes> TabletContext<T> {
                 res_row.push(top_level_col_vals.get(idx).unwrap().clone());
               }
 
-              res_table_views[context_row_idx].add_row(res_row);
+              res_table_views[context_row_idx].add_row_multi(res_row, count);
             };
             Ok(())
           },
@@ -2615,7 +2616,8 @@ impl<T: IOTypes> TabletContext<T> {
           top_level_col_names.clone(),
           &mut |context_row_idx: usize,
                 top_level_col_vals: Vec<ColValN>,
-                contexts: Vec<(ContextRow, usize)>| {
+                contexts: Vec<(ContextRow, usize)>,
+                count: u64| {
             assert_eq!(context_row_idx, 0); // Recall there is only one ContextRow for Updates.
 
             // First, we extract the subquery values using the child Context indices.
@@ -2656,7 +2658,7 @@ impl<T: IOTypes> TabletContext<T> {
               }
 
               // Finally, we add the `res_row` into the TableView.
-              res_table_view.add_row(res_row);
+              res_table_view.add_row_multi(res_row, count);
             };
             Ok(())
           },
@@ -2730,7 +2732,7 @@ impl<T: IOTypes> TabletContext<T> {
           children,
         );
 
-        // These are all of the `ColNames` we need to evaluat evaluate things.
+        // These are all of the `ColNames` we need to evaluate things.
         let mut top_level_cols_set = HashSet::<ColName>::new();
         top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
         top_level_cols_set.extend(es.sql_query.projection.clone());
@@ -2747,7 +2749,8 @@ impl<T: IOTypes> TabletContext<T> {
           top_level_col_names.clone(),
           &mut |context_row_idx: usize,
                 top_level_col_vals: Vec<ColValN>,
-                contexts: Vec<(ContextRow, usize)>| {
+                contexts: Vec<(ContextRow, usize)>,
+                count: u64| {
             // First, we extract the subquery values using the child Context indices.
             let mut subquery_vals = Vec::<TableView>::new();
             for index in 0..contexts.len() {
@@ -2760,7 +2763,7 @@ impl<T: IOTypes> TabletContext<T> {
 
             // Now, we evaluate all expressions in the SQL query and amend the
             // result to this TableView (if the WHERE clause evaluates to true).
-            let evaluated_select = evaluate_super_simple_select_2(
+            let evaluated_select = evaluate_super_simple_select(
               &es.sql_query,
               &top_level_col_names,
               &top_level_col_vals,
@@ -2775,7 +2778,7 @@ impl<T: IOTypes> TabletContext<T> {
                 res_row.push(top_level_col_vals.get(idx).unwrap().clone());
               }
 
-              res_table_views[context_row_idx].add_row(res_row);
+              res_table_views[context_row_idx].add_row_multi(res_row, count);
             };
             Ok(())
           },
@@ -3212,7 +3215,7 @@ impl ContextKeyboundComputer {
 
 /// This runs the `ContextConstructor` with the given inputs and simply accumulates the
 /// `ContextRow` to produce a `Context` for each element in `children`.
-fn compute_contexts<LocalTableT: LocalTable>(
+pub fn compute_contexts<LocalTableT: LocalTable>(
   parent_context: &Context,
   local_table: LocalTableT,
   children: Vec<(Vec<ColName>, Vec<TransTableName>)>,
@@ -3230,7 +3233,8 @@ fn compute_contexts<LocalTableT: LocalTable>(
   // Create the child Contexts.
   let callback = &mut |context_row_idx: usize,
                        top_level_col_vals: Vec<ColValN>,
-                       contexts: Vec<(ContextRow, usize)>| {
+                       contexts: Vec<(ContextRow, usize)>,
+                       count: u64| {
     for (subquery_idx, (context_row, idx)) in contexts.into_iter().enumerate() {
       let child_context = child_contexts.get_mut(subquery_idx).unwrap();
       if idx == child_context.context_rows.len() {
@@ -3261,6 +3265,7 @@ fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable>(
 ) -> Result<Vec<GRQueryES>, EvalError> {
   // Here, we construct first construct all of the subquery Contexts using the
   // ContextConstructor, and then we construct GRQueryESs.
+
   // Compute children.
   let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
   for child in &query_plan.col_usage_node.children {

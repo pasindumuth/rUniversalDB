@@ -232,7 +232,7 @@ pub struct EvaluatedSuperSimpleSelect {
 /// This evaluates a SuperSimpleSelect completely. When a ColumnRef is encountered in the `expr`,
 /// it searches `col_names` and `col_vals` to get the value. In addition, `subquery_vals` should
 /// have a length equal to that of how many GRQuerys there are in the `expr`.
-pub fn evaluate_super_simple_select_2(
+pub fn evaluate_super_simple_select(
   select: &proc::SuperSimpleSelect,
   col_names: &Vec<ColName>,
   col_vals: &Vec<ColValN>,
@@ -243,37 +243,6 @@ pub fn evaluate_super_simple_select_2(
   for i in 0..col_names.len() {
     col_map.insert(col_names.get(i).unwrap().clone(), col_vals.get(i).unwrap().clone());
   }
-
-  // Next, we reduce the subquery values to single values.
-  let subquery_vals = extract_subquery_vals(raw_subquery_vals)?;
-
-  // Construct the Evaluated Select
-  let mut next_subquery_idx = 0;
-  Ok(EvaluatedSuperSimpleSelect {
-    selection: evaluate_c_expr(&construct_cexpr(
-      &select.selection,
-      &col_map,
-      &subquery_vals,
-      &mut next_subquery_idx,
-    )?)?,
-  })
-}
-
-/// This evaluates a SuperSimpleSelect completely. When a ColumnRef is encountered
-/// in the `expr`, we first search `subtable_row`, and if that's not present, we search the
-/// `column_context_row`. In addition, `subquery_vals` should have a length equal to that of
-/// how many GRQuerys there are in the `expr`.
-pub fn evaluate_super_simple_select(
-  select: &proc::SuperSimpleSelect,
-  column_context_schema: &Vec<ColName>,
-  column_context_row: &Vec<ColValN>,
-  subtable_schema: &Vec<ColName>,
-  subtable_row: &Vec<ColValN>,
-  raw_subquery_vals: &Vec<TableView>,
-) -> Result<EvaluatedSuperSimpleSelect, EvalError> {
-  // We map all ColNames to their ColValNs using the Context and subtable.
-  let col_map =
-    mk_col_map(column_context_schema, column_context_row, subtable_schema, subtable_row);
 
   // Next, we reduce the subquery values to single values.
   let subquery_vals = extract_subquery_vals(raw_subquery_vals)?;
@@ -366,7 +335,7 @@ pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Times
 /// Importantly, order within `safe_present_split`, `external_split`, and
 /// `trans_table_split` aren't guaranteed.
 #[derive(Default)]
-pub struct ContextConverter {
+struct ContextConverter {
   // This is the child query's ContextSchema, and it's computed in the constructor.
   pub context_schema: ContextSchema,
 
@@ -385,105 +354,6 @@ pub struct ContextConverter {
 }
 
 impl ContextConverter {
-  /// This function is best understood as being a way to compute all data members of
-  /// `ContextConverter` for the subquery at `subquery_index` inside the `parent_node`.
-  pub fn create_from_query_plan(
-    parent_context_schema: &ContextSchema,
-    parent_node: &FrozenColUsageNode,
-    subquery_index: usize,
-  ) -> ContextConverter {
-    let child = parent_node.children.get(subquery_index).unwrap();
-
-    let mut safe_present_split = Vec::<ColName>::new();
-    let mut external_split = Vec::<ColName>::new();
-    let trans_table_split = nodes_external_trans_tables(child);
-
-    // Construct the ContextSchema of the GRQueryES.
-    let mut subquery_external_cols = HashSet::<ColName>::new();
-    for (_, (_, node)) in child {
-      subquery_external_cols.extend(node.external_cols.clone());
-    }
-
-    // Split the `subquery_external_cols` by which of those cols are in this Table,
-    // and which aren't.
-    for col in &subquery_external_cols {
-      if parent_node.safe_present_cols.contains(col) {
-        safe_present_split.push(col.clone());
-      } else {
-        external_split.push(col.clone());
-      }
-    }
-
-    ContextConverter::finish_creation(
-      parent_context_schema,
-      safe_present_split,
-      external_split,
-      trans_table_split,
-    )
-  }
-
-  /// Here, all ColNames in `child_columns` must be locked in the `table_schema`.
-  /// In addition they must either appear present in the `table_schema`, or in the
-  /// `parent_context_schema`. Finally, the `child_trans_table_names` must be contained
-  /// in the `parent_context_schema` as well.
-  pub fn general_create(
-    parent_context_schema: &ContextSchema,
-    timestamp: &Timestamp,
-    table_schema: &TableSchema,
-    child_columns: Vec<ColName>,
-    child_trans_table_names: Vec<TransTableName>,
-  ) -> ContextConverter {
-    let mut safe_present_split = Vec::<ColName>::new();
-    let mut external_split = Vec::<ColName>::new();
-
-    // Whichever `ColName`s in `child_columns` that are also present in `table_schema` should
-    // be added to `safe_present_cols`. Otherwise, they should be added to `external_split`.
-    for col in child_columns {
-      if contains_col(table_schema, &col, timestamp) {
-        safe_present_split.push(col);
-      } else {
-        external_split.push(col);
-      }
-    }
-
-    ContextConverter::finish_creation(
-      parent_context_schema,
-      safe_present_split,
-      external_split,
-      child_trans_table_names,
-    )
-  }
-
-  /// Here, all ColNames in `child_columns` either appear present in the `trans_table_schema`,
-  /// or in the `parent_context_schema`. In addition, the `child_trans_table_names` must be
-  /// contained in the `parent_context_schema` as well.
-  pub fn trans_general_create(
-    parent_context_schema: &ContextSchema,
-    trans_table_schema: &Vec<ColName>,
-    child_columns: Vec<ColName>,
-    child_trans_table_names: Vec<TransTableName>,
-  ) -> ContextConverter {
-    let mut safe_present_split = Vec::<ColName>::new();
-    let mut external_split = Vec::<ColName>::new();
-
-    // Whichever `ColName`s in `child_columns` that are also present in `trans_table_schema`
-    // should be added to `safe_present_cols`. Otherwise, they should be added to `external_split`.
-    for col in child_columns {
-      if trans_table_schema.contains(&col) {
-        safe_present_split.push(col);
-      } else {
-        external_split.push(col);
-      }
-    }
-
-    ContextConverter::finish_creation(
-      parent_context_schema,
-      safe_present_split,
-      external_split,
-      child_trans_table_names,
-    )
-  }
-
   /// This is a unified approach to `general_create` and `trans_general_create` that uses a
   /// `LocalTable` to infer table schema instead.
   pub fn local_table_create<LocalTableT: LocalTable>(
@@ -505,26 +375,10 @@ impl ContextConverter {
       }
     }
 
-    ContextConverter::finish_creation(
-      parent_context_schema,
-      safe_present_split,
-      external_split,
-      child_trans_table_names,
-    )
-  }
-
-  /// Moves the `*_split` variables into a ContextConverter and compute the various
-  /// convenience data.
-  pub fn finish_creation(
-    parent_context_schema: &ContextSchema,
-    safe_present_split: Vec<ColName>,
-    external_split: Vec<ColName>,
-    trans_table_split: Vec<TransTableName>,
-  ) -> ContextConverter {
     let mut conv = ContextConverter::default();
     conv.safe_present_split = safe_present_split;
     conv.external_split = external_split;
-    conv.trans_table_split = trans_table_split;
+    conv.trans_table_split = child_trans_table_names;
 
     // Point all `conv.external_split` columns to their index in main Query's ContextSchema.
     let col_schema = &parent_context_schema.column_context_schema;
@@ -619,12 +473,15 @@ pub trait LocalTable {
   fn contains_col(&self, col: &ColName) -> bool;
 
   /// Gets all rows in the local table that's associated with the given parent ContextRow.
+  /// Here, we return the value of every row (`Vec<ColValN>`), as well as the count of how
+  /// many times that row occurred (this is more performant than returning the same row over
+  /// and over again).
   fn get_rows(
     &self,
     parent_context_schema: &ContextSchema,
     parent_context_row: &ContextRow,
     col_names: &Vec<ColName>,
-  ) -> Result<Vec<Vec<ColValN>>, EvalError>;
+  ) -> Result<Vec<(Vec<ColValN>, u64)>, EvalError>;
 }
 
 pub struct ContextConstructor<LocalTableT: LocalTable> {
@@ -664,7 +521,9 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
 
   /// Here, the rows in the `parent_context_rows` must correspond to `parent_context_schema`.
   /// The first `usize` in the `callback` is the parent ContextRow currently being used.
-  pub fn run<CbT: FnMut(usize, Vec<ColValN>, Vec<(ContextRow, usize)>) -> Result<(), EvalError>>(
+  pub fn run<
+    CbT: FnMut(usize, Vec<ColValN>, Vec<(ContextRow, usize)>, u64) -> Result<(), EvalError>,
+  >(
     &self,
     parent_context_rows: &Vec<ContextRow>,
     extra_cols: Vec<ColName>,
@@ -693,7 +552,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
 
     for parent_context_row_idx in 0..parent_context_rows.len() {
       let parent_context_row = parent_context_rows.get(parent_context_row_idx).unwrap();
-      for local_row in
+      for (local_row, count) in
         self.local_table.get_rows(&self.parent_context_schema, parent_context_row, &local_schema)?
       {
         // First, construct the child ContextRows.
@@ -734,7 +593,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
         }
 
         // Finally, run the callback with the given inputs.
-        callback(parent_context_row_idx, extra_col_vals, child_context_rows)?;
+        callback(parent_context_row_idx, extra_col_vals, child_context_rows, count)?;
       }
     }
     Ok(())
