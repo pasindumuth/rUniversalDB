@@ -299,7 +299,7 @@ pub struct EvaluatedUpdate {
 /// This evaluates a Update completely. When a ColumnRef is encountered in the `expr`,
 /// it searches `col_names` and `col_vals` to get the value. In addition, `subquery_vals` should
 /// have a length equal to that of how many GRQuerys there are in the `expr`.
-pub fn evaluate_update_2(
+pub fn evaluate_update(
   update: &proc::Update,
   col_names: &Vec<ColName>,
   col_vals: &Vec<ColValN>,
