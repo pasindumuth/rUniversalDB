@@ -24,7 +24,7 @@ use crate::model::message as msg;
 use crate::model::message::AbortedData;
 use crate::multiversion_map::MVM;
 use crate::server::{
-  contains_col, evaluate_super_simple_select, evaluate_super_simple_select_2, evaluate_update,
+  contains_col, evaluate_super_simple_select, evaluate_super_simple_select_2, evaluate_update_2,
   mk_eval_error, CommonQuery, ContextConstructor, ContextConverter, LocalTable, ServerContext,
 };
 use crate::trans_read_es::{
@@ -74,7 +74,7 @@ impl QueryReplanningSqlView for proc::SuperSimpleSelect {
 impl QueryReplanningSqlView for proc::Update {
   fn projected_cols(&self, table_schema: &TableSchema) -> Vec<ColName> {
     let mut projected_cols = Vec::from_iter(self.assignment.iter().map(|(col, _)| col.clone()));
-    projected_cols.extend(table_schema.key_cols.iter().map(|(col, _)| col.clone()));
+    projected_cols.extend(table_schema.get_key_cols());
     return projected_cols;
   }
 
@@ -536,36 +536,31 @@ impl<'a> StorageView for MSStorageView<'a> {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  SimpleLocalTable
+//  StorageLocalTable
 // -----------------------------------------------------------------------------------------------
 
-struct SimpleLocalTable<'a> {
+struct StorageLocalTable<'a, StorageViewT: StorageView> {
   table_schema: &'a TableSchema,
   /// The Timestamp which we are reading data at.
   timestamp: &'a Timestamp,
   /// The row-filtering expression (i.e. WHERE clause) to compute subtables with.
   selection: &'a proc::ValExpr,
   /// This is used to compute the KeyBound
-  storage: SimpleStorageView<'a>,
+  storage: StorageViewT,
 }
 
-impl<'a> SimpleLocalTable<'a> {
+impl<'a, StorageViewT: StorageView> StorageLocalTable<'a, StorageViewT> {
   fn new(
     table_schema: &'a TableSchema,
     timestamp: &'a Timestamp,
     selection: &'a proc::ValExpr,
-    storage: &'a GenericMVTable,
-  ) -> SimpleLocalTable<'a> {
-    SimpleLocalTable {
-      table_schema,
-      timestamp,
-      selection,
-      storage: SimpleStorageView::new(storage),
-    }
+    storage: StorageViewT,
+  ) -> StorageLocalTable<'a, StorageViewT> {
+    StorageLocalTable { table_schema, timestamp, selection, storage }
   }
 }
 
-impl<'a> LocalTable for SimpleLocalTable<'a> {
+impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, StorageViewT> {
   fn contains_col(&self, col: &ColName) -> bool {
     contains_col(self.table_schema, col, self.timestamp)
   }
@@ -2111,13 +2106,13 @@ impl<T: IOTypes> TabletContext<T> {
       match &mut es.state {
         ExecutionS::Start => panic!(),
         ExecutionS::Pending(pending) => {
-          let gr_query_statuses = match compute_subqueries2::<T, SimpleLocalTable>(
+          let gr_query_statuses = match compute_subqueries2::<T, StorageLocalTable<SimpleStorageView>>(
             &mut self.rand,
-            SimpleLocalTable::new(
+            StorageLocalTable::new(
               &self.table_schema,
               &es.timestamp,
               &es.sql_query.selection,
-              &self.storage,
+              SimpleStorageView::new(&self.storage),
             ),
             &es.query_id,
             &es.root_query_path,
@@ -2165,30 +2160,31 @@ impl<T: IOTypes> TabletContext<T> {
           }
         }
         ExecutionS::Executing(executing) => {
-          let (subquery_id, gr_query_es) = match recompute_subquery2::<T, SimpleLocalTable>(
-            &mut self.rand,
-            SimpleLocalTable::new(
-              &self.table_schema,
+          let (subquery_id, gr_query_es) =
+            match recompute_subquery2::<T, StorageLocalTable<SimpleStorageView>>(
+              &mut self.rand,
+              StorageLocalTable::new(
+                &self.table_schema,
+                &es.timestamp,
+                &es.sql_query.selection,
+                SimpleStorageView::new(&self.storage),
+              ),
+              executing,
+              &protect_query_id,
+              &es.query_id,
+              &es.root_query_path,
+              &es.tier_map,
+              &collect_select_subqueries(&es.sql_query),
               &es.timestamp,
-              &es.sql_query.selection,
-              &self.storage,
-            ),
-            executing,
-            &protect_query_id,
-            &es.query_id,
-            &es.root_query_path,
-            &es.tier_map,
-            &collect_select_subqueries(&es.sql_query),
-            &es.timestamp,
-            &es.context,
-            &es.query_plan,
-          ) {
-            Ok(gr_query_statuses) => gr_query_statuses,
-            Err(eval_error) => {
-              self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
-              return;
-            }
-          };
+              &es.context,
+              &es.query_plan,
+            ) {
+              Ok(gr_query_statuses) => gr_query_statuses,
+              Err(eval_error) => {
+                self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
+                return;
+              }
+            };
 
           // Add in the GRQueryES to `table_statuses`, and start evaluating the it.
           let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
@@ -2445,11 +2441,11 @@ impl<T: IOTypes> TabletContext<T> {
         // Create the ContextConstructor.
         let context_constructor = ContextConstructor::new(
           es.context.context_schema.clone(),
-          SimpleLocalTable::new(
+          StorageLocalTable::new(
             &self.table_schema,
             &es.timestamp,
             &es.sql_query.selection,
-            &self.storage,
+            SimpleStorageView::new(&self.storage),
           ),
           children,
         );
@@ -2555,110 +2551,75 @@ impl<T: IOTypes> TabletContext<T> {
       // If all subqueries have been evaluated, finish the MSTableWriteES
       // and respond to the client.
       if executing_state.completed == executing_state.subqueries.len() {
-        let num_subqueries = executing_state.subqueries.len();
-
-        // Construct the ContextConverters for all subqueries
-        let mut converters = Vec::<ContextConverter>::new();
+        // Compute children.
+        let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
         for single_status in &executing_state.subqueries {
           let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
           let context_schema = &result.context.context_schema;
-          converters.push(ContextConverter::general_create(
-            &es.context.context_schema,
-            &es.timestamp,
-            &self.table_schema,
+          children.push((
             context_schema.column_context_schema.clone(),
             context_schema.trans_table_names(),
           ));
         }
 
-        // Setup the `child_context_row_maps` that will be populated over time.
-        let mut child_context_row_maps = Vec::<HashMap<ContextRow, usize>>::new();
-        for _ in 0..num_subqueries {
-          child_context_row_maps.push(HashMap::new());
-        }
-
-        // Compute the Schema of the TableView that will be returned by this MSTableWriteES.
-        let mut res_col_names = Vec::<ColName>::new();
-        res_col_names.extend(self.table_schema.key_cols.iter().map(|(name, _)| name.clone()));
-        res_col_names.extend(es.sql_query.assignment.iter().map(|(name, _)| name.clone()));
-
-        // Compute the set of columns to read from the table. This should should include all
-        // top-level ColumnRefs that are in expressions but not subqueries (these are included
-        // in `query_plan.col_usage_node.safe_present_cols`), the key columns (recall that the
-        // TableView and the GenericTable both use all key columns), and all Internal columns
-        // used in subqueries (which are best derived from the subquery Contexts, since
-        // they are generally a superset of the Query Plan).
-        let mut cols_to_read_set = HashSet::<ColName>::new();
-        cols_to_read_set.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
-        cols_to_read_set.extend(self.table_schema.key_cols.iter().map(|(col, _)| col.clone()));
-        for conv in &converters {
-          cols_to_read_set.extend(conv.safe_present_split.clone());
-        }
-        let cols_to_read = Vec::from_iter(cols_to_read_set.iter().cloned());
-
-        // Setup ability to compute a tight Keybound for every ContextRow. This will be
-        // the exact same as that computed before sending out the subqueries.
-        let keybound_computer = ContextKeyboundComputer::new(
-          &es.sql_query.selection,
-          &self.table_schema,
-          &es.timestamp,
-          &es.context.context_schema,
-        );
-
-        assert_eq!(&es.context.context_rows.len(), &1);
-        let context_row = &es.context.context_rows.get(0).unwrap();
-
-        // Since we recomputed this exact `key_bounds` before going to the Pending
-        // state, we can unwrap it; there should be no errors.
-        let key_bounds = keybound_computer.compute_keybounds(context_row).unwrap();
-
-        // We iterate over the rows of the Subtable computed for this ContextRow,
-        // computing the TableView we desire for the ContextRow.
+        // Create the ContextConstructor.
         let update_views = &statuses.ms_query_ess.get_mut(&es.ms_query_id).unwrap().update_views;
         let storage_view = MSStorageView::new(&self.storage, update_views, es.tier.clone() - 1);
-        let (subtable_schema, subtable) = storage_view.compute_subtable(&key_bounds, &cols_to_read);
+        let context_constructor = ContextConstructor::new(
+          es.context.context_schema.clone(),
+          StorageLocalTable::new(
+            &self.table_schema,
+            &es.timestamp,
+            &es.sql_query.selection,
+            storage_view,
+          ),
+          children,
+        );
 
-        // Next, we initialize the TableView and GenericTable that we are trying to
-        // construct for this `context_row`.
-        let mut res_table_view =
-          TableView { col_names: res_col_names.clone(), rows: Default::default() };
+        // These are all of the `ColNames` we need to evaluate the Update. This consists of all
+        // Top-Level Columns for every expression, as well as all Key Columns (since they are
+        // included in the projected columns).
+        let mut top_level_cols_set = HashSet::<ColName>::new();
+        top_level_cols_set.extend(self.table_schema.get_key_cols());
+        top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
+        for (_, expr) in &es.sql_query.assignment {
+          top_level_cols_set.extend(collect_top_level_cols(expr));
+        }
+        let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
+
+        // Setup the TableView that we are going to return and the UpdateView that we're going
+        // to hold in the MSQueryES.
+        let mut res_col_names = Vec::<ColName>::new();
+        res_col_names.extend(self.table_schema.get_key_cols());
+        res_col_names.extend(es.sql_query.assignment.iter().map(|(name, _)| name.clone()));
+        let mut res_table_view = TableView::new(res_col_names.clone());
         let mut update_view = GenericTable::new();
 
-        for subtable_row in subtable {
-          // Now, we compute the subquery result for all subqueries for this
-          // `context_row` + `subtable_row`.
-          let mut subquery_vals = Vec::<TableView>::new();
-          for index in 0..num_subqueries {
-            // Compute the child ContextRow for this subquery, and populate
-            // `child_context_row_map` accordingly.
-            let conv = converters.get(index).unwrap();
-            let child_context_row_map = child_context_row_maps.get_mut(index).unwrap();
-            let row = conv.extract_child_relevent_cols(&subtable_schema, &subtable_row);
-            let new_context_row = conv.compute_child_context_row(context_row, row);
-            if !child_context_row_map.contains_key(&new_context_row) {
-              let idx = child_context_row_map.len();
-              child_context_row_map.insert(new_context_row.clone(), idx);
+        // Finally, iterate over the Context Rows of the subqueries and compute the final values.
+        let eval_res = context_constructor.run(
+          &es.context.context_rows,
+          top_level_col_names.clone(),
+          &mut |context_row_idx: usize,
+                top_level_col_vals: Vec<ColValN>,
+                contexts: Vec<(ContextRow, usize)>| {
+            assert_eq!(context_row_idx, 0); // Recall there is only one ContextRow for Updates.
+
+            // First, we extract the subquery values using the child Context indices.
+            let mut subquery_vals = Vec::<TableView>::new();
+            for index in 0..contexts.len() {
+              let (_, child_context_idx) = contexts.get(index).unwrap();
+              let executing_state = cast!(MSWriteExecutionS::Executing, &es.state).unwrap();
+              let single_status = executing_state.subqueries.get(index).unwrap();
+              let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
+              subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
             }
 
-            // Get the child_context_idx to get the relevent TableView from the subquery
-            // results, and populate `subquery_vals`.
-            let child_context_idx = child_context_row_map.get(&new_context_row).unwrap();
-            let single_status = executing_state.subqueries.get(index).unwrap();
-            let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-            subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
-          }
-
-          // Now, we evaluate all expressions in the SQL query and amend the
-          // result to the TableView (if the WHERE clause evaluates to true).
-          let query = &es.sql_query;
-          let context = &es.context;
-          let eval_res = (|| -> Result<(), EvalError> {
-            let evaluated_update = evaluate_update(
-              query,
-              &context.context_schema.column_context_schema,
-              &context_row.column_context_row,
-              &subtable_schema,
-              &subtable_row,
+            // Now, we evaluate all expressions in the SQL query and amend the
+            // result to this TableView (if the WHERE clause evaluates to true).
+            let evaluated_update = evaluate_update_2(
+              &es.sql_query,
+              &top_level_col_names,
+              &top_level_col_vals,
               &subquery_vals,
             )?;
             if is_true(&evaluated_update.selection)? {
@@ -2668,8 +2629,8 @@ impl<T: IOTypes> TabletContext<T> {
               // First we add in the Key Columns
               let mut primary_key = PrimaryKey { cols: vec![] };
               for (key_col, _) in &self.table_schema.key_cols {
-                let idx = subtable_schema.iter().position(|col| key_col == col).unwrap();
-                let col_val = subtable_row.get(idx).unwrap().clone();
+                let idx = top_level_col_names.iter().position(|col| key_col == col).unwrap();
+                let col_val = top_level_col_vals.get(idx).unwrap().clone();
                 res_row.push(col_val.clone());
                 primary_key.cols.push(col_val.unwrap());
               }
@@ -2682,15 +2643,15 @@ impl<T: IOTypes> TabletContext<T> {
 
               // Finally, we add the `res_row` into the TableView.
               res_table_view.add_row(res_row);
-            }
+            };
             Ok(())
-          })();
+          },
+        );
 
-          if let Err(eval_error) = eval_res {
-            let ms_query_id = es.ms_query_id.clone();
-            self.abort_ms_with_query_error(statuses, ms_query_id, mk_eval_error(eval_error));
-            return;
-          }
+        if let Err(eval_error) = eval_res {
+          let ms_query_id = es.ms_query_id.clone();
+          self.abort_ms_with_query_error(statuses, ms_query_id, mk_eval_error(eval_error));
+          return;
         }
 
         // Build the success message and respond.

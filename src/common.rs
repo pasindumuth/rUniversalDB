@@ -75,6 +75,10 @@ impl TableSchema {
     }
     TableSchema { key_cols, val_cols: mvm }
   }
+
+  pub fn get_key_cols(&self) -> Vec<ColName> {
+    self.key_cols.iter().map(|(col, _)| col.clone()).collect()
+  }
 }
 
 // -------------------------------------------------------------------------------------------------

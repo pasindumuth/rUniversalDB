@@ -296,21 +296,20 @@ pub struct EvaluatedUpdate {
   pub selection: ColValN,
 }
 
-/// This evaluates a Update completely. When a ColumnRef is encountered
-/// in the `expr`, we first search `subtable_row`, and if that's not present, we search the
-/// `column_context_row`. In addition, `subquery_vals` should have a length equal to that of
-/// how many GRQuerys there are in the `expr`.
-pub fn evaluate_update(
+/// This evaluates a Update completely. When a ColumnRef is encountered in the `expr`,
+/// it searches `col_names` and `col_vals` to get the value. In addition, `subquery_vals` should
+/// have a length equal to that of how many GRQuerys there are in the `expr`.
+pub fn evaluate_update_2(
   update: &proc::Update,
-  column_context_schema: &Vec<ColName>,
-  column_context_row: &Vec<ColValN>,
-  subtable_schema: &Vec<ColName>,
-  subtable_row: &Vec<ColValN>,
+  col_names: &Vec<ColName>,
+  col_vals: &Vec<ColValN>,
   raw_subquery_vals: &Vec<TableView>,
 ) -> Result<EvaluatedUpdate, EvalError> {
   // We map all ColNames to their ColValNs using the Context and subtable.
-  let col_map =
-    mk_col_map(column_context_schema, column_context_row, subtable_schema, subtable_row);
+  let mut col_map = HashMap::<ColName, ColValN>::new();
+  for i in 0..col_names.len() {
+    col_map.insert(col_names.get(i).unwrap().clone(), col_vals.get(i).unwrap().clone());
+  }
 
   // Next, we reduce the subquery values to single values.
   let subquery_vals = extract_subquery_vals(raw_subquery_vals)?;
