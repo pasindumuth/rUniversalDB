@@ -1,4 +1,7 @@
-use crate::col_usage::{node_external_trans_tables, FrozenColUsageNode};
+use crate::col_usage::{
+  collect_select_subqueries, collect_update_subqueries, node_external_trans_tables,
+  nodes_external_trans_tables, FrozenColUsageNode,
+};
 use crate::common::{
   lookup, lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue,
 };
@@ -123,6 +126,83 @@ impl TransTableSource for GRQueryES {
     schema.clone()
   }
 }
+
+// -----------------------------------------------------------------------------------------------
+//  GRQuery Constructor
+// -----------------------------------------------------------------------------------------------
+// This is a convenient View Container we use to help create GRQuerys.
+
+/// This is a trait for getting all of the Subqueries in a SQL
+/// query (e.g. SuperSimpleSelect, Update).
+pub trait SubqueryComputableSql {
+  fn collect_subqueries(&self) -> Vec<proc::GRQuery>;
+}
+
+impl SubqueryComputableSql for proc::SuperSimpleSelect {
+  fn collect_subqueries(&self) -> Vec<proc::GRQuery> {
+    collect_select_subqueries(self)
+  }
+}
+
+impl SubqueryComputableSql for proc::Update {
+  fn collect_subqueries(&self) -> Vec<proc::GRQuery> {
+    collect_update_subqueries(self)
+  }
+}
+
+pub struct GRQueryConstructorView<'a, SqlQueryT: SubqueryComputableSql> {
+  pub root_query_path: &'a QueryPath,
+  pub tier_map: &'a TierMap,
+  pub timestamp: &'a Timestamp,
+  /// SQL query containing by the parent ES.
+  pub sql_query: &'a SqlQueryT,
+  /// QueryPlan of the parent ES
+  pub query_plan: &'a QueryPlan,
+  /// QueryId of the parent ES
+  pub query_id: &'a QueryId,
+  /// The parent ES's Context
+  pub context: &'a Context,
+}
+
+impl<'a, SqlQueryT: SubqueryComputableSql> GRQueryConstructorView<'a, SqlQueryT> {
+  pub fn mk_gr_query_es(
+    &self,
+    gr_query_id: QueryId,
+    context: Rc<Context>,
+    subquery_idx: usize,
+  ) -> GRQueryES {
+    // Filter the TransTables in the QueryPlan based on the TransTables available for this subquery.
+    let col_usage_nodes = self.query_plan.col_usage_node.children.get(subquery_idx).unwrap();
+    let mut trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
+    for trans_table_name in nodes_external_trans_tables(col_usage_nodes) {
+      let schema = self.query_plan.trans_table_schemas.get(&trans_table_name).unwrap().clone();
+      trans_table_schemas.insert(trans_table_name, schema);
+    }
+    // Finally, construct the GRQueryES.
+    GRQueryES {
+      root_query_path: self.root_query_path.clone(),
+      tier_map: self.tier_map.clone(),
+      timestamp: self.timestamp.clone(),
+      context,
+      new_trans_table_context: vec![],
+      query_id: gr_query_id,
+      sql_query: self.sql_query.collect_subqueries().remove(subquery_idx),
+      query_plan: GRQueryPlan {
+        gossip_gen: self.query_plan.gossip_gen.clone(),
+        trans_table_schemas,
+        col_usage_nodes: col_usage_nodes.clone(),
+      },
+      new_rms: Default::default(),
+      trans_table_views: vec![],
+      state: GRExecutionS::Start,
+      orig_p: OrigP::new(self.query_id.clone()),
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Implementation
+// -----------------------------------------------------------------------------------------------
 
 impl GRQueryES {
   /// Starts the GRQueryES from its initial state.

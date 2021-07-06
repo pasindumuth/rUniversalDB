@@ -3,7 +3,7 @@ use crate::col_usage::{
 };
 use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan};
 use crate::expression::{is_true, EvalError};
-use crate::gr_query_es::{GRExecutionS, GRQueryES, GRQueryPlan};
+use crate::gr_query_es::{GRExecutionS, GRQueryConstructorView, GRQueryES, GRQueryPlan};
 use crate::model::common::{
   proc, ColName, ColType, ColValN, ContextRow, ContextSchema, TableView, Timestamp, TransTableName,
 };
@@ -248,31 +248,22 @@ impl FullTransTableReadES {
     let child_contexts = compute_contexts(es.context.deref(), local_table, children).unwrap();
 
     // Finally, compute the GRQueryESs.
-    let subqueries = collect_select_subqueries(&es.sql_query);
+    let subquery_view = GRQueryConstructorView {
+      root_query_path: &es.root_query_path,
+      tier_map: &es.tier_map,
+      timestamp: &es.timestamp,
+      sql_query: &es.sql_query,
+      query_plan: &es.query_plan,
+      query_id: &es.query_id,
+      context: &es.context,
+    };
     let mut gr_query_statuses = Vec::<GRQueryES>::new();
     for (subquery_idx, child_context) in child_contexts.into_iter().enumerate() {
-      let subquery = subqueries.get(subquery_idx).unwrap();
-      let child = es.query_plan.col_usage_node.children.get(subquery_idx).unwrap();
-      let gr_query_id = mk_qid(ctx.rand);
-      let gr_query_es = GRQueryES {
-        root_query_path: es.root_query_path.clone(),
-        tier_map: es.tier_map.clone(),
-        timestamp: es.timestamp.clone(),
-        context: Rc::new(child_context),
-        new_trans_table_context: vec![],
-        query_id: gr_query_id.clone(),
-        sql_query: subquery.clone(),
-        query_plan: GRQueryPlan {
-          gossip_gen: es.query_plan.gossip_gen.clone(),
-          trans_table_schemas: es.query_plan.trans_table_schemas.clone(),
-          col_usage_nodes: child.clone(),
-        },
-        new_rms: Default::default(),
-        trans_table_views: vec![],
-        state: GRExecutionS::Start,
-        orig_p: OrigP::new(es.query_id.clone()),
-      };
-      gr_query_statuses.push(gr_query_es)
+      gr_query_statuses.push(subquery_view.mk_gr_query_es(
+        mk_qid(&mut ctx.rand),
+        Rc::new(child_context),
+        subquery_idx,
+      ));
     }
 
     // Here, we have computed all GRQueryESs, and we can now add them to
@@ -355,31 +346,21 @@ impl FullTransTableReadES {
       )
       .unwrap();
       assert_eq!(child_contexts.len(), 1);
+      let context = Rc::new(child_contexts.into_iter().next().unwrap());
 
       // Construct the GRQueryES
-      let context = Rc::new(child_contexts.into_iter().next().unwrap());
-      let subqueries = collect_select_subqueries(&es.sql_query);
-      let subquery = subqueries.get(subquery_idx).unwrap().clone();
-      let child = es.query_plan.col_usage_node.children.get(subquery_idx).unwrap();
-      let gr_query_id = mk_qid(ctx.rand);
-      let gr_query_es = GRQueryES {
-        root_query_path: es.root_query_path.clone(),
-        tier_map: es.tier_map.clone(),
-        timestamp: es.timestamp.clone(),
-        context: context.clone(),
-        new_trans_table_context: vec![],
-        query_id: gr_query_id.clone(),
-        sql_query: subquery,
-        query_plan: GRQueryPlan {
-          gossip_gen: es.query_plan.gossip_gen.clone(),
-          trans_table_schemas: es.query_plan.trans_table_schemas.clone(),
-          col_usage_nodes: child.clone(),
-        },
-        new_rms: Default::default(),
-        trans_table_views: vec![],
-        state: GRExecutionS::Start,
-        orig_p: OrigP::new(es.query_id.clone()),
+      let subquery_view = GRQueryConstructorView {
+        root_query_path: &es.root_query_path,
+        tier_map: &es.tier_map,
+        timestamp: &es.timestamp,
+        sql_query: &es.sql_query,
+        query_plan: &es.query_plan,
+        query_id: &es.query_id,
+        context: &es.context,
       };
+      let gr_query_id = mk_qid(ctx.rand);
+      let gr_query_es =
+        subquery_view.mk_gr_query_es(gr_query_id.clone(), context.clone(), subquery_idx);
 
       // Update the `executing` state to contain the new subquery_id.
       *single_status =

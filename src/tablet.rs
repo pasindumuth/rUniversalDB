@@ -11,7 +11,10 @@ use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
   construct_kb_expr, does_intersect, evaluate_c_expr, is_true, CExpr, EvalError,
 };
-use crate::gr_query_es::{GRExecutionS, GRQueryAction, GRQueryES, GRQueryPlan, ReadStage};
+use crate::gr_query_es::{
+  GRExecutionS, GRQueryAction, GRQueryConstructorView, GRQueryES, GRQueryPlan, ReadStage,
+  SubqueryComputableSql,
+};
 use crate::model::common::{
   proc, ColType, ColValN, Context, ContextRow, ContextSchema, Gen, NodeGroupId, QueryPath,
   TableView, TierMap, TransTableLocationPrefix, TransTableName,
@@ -2106,7 +2109,16 @@ impl<T: IOTypes> TabletContext<T> {
       match &mut es.state {
         ExecutionS::Start => panic!(),
         ExecutionS::Pending(pending) => {
-          let gr_query_statuses = match compute_subqueries::<T, StorageLocalTable<SimpleStorageView>>(
+          let gr_query_statuses = match compute_subqueries::<T, _, _>(
+            GRQueryConstructorView {
+              root_query_path: &es.root_query_path,
+              tier_map: &es.tier_map,
+              timestamp: &es.timestamp,
+              sql_query: &es.sql_query,
+              query_plan: &es.query_plan,
+              query_id: &es.query_id,
+              context: &es.context,
+            },
             &mut self.rand,
             StorageLocalTable::new(
               &self.table_schema,
@@ -2114,13 +2126,6 @@ impl<T: IOTypes> TabletContext<T> {
               &es.sql_query.selection,
               SimpleStorageView::new(&self.storage),
             ),
-            &es.query_id,
-            &es.root_query_path,
-            &es.tier_map,
-            &collect_select_subqueries(&es.sql_query),
-            &es.timestamp,
-            &es.context,
-            &es.query_plan,
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
@@ -2160,31 +2165,32 @@ impl<T: IOTypes> TabletContext<T> {
           }
         }
         ExecutionS::Executing(executing) => {
-          let (subquery_id, gr_query_es) =
-            match recompute_subquery::<T, StorageLocalTable<SimpleStorageView>>(
-              &mut self.rand,
-              StorageLocalTable::new(
-                &self.table_schema,
-                &es.timestamp,
-                &es.sql_query.selection,
-                SimpleStorageView::new(&self.storage),
-              ),
-              executing,
-              &protect_query_id,
-              &es.query_id,
-              &es.root_query_path,
-              &es.tier_map,
-              &collect_select_subqueries(&es.sql_query),
+          let (subquery_id, gr_query_es) = match recompute_subquery::<T, _, _>(
+            GRQueryConstructorView {
+              root_query_path: &es.root_query_path,
+              tier_map: &es.tier_map,
+              timestamp: &es.timestamp,
+              sql_query: &es.sql_query,
+              query_plan: &es.query_plan,
+              query_id: &es.query_id,
+              context: &es.context,
+            },
+            &mut self.rand,
+            StorageLocalTable::new(
+              &self.table_schema,
               &es.timestamp,
-              &es.context,
-              &es.query_plan,
-            ) {
-              Ok(gr_query_statuses) => gr_query_statuses,
-              Err(eval_error) => {
-                self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
-                return;
-              }
-            };
+              &es.sql_query.selection,
+              SimpleStorageView::new(&self.storage),
+            ),
+            executing,
+            &protect_query_id,
+          ) {
+            Ok(gr_query_statuses) => gr_query_statuses,
+            Err(eval_error) => {
+              self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
+              return;
+            }
+          };
 
           // Add in the GRQueryES to `table_statuses`, and start evaluating the it.
           let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
@@ -2198,7 +2204,16 @@ impl<T: IOTypes> TabletContext<T> {
         MSWriteExecutionS::Start => panic!(),
         MSWriteExecutionS::Pending(pending) => {
           let ms_query_es = statuses.ms_query_ess.get(&es.ms_query_id).unwrap();
-          let gr_query_statuses = match compute_subqueries::<T, StorageLocalTable<MSStorageView>>(
+          let gr_query_statuses = match compute_subqueries::<T, _, _>(
+            GRQueryConstructorView {
+              root_query_path: &es.root_query_path,
+              tier_map: &es.tier_map,
+              timestamp: &es.timestamp,
+              sql_query: &es.sql_query,
+              query_plan: &es.query_plan,
+              query_id: &es.query_id,
+              context: &es.context,
+            },
             &mut self.rand,
             StorageLocalTable::new(
               &self.table_schema,
@@ -2206,13 +2221,6 @@ impl<T: IOTypes> TabletContext<T> {
               &es.sql_query.selection,
               MSStorageView::new(&self.storage, &ms_query_es.update_views, es.tier.clone()),
             ),
-            &es.query_id,
-            &es.root_query_path,
-            &es.tier_map,
-            &collect_update_subqueries(&es.sql_query),
-            &es.timestamp,
-            &es.context,
-            &es.query_plan,
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
@@ -2254,31 +2262,32 @@ impl<T: IOTypes> TabletContext<T> {
         }
         MSWriteExecutionS::Executing(executing) => {
           let ms_query_es = statuses.ms_query_ess.get(&es.ms_query_id).unwrap();
-          let (subquery_id, gr_query_es) =
-            match recompute_subquery::<T, StorageLocalTable<MSStorageView>>(
-              &mut self.rand,
-              StorageLocalTable::new(
-                &self.table_schema,
-                &es.timestamp,
-                &es.sql_query.selection,
-                MSStorageView::new(&self.storage, &ms_query_es.update_views, es.tier.clone()),
-              ),
-              executing,
-              &protect_query_id,
-              &es.query_id,
-              &es.root_query_path,
-              &es.tier_map,
-              &collect_update_subqueries(&es.sql_query),
+          let (subquery_id, gr_query_es) = match recompute_subquery::<T, _, _>(
+            GRQueryConstructorView {
+              root_query_path: &es.root_query_path,
+              tier_map: &es.tier_map,
+              timestamp: &es.timestamp,
+              sql_query: &es.sql_query,
+              query_plan: &es.query_plan,
+              query_id: &es.query_id,
+              context: &es.context,
+            },
+            &mut self.rand,
+            StorageLocalTable::new(
+              &self.table_schema,
               &es.timestamp,
-              &es.context,
-              &es.query_plan,
-            ) {
-              Ok(gr_query_statuses) => gr_query_statuses,
-              Err(eval_error) => {
-                self.abort_ms_with_query_error(statuses, query_id, mk_eval_error(eval_error));
-                return;
-              }
-            };
+              &es.sql_query.selection,
+              MSStorageView::new(&self.storage, &ms_query_es.update_views, es.tier.clone()),
+            ),
+            executing,
+            &protect_query_id,
+          ) {
+            Ok(gr_query_statuses) => gr_query_statuses,
+            Err(eval_error) => {
+              self.abort_ms_with_query_error(statuses, query_id, mk_eval_error(eval_error));
+              return;
+            }
+          };
 
           // Add in the GRQueryES to `table_statuses`, and start evaluating the it.
           let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
@@ -2292,7 +2301,16 @@ impl<T: IOTypes> TabletContext<T> {
         MSReadExecutionS::Start => panic!(),
         MSReadExecutionS::Pending(pending) => {
           let ms_query_es = statuses.ms_query_ess.get(&es.ms_query_id).unwrap();
-          let gr_query_statuses = match compute_subqueries::<T, StorageLocalTable<MSStorageView>>(
+          let gr_query_statuses = match compute_subqueries::<T, _, _>(
+            GRQueryConstructorView {
+              root_query_path: &es.root_query_path,
+              tier_map: &es.tier_map,
+              timestamp: &es.timestamp,
+              sql_query: &es.sql_query,
+              query_plan: &es.query_plan,
+              query_id: &es.query_id,
+              context: &es.context,
+            },
             &mut self.rand,
             StorageLocalTable::new(
               &self.table_schema,
@@ -2300,13 +2318,6 @@ impl<T: IOTypes> TabletContext<T> {
               &es.sql_query.selection,
               MSStorageView::new(&self.storage, &ms_query_es.update_views, es.tier.clone()),
             ),
-            &es.query_id,
-            &es.root_query_path,
-            &es.tier_map,
-            &collect_select_subqueries(&es.sql_query),
-            &es.timestamp,
-            &es.context,
-            &es.query_plan,
           ) {
             Ok(gr_query_statuses) => gr_query_statuses,
             Err(eval_error) => {
@@ -2348,31 +2359,32 @@ impl<T: IOTypes> TabletContext<T> {
         }
         MSReadExecutionS::Executing(executing) => {
           let ms_query_es = statuses.ms_query_ess.get(&es.ms_query_id).unwrap();
-          let (subquery_id, gr_query_es) =
-            match recompute_subquery::<T, StorageLocalTable<MSStorageView>>(
-              &mut self.rand,
-              StorageLocalTable::new(
-                &self.table_schema,
-                &es.timestamp,
-                &es.sql_query.selection,
-                MSStorageView::new(&self.storage, &ms_query_es.update_views, es.tier.clone()),
-              ),
-              executing,
-              &protect_query_id,
-              &es.query_id,
-              &es.root_query_path,
-              &es.tier_map,
-              &collect_select_subqueries(&es.sql_query),
+          let (subquery_id, gr_query_es) = match recompute_subquery::<T, _, _>(
+            GRQueryConstructorView {
+              root_query_path: &es.root_query_path,
+              tier_map: &es.tier_map,
+              timestamp: &es.timestamp,
+              sql_query: &es.sql_query,
+              query_plan: &es.query_plan,
+              query_id: &es.query_id,
+              context: &es.context,
+            },
+            &mut self.rand,
+            StorageLocalTable::new(
+              &self.table_schema,
               &es.timestamp,
-              &es.context,
-              &es.query_plan,
-            ) {
-              Ok(gr_query_statuses) => gr_query_statuses,
-              Err(eval_error) => {
-                self.abort_ms_with_query_error(statuses, query_id, mk_eval_error(eval_error));
-                return;
-              }
-            };
+              &es.sql_query.selection,
+              MSStorageView::new(&self.storage, &ms_query_es.update_views, es.tier.clone()),
+            ),
+            executing,
+            &protect_query_id,
+          ) {
+            Ok(gr_query_statuses) => gr_query_statuses,
+            Err(eval_error) => {
+              self.abort_ms_with_query_error(statuses, query_id, mk_eval_error(eval_error));
+              return;
+            }
+          };
 
           // Add in the GRQueryES to `table_statuses`, and start evaluating the it.
           let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
@@ -3250,25 +3262,17 @@ pub fn compute_contexts<LocalTableT: LocalTable>(
 }
 
 /// This computes GRQueryESs corresponding to every element in `subqueries`.
-fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable>(
-  // TabletContext params
+fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryComputableSql>(
+  subquery_view: GRQueryConstructorView<SqlQueryT>,
   rand: &mut T::RngCoreT,
   local_table: LocalTableT,
-  // TabletStatus params
-  query_id: &QueryId,
-  root_query_path: &QueryPath,
-  tier_map: &TierMap,
-  subqueries: &Vec<proc::GRQuery>,
-  timestamp: &Timestamp,
-  context: &Context,
-  query_plan: &QueryPlan,
 ) -> Result<Vec<GRQueryES>, EvalError> {
   // Here, we construct first construct all of the subquery Contexts using the
   // ContextConstructor, and then we construct GRQueryESs.
 
   // Compute children.
   let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
-  for child in &query_plan.col_usage_node.children {
+  for child in &subquery_view.query_plan.col_usage_node.children {
     let mut col_name_set = HashSet::<ColName>::new();
     for (_, (_, node)) in child {
       col_name_set.extend(node.external_cols.clone())
@@ -3276,72 +3280,39 @@ fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable>(
     children.push((col_name_set.iter().cloned().collect(), nodes_external_trans_tables(child)));
   }
 
-  // Create the child contextx.
-  let child_contexts = compute_contexts(context, local_table, children)?;
+  // Create the child context.
+  let child_contexts = compute_contexts(subquery_view.context, local_table, children)?;
 
   // We compute all GRQueryESs.
   let mut gr_query_statuses = Vec::<GRQueryES>::new();
   for (subquery_idx, child_context) in child_contexts.into_iter().enumerate() {
-    let subquery = subqueries.get(subquery_idx).unwrap();
-    let child = query_plan.col_usage_node.children.get(subquery_idx).unwrap();
-
-    // Construct the GRQueryES
-    // TODO: I believe we can create a View Container that is both passed in as an argument
-    // here and in the above, and where we can easily create a GRQueryES (where things are just
-    // copied forward) where we only have to specify an index (for the subquery (the function will
-    // extract the right sql_query, query_plan, and trim down trans_table_schemas), the context, and
-    // the right QueryId for the GRQueryES to take on.
-    let gr_query_id = mk_qid(rand);
-    let gr_query_es = GRQueryES {
-      root_query_path: root_query_path.clone(),
-      tier_map: tier_map.clone(),
-      timestamp: timestamp.clone(),
-      context: Rc::new(child_context),
-      new_trans_table_context: vec![],
-      query_id: gr_query_id.clone(),
-      sql_query: subquery.clone(),
-      query_plan: GRQueryPlan {
-        gossip_gen: query_plan.gossip_gen.clone(),
-        // TODO: should we trim trans_table_schemas down?
-        trans_table_schemas: query_plan.trans_table_schemas.clone(),
-        col_usage_nodes: child.clone(),
-      },
-      new_rms: Default::default(),
-      trans_table_views: vec![],
-      state: GRExecutionS::Start,
-      orig_p: OrigP::new(query_id.clone()),
-    };
-    gr_query_statuses.push(gr_query_es)
+    gr_query_statuses.push(subquery_view.mk_gr_query_es(
+      mk_qid(rand),
+      Rc::new(child_context),
+      subquery_idx,
+    ));
   }
 
   Ok(gr_query_statuses)
 }
 
 /// This recomputes GRQueryESs that corresponds to `protect_query_id`.
-fn recompute_subquery<T: IOTypes, LocalTableT: LocalTable>(
-  // TabletContext params
+fn recompute_subquery<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryComputableSql>(
+  subquery_view: GRQueryConstructorView<SqlQueryT>,
   rand: &mut T::RngCoreT,
   local_table: LocalTableT,
-  // TabletStatus params
   executing: &mut Executing,
   protect_query_id: &QueryId,
-  query_id: &QueryId,
-  root_query_path: &QueryPath,
-  tier_map: &TierMap,
-  subqueries: &Vec<proc::GRQuery>,
-  timestamp: &Timestamp,
-  context: &Context,
-  query_plan: &QueryPlan,
 ) -> Result<(QueryId, GRQueryES), EvalError> {
   // Find the subquery that this `protect_query_id` is referring to. There should
   // always be such a Subquery.
-  let subquery_index = executing.find_subquery(protect_query_id).unwrap();
-  let single_status = executing.subqueries.get_mut(subquery_index).unwrap();
+  let subquery_idx = executing.find_subquery(protect_query_id).unwrap();
+  let single_status = executing.subqueries.get_mut(subquery_idx).unwrap();
   let protect_status = cast!(SingleSubqueryStatus::PendingReadRegion, single_status).unwrap();
 
   // Create the child context.
   let child_contexts = compute_contexts(
-    context,
+    subquery_view.context,
     local_table,
     vec![(protect_status.new_columns.clone(), protect_status.trans_table_names.clone())],
   )?;
@@ -3349,27 +3320,9 @@ fn recompute_subquery<T: IOTypes, LocalTableT: LocalTable>(
 
   // Construct the GRQueryES
   let context = Rc::new(child_contexts.into_iter().next().unwrap());
-  let subquery = subqueries.get(0).unwrap().clone();
-  let child = query_plan.col_usage_node.children.get(subquery_index).unwrap();
   let gr_query_id = mk_qid(rand);
-  let gr_query_es = GRQueryES {
-    root_query_path: root_query_path.clone(),
-    tier_map: tier_map.clone(),
-    timestamp: timestamp.clone(),
-    context: context.clone(),
-    new_trans_table_context: vec![],
-    query_id: gr_query_id.clone(),
-    sql_query: subquery,
-    query_plan: GRQueryPlan {
-      gossip_gen: query_plan.gossip_gen.clone(),
-      trans_table_schemas: query_plan.trans_table_schemas.clone(),
-      col_usage_nodes: child.clone(),
-    },
-    new_rms: Default::default(),
-    trans_table_views: vec![],
-    state: GRExecutionS::Start,
-    orig_p: OrigP::new(query_id.clone()),
-  };
+  let gr_query_es =
+    subquery_view.mk_gr_query_es(gr_query_id.clone(), context.clone(), subquery_idx);
 
   // Advance the SingleSubqueryStatus.
   *single_status =
