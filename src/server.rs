@@ -658,6 +658,11 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
     ContextConstructor { parent_context_schema, local_table, children, converters }
   }
 
+  /// This gets the schemas for every element in `children` passed in the constructor.
+  pub fn get_schemas(&self) -> Vec<ContextSchema> {
+    self.converters.iter().map(|conv| conv.context_schema.clone()).collect()
+  }
+
   /// Here, the rows in the `parent_context_rows` must correspond to `parent_context_schema`.
   /// The first `usize` in the `callback` is the parent ContextRow currently being used.
   pub fn run<CbT: FnMut(usize, Vec<ColValN>, Vec<(ContextRow, usize)>) -> Result<(), EvalError>>(

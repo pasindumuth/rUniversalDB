@@ -1,7 +1,7 @@
-use crate::common::{ColBound, KeyBound, PolyColBound, SingleBound};
+use crate::common::{ColBound, KeyBound, PolyColBound, SingleBound, TableRegion};
 use crate::model::common::proc::ValExpr;
 use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::iter::FromIterator;
 use std::ops::Deref;
 
@@ -584,4 +584,9 @@ pub fn compute_key_region(
     key_bounds = compress_row_region(new_key_bounds);
   }
   Ok(key_bounds)
+}
+
+/// Computes if `region` and intersects with any TableRegion in `regions`.
+pub fn does_intersect(region: &TableRegion, regions: &BTreeSet<TableRegion>) -> bool {
+  unimplemented!()
 }

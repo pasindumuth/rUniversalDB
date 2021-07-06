@@ -170,6 +170,12 @@ impl ContextSchema {
   }
 }
 
+impl Context {
+  pub fn new(context_schema: ContextSchema) -> Context {
+    Context { context_schema, context_rows: vec![] }
+  }
+}
+
 impl TableView {
   pub fn new(col_names: Vec<ColName>) -> TableView {
     TableView { col_names, rows: Default::default() }

@@ -9,7 +9,7 @@ use crate::common::{
 };
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
-  construct_kb_expr, evaluate_c_expr, is_true, CExpr, EvalError,
+  construct_kb_expr, does_intersect, evaluate_c_expr, is_true, CExpr, EvalError,
 };
 use crate::gr_query_es::{GRExecutionS, GRQueryAction, GRQueryES, GRQueryPlan, ReadStage};
 use crate::model::common::{
@@ -2111,14 +2111,17 @@ impl<T: IOTypes> TabletContext<T> {
       match &mut es.state {
         ExecutionS::Start => panic!(),
         ExecutionS::Pending(pending) => {
-          let gr_query_statuses = match compute_subqueries::<T, SimpleStorageView>(
+          let gr_query_statuses = match compute_subqueries2::<T, SimpleLocalTable>(
             &mut self.rand,
-            &self.table_schema,
-            SimpleStorageView::new(&self.storage),
+            SimpleLocalTable::new(
+              &self.table_schema,
+              &es.timestamp,
+              &es.sql_query.selection,
+              &self.storage,
+            ),
             &es.query_id,
             &es.root_query_path,
             &es.tier_map,
-            &es.sql_query.selection,
             &collect_select_subqueries(&es.sql_query),
             &es.timestamp,
             &es.context,
@@ -2162,16 +2165,19 @@ impl<T: IOTypes> TabletContext<T> {
           }
         }
         ExecutionS::Executing(executing) => {
-          let (subquery_id, gr_query_es) = match recompute_subquery::<T, SimpleStorageView>(
+          let (subquery_id, gr_query_es) = match recompute_subquery2::<T, SimpleLocalTable>(
             &mut self.rand,
-            &self.table_schema,
-            SimpleStorageView::new(&self.storage),
+            SimpleLocalTable::new(
+              &self.table_schema,
+              &es.timestamp,
+              &es.sql_query.selection,
+              &self.storage,
+            ),
             executing,
             &protect_query_id,
             &es.query_id,
             &es.root_query_path,
             &es.tier_map,
-            &es.sql_query.selection,
             &collect_select_subqueries(&es.sql_query),
             &es.timestamp,
             &es.context,
@@ -2436,7 +2442,7 @@ impl<T: IOTypes> TabletContext<T> {
           ));
         }
 
-        // Compute children.
+        // Create the ContextConstructor.
         let context_constructor = ContextConstructor::new(
           es.context.context_schema.clone(),
           SimpleLocalTable::new(
@@ -3193,6 +3199,10 @@ impl<T: IOTypes> TabletContext<T> {
   }
 }
 
+// -----------------------------------------------------------------------------------------------
+//  Old Table Subquery Construction
+// -----------------------------------------------------------------------------------------------
+
 /// This is used to compute the Keybound of a selection expression for
 /// a given ContextRow containing external columns. Recall that the
 /// selection expression might have ColumnRefs that aren't part of
@@ -3453,10 +3463,176 @@ fn recompute_subquery<T: IOTypes, StorageViewT: StorageView>(
   Ok((gr_query_id, gr_query_es))
 }
 
-/// Computes if `region` and intersects with any TableRegion in `regions`.
-fn does_intersect(region: &TableRegion, regions: &BTreeSet<TableRegion>) -> bool {
-  unimplemented!()
+// -----------------------------------------------------------------------------------------------
+//  New Table Subquery Construction
+// -----------------------------------------------------------------------------------------------
+
+/// This runs the `ContextConstructor` with the given inputs and simply accumulates the
+/// `ContextRow` to produce a `Context` for each element in `children`.
+fn compute_contexts<LocalTableT: LocalTable>(
+  parent_context: &Context,
+  local_table: LocalTableT,
+  children: Vec<(Vec<ColName>, Vec<TransTableName>)>,
+) -> Result<Vec<Context>, EvalError> {
+  // Create the ContextConstruct.
+  let context_constructor =
+    ContextConstructor::new(parent_context.context_schema.clone(), local_table, children);
+
+  // Initialize the child Contexts
+  let mut child_contexts = Vec::<Context>::new();
+  for schema in context_constructor.get_schemas() {
+    child_contexts.push(Context::new(schema));
+  }
+
+  // Create the child Contexts.
+  let callback = &mut |context_row_idx: usize,
+                       top_level_col_vals: Vec<ColValN>,
+                       contexts: Vec<(ContextRow, usize)>| {
+    for (subquery_idx, (context_row, idx)) in contexts.into_iter().enumerate() {
+      let child_context = child_contexts.get_mut(subquery_idx).unwrap();
+      if idx == child_context.context_rows.len() {
+        // This is a new ContextRow, so add it in.
+        child_context.context_rows.push(context_row);
+      }
+    }
+
+    Ok(())
+  };
+  context_constructor.run(&parent_context.context_rows, Vec::new(), callback)?;
+  Ok(child_contexts)
 }
+
+/// This computes GRQueryESs corresponding to every element in `subqueries`.
+fn compute_subqueries2<T: IOTypes, LocalTableT: LocalTable>(
+  // TabletContext params
+  rand: &mut T::RngCoreT,
+  local_table: LocalTableT,
+  // TabletStatus params
+  query_id: &QueryId,
+  root_query_path: &QueryPath,
+  tier_map: &TierMap,
+  subqueries: &Vec<proc::GRQuery>,
+  timestamp: &Timestamp,
+  context: &Context,
+  query_plan: &QueryPlan,
+) -> Result<Vec<GRQueryES>, EvalError> {
+  // Here, we construct first construct all of the subquery Contexts using the
+  // ContextConstructor, and then we construct GRQueryESs.
+  // Compute children.
+  let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+  for child in &query_plan.col_usage_node.children {
+    let mut col_name_set = HashSet::<ColName>::new();
+    for (_, (_, node)) in child {
+      col_name_set.extend(node.external_cols.clone())
+    }
+    children.push((col_name_set.iter().cloned().collect(), nodes_external_trans_tables(child)));
+  }
+
+  // Create the child contextx.
+  let child_contexts = compute_contexts(context, local_table, children)?;
+
+  // We compute all GRQueryESs.
+  let mut gr_query_statuses = Vec::<GRQueryES>::new();
+  for (subquery_idx, child_context) in child_contexts.into_iter().enumerate() {
+    let subquery = subqueries.get(subquery_idx).unwrap();
+    let child = query_plan.col_usage_node.children.get(subquery_idx).unwrap();
+
+    // Construct the GRQueryES
+    // TODO: I believe we can create a View Container that is both passed in as an argument
+    // here and in the above, and where we can easily create a GRQueryES (where things are just
+    // copied forward) where we only have to specify an index (for the subquery (the function will
+    // extract the right sql_query, query_plan, and trim down trans_table_schemas), the context, and
+    // the right QueryId for the GRQueryES to take on.
+    let gr_query_id = mk_qid(rand);
+    let gr_query_es = GRQueryES {
+      root_query_path: root_query_path.clone(),
+      tier_map: tier_map.clone(),
+      timestamp: timestamp.clone(),
+      context: Rc::new(child_context),
+      new_trans_table_context: vec![],
+      query_id: gr_query_id.clone(),
+      sql_query: subquery.clone(),
+      query_plan: GRQueryPlan {
+        gossip_gen: query_plan.gossip_gen.clone(),
+        // TODO: should we trim trans_table_schemas down?
+        trans_table_schemas: query_plan.trans_table_schemas.clone(),
+        col_usage_nodes: child.clone(),
+      },
+      new_rms: Default::default(),
+      trans_table_views: vec![],
+      state: GRExecutionS::Start,
+      orig_p: OrigP::new(query_id.clone()),
+    };
+    gr_query_statuses.push(gr_query_es)
+  }
+
+  Ok(gr_query_statuses)
+}
+
+/// This recomputes GRQueryESs that corresponds to `protect_query_id`.
+fn recompute_subquery2<T: IOTypes, LocalTableT: LocalTable>(
+  // TabletContext params
+  rand: &mut T::RngCoreT,
+  local_table: LocalTableT,
+  // TabletStatus params
+  executing: &mut Executing,
+  protect_query_id: &QueryId,
+  query_id: &QueryId,
+  root_query_path: &QueryPath,
+  tier_map: &TierMap,
+  subqueries: &Vec<proc::GRQuery>,
+  timestamp: &Timestamp,
+  context: &Context,
+  query_plan: &QueryPlan,
+) -> Result<(QueryId, GRQueryES), EvalError> {
+  // Find the subquery that this `protect_query_id` is referring to. There should
+  // always be such a Subquery.
+  let subquery_index = executing.find_subquery(protect_query_id).unwrap();
+  let single_status = executing.subqueries.get_mut(subquery_index).unwrap();
+  let protect_status = cast!(SingleSubqueryStatus::PendingReadRegion, single_status).unwrap();
+
+  // Create the child context.
+  let child_contexts = compute_contexts(
+    context,
+    local_table,
+    vec![(protect_status.new_columns.clone(), protect_status.trans_table_names.clone())],
+  )?;
+  assert_eq!(child_contexts.len(), 1);
+
+  // Construct the GRQueryES
+  let context = Rc::new(child_contexts.into_iter().next().unwrap());
+  let subquery = subqueries.get(0).unwrap().clone();
+  let child = query_plan.col_usage_node.children.get(subquery_index).unwrap();
+  let gr_query_id = mk_qid(rand);
+  let gr_query_es = GRQueryES {
+    root_query_path: root_query_path.clone(),
+    tier_map: tier_map.clone(),
+    timestamp: timestamp.clone(),
+    context: context.clone(),
+    new_trans_table_context: vec![],
+    query_id: gr_query_id.clone(),
+    sql_query: subquery,
+    query_plan: GRQueryPlan {
+      gossip_gen: query_plan.gossip_gen.clone(),
+      trans_table_schemas: query_plan.trans_table_schemas.clone(),
+      col_usage_nodes: child.clone(),
+    },
+    new_rms: Default::default(),
+    trans_table_views: vec![],
+    state: GRExecutionS::Start,
+    orig_p: OrigP::new(query_id.clone()),
+  };
+
+  // Advance the SingleSubqueryStatus.
+  *single_status =
+    SingleSubqueryStatus::Pending(SubqueryPending { context, query_id: gr_query_id.clone() });
+
+  Ok((gr_query_id, gr_query_es))
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Query Replanning
+// -----------------------------------------------------------------------------------------------
 
 impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
   fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
