@@ -8,6 +8,8 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use std::collections::{HashMap, HashSet};
+use std::iter::FromIterator;
+use std::rc::Rc;
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
@@ -225,6 +227,36 @@ pub fn extract_subquery_vals(
 #[derive(Debug, Default)]
 pub struct EvaluatedSuperSimpleSelect {
   pub selection: ColValN,
+}
+
+/// This evaluates a SuperSimpleSelect completely. When a ColumnRef is encountered in the `expr`,
+/// it searches `col_names` and `col_vals` to get the value. In addition, `subquery_vals` should
+/// have a length equal to that of how many GRQuerys there are in the `expr`.
+pub fn evaluate_super_simple_select_2(
+  select: &proc::SuperSimpleSelect,
+  col_names: &Vec<ColName>,
+  col_vals: &Vec<ColValN>,
+  raw_subquery_vals: &Vec<TableView>,
+) -> Result<EvaluatedSuperSimpleSelect, EvalError> {
+  // We map all ColNames to their ColValNs using the Context and subtable.
+  let mut col_map = HashMap::<ColName, ColValN>::new();
+  for i in 0..col_names.len() {
+    col_map.insert(col_names.get(i).unwrap().clone(), col_vals.get(i).unwrap().clone());
+  }
+
+  // Next, we reduce the subquery values to single values.
+  let subquery_vals = extract_subquery_vals(raw_subquery_vals)?;
+
+  // Construct the Evaluated Select
+  let mut next_subquery_idx = 0;
+  Ok(EvaluatedSuperSimpleSelect {
+    selection: evaluate_c_expr(&construct_cexpr(
+      &select.selection,
+      &col_map,
+      &subquery_vals,
+      &mut next_subquery_idx,
+    )?)?,
+  })
 }
 
 /// This evaluates a SuperSimpleSelect completely. When a ColumnRef is encountered
@@ -453,6 +485,35 @@ impl ContextConverter {
     )
   }
 
+  /// This is a unified approach to `general_create` and `trans_general_create` that uses a
+  /// `LocalTable` to infer table schema instead.
+  pub fn local_table_create<LocalTableT: LocalTable>(
+    parent_context_schema: &ContextSchema,
+    local_table: &LocalTableT,
+    child_columns: Vec<ColName>,
+    child_trans_table_names: Vec<TransTableName>,
+  ) -> ContextConverter {
+    let mut safe_present_split = Vec::<ColName>::new();
+    let mut external_split = Vec::<ColName>::new();
+
+    // Whichever `ColName`s in `child_columns` that are also present in `local_table` should
+    // be added to `safe_present_cols`. Otherwise, they should be added to `external_split`.
+    for col in child_columns {
+      if local_table.contains_col(&col) {
+        safe_present_split.push(col);
+      } else {
+        external_split.push(col);
+      }
+    }
+
+    ContextConverter::finish_creation(
+      parent_context_schema,
+      safe_present_split,
+      external_split,
+      child_trans_table_names,
+    )
+  }
+
   /// Moves the `*_split` variables into a ContextConverter and compute the various
   /// convenience data.
   pub fn finish_creation(
@@ -546,5 +607,132 @@ impl ContextConverter {
         .insert(col.clone(), parent_context_row.column_context_row.get(*index).unwrap().clone());
     }
     col_context
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Context Construction
+// -----------------------------------------------------------------------------------------------
+// These enums are used for communication between algorithms.
+
+pub trait LocalTable {
+  /// Checks if the given `col` is in the schema of the LocalTable.
+  fn contains_col(&self, col: &ColName) -> bool;
+
+  /// Gets all rows in the local table that's associated with the given parent ContextRow.
+  fn get_rows(
+    &self,
+    parent_context_schema: &ContextSchema,
+    parent_context_row: &ContextRow,
+    col_names: &Vec<ColName>,
+  ) -> Result<Vec<Vec<ColValN>>, EvalError>;
+}
+
+pub struct ContextConstructor<LocalTableT: LocalTable> {
+  parent_context_schema: ContextSchema,
+  local_table: LocalTableT,
+  children: Vec<(Vec<ColName>, Vec<TransTableName>)>,
+
+  /// Here, there is on converter for each element in `children` above.
+  converters: Vec<ContextConverter>,
+}
+
+impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
+  /// Here, the `Vec<ColName>` in each child has to either exist in the LocalTable, or in the
+  /// `parent_context_schema`. In addition the `Vec<TransTableName>` must exist in the
+  /// `parent_context_schema`.
+  pub fn new(
+    parent_context_schema: ContextSchema,
+    local_table: LocalTableT,
+    children: Vec<(Vec<ColName>, Vec<TransTableName>)>,
+  ) -> ContextConstructor<LocalTableT> {
+    let mut converters = Vec::<ContextConverter>::new();
+    for (col_names, trans_table_names) in &children {
+      converters.push(ContextConverter::local_table_create(
+        &parent_context_schema,
+        &local_table,
+        col_names.clone(),
+        trans_table_names.clone(),
+      ));
+    }
+    ContextConstructor { parent_context_schema, local_table, children, converters }
+  }
+
+  /// Here, the rows in the `parent_context_rows` must correspond to `parent_context_schema`.
+  /// The first `usize` in the `callback` is the parent ContextRow currently being used.
+  pub fn run<CbT: FnMut(usize, Vec<ColValN>, Vec<(ContextRow, usize)>) -> Result<(), EvalError>>(
+    &self,
+    parent_context_rows: &Vec<ContextRow>,
+    extra_cols: Vec<ColName>,
+    callback: &mut CbT,
+  ) -> Result<(), EvalError> {
+    // Compute the set of all columns that we have to read from the LocalTable. First,
+    // figure out which of the ColNames in `extra_cols` are in the LocalTable, and then,
+    // figure the which of the `ColName`s in each child are in the LocalTable.
+    let mut local_schema_set = HashSet::<ColName>::new();
+    for col in &extra_cols {
+      if self.local_table.contains_col(col) {
+        local_schema_set.insert(col.clone());
+      }
+    }
+    for conv in &self.converters {
+      local_schema_set.extend(conv.safe_present_split.clone());
+    }
+    let local_schema = Vec::from_iter(local_schema_set.into_iter());
+
+    // Iterate through all parent ContextRows, compute the local rows, then iterate through those,
+    // construct child ContextRows, populate `child_context_row_maps`, then run the callback.
+    let mut child_context_row_maps = Vec::<HashMap<ContextRow, usize>>::new();
+    for _ in 0..self.converters.len() {
+      child_context_row_maps.push(HashMap::new());
+    }
+
+    for parent_context_row_idx in 0..parent_context_rows.len() {
+      let parent_context_row = parent_context_rows.get(parent_context_row_idx).unwrap();
+      for local_row in
+        self.local_table.get_rows(&self.parent_context_schema, parent_context_row, &local_schema)?
+      {
+        // First, construct the child ContextRows.
+        let mut child_context_rows = Vec::<(ContextRow, usize)>::new();
+        for index in 0..self.converters.len() {
+          // Compute the child ContextRow for this subquery, and populate
+          // `child_context_row_map` accordingly.
+          let conv = self.converters.get(index).unwrap();
+          let child_context_row_map = child_context_row_maps.get_mut(index).unwrap();
+          let row = conv.extract_child_relevent_cols(&local_schema, &local_row);
+          let child_context_row = conv.compute_child_context_row(parent_context_row, row);
+          if !child_context_row_map.contains_key(&child_context_row) {
+            let idx = child_context_row_map.len();
+            child_context_row_map.insert(child_context_row.clone(), idx);
+          }
+
+          // Get the child_context_idx to get the relevent TableView from the subquery
+          // results, and populate `subquery_vals`.
+          let child_context_idx = child_context_row_map.get(&child_context_row).unwrap();
+          child_context_rows.push((child_context_row, *child_context_idx));
+        }
+
+        // Then, extract values for the `extra_cols` by first searching the `local_schema`,
+        // and then the parent Context.
+        let mut extra_col_vals = Vec::<ColValN>::new();
+        for col in &extra_cols {
+          if let Some(pos) = local_schema.iter().position(|local_col| col == local_col) {
+            extra_col_vals.push(local_row.get(pos).unwrap().clone());
+          } else {
+            let pos = self
+              .parent_context_schema
+              .column_context_schema
+              .iter()
+              .position(|parent_col| col == parent_col)
+              .unwrap();
+            extra_col_vals.push(parent_context_row.column_context_row.get(pos).unwrap().clone());
+          }
+        }
+
+        // Finally, run the callback with the given inputs.
+        callback(parent_context_row_idx, extra_col_vals, child_context_rows)?;
+      }
+    }
+    Ok(())
   }
 }

@@ -171,6 +171,10 @@ impl ContextSchema {
 }
 
 impl TableView {
+  pub fn new(col_names: Vec<ColName>) -> TableView {
+    TableView { col_names, rows: Default::default() }
+  }
+
   pub fn add_row(&mut self, row: Vec<ColValN>) {
     if let Some(count) = self.rows.get_mut(&row) {
       *count += 1;
