@@ -3,35 +3,36 @@ use crate::common::{map_insert, mk_qid, IOTypes, KeyBound, OrigP, QueryPlan, Tab
 use crate::expression::{compress_row_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, ColName, ColValN, Context, ContextRow, QueryId, QueryPath, TableView, TierMap, Timestamp,
-  TransTableName,
+  proc, ColName, ColValN, Context, ContextRow, PrimaryKey, QueryId, QueryPath, TableView, TierMap,
+  Timestamp, TransTableName,
 };
 use crate::model::message as msg;
+use crate::ms_table_read_es::FullMSTableReadES;
 use crate::server::{
-  contains_col, evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor,
+  contains_col, evaluate_update, mk_eval_error, CommonQuery, ContextConstructor,
 };
 use crate::tablet::{
   compute_subqueries, recompute_subquery, CommonQueryReplanningES, CommonQueryReplanningS,
-  ContextKeyboundComputer, Executing, MSQueryES, MSStorageView, Pending, QueryReplanningSqlView,
-  SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryLockingSchemas,
-  SubqueryPending, SubqueryPendingReadRegion, TabletContext,
+  ContextKeyboundComputer, Executing, GenericTable, MSQueryES, MSStorageView, Pending,
+  QueryReplanningSqlView, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
+  SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion, TabletContext,
 };
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 use std::rc::Rc;
 
 // -----------------------------------------------------------------------------------------------
-//  MSTableReadES
+//  MSTableWriteES
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
-enum MSReadExecutionS {
+enum MSWriteExecutionS {
   Start,
   Pending(Pending),
   Executing(Executing),
 }
 
 #[derive(Debug)]
-pub struct MSTableReadES {
+pub struct MSTableWriteES {
   root_query_path: QueryPath,
   tier_map: TierMap,
   timestamp: Timestamp,
@@ -43,7 +44,7 @@ pub struct MSTableReadES {
   query_id: QueryId,
 
   // Query-related fields.
-  sql_query: proc::SuperSimpleSelect,
+  sql_query: proc::Update,
   query_plan: QueryPlan,
 
   // MSQuery fields
@@ -51,20 +52,26 @@ pub struct MSTableReadES {
 
   // Dynamically evolving fields.
   new_rms: HashSet<QueryPath>,
-  state: MSReadExecutionS,
+  state: MSWriteExecutionS,
 }
 
 #[derive(Debug)]
-pub struct MSReadQueryReplanningES {
-  /// The below fields are from PerformQuery and are passed through to MSTableReadES.
+pub struct MSWriteQueryReplanningES {
+  /// The below fields are from PerformQuery and are passed through to MSTableWriteES.
   pub root_query_path: QueryPath,
   pub tier_map: TierMap,
   pub ms_query_id: QueryId,
   /// Used for updating the query plan
-  pub status: CommonQueryReplanningES<proc::SuperSimpleSelect>,
+  pub status: CommonQueryReplanningES<proc::Update>,
 }
 
-pub enum MSTableReadAction {
+#[derive(Debug)]
+pub enum FullMSTableWriteES {
+  QueryReplanning(MSWriteQueryReplanningES),
+  Executing(MSTableWriteES),
+}
+
+pub enum MSTableWriteAction {
   /// This tells the parent Server to wait. This is used after this ES sends
   /// out a MasterQueryReplanning, while it's waiting for subqueries, column
   /// locking, ReadRegion protection, etc.
@@ -85,21 +92,15 @@ pub enum MSTableReadAction {
   ExitAndCleanUp(Vec<QueryId>),
 }
 
-#[derive(Debug)]
-pub enum FullMSTableReadES {
-  QueryReplanning(MSReadQueryReplanningES),
-  Executing(MSTableReadES),
-}
-
 // -----------------------------------------------------------------------------------------------
 //  Implementation
 // -----------------------------------------------------------------------------------------------
 
-impl FullMSTableReadES {
-  pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> MSTableReadAction {
+impl FullMSTableWriteES {
+  pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> MSTableWriteAction {
     let plan_es = cast!(Self::QueryReplanning, self).unwrap();
     plan_es.status.start(ctx);
-    MSTableReadAction::Wait
+    MSTableWriteAction::Wait
   }
 
   /// Handle Columns being locked
@@ -107,9 +108,9 @@ impl FullMSTableReadES {
     &mut self,
     ctx: &mut TabletContext<T>,
     locked_cols_qid: QueryId,
-  ) -> MSTableReadAction {
+  ) -> MSTableWriteAction {
     match self {
-      FullMSTableReadES::QueryReplanning(plan_es) => {
+      FullMSTableWriteES::QueryReplanning(plan_es) => {
         // Advance the QueryReplanning now that the desired columns have been locked.
         let comm_plan_es = &mut plan_es.status;
         comm_plan_es.columns_locked::<T>(ctx);
@@ -118,16 +119,18 @@ impl FullMSTableReadES {
         let ms_query_id = plan_es.ms_query_id.clone();
         if let CommonQueryReplanningS::Done(success) = comm_plan_es.state {
           if success {
-            // If the QueryReplanning was successful, we move the FullMSTableReadES
+            // If the QueryReplanning was successful, we move the FullMSTableWriteES
             // to Executing in the Start state, and immediately start executing it.
 
-            // First, we look up the `tier` of this Table being read.
+            // First, we look up the `tier` of this Table being
+            // written, update the `tier_map`.
             let sql_query = comm_plan_es.sql_view.clone();
-            let tier_map = plan_es.tier_map.clone();
+            let mut tier_map = plan_es.tier_map.clone();
             let tier = tier_map.map.get(sql_query.table()).unwrap().clone();
+            *tier_map.map.get_mut(sql_query.table()).unwrap() += 1;
 
-            // Then, we construct the MSTableReadES.
-            *self = FullMSTableReadES::Executing(MSTableReadES {
+            // Then, we construct the MSTableWriteES.
+            *self = FullMSTableWriteES::Executing(MSTableWriteES {
               root_query_path: plan_es.root_query_path.clone(),
               tier_map,
               timestamp: comm_plan_es.timestamp,
@@ -139,24 +142,24 @@ impl FullMSTableReadES {
               query_plan: comm_plan_es.query_plan.clone(),
               ms_query_id,
               new_rms: Default::default(),
-              state: MSReadExecutionS::Start,
+              state: MSWriteExecutionS::Start,
             });
 
-            // Finally, we start the MSReadTableES.
-            self.start_ms_table_read_es(ctx)
+            // Finally, we start the MSWriteTableES.
+            self.start_ms_table_write_es(ctx)
           } else {
             // Recall that if QueryReplanning had ended in a failure (i.e. having missing
             // columns), then `CommonQueryReplanningES` will have send back the necessary
             // responses. Thus, we only need to Exit the ES here. (Recall this doesn't imply
             // a fatal Error for the whole transaction, so we don't return ExitAll).
-            MSTableReadAction::ExitAndCleanUp(Vec::new())
+            MSTableWriteAction::ExitAndCleanUp(Vec::new())
           }
         } else {
-          MSTableReadAction::Wait
+          MSTableWriteAction::Wait
         }
       }
-      FullMSTableReadES::Executing(es) => {
-        let executing = cast!(MSReadExecutionS::Executing, &mut es.state).unwrap();
+      FullMSTableWriteES::Executing(es) => {
+        let executing = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
 
         // Find the SingleSubqueryStatus that sent out this requested_locked_columns.
         // There should always be such a Subquery.
@@ -224,7 +227,7 @@ impl FullMSTableReadES {
             read_region: new_read_region,
             query_id: protect_query_id,
           });
-          MSTableReadAction::Wait
+          MSTableWriteAction::Wait
         }
       }
     }
@@ -236,11 +239,11 @@ impl FullMSTableReadES {
     ctx: &mut TabletContext<T>,
     ms_query_ess: &HashMap<QueryId, MSQueryES>,
     protect_query_id: QueryId,
-  ) -> MSTableReadAction {
-    let es = cast!(FullMSTableReadES::Executing, self).unwrap();
+  ) -> MSTableWriteAction {
+    let es = cast!(FullMSTableWriteES::Executing, self).unwrap();
     match &mut es.state {
-      MSReadExecutionS::Start => panic!(),
-      MSReadExecutionS::Pending(pending) => {
+      MSWriteExecutionS::Start => panic!(),
+      MSWriteExecutionS::Pending(pending) => {
         let ms_query_es = ms_query_ess.get(&es.ms_query_id).unwrap();
         let gr_query_statuses = match compute_subqueries::<T, _, _>(
           GRQueryConstructorView {
@@ -262,7 +265,7 @@ impl FullMSTableReadES {
         ) {
           Ok(gr_query_statuses) => gr_query_statuses,
           Err(eval_error) => {
-            return MSTableReadAction::ExitAll(mk_eval_error(eval_error));
+            return MSTableWriteAction::ExitAll(mk_eval_error(eval_error));
           }
         };
 
@@ -279,16 +282,16 @@ impl FullMSTableReadES {
         }
 
         // Move the ES to the Executing state.
-        es.state = MSReadExecutionS::Executing(Executing {
+        es.state = MSWriteExecutionS::Executing(Executing {
           completed: 0,
           subqueries,
           row_region: pending.read_region.row_region.clone(),
         });
 
         // Return the subqueries
-        MSTableReadAction::SendSubqueries(gr_query_statuses)
+        MSTableWriteAction::SendSubqueries(gr_query_statuses)
       }
-      MSReadExecutionS::Executing(executing) => {
+      MSWriteExecutionS::Executing(executing) => {
         let ms_query_es = ms_query_ess.get(&es.ms_query_id).unwrap();
         let (_, gr_query_es) = match recompute_subquery::<T, _, _>(
           GRQueryConstructorView {
@@ -312,12 +315,12 @@ impl FullMSTableReadES {
         ) {
           Ok(gr_query_statuses) => gr_query_statuses,
           Err(eval_error) => {
-            return MSTableReadAction::ExitAll(mk_eval_error(eval_error));
+            return MSTableWriteAction::ExitAll(mk_eval_error(eval_error));
           }
         };
 
         // Return the subquery
-        MSTableReadAction::SendSubqueries(vec![gr_query_es])
+        MSTableWriteAction::SendSubqueries(vec![gr_query_es])
       }
     }
   }
@@ -328,9 +331,9 @@ impl FullMSTableReadES {
     ctx: &mut TabletContext<T>,
     subquery_id: QueryId,
     rem_cols: Vec<ColName>,
-  ) -> MSTableReadAction {
-    let es = cast!(FullMSTableReadES::Executing, self).unwrap();
-    let executing = cast!(MSReadExecutionS::Executing, &mut es.state).unwrap();
+  ) -> MSTableWriteAction {
+    let es = cast!(FullMSTableWriteES::Executing, self).unwrap();
+    let executing = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
 
     // Insert a requested_locked_columns for the missing columns.
     let locked_cols_qid = ctx.add_requested_locked_columns(
@@ -353,7 +356,7 @@ impl FullMSTableReadES {
       query_id: locked_cols_qid,
     });
 
-    MSTableReadAction::Wait
+    MSTableWriteAction::Wait
   }
 
   /// This is called if a subquery fails. This simply responds to the sender and Exits
@@ -363,24 +366,24 @@ impl FullMSTableReadES {
     &mut self,
     _: &mut TabletContext<T>,
     query_error: msg::QueryError,
-  ) -> MSTableReadAction {
-    MSTableReadAction::ExitAll(query_error)
+  ) -> MSTableWriteAction {
+    MSTableWriteAction::ExitAll(query_error)
   }
 
   /// Handles a Subquery completing
   pub fn handle_subquery_done<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
-    ms_query_ess: &HashMap<QueryId, MSQueryES>,
+    ms_query_ess: &mut HashMap<QueryId, MSQueryES>,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<QueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
-  ) -> MSTableReadAction {
-    let es = cast!(FullMSTableReadES::Executing, self).unwrap();
+  ) -> MSTableWriteAction {
+    let es = cast!(FullMSTableWriteES::Executing, self).unwrap();
 
-    // Add the subquery results into the MSTableReadES.
+    // Add the subquery results into the MSTableWriteES.
     es.new_rms.extend(subquery_new_rms);
-    let executing_state = cast!(MSReadExecutionS::Executing, &mut es.state).unwrap();
+    let executing_state = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
     let subquery_idx = executing_state.find_subquery(&subquery_id).unwrap();
     let single_status = executing_state.subqueries.get_mut(subquery_idx).unwrap();
     let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
@@ -391,9 +394,9 @@ impl FullMSTableReadES {
     executing_state.completed += 1;
 
     // If there are still subqueries to compute, then we wait. Otherwise, we finish
-    // up the MSTableReadES and respond to the client.
+    // up the MSTableWriteES and respond to the client.
     if executing_state.completed < executing_state.subqueries.len() {
-      MSTableReadAction::Wait
+      MSTableWriteAction::Wait
     } else {
       // Compute children.
       let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
@@ -405,7 +408,7 @@ impl FullMSTableReadES {
       }
 
       // Create the ContextConstructor.
-      let update_views = &ms_query_ess.get(&es.ms_query_id).unwrap().update_views;
+      let update_views = &ms_query_ess.get_mut(&es.ms_query_id).unwrap().update_views;
       let storage_view = MSStorageView::new(&ctx.storage, update_views, es.tier.clone() - 1);
       let context_constructor = ContextConstructor::new(
         es.context.context_schema.clone(),
@@ -418,18 +421,26 @@ impl FullMSTableReadES {
         children,
       );
 
-      // These are all of the `ColNames` we need to evaluate things.
+      // These are all of the `ColNames` we need to evaluate the Update. This consists of all
+      // Top-Level Columns for every expression, as well as all Key Columns (since they are
+      // included in the projected columns).
       let mut top_level_cols_set = HashSet::<ColName>::new();
+      top_level_cols_set.extend(ctx.table_schema.get_key_cols());
       top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
-      top_level_cols_set.extend(es.sql_query.projection.clone());
+      for (_, expr) in &es.sql_query.assignment {
+        top_level_cols_set.extend(collect_top_level_cols(expr));
+      }
       let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
 
-      // Finally, iterate over the Context Rows of the subqueries and compute the final values.
-      let mut res_table_views = Vec::<TableView>::new();
-      for _ in 0..es.context.context_rows.len() {
-        res_table_views.push(TableView::new(es.sql_query.projection.clone()));
-      }
+      // Setup the TableView that we are going to return and the UpdateView that we're going
+      // to hold in the MSQueryES.
+      let mut res_col_names = Vec::<ColName>::new();
+      res_col_names.extend(ctx.table_schema.get_key_cols());
+      res_col_names.extend(es.sql_query.assignment.iter().map(|(name, _)| name.clone()));
+      let mut res_table_view = TableView::new(res_col_names.clone());
+      let mut update_view = GenericTable::new();
 
+      // Finally, iterate over the Context Rows of the subqueries and compute the final values.
       let eval_res = context_constructor.run(
         &es.context.context_rows,
         top_level_col_names.clone(),
@@ -437,11 +448,13 @@ impl FullMSTableReadES {
               top_level_col_vals: Vec<ColValN>,
               contexts: Vec<(ContextRow, usize)>,
               count: u64| {
+          assert_eq!(context_row_idx, 0); // Recall there is only one ContextRow for Updates.
+
           // First, we extract the subquery values using the child Context indices.
           let mut subquery_vals = Vec::<TableView>::new();
           for index in 0..contexts.len() {
             let (_, child_context_idx) = contexts.get(index).unwrap();
-            let executing_state = cast!(MSReadExecutionS::Executing, &es.state).unwrap();
+            let executing_state = cast!(MSWriteExecutionS::Executing, &es.state).unwrap();
             let single_status = executing_state.subqueries.get(index).unwrap();
             let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
             subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
@@ -449,43 +462,60 @@ impl FullMSTableReadES {
 
           // Now, we evaluate all expressions in the SQL query and amend the
           // result to this TableView (if the WHERE clause evaluates to true).
-          let evaluated_select = evaluate_super_simple_select(
+          let evaluated_update = evaluate_update(
             &es.sql_query,
             &top_level_col_names,
             &top_level_col_vals,
             &subquery_vals,
           )?;
-          if is_true(&evaluated_select.selection)? {
-            // This means that the current row should be selected for the result. Thus, we take
-            // the values of the project columns and insert it into the appropriate TableView.
+          if is_true(&evaluated_update.selection)? {
+            // This means that the current row should be selected for the result.
             let mut res_row = Vec::<ColValN>::new();
-            for res_col_name in &es.sql_query.projection {
-              let idx = top_level_col_names.iter().position(|k| res_col_name == k).unwrap();
-              res_row.push(top_level_col_vals.get(idx).unwrap().clone());
+
+            // First we add in the Key Columns
+            let mut primary_key = PrimaryKey { cols: vec![] };
+            for (key_col, _) in &ctx.table_schema.key_cols {
+              let idx = top_level_col_names.iter().position(|col| key_col == col).unwrap();
+              let col_val = top_level_col_vals.get(idx).unwrap().clone();
+              res_row.push(col_val.clone());
+              primary_key.cols.push(col_val.unwrap());
             }
 
-            res_table_views[context_row_idx].add_row_multi(res_row, count);
+            // Then, iterate through the assignment, updating `res_row` and `update_view`.
+            for (col_name, col_val) in evaluated_update.assignment {
+              res_row.push(col_val.clone());
+              update_view.insert((primary_key.clone(), Some(col_name)), col_val);
+            }
+
+            // Finally, we add the `res_row` into the TableView.
+            res_table_view.add_row_multi(res_row, count);
           };
           Ok(())
         },
       );
 
       if let Err(eval_error) = eval_res {
-        return MSTableReadAction::ExitAll(mk_eval_error(eval_error));
+        return MSTableWriteAction::ExitAll(mk_eval_error(eval_error));
       }
 
       // Build the success message and respond.
       let success_msg = msg::QuerySuccess {
         return_path: es.sender_path.query_id.clone(),
         query_id: es.query_id.clone(),
-        result: (es.sql_query.projection.clone(), res_table_views),
+        result: (res_col_names, vec![res_table_view]),
         new_rms: es.new_rms.iter().cloned().collect(),
       };
       let sender_path = es.sender_path.clone();
       ctx.ctx().send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
 
+      // Update the MSQuery. In particular, amend the `update_view` and remove this
+      // MSTableWriteES from the pending queries.
+      let ms_query = ms_query_ess.get_mut(&es.ms_query_id).unwrap();
+      ms_query.pending_queries.remove(&es.query_id);
+      ms_query.update_views.insert(es.tier.clone(), update_view);
+
       // Signal that the subquery has finished successfully
-      MSTableReadAction::Done
+      MSTableWriteAction::Done
     }
   }
 
@@ -493,20 +523,23 @@ impl FullMSTableReadES {
   /// parent Server to follow to clean up subqueries. Note that this function doesn't assume
   /// anything about if the whole MSQueryES is being cleaned up or not; it only expects to clean
   /// up this ES.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> MSTableReadAction {
+  pub fn exit_and_clean_up<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+  ) -> MSTableWriteAction {
     let mut subquery_ids = Vec::<QueryId>::new();
     match self {
-      FullMSTableReadES::QueryReplanning(es) => es.status.exit_and_clean_up(ctx),
-      FullMSTableReadES::Executing(es) => {
+      FullMSTableWriteES::QueryReplanning(es) => es.status.exit_and_clean_up(ctx),
+      FullMSTableWriteES::Executing(es) => {
         match &es.state {
-          MSReadExecutionS::Start => {}
-          MSReadExecutionS::Pending(pending) => {
+          MSWriteExecutionS::Start => {}
+          MSWriteExecutionS::Pending(pending) => {
             // Here, we remove the ReadRegion from `m_waiting_read_protected`, if it still
             // exists. Note that we leave `m_read_protected` and `m_write_protected` intact
             // since they are inconvenient to change (since they don't have `query_id`.
             ctx.remove_m_read_protected_request(es.timestamp.clone(), pending.query_id.clone());
           }
-          MSReadExecutionS::Executing(executing) => {
+          MSWriteExecutionS::Executing(executing) => {
             // Here, we need to cancel every Subquery. Depending on the state of the
             // SingleSubqueryStatus, we either need to either clean up the column locking request,
             // the ReadRegion from m_waiting_read_protected, or abort the underlying GRQueryES.
@@ -534,15 +567,15 @@ impl FullMSTableReadES {
         }
       }
     }
-    MSTableReadAction::ExitAndCleanUp(subquery_ids)
+    MSTableWriteAction::ExitAndCleanUp(subquery_ids)
   }
 
   /// Starts the Execution state
-  fn start_ms_table_read_es<T: IOTypes>(
+  fn start_ms_table_write_es<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
-  ) -> MSTableReadAction {
-    let es = cast!(FullMSTableReadES::Executing, self).unwrap();
+  ) -> MSTableWriteAction {
+    let es = cast!(FullMSTableWriteES::Executing, self).unwrap();
 
     // Setup ability to compute a tight Keybound for every ContextRow.
     let keybound_computer = ContextKeyboundComputer::new(
@@ -562,47 +595,62 @@ impl FullMSTableReadES {
           }
         }
         Err(eval_error) => {
-          return MSTableReadAction::ExitAll(mk_eval_error(eval_error));
+          return MSTableWriteAction::ExitAll(mk_eval_error(eval_error));
         }
       }
     }
     row_region = compress_row_region(row_region);
 
-    // Compute the Read Column Region.
+    // Compute the Write Column Region.
     let mut col_region = HashSet::<ColName>::new();
-    col_region.extend(es.sql_query.projection.clone());
-    col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
+    col_region.extend(es.sql_query.assignment.iter().map(|(col, _)| col.clone()));
 
-    // Move the MSTableReadES to the Pending state with the given ReadRegion.
-    let protect_query_id = mk_qid(&mut ctx.rand);
+    // Compute the Write Region
     let col_region = Vec::from_iter(col_region.into_iter());
-    let read_region = TableRegion { col_region, row_region };
-    es.state = MSReadExecutionS::Pending(Pending {
-      read_region: read_region.clone(),
-      query_id: protect_query_id.clone(),
-    });
+    let write_region = TableRegion { col_region, row_region: row_region.clone() };
 
-    // Add a ReadRegion to the m_waiting_read_protected.
-    let orig_p = OrigP::new(es.query_id.clone());
-    let protect_request = (orig_p, protect_query_id, read_region);
-    let verifying = ctx.verifying_writes.get_mut(&es.timestamp).unwrap();
-    verifying.m_waiting_read_protected.insert(protect_request);
-    MSTableReadAction::Wait
+    // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
+    // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
+    let timestamp = es.timestamp.clone();
+    if !ctx.check_write_region_isolation(&write_region, &timestamp) {
+      MSTableWriteAction::ExitAll(msg::QueryError::WriteRegionConflictWithSubsequentRead)
+    } else {
+      // Compute the Read Column Region.
+      let col_region = HashSet::<ColName>::from_iter(
+        es.query_plan.col_usage_node.safe_present_cols.iter().cloned(),
+      );
+
+      // Move the MSTableWriteES to the Pending state with the given ReadRegion.
+      let protect_query_id = mk_qid(&mut ctx.rand);
+      let col_region = Vec::from_iter(col_region.into_iter());
+      let read_region = TableRegion { col_region, row_region };
+      es.state = MSWriteExecutionS::Pending(Pending {
+        read_region: read_region.clone(),
+        query_id: protect_query_id.clone(),
+      });
+
+      // Add a ReadRegion to the m_waiting_read_protected.
+      let orig_p = OrigP::new(es.query_id.clone());
+      let protect_request = (orig_p, protect_query_id, read_region);
+      let verifying = ctx.verifying_writes.get_mut(&es.timestamp).unwrap();
+      verifying.m_waiting_read_protected.insert(protect_request);
+      MSTableWriteAction::Wait
+    }
   }
 
   /// Get the `QueryPath` of the sender of this ES.
   pub fn sender_path(&self) -> &QueryPath {
     match &self {
-      FullMSTableReadES::QueryReplanning(es) => &es.status.sender_path,
-      FullMSTableReadES::Executing(es) => &es.sender_path,
+      FullMSTableWriteES::QueryReplanning(es) => &es.status.sender_path,
+      FullMSTableWriteES::Executing(es) => &es.sender_path,
     }
   }
 
   /// Get the `QueryId` of the owning originating MSQueryES.
   pub fn ms_query_id(&self) -> &QueryId {
     match &self {
-      FullMSTableReadES::QueryReplanning(es) => &es.ms_query_id,
-      FullMSTableReadES::Executing(es) => &es.ms_query_id,
+      FullMSTableWriteES::QueryReplanning(es) => &es.ms_query_id,
+      FullMSTableWriteES::Executing(es) => &es.ms_query_id,
     }
   }
 }
