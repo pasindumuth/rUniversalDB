@@ -8,6 +8,7 @@ pub mod experimental;
 pub mod expression;
 pub mod gr_query_es;
 pub mod model;
+pub mod ms_table_read_es;
 pub mod multiversion_map;
 pub mod net;
 pub mod query_converter;
