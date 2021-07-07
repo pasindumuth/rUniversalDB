@@ -15,7 +15,7 @@ use crate::model::message::{GeneralQuery, QueryError};
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContext};
 use crate::sql_parser::convert_ast;
-use crate::trans_read_es::{
+use crate::trans_table_read_es::{
   FullTransTableReadES, TransQueryReplanningES, TransQueryReplanningS, TransTableAction,
   TransTableSource,
 };

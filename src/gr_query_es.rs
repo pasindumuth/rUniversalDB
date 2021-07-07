@@ -12,7 +12,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::server::{CommonQuery, ServerContext};
 use crate::tablet::{SingleSubqueryStatus, SubqueryPending};
-use crate::trans_read_es::TransTableSource;
+use crate::trans_table_read_es::TransTableSource;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::rc::Rc;

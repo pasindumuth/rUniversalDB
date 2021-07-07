@@ -185,7 +185,7 @@ impl FullTransTableReadES {
     ctx: &mut ServerContext<T>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
-    let plan_es = cast!(FullTransTableReadES::QueryReplanning, self).unwrap();
+    let plan_es = cast!(Self::QueryReplanning, self).unwrap();
     plan_es.start::<T, SourceT>(ctx, trans_table_source);
     if let TransQueryReplanningS::Done(success) = &plan_es.state {
       if *success {
@@ -221,7 +221,7 @@ impl FullTransTableReadES {
     ctx: &mut ServerContext<T>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
-    let es = cast!(FullTransTableReadES::Executing, self).unwrap();
+    let es = cast!(Self::Executing, self).unwrap();
     assert!(matches!(&es.state, &TransExecutionS::Start));
     // Here, we first construct all of the subquery Contexts using the
     // ContextConstructor, and then we construct GRQueryESs.
@@ -289,7 +289,7 @@ impl FullTransTableReadES {
     subquery_id: QueryId,
     rem_cols: Vec<ColName>,
   ) -> TransTableAction {
-    let es = cast!(FullTransTableReadES::Executing, self).unwrap();
+    let es = cast!(Self::Executing, self).unwrap();
     let executing = cast!(TransExecutionS::Executing, &mut es.state).unwrap();
     let trans_table_name = &es.location_prefix.trans_table_name;
     let trans_table_schema = trans_table_source.get_schema(trans_table_name);
@@ -383,7 +383,7 @@ impl FullTransTableReadES {
     subquery_new_rms: HashSet<QueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> TransTableAction {
-    let es = cast!(FullTransTableReadES::Executing, self).unwrap();
+    let es = cast!(Self::Executing, self).unwrap();
 
     // Add the subquery results into the TableReadES.
     es.new_rms.extend(subquery_new_rms);

@@ -31,7 +31,8 @@ use crate::server::{
   contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error, CommonQuery,
   ContextConstructor, LocalTable, ServerContext,
 };
-use crate::trans_read_es::{
+use crate::table_read_es::{FullTableReadES, QueryReplanningES, TableAction};
+use crate::trans_table_read_es::{
   FullTransTableReadES, TransQueryReplanningES, TransQueryReplanningS, TransTableAction,
   TransTableSource,
 };
@@ -101,7 +102,7 @@ impl QueryReplanningSqlView for proc::Update {
 }
 
 #[derive(Debug)]
-enum CommonQueryReplanningS {
+pub enum CommonQueryReplanningS {
   Start,
   /// Used to lock the columsn in the SELECT clause or SET clause.
   ProjectedColumnLocking {
@@ -125,7 +126,7 @@ enum CommonQueryReplanningS {
 }
 
 #[derive(Debug)]
-struct CommonQueryReplanningES<T: QueryReplanningSqlView> {
+pub struct CommonQueryReplanningES<T: QueryReplanningSqlView> {
   // These members are parallel to the messages in `msg::GeneralQuery`.
   pub timestamp: Timestamp,
   pub context: Rc<Context>,
@@ -148,18 +149,18 @@ pub struct SubqueryLockingSchemas {
   // Recall that we only get to this State if a Subquery had failed. We hold onto
   // the prior ColNames and TransTableNames (rather than computating from the QueryPlan
   // again) so that we don't potentially lose prior ColName amendments.
-  old_columns: Vec<ColName>,
-  trans_table_names: Vec<TransTableName>,
-  new_cols: Vec<ColName>,
-  query_id: QueryId,
+  pub old_columns: Vec<ColName>,
+  pub trans_table_names: Vec<TransTableName>,
+  pub new_cols: Vec<ColName>,
+  pub query_id: QueryId,
 }
 
 #[derive(Debug)]
 pub struct SubqueryPendingReadRegion {
-  new_columns: Vec<ColName>,
-  trans_table_names: Vec<TransTableName>,
-  read_region: TableRegion,
-  query_id: QueryId,
+  pub new_columns: Vec<ColName>,
+  pub trans_table_names: Vec<TransTableName>,
+  pub read_region: TableRegion,
+  pub query_id: QueryId,
 }
 
 #[derive(Debug)]
@@ -183,12 +184,12 @@ pub enum SingleSubqueryStatus {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  TableReadES
+//  Common Execution States
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
-struct Pending {
-  read_region: TableRegion,
-  query_id: QueryId,
+pub struct Pending {
+  pub read_region: TableRegion,
+  pub query_id: QueryId,
 }
 
 #[derive(Debug)]
@@ -218,48 +219,6 @@ impl Executing {
     }
     None
   }
-}
-
-#[derive(Debug)]
-enum ExecutionS {
-  Start,
-  Pending(Pending),
-  Executing(Executing),
-}
-
-#[derive(Debug)]
-struct TableReadES {
-  root_query_path: QueryPath,
-  tier_map: TierMap,
-  timestamp: Timestamp,
-  context: Rc<Context>,
-
-  // Fields needed for responding.
-  sender_path: QueryPath,
-  query_id: QueryId,
-
-  // Query-related fields.
-  sql_query: proc::SuperSimpleSelect,
-  query_plan: QueryPlan,
-
-  // Dynamically evolving fields.
-  new_rms: HashSet<QueryPath>,
-  state: ExecutionS,
-}
-
-#[derive(Debug)]
-struct QueryReplanningES {
-  /// The below fields are from PerformQuery and are passed through to TableReadES.
-  pub root_query_path: QueryPath,
-  pub tier_map: TierMap,
-  /// Used for updating the query plan
-  pub status: CommonQueryReplanningES<proc::SuperSimpleSelect>,
-}
-
-#[derive(Debug)]
-enum FullTableReadES {
-  QueryReplanning(QueryReplanningES),
-  Executing(TableReadES),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -441,18 +400,18 @@ impl Statuses {
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct VerifyingReadWriteRegion {
-  orig_p: OrigP,
-  m_waiting_read_protected: BTreeSet<(OrigP, QueryId, TableRegion)>,
-  m_read_protected: BTreeSet<TableRegion>,
-  m_write_protected: BTreeSet<TableRegion>,
+pub struct VerifyingReadWriteRegion {
+  pub orig_p: OrigP,
+  pub m_waiting_read_protected: BTreeSet<(OrigP, QueryId, TableRegion)>,
+  pub m_read_protected: BTreeSet<TableRegion>,
+  pub m_write_protected: BTreeSet<TableRegion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct ReadWriteRegion {
-  orig_p: OrigP,
-  m_read_protected: BTreeSet<TableRegion>,
-  m_write_protected: BTreeSet<TableRegion>,
+pub struct ReadWriteRegion {
+  pub orig_p: OrigP,
+  pub m_read_protected: BTreeSet<TableRegion>,
+  pub m_write_protected: BTreeSet<TableRegion>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -476,7 +435,7 @@ enum ReadProtectionGrant {
 /// indicates the set of rows to read from the Table, and the `col_region` are the columns to read.
 ///
 /// This function must a pure function; the order of the returned vectors matter.
-trait StorageView {
+pub trait StorageView {
   fn compute_subtable(
     &self,
     key_region: &Vec<KeyBound>,
@@ -485,12 +444,12 @@ trait StorageView {
 }
 
 /// This is used to directly read data from persistent storage.
-struct SimpleStorageView<'a> {
+pub struct SimpleStorageView<'a> {
   storage: &'a GenericMVTable,
 }
 
 impl<'a> SimpleStorageView<'a> {
-  fn new(storage: &GenericMVTable) -> SimpleStorageView {
+  pub fn new(storage: &GenericMVTable) -> SimpleStorageView {
     SimpleStorageView { storage }
   }
 }
@@ -510,7 +469,7 @@ impl<'a> StorageView for SimpleStorageView<'a> {
 }
 
 /// This reads data by first replaying the Update Views on top of the persistant data.
-struct MSStorageView<'a> {
+pub struct MSStorageView<'a> {
   storage: &'a GenericMVTable,
   update_views: &'a BTreeMap<u32, GenericTable>,
   tier: u32,
@@ -520,7 +479,7 @@ impl<'a> MSStorageView<'a> {
   /// Here, in addition to the persistent storage, we pass in the `update_views` that
   /// we want to apply on top before reading data, and a `tier` to indicate up to which
   /// update should be applied.
-  fn new(
+  pub fn new(
     storage: &'a GenericMVTable,
     update_views: &'a BTreeMap<u32, GenericTable>,
     tier: u32,
@@ -543,7 +502,7 @@ impl<'a> StorageView for MSStorageView<'a> {
 //  StorageLocalTable
 // -----------------------------------------------------------------------------------------------
 
-struct StorageLocalTable<'a, StorageViewT: StorageView> {
+pub struct StorageLocalTable<'a, StorageViewT: StorageView> {
   table_schema: &'a TableSchema,
   /// The Timestamp which we are reading data at.
   timestamp: &'a Timestamp,
@@ -554,7 +513,7 @@ struct StorageLocalTable<'a, StorageViewT: StorageView> {
 }
 
 impl<'a, StorageViewT: StorageView> StorageLocalTable<'a, StorageViewT> {
-  fn new(
+  pub fn new(
     table_schema: &'a TableSchema,
     timestamp: &'a Timestamp,
     selection: &'a proc::ValExpr,
@@ -658,46 +617,46 @@ pub struct TabletState<T: IOTypes> {
 #[derive(Debug)]
 pub struct TabletContext<T: IOTypes> {
   /// IO Objects.
-  rand: T::RngCoreT,
-  clock: T::ClockT,
-  network_output: T::NetworkOutT,
+  pub rand: T::RngCoreT,
+  pub clock: T::ClockT,
+  pub network_output: T::NetworkOutT,
 
   /// Metadata
-  this_slave_group_id: SlaveGroupId,
-  this_tablet_group_id: TabletGroupId,
-  master_eid: EndpointId,
+  pub this_slave_group_id: SlaveGroupId,
+  pub this_tablet_group_id: TabletGroupId,
+  pub master_eid: EndpointId,
 
   /// Gossip
-  gossip: Arc<GossipData>,
+  pub gossip: Arc<GossipData>,
 
   /// Distribution
-  sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-  tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
 
   // Storage
-  storage: GenericMVTable,
-  this_table_path: TablePath,
-  this_table_key_range: TabletKeyRange,
-  table_schema: TableSchema,
+  pub storage: GenericMVTable,
+  pub this_table_path: TablePath,
+  pub this_table_key_range: TabletKeyRange,
+  pub table_schema: TableSchema,
 
   // Region Isolation Algorithm
-  verifying_writes: BTreeMap<Timestamp, VerifyingReadWriteRegion>,
-  prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
-  committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
+  pub verifying_writes: BTreeMap<Timestamp, VerifyingReadWriteRegion>,
+  pub prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
+  pub committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
 
   // TODO: make (OrigP, QueryId, TableRegion) into a proper type.
-  waiting_read_protected: BTreeMap<Timestamp, BTreeSet<(OrigP, QueryId, TableRegion)>>,
-  read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
+  pub waiting_read_protected: BTreeMap<Timestamp, BTreeSet<(OrigP, QueryId, TableRegion)>>,
+  pub read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
 
   // Schema Change and Locking
-  prepared_schema_change: BTreeMap<Timestamp, HashMap<ColName, Option<ColType>>>,
-  request_index: BTreeMap<Timestamp, BTreeSet<QueryId>>, // Used to help iterate requests in order.
-  requested_locked_columns: HashMap<QueryId, (OrigP, Timestamp, Vec<ColName>)>,
+  pub prepared_schema_change: BTreeMap<Timestamp, HashMap<ColName, Option<ColType>>>,
+  pub request_index: BTreeMap<Timestamp, BTreeSet<QueryId>>, // Used to help iterate requests in order.
+  pub requested_locked_columns: HashMap<QueryId, (OrigP, Timestamp, Vec<ColName>)>,
 
   /// Child Queries
-  ms_root_query_map: HashMap<QueryId, QueryId>,
-  master_query_map: HashMap<QueryId, OrigP>,
+  pub ms_root_query_map: HashMap<QueryId, QueryId>,
+  pub master_query_map: HashMap<QueryId, OrigP>,
 }
 
 impl<T: IOTypes> TabletState<T> {
@@ -762,7 +721,7 @@ impl<T: IOTypes> TabletState<T> {
 }
 
 impl<T: IOTypes> TabletContext<T> {
-  fn ctx(&mut self) -> ServerContext<T> {
+  pub fn ctx(&mut self) -> ServerContext<T> {
     ServerContext {
       rand: &mut self.rand,
       clock: &mut self.clock,
@@ -913,25 +872,25 @@ impl<T: IOTypes> TabletContext<T> {
                 }),
               );
             } else {
-              let mut comm_plan_es = CommonQueryReplanningES {
-                timestamp: query.timestamp,
-                context: Rc::new(query.context),
-                sql_view: query.sql_query.clone(),
-                query_plan: query.query_plan,
-                sender_path: perform_query.sender_path,
-                query_id: perform_query.query_id.clone(),
-                state: CommonQueryReplanningS::Start,
-              };
-              comm_plan_es.start::<T>(self);
-              // Add ReadStatus
-              statuses.full_table_read_ess.insert(
-                perform_query.query_id.clone(),
+              let read_es = map_insert(
+                &mut statuses.full_table_read_ess,
+                &perform_query.query_id,
                 FullTableReadES::QueryReplanning(QueryReplanningES {
                   root_query_path: perform_query.root_query_path,
                   tier_map: perform_query.tier_map,
-                  status: comm_plan_es,
+                  status: CommonQueryReplanningES {
+                    timestamp: query.timestamp,
+                    context: Rc::new(query.context),
+                    sql_view: query.sql_query.clone(),
+                    query_plan: query.query_plan,
+                    sender_path: perform_query.sender_path,
+                    query_id: perform_query.query_id.clone(),
+                    state: CommonQueryReplanningS::Start,
+                  },
                 }),
               );
+              let action = read_es.start(self);
+              self.handle_read_es_action(statuses, perform_query.query_id, action);
             }
           }
           msg::GeneralQuery::UpdateQuery(query) => {
@@ -1057,7 +1016,7 @@ impl<T: IOTypes> TabletContext<T> {
   /// Adds the following triple into `requested_locked_columns`, making sure to update
   /// `request_index` as well. Here, `orig_p` is the origiator who should get the locking
   /// result.
-  fn add_requested_locked_columns(
+  pub fn add_requested_locked_columns(
     &mut self,
     orig_p: OrigP,
     timestamp: Timestamp,
@@ -1073,7 +1032,7 @@ impl<T: IOTypes> TabletContext<T> {
 
   /// This removes elements from `requested_locked_columns`, maintaining
   /// `request_index` as well, if the request is present.
-  fn remove_col_locking_request(
+  pub fn remove_col_locking_request(
     &mut self,
     query_id: QueryId,
   ) -> Option<(OrigP, Timestamp, Vec<ColName>)> {
@@ -1088,7 +1047,7 @@ impl<T: IOTypes> TabletContext<T> {
 
   /// This removes the Read Protection request from `waiting_read_protected` with the given
   /// `query_id` at the given `timestamp`, if it exists, and returns it.
-  fn remove_read_protected_request(
+  pub fn remove_read_protected_request(
     &mut self,
     timestamp: Timestamp,
     query_id: QueryId,
@@ -1112,7 +1071,7 @@ impl<T: IOTypes> TabletContext<T> {
 
   /// This removes the Read Protection request from `waiting_read_protected` with the given
   /// `query_id` at the given `timestamp`, if it exists, and returns it.
-  fn remove_m_read_protected_request(
+  pub fn remove_m_read_protected_request(
     &mut self,
     timestamp: Timestamp,
     query_id: QueryId,
@@ -1411,116 +1370,8 @@ impl<T: IOTypes> TabletContext<T> {
   ) {
     let query_id = orig_p.query_id;
     if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
-      match read_es {
-        FullTableReadES::QueryReplanning(plan_es) => {
-          // Advance the QueryReplanning now that the desired columns have been locked.
-          let comm_plan_es = &mut plan_es.status;
-          comm_plan_es.columns_locked::<T>(self);
-          // We check if the QueryReplanning is done.
-          match comm_plan_es.state {
-            CommonQueryReplanningS::Done(success) => {
-              if success {
-                // If the QueryReplanning was successful, we move the FullTableReadES
-                // to Executing in the Start state, and immediately start executing it.
-                *read_es = FullTableReadES::Executing(TableReadES {
-                  root_query_path: plan_es.root_query_path.clone(),
-                  tier_map: plan_es.tier_map.clone(),
-                  timestamp: comm_plan_es.timestamp,
-                  context: comm_plan_es.context.clone(),
-                  sender_path: comm_plan_es.sender_path.clone(),
-                  query_id: comm_plan_es.query_id.clone(),
-                  sql_query: comm_plan_es.sql_view.clone(),
-                  query_plan: comm_plan_es.query_plan.clone(),
-                  new_rms: Default::default(),
-                  state: ExecutionS::Start,
-                });
-                self.start_table_read_es(statuses, &query_id);
-              } else {
-                // Recall that if QueryReplanning had ended in a failure (i.e.
-                // having missing columns), then `CommonQueryReplanningES` will
-                // have send back the necessary responses. Thus, we only need to
-                // Exit the ES here.
-                statuses.remove(&query_id);
-              }
-            }
-            _ => {}
-          }
-        }
-        FullTableReadES::Executing(es) => {
-          let executing = cast!(ExecutionS::Executing, &mut es.state).unwrap();
-
-          // Find the SingleSubqueryStatus that sent out this requested_locked_columns.
-          // There should always be such a Subquery.
-          let subquery_idx = executing.find_subquery(&locked_cols_qid).unwrap();
-          let single_status = executing.subqueries.get_mut(subquery_idx).unwrap();
-          let locking_status = cast!(SingleSubqueryStatus::LockingSchemas, single_status).unwrap();
-
-          // None of the `new_cols` should already exist in the old subquery Context schema
-          // (since they didn't exist when the GRQueryES complained).
-          for col in &locking_status.new_cols {
-            assert!(!locking_status.old_columns.contains(col));
-          }
-
-          // Next, we compute the subset of `new_cols` that aren't in the Table
-          // Schema or the Context.
-          let mut missing_cols = Vec::<ColName>::new();
-          for col in &locking_status.new_cols {
-            if !contains_col(&self.table_schema, col, &es.timestamp) {
-              if !es.context.context_schema.column_context_schema.contains(col) {
-                missing_cols.push(col.clone());
-              }
-            }
-          }
-
-          if !missing_cols.is_empty() {
-            // If there are missing columns, we Exit and clean up, and propagate
-            // the Abort to the originator.
-
-            // Construct a ColumnsDNE containing `missing_cols` and send it
-            // back to the originator.
-            self.ctx().send_abort_data(
-              es.sender_path.clone(),
-              query_id.clone(),
-              msg::AbortedData::ColumnsDNE { missing_cols },
-            );
-
-            // Finally, Exit and Clean Up this TableReadES.
-            self.exit_and_clean_up(statuses, query_id);
-          } else {
-            // Here, we know all `new_cols` are in this Context, and so we can continue
-            // trying to evaluate the subquery.
-
-            // Now, add the `new_cols` to the schema
-            let mut new_columns = locking_status.old_columns.clone();
-            new_columns.extend(locking_status.new_cols.clone());
-
-            // For ColNames in `new_cols` that belong to this Table, we need to
-            // lock the region, so we compute a TableRegion accordingly.
-            let mut new_col_region = Vec::<ColName>::new();
-            for col in &locking_status.new_cols {
-              if contains_col(&self.table_schema, col, &es.timestamp) {
-                new_col_region.push(col.clone());
-              }
-            }
-            let new_read_region =
-              TableRegion { col_region: new_col_region, row_region: executing.row_region.clone() };
-
-            // Add a read protection requested
-            let protect_query_id = mk_qid(&mut self.rand);
-            let protect_request =
-              (OrigP::new(es.query_id.clone()), protect_query_id.clone(), new_read_region.clone());
-            btree_multimap_insert(&mut self.waiting_read_protected, &es.timestamp, protect_request);
-
-            // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
-            *single_status = SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
-              new_columns,
-              trans_table_names: locking_status.trans_table_names.clone(),
-              read_region: new_read_region,
-              query_id: protect_query_id,
-            })
-          }
-        }
-      }
+      let action = read_es.columns_locked(self, locked_cols_qid);
+      self.handle_read_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       match ms_write_es {
         FullMSTableWriteES::QueryReplanning(plan_es) => {
@@ -1774,55 +1625,6 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// Processes the Start state of TableReadES.
-  fn start_table_read_es(&mut self, statuses: &mut Statuses, query_id: &QueryId) {
-    let read_es = statuses.full_table_read_ess.get_mut(&query_id).unwrap();
-    let es = cast!(FullTableReadES::Executing, read_es).unwrap();
-
-    // Setup ability to compute a tight Keybound for every ContextRow.
-    let keybound_computer = ContextKeyboundComputer::new(
-      &es.sql_query.selection,
-      &self.table_schema,
-      &es.timestamp,
-      &es.context.context_schema,
-    );
-
-    // Compute the Row Region by taking the union across all ContextRows
-    let mut row_region = Vec::<KeyBound>::new();
-    for context_row in &es.context.context_rows {
-      match keybound_computer.compute_keybounds(&context_row) {
-        Ok(key_bounds) => {
-          for key_bound in key_bounds {
-            row_region.push(key_bound);
-          }
-        }
-        Err(eval_error) => {
-          self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
-          return;
-        }
-      }
-    }
-    row_region = compress_row_region(row_region);
-
-    // Compute the Column Region.
-    let mut col_region = HashSet::<ColName>::new();
-    col_region.extend(es.sql_query.projection.clone());
-    col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
-
-    // Move the TableReadES to the Pending state with the given ReadRegion.
-    let protect_query_id = mk_qid(&mut self.rand);
-    let col_region = Vec::from_iter(col_region.into_iter());
-    let read_region = TableRegion { col_region, row_region };
-    es.state = ExecutionS::Pending(Pending {
-      read_region: read_region.clone(),
-      query_id: protect_query_id.clone(),
-    });
-
-    // Add a read protection requested
-    let protect_request = (OrigP::new(es.query_id.clone()), protect_query_id, read_region);
-    btree_multimap_insert(&mut self.waiting_read_protected, &es.timestamp, protect_request);
-  }
-
   /// Processes the Start state of MSTableWrite.
   fn start_ms_table_write_es(&mut self, statuses: &mut Statuses, query_id: &QueryId) {
     let ms_write_es = statuses.full_ms_table_write_ess.get_mut(&query_id).unwrap();
@@ -1948,9 +1750,7 @@ impl<T: IOTypes> TabletContext<T> {
 
   fn get_path(&self, statuses: &Statuses, query_id: &QueryId) -> QueryPath {
     if let Some(read_es) = statuses.full_table_read_ess.get(query_id) {
-      // TODO: shouldn't we also switch over the QueryReplanning state?
-      let es = cast!(FullTableReadES::Executing, read_es).unwrap();
-      es.sender_path.clone()
+      read_es.sender_path()
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get(&query_id) {
       trans_read_es.sender_path()
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get(&query_id) {
@@ -2051,15 +1851,8 @@ impl<T: IOTypes> TabletContext<T> {
   ) {
     let query_id = orig_p.query_id;
     if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
-      let es = cast!(FullTableReadES::Executing, read_es).unwrap();
-      let executing = cast!(ExecutionS::Executing, &mut es.state).unwrap();
-      self.common_handle_internal_columns_dne(
-        executing,
-        query_id,
-        es.timestamp.clone(),
-        subquery_id,
-        rem_cols,
-      );
+      let action = read_es.handle_internal_columns_dne(self, subquery_id, rem_cols);
+      self.handle_read_es_action(statuses, query_id, action);
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
       let prefix = trans_read_es.location_prefix();
       let action = if let Some(gr_query_es) = statuses.gr_query_ess.get(&prefix.query_id) {
@@ -2106,99 +1899,8 @@ impl<T: IOTypes> TabletContext<T> {
   ) {
     let query_id = orig_p.query_id;
     if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
-      let es = cast!(FullTableReadES::Executing, read_es).unwrap();
-      match &mut es.state {
-        ExecutionS::Start => panic!(),
-        ExecutionS::Pending(pending) => {
-          let gr_query_statuses = match compute_subqueries::<T, _, _>(
-            GRQueryConstructorView {
-              root_query_path: &es.root_query_path,
-              tier_map: &es.tier_map,
-              timestamp: &es.timestamp,
-              sql_query: &es.sql_query,
-              query_plan: &es.query_plan,
-              query_id: &es.query_id,
-              context: &es.context,
-            },
-            &mut self.rand,
-            StorageLocalTable::new(
-              &self.table_schema,
-              &es.timestamp,
-              &es.sql_query.selection,
-              SimpleStorageView::new(&self.storage),
-            ),
-          ) {
-            Ok(gr_query_statuses) => gr_query_statuses,
-            Err(eval_error) => {
-              self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
-              return;
-            }
-          };
-
-          // Here, we have computed all GRQueryESs, and we can now add them to Executing.
-          let mut gr_query_ids = Vec::<QueryId>::new();
-          let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-          for gr_query_es in gr_query_statuses {
-            let query_id = gr_query_es.query_id.clone();
-            gr_query_ids.push(query_id.clone());
-            subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-              context: gr_query_es.context.clone(),
-              query_id: query_id.clone(),
-            }));
-            statuses.gr_query_ess.insert(query_id, gr_query_es);
-          }
-
-          // Move the ES to the Executing state.
-          es.state = ExecutionS::Executing(Executing {
-            completed: 0,
-            subqueries,
-            row_region: pending.read_region.row_region.clone(),
-          });
-
-          // Drive GRQueries
-          for query_id in gr_query_ids {
-            if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
-              // Generally, we use an `if` guard in case one child Query aborts the parent and
-              // thus all other children. (This won't happen for GRQueryESs, though)
-              let action = es.start::<T>(&mut self.ctx());
-              self.handle_gr_query_es_action(statuses, query_id, action);
-            }
-          }
-        }
-        ExecutionS::Executing(executing) => {
-          let (subquery_id, gr_query_es) = match recompute_subquery::<T, _, _>(
-            GRQueryConstructorView {
-              root_query_path: &es.root_query_path,
-              tier_map: &es.tier_map,
-              timestamp: &es.timestamp,
-              sql_query: &es.sql_query,
-              query_plan: &es.query_plan,
-              query_id: &es.query_id,
-              context: &es.context,
-            },
-            &mut self.rand,
-            StorageLocalTable::new(
-              &self.table_schema,
-              &es.timestamp,
-              &es.sql_query.selection,
-              SimpleStorageView::new(&self.storage),
-            ),
-            executing,
-            &protect_query_id,
-          ) {
-            Ok(gr_query_statuses) => gr_query_statuses,
-            Err(eval_error) => {
-              self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
-              return;
-            }
-          };
-
-          // Add in the GRQueryES to `table_statuses`, and start evaluating the it.
-          let es = map_insert(&mut statuses.gr_query_ess, &subquery_id, gr_query_es);
-          let action = es.start::<T>(&mut self.ctx());
-          self.handle_gr_query_es_action(statuses, subquery_id, action);
-        }
-      }
+      let action = read_es.read_protected(self, protect_query_id);
+      self.handle_read_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       let es = cast!(FullMSTableWriteES::Executing, ms_write_es).unwrap();
       match &mut es.state {
@@ -2437,116 +2139,13 @@ impl<T: IOTypes> TabletContext<T> {
   ) {
     let query_id = orig_p.query_id;
     if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
-      let es = cast!(FullTableReadES::Executing, read_es).unwrap();
-
-      // Add the subquery results into the TableReadES.
-      es.new_rms.extend(subquery_new_rms);
-      let executing_state = cast!(ExecutionS::Executing, &mut es.state).unwrap();
-      let subquery_idx = executing_state.find_subquery(&subquery_id).unwrap();
-      let single_status = executing_state.subqueries.get_mut(subquery_idx).unwrap();
-      let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
-      *single_status = SingleSubqueryStatus::Finished(SubqueryFinished {
-        context: context.clone(),
-        result: table_views,
-      });
-      executing_state.completed += 1;
-
-      // If all subqueries have been evaluated, finish the TableReadES
-      // and respond to the client.
-      if executing_state.completed == executing_state.subqueries.len() {
-        // Compute children.
-        let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
-        for single_status in &executing_state.subqueries {
-          let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-          let context_schema = &result.context.context_schema;
-          children.push((
-            context_schema.column_context_schema.clone(),
-            context_schema.trans_table_names(),
-          ));
-        }
-
-        // Create the ContextConstructor.
-        let context_constructor = ContextConstructor::new(
-          es.context.context_schema.clone(),
-          StorageLocalTable::new(
-            &self.table_schema,
-            &es.timestamp,
-            &es.sql_query.selection,
-            SimpleStorageView::new(&self.storage),
-          ),
-          children,
-        );
-
-        // These are all of the `ColNames` we need to evaluate things.
-        let mut top_level_cols_set = HashSet::<ColName>::new();
-        top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
-        top_level_cols_set.extend(es.sql_query.projection.clone());
-        let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
-
-        // Finally, iterate over the Context Rows of the subqueries and compute the final values.
-        let mut res_table_views = Vec::<TableView>::new();
-        for _ in 0..es.context.context_rows.len() {
-          res_table_views.push(TableView::new(es.sql_query.projection.clone()));
-        }
-
-        let eval_res = context_constructor.run(
-          &es.context.context_rows,
-          top_level_col_names.clone(),
-          &mut |context_row_idx: usize,
-                top_level_col_vals: Vec<ColValN>,
-                contexts: Vec<(ContextRow, usize)>,
-                count: u64| {
-            // First, we extract the subquery values using the child Context indices.
-            let mut subquery_vals = Vec::<TableView>::new();
-            for index in 0..contexts.len() {
-              let (_, child_context_idx) = contexts.get(index).unwrap();
-              let executing_state = cast!(ExecutionS::Executing, &es.state).unwrap();
-              let single_status = executing_state.subqueries.get(index).unwrap();
-              let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-              subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
-            }
-
-            // Now, we evaluate all expressions in the SQL query and amend the
-            // result to this TableView (if the WHERE clause evaluates to true).
-            let evaluated_select = evaluate_super_simple_select(
-              &es.sql_query,
-              &top_level_col_names,
-              &top_level_col_vals,
-              &subquery_vals,
-            )?;
-            if is_true(&evaluated_select.selection)? {
-              // This means that the current row should be selected for the result. Thus, we take
-              // the values of the project columns and insert it into the appropriate TableView.
-              let mut res_row = Vec::<ColValN>::new();
-              for res_col_name in &es.sql_query.projection {
-                let idx = top_level_col_names.iter().position(|k| res_col_name == k).unwrap();
-                res_row.push(top_level_col_vals.get(idx).unwrap().clone());
-              }
-
-              res_table_views[context_row_idx].add_row_multi(res_row, count);
-            };
-            Ok(())
-          },
-        );
-
-        if let Err(eval_error) = eval_res {
-          self.abort_with_query_error(statuses, &query_id, mk_eval_error(eval_error));
-          return;
-        }
-
-        // Build the success message and respond.
-        let success_msg = msg::QuerySuccess {
-          return_path: es.sender_path.query_id.clone(),
-          query_id: query_id.clone(),
-          result: (es.sql_query.projection.clone(), res_table_views),
-          new_rms: es.new_rms.iter().cloned().collect(),
-        };
-        let sender_path = es.sender_path.clone();
-        self.ctx().send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
-
-        // Remove the TableReadES.
-        statuses.remove(&query_id);
-      }
+      let action = read_es.handle_subquery_done(
+        self,
+        subquery_id,
+        subquery_new_rms,
+        (table_schema, table_views),
+      );
+      self.handle_read_es_action(statuses, query_id, action);
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
       let prefix = trans_read_es.location_prefix();
       let action = if let Some(gr_query_es) = statuses.gr_query_ess.get(&prefix.query_id) {
@@ -2910,6 +2509,50 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
+  /// Handles the actions specified by a TableReadES.
+  fn handle_read_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: TableAction,
+  ) {
+    match action {
+      TableAction::Wait => {}
+      TableAction::SendSubqueries(gr_query_ess) => {
+        /// Here, we have to add in the GRQueryESs and start them.
+        let mut subquery_ids = Vec::<QueryId>::new();
+        for gr_query_es in gr_query_ess {
+          let subquery_id = gr_query_es.query_id.clone();
+          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
+          subquery_ids.push(subquery_id);
+        }
+
+        // Drive GRQueries
+        for query_id in subquery_ids {
+          if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+            // Generally, we use an `if` guard in case one child Query aborts the parent and
+            // thus all other children. (This won't happen for GRQueryESs, though)
+            let action = es.start::<T>(&mut self.ctx());
+            self.handle_gr_query_es_action(statuses, query_id, action);
+          }
+        }
+      }
+      TableAction::Done => {
+        // Recall that all responses will have been sent. Here, the ES should not be
+        // holding onto any other resources, so we can simply remove it.
+        statuses.full_table_read_ess.remove(&query_id);
+      }
+      TableAction::ExitAndCleanUp(subquery_ids) => {
+        // Recall that all responses will have been sent. There only resources that the ES
+        // has are subqueries, so we Exit and Clean Up them here.
+        statuses.full_table_read_ess.remove(&query_id);
+        for subquery_id in subquery_ids {
+          self.exit_and_clean_up(statuses, subquery_id);
+        }
+      }
+    }
+  }
+
   /// Handles the actions specified by a GRQueryES.
   fn handle_gr_query_es_action(
     &mut self,
@@ -2954,45 +2597,18 @@ impl<T: IOTypes> TabletContext<T> {
   /// CancelQuery's, as well as when one on ES wants to Exit and Clean Up another ES. Note that
   /// We allow the ES at `query_id` to be in any state, and to not even exist.
   fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    // Here, we only take &mut to all ESs, since their `handle_*_action` functions require
+    // them to exist when aborting.
     if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
-      // Here, we only take a `&mut` to the GRQueryES, since `handle_trans_es_action`
-      // needs it to be present before deleting it.
+      // Abort the GRQueryES
       let action = es.exit_and_clean_up(&mut self.ctx());
       self.handle_gr_query_es_action(statuses, query_id, action);
-    } else if let Some(read_es) = statuses.full_table_read_ess.remove(&query_id) {
-      match read_es {
-        FullTableReadES::QueryReplanning(es) => self.exit_planning(es.status.state),
-        FullTableReadES::Executing(es) => match es.state {
-          ExecutionS::Start => {}
-          ExecutionS::Pending(pending) => {
-            // Here, we remove the ReadRegion from `waiting_read_protected`, if it still exists.
-            self.remove_read_protected_request(es.timestamp.clone(), pending.query_id);
-          }
-          ExecutionS::Executing(executing) => {
-            // Here, we need to cancel every Subquery. Depending on the state of the
-            // SingleSubqueryStatus, we either need to either clean up the column locking request,
-            // the ReadRegion from read protection, or abort the underlying GRQueryES.
-            for single_status in executing.subqueries {
-              match single_status {
-                SingleSubqueryStatus::LockingSchemas(locking_status) => {
-                  self.remove_col_locking_request(locking_status.query_id);
-                }
-                SingleSubqueryStatus::PendingReadRegion(protect_status) => {
-                  let protect_query_id = protect_status.query_id;
-                  self.remove_read_protected_request(es.timestamp.clone(), protect_query_id);
-                }
-                SingleSubqueryStatus::Pending(pending_status) => {
-                  self.exit_and_clean_up(statuses, pending_status.query_id);
-                }
-                SingleSubqueryStatus::Finished(_) => {}
-              }
-            }
-          }
-        },
-      }
+    } else if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
+      // Abort the TableReadES
+      let action = read_es.exit_and_clean_up(self);
+      self.handle_read_es_action(statuses, query_id, action);
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-      // Here, we only take a `&mut` to the TransTableRead, since `handle_gr_query_es_action`
-      // needs it to be present before deleting it.
+      // Abort the TransTableReadES
       let action = trans_read_es.exit_and_clean_up(&mut self.ctx());
       self.handle_trans_es_action(statuses, query_id, action);
     } else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
@@ -3021,10 +2637,7 @@ impl<T: IOTypes> TabletContext<T> {
       ms_query.pending_queries.remove(&query_id);
 
       match ms_write_es {
-        FullMSTableWriteES::QueryReplanning(es) => {
-          // Exit the query Replanning
-          self.exit_planning(es.status.state)
-        }
+        FullMSTableWriteES::QueryReplanning(es) => es.status.exit_and_clean_up(self),
         FullMSTableWriteES::Executing(es) => {
           // Exit and Clean Up state-specific resources.
           match es.state {
@@ -3069,10 +2682,7 @@ impl<T: IOTypes> TabletContext<T> {
       ms_query.pending_queries.remove(&query_id);
 
       match ms_read_es {
-        FullMSTableReadES::QueryReplanning(es) => {
-          // Exit the query Replanning
-          self.exit_planning(es.status.state)
-        }
+        FullMSTableReadES::QueryReplanning(es) => es.status.exit_and_clean_up(self),
         FullMSTableReadES::Executing(es) => {
           // Exit and Clean Up state-specific resources.
           match es.state {
@@ -3113,35 +2723,6 @@ impl<T: IOTypes> TabletContext<T> {
       }
     }
   }
-
-  fn exit_planning(&mut self, state: CommonQueryReplanningS) {
-    match state {
-      CommonQueryReplanningS::Start => {}
-      CommonQueryReplanningS::ProjectedColumnLocking { locked_columns_query_id } => {
-        self.remove_col_locking_request(locked_columns_query_id.clone());
-      }
-      CommonQueryReplanningS::ColumnLocking { locked_columns_query_id } => {
-        self.remove_col_locking_request(locked_columns_query_id.clone());
-      }
-      CommonQueryReplanningS::RecomputeQueryPlan { locked_columns_query_id, .. } => {
-        self.remove_col_locking_request(locked_columns_query_id.clone());
-      }
-      CommonQueryReplanningS::MasterQueryReplanning { master_query_id } => {
-        // Remove if present
-        if self.master_query_map.remove(&master_query_id).is_some() {
-          // If the removal was successful, we should also send a Cancellation
-          // message to the Master.
-          self.network_output.send(
-            &self.master_eid,
-            msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-              msg::CancelMasterFrozenColUsage { query_id: master_query_id },
-            )),
-          );
-        }
-      }
-      CommonQueryReplanningS::Done(_) => {}
-    }
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -3153,7 +2734,7 @@ impl<T: IOTypes> TabletContext<T> {
 /// selection expression might have ColumnRefs that aren't part of
 /// the TableSchema (i.e. part of the external Context), and we can use
 /// that to compute a tigher Keybound.
-struct ContextKeyboundComputer {
+pub struct ContextKeyboundComputer {
   /// The `ColName`s here are the ones we must read from the Context, and the `usize`
   /// points to them in the ContextRows.
   context_col_index: HashMap<ColName, usize>,
@@ -3171,7 +2752,7 @@ impl ContextKeyboundComputer {
   ///
   /// Formally, `selection`'s Top-Level Cols must all be locked in `table_schema` at `timestamp`.
   /// They must either be in the `table_schema` or in the `parent_context_schema`.
-  fn new(
+  pub fn new(
     selection: &proc::ValExpr,
     table_schema: &TableSchema,
     timestamp: &Timestamp,
@@ -3208,7 +2789,10 @@ impl ContextKeyboundComputer {
   ///
   /// Formally, these `parent_context_row` must correspond to the `parent_context_schema`
   /// provided in the constructor.
-  fn compute_keybounds(&self, parent_context_row: &ContextRow) -> Result<Vec<KeyBound>, EvalError> {
+  pub fn compute_keybounds(
+    &self,
+    parent_context_row: &ContextRow,
+  ) -> Result<Vec<KeyBound>, EvalError> {
     // First, map all External Columns names to the corresponding values
     // in this ContextRow
     let mut col_context = HashMap::<ColName, ColValN>::new();
@@ -3263,7 +2847,7 @@ pub fn compute_contexts<LocalTableT: LocalTable>(
 }
 
 /// This computes GRQueryESs corresponding to every element in `subqueries`.
-fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryComputableSql>(
+pub fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryComputableSql>(
   subquery_view: GRQueryConstructorView<SqlQueryT>,
   rand: &mut T::RngCoreT,
   local_table: LocalTableT,
@@ -3294,7 +2878,7 @@ fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryCo
 }
 
 /// This recomputes GRQueryESs that corresponds to `protect_query_id`.
-fn recompute_subquery<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryComputableSql>(
+pub fn recompute_subquery<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryComputableSql>(
   subquery_view: GRQueryConstructorView<SqlQueryT>,
   rand: &mut T::RngCoreT,
   local_table: LocalTableT,
@@ -3333,7 +2917,7 @@ fn recompute_subquery<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryCo
 // -----------------------------------------------------------------------------------------------
 
 impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
-  fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
+  pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
     matches!(self.state, CommonQueryReplanningS::Start);
     // Add column locking
     let locked_cols_qid = ctx.add_requested_locked_columns(
@@ -3349,7 +2933,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
   /// Note: The reason that `start` above is not just another case statement in this function
   /// because functions are generally  suppose to take in arguments specific to the states
   /// that they are transitioning. however, many of the other states do wait for column locking.
-  fn columns_locked<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
+  pub fn columns_locked<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
     match &self.state {
       CommonQueryReplanningS::ProjectedColumnLocking { .. } => {
         // We need to verify that the projected columns are present.
@@ -3555,6 +3139,36 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         self.state = CommonQueryReplanningS::Done(true);
       }
       _ => panic!(),
+    }
+  }
+
+  /// This Exits and Cleans up this QueryReplanningES
+  pub fn exit_and_clean_up<T: IOTypes>(&self, ctx: &mut TabletContext<T>) {
+    match &self.state {
+      CommonQueryReplanningS::Start => {}
+      CommonQueryReplanningS::ProjectedColumnLocking { locked_columns_query_id } => {
+        ctx.remove_col_locking_request(locked_columns_query_id.clone());
+      }
+      CommonQueryReplanningS::ColumnLocking { locked_columns_query_id } => {
+        ctx.remove_col_locking_request(locked_columns_query_id.clone());
+      }
+      CommonQueryReplanningS::RecomputeQueryPlan { locked_columns_query_id, .. } => {
+        ctx.remove_col_locking_request(locked_columns_query_id.clone());
+      }
+      CommonQueryReplanningS::MasterQueryReplanning { master_query_id } => {
+        // Remove if present
+        if ctx.master_query_map.remove(&master_query_id).is_some() {
+          // If the removal was successful, we should also send a Cancellation
+          // message to the Master.
+          ctx.network_output.send(
+            &ctx.master_eid,
+            msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+              msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
+            )),
+          );
+        }
+      }
+      CommonQueryReplanningS::Done(_) => {}
     }
   }
 }
