@@ -49,8 +49,8 @@ use std::sync::Arc;
 // -----------------------------------------------------------------------------------------------
 
 pub trait QueryReplanningSqlView {
-  /// Get the projected Columns of the query.
-  fn projected_cols(&self, table_schema: &TableSchema) -> Vec<ColName>;
+  /// Get the ColNames that must exist in the TableSchema (the Context is not sufficient).
+  fn required_local_cols(&self) -> Vec<ColName>;
   /// Get the TablePath that the query reads.
   fn table(&self) -> &TablePath;
   /// Get all expressions in the Query (in some deterministic order)
@@ -61,7 +61,7 @@ pub trait QueryReplanningSqlView {
 }
 
 impl QueryReplanningSqlView for proc::SuperSimpleSelect {
-  fn projected_cols(&self, _: &TableSchema) -> Vec<ColName> {
+  fn required_local_cols(&self) -> Vec<ColName> {
     return self.projection.clone();
   }
 
@@ -79,10 +79,8 @@ impl QueryReplanningSqlView for proc::SuperSimpleSelect {
 }
 
 impl QueryReplanningSqlView for proc::Update {
-  fn projected_cols(&self, table_schema: &TableSchema) -> Vec<ColName> {
-    let mut projected_cols = Vec::from_iter(self.assignment.iter().map(|(col, _)| col.clone()));
-    projected_cols.extend(table_schema.get_key_cols());
-    return projected_cols;
+  fn required_local_cols(&self) -> Vec<ColName> {
+    self.assignment.iter().map(|(col, _)| col.clone()).collect()
   }
 
   fn table(&self) -> &TablePath {
@@ -708,7 +706,7 @@ impl<T: IOTypes> TabletContext<T> {
                     query_path: QueryPath {
                       slave_group_id: self.this_slave_group_id.clone(),
                       maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
-                      query_id: ms_query_id,
+                      query_id: ms_query_id.clone(),
                     },
                   };
                   let sid = perform_query.sender_path.slave_group_id.clone();
@@ -722,7 +720,7 @@ impl<T: IOTypes> TabletContext<T> {
                   self.verifying_writes.insert(
                     timestamp,
                     VerifyingReadWriteRegion {
-                      orig_p: OrigP::new(perform_query.query_id.clone()),
+                      orig_p: OrigP::new(ms_query_id),
                       m_waiting_read_protected: BTreeSet::new(),
                       m_read_protected: BTreeSet::new(),
                       m_write_protected: BTreeSet::new(),
@@ -768,7 +766,7 @@ impl<T: IOTypes> TabletContext<T> {
                   status: CommonQueryReplanningES {
                     timestamp: query.timestamp,
                     context: Rc::new(query.context),
-                    sql_view: query.sql_query.clone(),
+                    sql_view: query.sql_query,
                     query_plan: query.query_plan,
                     sender_path: perform_query.sender_path,
                     query_id: perform_query.query_id.clone(),
@@ -782,9 +780,9 @@ impl<T: IOTypes> TabletContext<T> {
           }
           msg::GeneralQuery::UpdateQuery(query) => {
             // We first do some basic verification of the SQL query, namely assert that the
-            // assigned columns aren't key columns.e
+            // assigned columns aren't key columns. (Recall this should be enformed by the Slave.)
             for (col, _) in &query.sql_query.assignment {
-              assert!(!lookup_pos(&self.table_schema.key_cols, col).is_some())
+              assert!(lookup(&self.table_schema.key_cols, col).is_none())
             }
 
             // Lookup the MSQueryES
@@ -827,7 +825,7 @@ impl<T: IOTypes> TabletContext<T> {
                   query_path: QueryPath {
                     slave_group_id: self.this_slave_group_id.clone(),
                     maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
-                    query_id: ms_query_id,
+                    query_id: ms_query_id.clone(),
                   },
                 };
                 let sid = perform_query.sender_path.slave_group_id.clone();
@@ -841,7 +839,7 @@ impl<T: IOTypes> TabletContext<T> {
                 self.verifying_writes.insert(
                   timestamp,
                   VerifyingReadWriteRegion {
-                    orig_p: OrigP::new(perform_query.query_id.clone()),
+                    orig_p: OrigP::new(ms_query_id),
                     m_waiting_read_protected: BTreeSet::new(),
                     m_read_protected: BTreeSet::new(),
                     m_write_protected: BTreeSet::new(),
@@ -867,7 +865,7 @@ impl<T: IOTypes> TabletContext<T> {
                 status: CommonQueryReplanningES {
                   timestamp: query.timestamp,
                   context: Rc::new(query.context),
-                  sql_view: query.sql_query.clone(),
+                  sql_view: query.sql_query,
                   query_plan: query.query_plan,
                   sender_path: perform_query.sender_path,
                   query_id: perform_query.query_id.clone(),
@@ -1992,7 +1990,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
     let locked_cols_qid = ctx.add_requested_locked_columns(
       OrigP::new(self.query_id.clone()),
       self.timestamp,
-      self.sql_view.projected_cols(&ctx.table_schema),
+      self.sql_view.required_local_cols(),
     );
     self.state =
       CommonQueryReplanningS::ProjectedColumnLocking { locked_columns_query_id: locked_cols_qid };
@@ -2006,7 +2004,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
     match &self.state {
       CommonQueryReplanningS::ProjectedColumnLocking { .. } => {
         // We need to verify that the projected columns are present.
-        for col in &self.sql_view.projected_cols(&ctx.table_schema) {
+        for col in &self.sql_view.required_local_cols() {
           if !contains_col(&ctx.table_schema, col, &self.timestamp) {
             // This means a projected column doesn't exist. Thus, we Exit and Clean Up.
             ctx.ctx().send_query_error(
@@ -2167,7 +2165,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
 
         let (_, col_usage_node) = planner.plan_stage_query_with_schema(
           &mut self.query_plan.trans_table_schemas.clone(),
-          &self.sql_view.projected_cols(&ctx.table_schema), // TODO: we shouldn't have to pass this in.
+          &self.sql_view.required_local_cols(), // TODO: we shouldn't have to pass this in.
           &proc::TableRef::TablePath(self.sql_view.table().clone()),
           schema_cols,
           &self.sql_view.exprs(),

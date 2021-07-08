@@ -115,7 +115,6 @@ impl FullMSTableReadES {
         comm_plan_es.columns_locked::<T>(ctx);
 
         // We check if the QueryReplanning is done.
-        let ms_query_id = plan_es.ms_query_id.clone();
         if let CommonQueryReplanningS::Done(success) = comm_plan_es.state {
           if success {
             // If the QueryReplanning was successful, we move the FullMSTableReadES
@@ -137,7 +136,7 @@ impl FullMSTableReadES {
               query_id: comm_plan_es.query_id.clone(),
               sql_query,
               query_plan: comm_plan_es.query_plan.clone(),
-              ms_query_id,
+              ms_query_id: plan_es.ms_query_id.clone(),
               new_rms: Default::default(),
               state: MSReadExecutionS::Start,
             });

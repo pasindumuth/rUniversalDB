@@ -116,7 +116,6 @@ impl FullMSTableWriteES {
         comm_plan_es.columns_locked::<T>(ctx);
 
         // We check if the QueryReplanning is done.
-        let ms_query_id = plan_es.ms_query_id.clone();
         if let CommonQueryReplanningS::Done(success) = comm_plan_es.state {
           if success {
             // If the QueryReplanning was successful, we move the FullMSTableWriteES
@@ -140,7 +139,7 @@ impl FullMSTableWriteES {
               query_id: comm_plan_es.query_id.clone(),
               sql_query,
               query_plan: comm_plan_es.query_plan.clone(),
-              ms_query_id,
+              ms_query_id: plan_es.ms_query_id.clone(),
               new_rms: Default::default(),
               state: MSWriteExecutionS::Start,
             });
@@ -472,7 +471,7 @@ impl FullMSTableWriteES {
             // This means that the current row should be selected for the result.
             let mut res_row = Vec::<ColValN>::new();
 
-            // First we add in the Key Columns
+            // First, we add in the Key Columns
             let mut primary_key = PrimaryKey { cols: vec![] };
             for (key_col, _) in &ctx.table_schema.key_cols {
               let idx = top_level_col_names.iter().position(|col| key_col == col).unwrap();

@@ -343,7 +343,8 @@ impl FullTableReadES {
   }
 
   /// This is called if a subquery fails. This simply responds to the sender
-  /// and Exits and Clean Ups this ES.
+  /// and Exits and Clean Ups this ES. This is also called when a Deadlock Safety
+  /// Abortion happens.
   pub fn handle_internal_query_error<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
