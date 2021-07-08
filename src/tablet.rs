@@ -650,7 +650,7 @@ impl<T: IOTypes> TabletContext<T> {
               );
 
               let action = full_trans_table_es.start(&mut self.ctx(), gr_query_es);
-              self.handle_trans_es_action(statuses, perform_query.query_id, action);
+              self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
             } else {
               // This means that the target GRQueryES was deleted, so we send back
               // an Abort with LateralError.
@@ -1267,66 +1267,21 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  fn get_path(&self, statuses: &Statuses, query_id: &QueryId) -> QueryPath {
-    if let Some(read_es) = statuses.full_table_read_ess.get(query_id) {
-      read_es.sender_path()
-    } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get(&query_id) {
-      trans_read_es.sender_path()
-    } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get(&query_id) {
-      ms_write_es.sender_path().clone()
-    } else if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get(&query_id) {
-      ms_read_es.sender_path().clone()
-    } else {
-      panic!()
-    }
-  }
-
-  /// This looks up the ES of `query_id` and sends the `query_error` back to that ES's
-  /// sender_path, and also Exit and Cleans Up the ES.
-  fn abort_with_query_error(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: &QueryId,
-    query_error: msg::QueryError,
-  ) {
-    let sender_path = self.get_path(statuses, query_id);
-    self.ctx().send_query_error(sender_path, query_id.clone(), query_error);
-    self.exit_and_clean_up(statuses, query_id.clone());
-  }
-
   /// We call this when a DeadlockSafetyReadAbort happens for a `waiting_read_protected`.
-  /// Recall this behavior is distinct than if a `verifying_writes` aborts.
+  /// Recall this behavior is distinct than if a `verifying_writes` aborts. Also recall that
+  /// this only affects TableReadESs
   fn deadlock_safety_read_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP, _: TableRegion) {
-    self.abort_with_query_error(
-      statuses,
-      &orig_p.query_id,
-      msg::QueryError::DeadlockSafetyAbortion,
-    );
-  }
-
-  /// This function simply removes the the MSQueryES from `statuses`, accesses all ESs in
-  /// `pending_queries`, Exit sthen and cleans up and sends back `query_error` to their senders.
-  fn abort_ms_with_query_error(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: QueryId,
-    query_error: msg::QueryError,
-  ) {
-    let ms_query_es = statuses.ms_query_ess.remove(&query_id).unwrap();
-    for query_id in ms_query_es.pending_queries {
-      self.abort_with_query_error(statuses, &query_id, query_error.clone());
+    let query_id = orig_p.query_id;
+    if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
+      let action =
+        read_es.handle_internal_query_error(self, msg::QueryError::DeadlockSafetyAbortion);
+      self.handle_read_es_action(statuses, query_id, action)
     }
-    self.verifying_writes.remove(&ms_query_es.timestamp);
   }
 
   /// We call this when a DeadlockSafetyReadAbort happens for a `verifying_writes`.
   fn deadlock_safety_write_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP) {
-    // TODO: address this properly, then delete the above.
-    self.abort_ms_with_query_error(
-      statuses,
-      orig_p.query_id,
-      msg::QueryError::DeadlockSafetyAbortion,
-    );
+    self.exit_ms_query_es(statuses, orig_p.query_id, msg::QueryError::DeadlockSafetyAbortion);
   }
 
   /// This function just routes the InternalColumnsDNE notification from the GRQueryES.
@@ -1354,7 +1309,7 @@ impl<T: IOTypes> TabletContext<T> {
       } else {
         trans_read_es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
       };
-      self.handle_trans_es_action(statuses, query_id, action);
+      self.handle_trans_read_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       let action = ms_write_es.handle_internal_columns_dne(self, subquery_id, rem_cols);
       self.handle_ms_write_es_action(statuses, query_id, action);
@@ -1446,7 +1401,7 @@ impl<T: IOTypes> TabletContext<T> {
       } else {
         trans_read_es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
       };
-      self.handle_trans_es_action(statuses, query_id, action);
+      self.handle_trans_read_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       let action = ms_write_es.handle_subquery_done(
         self,
@@ -1508,7 +1463,7 @@ impl<T: IOTypes> TabletContext<T> {
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
       // Send InternalQueryError to TransTableReadES
       let action = trans_read_es.handle_internal_query_error(&mut self.ctx(), query_error);
-      self.handle_trans_es_action(statuses, query_id, action);
+      self.handle_trans_read_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       // Send InternalQueryError to MSTableWriteES
       let action = ms_write_es.handle_internal_query_error(self, query_error);
@@ -1521,7 +1476,7 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   /// Handles the actions specified by a TransTableReadES.
-  fn handle_trans_es_action(
+  fn handle_trans_read_es_action(
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
@@ -1608,6 +1563,35 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
+  /// Cleans up the MSQueryES with QueryId of `query_id`.
+  fn exit_ms_query_es(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    query_error: msg::QueryError,
+  ) {
+    let ms_query_es = statuses.ms_query_ess.get(&query_id).unwrap();
+
+    // Then, we Exit and Clean Up all ESs in MSQuery::pending_queries.
+    for query_id in ms_query_es.pending_queries.clone() {
+      if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+        // Here, this `query_id` is an MSTableReadES, and we abort it.
+        let action = ms_read_es.handle_internal_query_error(self, query_error.clone());
+        self.handle_ms_read_es_action(statuses, query_id.clone(), action);
+      } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
+        // Here, this `query_id` is an MSTableWriteES, and we abort it.
+        let action = ms_write_es.handle_internal_query_error(self, query_error.clone());
+        self.handle_ms_write_es_action(statuses, query_id.clone(), action);
+      }
+    }
+
+    // Finally, we remove  Clean the MSQueryES, making sure to clean up TabletContext too.
+    let ms_query_es = statuses.ms_query_ess.remove(&query_id).unwrap();
+    assert!(ms_query_es.pending_queries.is_empty()); // All ES should have been removed.
+    self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
+    self.ms_root_query_map.remove(&ms_query_es.root_query_id).unwrap();
+  }
+
   /// Handles the actions specified by a MSTableWriteES.
   fn handle_ms_write_es_action(
     &mut self,
@@ -1644,29 +1628,10 @@ impl<T: IOTypes> TabletContext<T> {
         ms_query_es.pending_queries.remove(&query_id);
       }
       MSTableWriteAction::ExitAll(query_error) => {
-        // First, we get the associate MSQueryES.
+        // We get the MSQueryES's QueryId, and then exit it.
         let ms_write_es = statuses.full_ms_table_write_ess.get(&query_id).unwrap();
         let ms_query_id = ms_write_es.ms_query_id().clone();
-        let ms_query_es = statuses.ms_query_ess.get(&ms_query_id).unwrap();
-
-        // Then, we Exit and Clean Up all ESs in MSQuery::pending_queries.
-        for query_id in ms_query_es.pending_queries.clone() {
-          if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
-            // Here, this `query_id` is an MSTableReadES, and we abort it.
-            let action = ms_read_es.handle_internal_query_error(self, query_error.clone());
-            self.handle_ms_read_es_action(statuses, query_id.clone(), action);
-          } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
-            // Here, this `query_id` is an MSTableWriteES, and we abort it.
-            let action = ms_write_es.handle_internal_query_error(self, query_error.clone());
-            self.handle_ms_write_es_action(statuses, query_id.clone(), action);
-          }
-        }
-
-        // Finally, we remove  Clean the MSQueryES, making sure to clean up TabletContext too.
-        let ms_query_es = statuses.ms_query_ess.remove(&ms_query_id).unwrap();
-        assert!(ms_query_es.pending_queries.is_empty()); // All ES should have been removed.
-        self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
-        self.ms_root_query_map.remove(&ms_query_es.root_query_id).unwrap();
+        self.exit_ms_query_es(statuses, ms_query_id, query_error);
       }
       MSTableWriteAction::ExitAndCleanUp(subquery_ids) => {
         // Recall that all responses will have been sent. We clean up all Subqueries here
@@ -1719,29 +1684,10 @@ impl<T: IOTypes> TabletContext<T> {
         ms_query_es.pending_queries.remove(&query_id);
       }
       MSTableReadAction::ExitAll(query_error) => {
-        // First, we get the associate MSQueryES.
+        // We get the MSQueryES's QueryId, and then exit it.
         let ms_read_es = statuses.full_ms_table_read_ess.get(&query_id).unwrap();
         let ms_query_id = ms_read_es.ms_query_id().clone();
-        let ms_query_es = statuses.ms_query_ess.get(&ms_query_id).unwrap();
-
-        // Then, we Exit and Clean Up all ESs in MSQuery::pending_queries.
-        for query_id in ms_query_es.pending_queries.clone() {
-          if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
-            // Here, this `query_id` is an MSTableReadES, and we abort it.
-            let action = ms_read_es.handle_internal_query_error(self, query_error.clone());
-            self.handle_ms_read_es_action(statuses, query_id.clone(), action);
-          } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
-            // Here, this `query_id` is an MSTableWriteES, and we abort it.
-            let action = ms_write_es.handle_internal_query_error(self, query_error.clone());
-            self.handle_ms_write_es_action(statuses, query_id.clone(), action);
-          }
-        }
-
-        // Finally, we remove  Clean the MSQueryES, making sure to clean up TabletContext too.
-        let ms_query_es = statuses.ms_query_ess.remove(&ms_query_id).unwrap();
-        assert!(ms_query_es.pending_queries.is_empty()); // All ES should have been removed.
-        self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
-        self.ms_root_query_map.remove(&ms_query_es.root_query_id).unwrap();
+        self.exit_ms_query_es(statuses, ms_query_id, query_error);
       }
       MSTableReadAction::ExitAndCleanUp(subquery_ids) => {
         // Recall that all responses will have been sent. We clean up all Subqueries here
@@ -1815,7 +1761,7 @@ impl<T: IOTypes> TabletContext<T> {
     } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
       // Abort the TransTableReadES
       let action = trans_read_es.exit_and_clean_up(&mut self.ctx());
-      self.handle_trans_es_action(statuses, query_id, action);
+      self.handle_trans_read_es_action(statuses, query_id, action);
     } else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all remaining participants)
       for (node_group_id, child_query_id) in tm_status.node_group_ids {
@@ -1827,16 +1773,13 @@ impl<T: IOTypes> TabletContext<T> {
           );
         }
       }
-    } else if let Some(ms_query_es) = statuses.ms_query_ess.remove(&query_id) {
+    } else if let Some(ms_query_es) = statuses.ms_query_ess.get(&query_id) {
+      // TODO: understand this better when we know how Exit And Cleanup works more.
       // Note: this code is only run when a CancelQuery comes in (from the Slave) for the
       // MSQueryES. We don't remove the MSQueryES via this code otherwise, since the Abort
       // message for the `pending_queries` to propagate up will generally vary. This anomaly is
       // rooted in the fact that MSQueryES does not own the MTable*ESs.
-      // TODO: do what we do in the action handlers for MSReadES and MSWriteES.
-      for query_id in ms_query_es.pending_queries {
-        self.abort_with_query_error(statuses, &query_id, msg::QueryError::LateralError);
-      }
-      self.verifying_writes.remove(&ms_query_es.timestamp);
+      self.exit_ms_query_es(statuses, ms_query_es.query_id.clone(), msg::QueryError::LateralError);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       // Abort the MSTableWriteES. Recall this only returns the subqueries we need to abort.
       // Also, recall that `handle_ms_read_es_action` will maintain the MSQueryES.
