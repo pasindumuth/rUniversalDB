@@ -212,7 +212,6 @@ impl FullMSTableReadES {
           let protect_query_id = mk_qid(&mut ctx.rand);
           let orig_p = OrigP::new(es.query_id.clone());
           let protect_request = (orig_p, protect_query_id.clone(), new_read_region.clone());
-          // Note: this part is the main difference between this and TableReadES.
           let verifying_write = ctx.verifying_writes.get_mut(&es.timestamp).unwrap();
           verifying_write.m_waiting_read_protected.insert(protect_request);
 
@@ -220,7 +219,6 @@ impl FullMSTableReadES {
           *single_status = SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
             new_columns,
             trans_table_names: locking_status.trans_table_names.clone(),
-            read_region: new_read_region,
             query_id: protect_query_id,
           });
           MSTableReadAction::Wait

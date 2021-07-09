@@ -215,7 +215,6 @@ impl FullMSTableWriteES {
           let protect_query_id = mk_qid(&mut ctx.rand);
           let orig_p = OrigP::new(es.query_id.clone());
           let protect_request = (orig_p, protect_query_id.clone(), new_read_region.clone());
-          // Note: this part is the main difference between this and TableReadES.
           let verifying_write = ctx.verifying_writes.get_mut(&es.timestamp).unwrap();
           verifying_write.m_waiting_read_protected.insert(protect_request);
 
@@ -223,7 +222,6 @@ impl FullMSTableWriteES {
           *single_status = SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
             new_columns,
             trans_table_names: locking_status.trans_table_names.clone(),
-            read_region: new_read_region,
             query_id: protect_query_id,
           });
           MSTableWriteAction::Wait
@@ -610,29 +608,27 @@ impl FullMSTableWriteES {
 
     // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
     // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
-    let timestamp = es.timestamp.clone();
-    if !ctx.check_write_region_isolation(&write_region, &timestamp) {
+    if !ctx.check_write_region_isolation(&write_region, &es.timestamp) {
       MSTableWriteAction::ExitAll(msg::QueryError::WriteRegionConflictWithSubsequentRead)
     } else {
       // Compute the Read Column Region.
-      let col_region = HashSet::<ColName>::from_iter(
-        es.query_plan.col_usage_node.safe_present_cols.iter().cloned(),
-      );
+      let col_region = es.query_plan.col_usage_node.safe_present_cols.clone();
+      let read_region = TableRegion { col_region, row_region };
 
       // Move the MSTableWriteES to the Pending state with the given ReadRegion.
       let protect_query_id = mk_qid(&mut ctx.rand);
-      let col_region = Vec::from_iter(col_region.into_iter());
-      let read_region = TableRegion { col_region, row_region };
       es.state = MSWriteExecutionS::Pending(Pending {
         read_region: read_region.clone(),
         query_id: protect_query_id.clone(),
       });
 
-      // Add a ReadRegion to the m_waiting_read_protected.
+      // Add a ReadRegion to the `m_waiting_read_protected` and the
+      // WriteRegion into `m_write_protected`.
       let orig_p = OrigP::new(es.query_id.clone());
       let protect_request = (orig_p, protect_query_id, read_region);
       let verifying = ctx.verifying_writes.get_mut(&es.timestamp).unwrap();
       verifying.m_waiting_read_protected.insert(protect_request);
+      verifying.m_write_protected.insert(write_region);
       MSTableWriteAction::Wait
     }
   }

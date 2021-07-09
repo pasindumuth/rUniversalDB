@@ -199,7 +199,6 @@ impl FullTableReadES {
           *single_status = SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
             new_columns,
             trans_table_names: locking_status.trans_table_names.clone(),
-            read_region: new_read_region,
             query_id: protect_query_id,
           });
 

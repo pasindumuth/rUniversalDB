@@ -105,7 +105,7 @@ impl QueryReplanningSqlView for proc::Update {
 pub enum CommonQueryReplanningS {
   Start,
   /// Used to lock the columsn in the SELECT clause or SET clause.
-  ProjectedColumnLocking {
+  RequiredLocalColumnLocking {
     locked_columns_query_id: QueryId,
   },
   /// Used to lock the query plan's columns
@@ -150,22 +150,31 @@ pub struct SubqueryLockingSchemas {
   // the prior ColNames and TransTableNames (rather than computating from the QueryPlan
   // again) so that we don't potentially lose prior ColName amendments.
   pub old_columns: Vec<ColName>,
+  /// Recall that the set of TransTables required by a subquery never changes.
+  /// This is only here to construct the QueryPlan later.
   pub trans_table_names: Vec<TransTableName>,
+  /// The `ColName`s from the InternalQueryError that was returned from the GRQueryES.
   pub new_cols: Vec<ColName>,
+  /// The QueryId of the Column Locking request that this State is waiting for.
   pub query_id: QueryId,
 }
 
 #[derive(Debug)]
 pub struct SubqueryPendingReadRegion {
+  /// This contains all columns from `old_columns`, as well as any new ones from
+  /// `new_cols` that's present in this Table that need to be locked.
   pub new_columns: Vec<ColName>,
+  /// Recall that the set of TransTables required by a subquery never changes.
+  /// This is only here to construct the QueryPlan later.
   pub trans_table_names: Vec<TransTableName>,
-  pub read_region: TableRegion,
+  /// The QueryId of the ReadRegion protection request that this State is waiting for.
   pub query_id: QueryId,
 }
 
 #[derive(Debug)]
 pub struct SubqueryPending {
   pub context: Rc<Context>,
+  /// The QueryId of GRQueryES we are waiting for.
   pub query_id: QueryId,
 }
 
@@ -205,8 +214,8 @@ pub struct Executing {
 
 impl Executing {
   pub fn find_subquery(&self, qid: &QueryId) -> Option<usize> {
-    for i in 1..self.subqueries.len() {
-      match &self.subqueries.get(i).unwrap() {
+    for (i, single_status) in self.subqueries.iter().enumerate() {
+      match single_status {
         SingleSubqueryStatus::LockingSchemas(SubqueryLockingSchemas { query_id, .. })
         | SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion { query_id, .. })
         | SingleSubqueryStatus::Pending(SubqueryPending { query_id, .. }) => {
@@ -974,6 +983,7 @@ impl<T: IOTypes> TabletContext<T> {
     return None;
   }
 
+  /// Checks if the give `write_region` has a conflict with a subsequent read.
   pub fn check_write_region_isolation(
     &self,
     write_region: &TableRegion,
@@ -1992,8 +2002,9 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
       self.timestamp,
       self.sql_view.required_local_cols(),
     );
-    self.state =
-      CommonQueryReplanningS::ProjectedColumnLocking { locked_columns_query_id: locked_cols_qid };
+    self.state = CommonQueryReplanningS::RequiredLocalColumnLocking {
+      locked_columns_query_id: locked_cols_qid,
+    };
   }
 
   /// This is called when Columns have been locked, and the originator was this ES.
@@ -2002,7 +2013,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
   /// that they are transitioning. however, many of the other states do wait for column locking.
   pub fn columns_locked<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
     match &self.state {
-      CommonQueryReplanningS::ProjectedColumnLocking { .. } => {
+      CommonQueryReplanningS::RequiredLocalColumnLocking { .. } => {
         // We need to verify that the projected columns are present.
         for col in &self.sql_view.required_local_cols() {
           if !contains_col(&ctx.table_schema, col, &self.timestamp) {
@@ -2213,13 +2224,9 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
   pub fn exit_and_clean_up<T: IOTypes>(&self, ctx: &mut TabletContext<T>) {
     match &self.state {
       CommonQueryReplanningS::Start => {}
-      CommonQueryReplanningS::ProjectedColumnLocking { locked_columns_query_id } => {
-        ctx.remove_col_locking_request(locked_columns_query_id.clone());
-      }
-      CommonQueryReplanningS::ColumnLocking { locked_columns_query_id } => {
-        ctx.remove_col_locking_request(locked_columns_query_id.clone());
-      }
-      CommonQueryReplanningS::RecomputeQueryPlan { locked_columns_query_id, .. } => {
+      CommonQueryReplanningS::RequiredLocalColumnLocking { locked_columns_query_id }
+      | CommonQueryReplanningS::ColumnLocking { locked_columns_query_id }
+      | CommonQueryReplanningS::RecomputeQueryPlan { locked_columns_query_id, .. } => {
         ctx.remove_col_locking_request(locked_columns_query_id.clone());
       }
       CommonQueryReplanningS::MasterQueryReplanning { master_query_id } => {
