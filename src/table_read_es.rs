@@ -465,7 +465,7 @@ impl FullTableReadES {
 
       // Build the success message and respond.
       let success_msg = msg::QuerySuccess {
-        return_path: es.sender_path.query_id.clone(),
+        return_qid: es.sender_path.query_id.clone(),
         query_id: es.query_id.clone(),
         result: (es.sql_query.projection.clone(), res_table_views),
         new_rms: es.new_rms.iter().cloned().collect(),

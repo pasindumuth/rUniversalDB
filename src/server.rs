@@ -68,7 +68,7 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
     abort_data: msg::AbortedData,
   ) {
     let aborted = msg::QueryAborted {
-      return_path: sender_path.query_id.clone(),
+      return_qid: sender_path.query_id.clone(),
       query_id: query_id.clone(),
       payload: abort_data,
     };

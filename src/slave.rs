@@ -678,7 +678,7 @@ impl<T: IOTypes> SlaveContext<T> {
   fn handle_query_success(&mut self, statuses: &mut Statuses, query_success: msg::QuerySuccess) {
     if let Some(tm_status) = statuses.tm_statuss.get_mut(&query_success.query_id) {
       // We just add the result of the `query_success` here.
-      let tm_wait_value = tm_status.tm_state.get_mut(&query_success.return_path).unwrap();
+      let tm_wait_value = tm_status.tm_state.get_mut(&query_success.return_qid).unwrap();
       *tm_wait_value = TMWaitValue::Result(query_success.result.clone());
       tm_status.new_rms.extend(query_success.new_rms.into_iter());
       tm_status.responded_count += 1;
@@ -739,7 +739,7 @@ impl<T: IOTypes> SlaveContext<T> {
   }
 
   fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
-    if let Some(tm_status) = statuses.tm_statuss.remove(&query_aborted.return_path) {
+    if let Some(tm_status) = statuses.tm_statuss.remove(&query_aborted.return_qid) {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all
       // remaining participants) and send the QueryAborted back to the orig_p
       for (node_group_id, child_query_id) in tm_status.node_group_ids {
@@ -831,7 +831,7 @@ impl<T: IOTypes> SlaveContext<T> {
 
   /// Handle a Prepared message sent to an MSQueryCoordES.
   fn handle_prepared(&mut self, statuses: &mut Statuses, prepared: msg::Query2PCPrepared) {
-    let query_id = prepared.return_path;
+    let query_id = prepared.return_qid;
     if let Some(ms_coord_es) = statuses.ms_coord_ess.get_mut(&query_id) {
       let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
       let preparing = cast!(CoordState::Preparing, &mut es.state).unwrap();

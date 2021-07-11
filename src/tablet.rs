@@ -1432,7 +1432,7 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
-    if let Some(tm_status) = statuses.tm_statuss.remove(&query_aborted.return_path) {
+    if let Some(tm_status) = statuses.tm_statuss.remove(&query_aborted.return_qid) {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all
       // remaining participants) and send the QueryAborted back to the orig_p
       for (node_group_id, child_query_id) in tm_status.node_group_ids {

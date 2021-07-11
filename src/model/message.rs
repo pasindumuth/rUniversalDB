@@ -114,7 +114,7 @@ pub struct CancelQuery {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QuerySuccess {
   /// The receiving node's State that the responses should be routed to.
-  pub return_path: QueryId,
+  pub return_qid: QueryId,
   pub query_id: QueryId,
   pub result: (Vec<ColName>, Vec<TableView>),
   pub new_rms: Vec<QueryPath>,
@@ -145,7 +145,7 @@ pub enum AbortedData {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QueryAborted {
-  pub return_path: QueryId,
+  pub return_qid: QueryId,
   // The QueryId of the query that was aborted.
   pub query_id: QueryId,
   pub payload: AbortedData,
@@ -208,13 +208,13 @@ pub struct Query2PCPrepare {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Query2PCPrepared {
-  pub return_path: QueryId,
+  pub return_qid: QueryId,
   pub rm_path: QueryPath,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Query2PCAborted {
-  pub return_path: QueryId,
+  pub return_qid: QueryId,
   pub rm_path: QueryPath,
 }
 
