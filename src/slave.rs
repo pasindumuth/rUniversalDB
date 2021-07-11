@@ -270,8 +270,8 @@ impl<T: IOTypes> SlaveContext<T> {
           }
           Err(payload) => self.network_output.send(
             &external_query.sender_eid,
-            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAbort(
-              msg::ExternalQueryAbort { request_id: external_query.request_id, payload },
+            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+              msg::ExternalQueryAborted { request_id: external_query.request_id, payload },
             )),
           ),
         }
@@ -785,8 +785,8 @@ impl<T: IOTypes> SlaveContext<T> {
           // and Exit and Clean Up.
           self.network_output.send(
             &es.sender_eid,
-            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAbort(
-              msg::ExternalQueryAbort {
+            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+              msg::ExternalQueryAborted {
                 request_id: es.request_id.clone(),
                 payload: msg::ExternalAbortedData::QueryExecutionError,
               },

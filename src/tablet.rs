@@ -25,7 +25,6 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::model::message::AbortedData;
 use crate::ms_table_read_es::{FullMSTableReadES, MSReadQueryReplanningES, MSTableReadAction};
 use crate::ms_table_write_es::{FullMSTableWriteES, MSTableWriteAction, MSWriteQueryReplanningES};
 use crate::multiversion_map::MVM;
@@ -901,6 +900,9 @@ impl<T: IOTypes> TabletContext<T> {
       msg::TabletMessage::Query2PCCommit(_) => unimplemented!(),
       msg::TabletMessage::MasterFrozenColUsageAborted(_) => unimplemented!(),
       msg::TabletMessage::MasterFrozenColUsageSuccess(_) => unimplemented!(),
+      msg::TabletMessage::AlterTablePrepare(_) => unimplemented!(),
+      msg::TabletMessage::AlterTableAbort(_) => unimplemented!(),
+      msg::TabletMessage::AlterTableCommit(_) => unimplemented!(),
     }
 
     self.run_main_loop(statuses);
@@ -1028,7 +1030,7 @@ impl<T: IOTypes> TabletContext<T> {
       // We set this to false, and the below code will set it back to true if need be.
       change_occurred = false;
 
-      // First, we see if we can satisfy any `requested_locked_cols`.
+      // First, we see if we can satisfy any `requested_locked_columns`.
 
       // First, compute the Timestamp that each ColName is going to change.
       let mut col_prepare_timestamps = HashMap::<ColName, Timestamp>::new();

@@ -16,7 +16,9 @@ use std::collections::HashMap;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ExternalMessage {
   ExternalQuerySuccess(ExternalQuerySuccess),
-  ExternalQueryAbort(ExternalQueryAbort),
+  ExternalQueryAborted(ExternalQueryAborted),
+  ExternalAlterTableSuccess(ExternalAlterTableSuccess),
+  ExternalAlterTableAbort(ExternalAlterTableAborted),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -67,6 +69,11 @@ pub enum TabletMessage {
   Query2PCAbort(Query2PCAbort),
   Query2PCCommit(Query2PCCommit),
 
+  // Internal AlterTable Messages
+  AlterTablePrepare(AlterTablePrepare),
+  AlterTableAbort(AlterTableAbort),
+  AlterTableCommit(AlterTableCommit),
+
   // Master Responses
   MasterFrozenColUsageAborted(MasterFrozenColUsageAborted),
   MasterFrozenColUsageSuccess(MasterFrozenColUsageSuccess),
@@ -79,6 +86,15 @@ pub enum TabletMessage {
 /// Message that go into the Master
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterMessage {
+  // External AlterTable Messages
+  PerformExternalAlterTable(PerformExternalAlterTable),
+  CancelExternalAlterTable(CancelExternalAlterTable),
+
+  // Internal AlterTable Messages
+  AlterTablePrepared(AlterTablePrepared),
+  AlterTableAborted(AlterTableAborted),
+
+  // Master FrozenColUsageAlgorithm
   PerformMasterFrozenColUsage(PerformMasterFrozenColUsage),
   CancelMasterFrozenColUsage(CancelMasterFrozenColUsage),
 }
@@ -229,7 +245,7 @@ pub struct Query2PCCommit {
 }
 
 // -------------------------------------------------------------------------------------------------
-//  External Messages
+//  Transaction Processing External Messages
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -270,7 +286,7 @@ pub enum ExternalAbortedData {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ExternalQueryAbort {
+pub struct ExternalQueryAborted {
   pub request_id: RequestId,
   pub payload: ExternalAbortedData,
 }
@@ -316,4 +332,81 @@ pub struct MasterFrozenColUsageSuccess {
   pub frozen_col_usage_tree: FrozenColUsageTree,
   // TODO: to address the `gossip` problem, we can just hold the underlying map of the MVM.
   /* pub gossip: GossipData */
+}
+
+// -------------------------------------------------------------------------------------------------
+//  AlterTable Messages
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterOp {
+  col_name: ColName,
+  /// If the `ColName` is being deleted, then this is `None`. Otherwise, it takes
+  /// on the target `ColType`.
+  maybe_col_type: Option<ColType>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTablePrepare {
+  query_id: QueryId,
+  alter_op: AlterOp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTablePrepared {
+  query_id: QueryId,
+  tablet_group_id: TabletGroupId,
+  timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAborted {
+  query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAbort {
+  query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableCommit {
+  query_id: QueryId,
+  timestamp: Timestamp,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  External AlterTable Messages
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PerformExternalAlterTable {
+  pub request_id: RequestId,
+  pub table_path: TablePath,
+  pub alter_op: AlterOp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CancelExternalAlterTable {
+  pub request_id: RequestId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ExternalAlterTableAbortData {
+  NonUniqueRequestId,
+  ParseError(String),
+  InvalidAlterOp(String),
+  Cancelled,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ExternalAlterTableAborted {
+  pub request_id: RequestId,
+  pub payload: ExternalAlterTableAbortData,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ExternalAlterTableSuccess {
+  pub request_id: RequestId,
+  pub timestamp: Timestamp,
 }

@@ -346,16 +346,16 @@ pub fn boolean_leaf_constraint<T: BoundType + Clone>(
     if col_ref == col_name {
       // In this case, we see if we can evaluate the `right` expression.
       if let Some(right_val) = evaluate_kb_expr(right.deref())? {
-        if None == right_val {
+        return if None == right_val {
           // If `right_val` is NULL, then `kb_expr` is always false.
-          return Ok(vec![]);
+          Ok(vec![])
         } else if let Some(val) = T::col_val_cast(right_val) {
           // If `right_val` has the correct Type, then we can compute a keybounds.
-          return Ok(vec![left_f(val)]);
+          Ok(vec![left_f(val)])
         } else {
           // Otherwise, we detected a TypeError.
-          return Err(EvalError::TypeError);
-        }
+          Err(EvalError::TypeError)
+        };
       }
     }
   } else if let KBExpr::ColumnRef { col_ref } = right.deref() {
@@ -363,16 +363,16 @@ pub fn boolean_leaf_constraint<T: BoundType + Clone>(
     if col_ref == col_name {
       // In this case, we see if we can evaluate the `left` expression.
       if let Some(left_val) = evaluate_kb_expr(left.deref())? {
-        if None == left_val {
+        return if None == left_val {
           // If `left_val` is NULL, then `kb_expr` is always false.
-          return Ok(vec![]);
+          Ok(vec![])
         } else if let Some(val) = T::col_val_cast(left_val) {
           // If `left_val` has the correct Type, then we can compute a keybounds.
-          return Ok(vec![right_f(val)]);
+          Ok(vec![right_f(val)])
         } else {
           // Otherwise, we detected a TypeError.
-          return Err(EvalError::TypeError);
-        }
+          Err(EvalError::TypeError)
+        };
       }
     }
   } else if let Some(val) = evaluate_kb_expr(kb_expr)? {
