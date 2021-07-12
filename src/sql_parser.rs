@@ -1,7 +1,13 @@
-use crate::model::common::iast;
+use crate::model::common::{iast, ColName, ColType};
+use crate::model::common::{proc, TablePath};
 use sqlparser::ast;
+use sqlparser::ast::DataType;
 
 // TODO: We should return a Result if there is a conversion failure to MSQuery.
+
+// -----------------------------------------------------------------------------------------------
+//  DQL Query Parsing
+// -----------------------------------------------------------------------------------------------
 
 /// This function converts the sqlparser AST into our own internal
 /// AST, `Query`. Recall that we can transform all DML and DQL transactions
@@ -151,5 +157,44 @@ fn convert_expr(expr: &ast::Expr) -> iast::ValExpr {
     ast::Expr::Value(value) => iast::ValExpr::Value { val: convert_value(value) },
     ast::Expr::Subquery(query) => iast::ValExpr::Subquery { query: Box::new(convert_query(query)) },
     _ => panic!("Expr {:?} not supported", expr),
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  DQL Query Parsing
+// -----------------------------------------------------------------------------------------------
+
+/// This function converts the sqlparser AST into an internal DDL struct.
+pub fn convert_ddl_ast(raw_query: &Vec<ast::Statement>) -> proc::AlterTable {
+  assert_eq!(raw_query.len(), 1, "Only one SQL statement support atm.");
+  let stmt = &raw_query[0];
+  match stmt {
+    ast::Statement::AlterTable { name, operation } => match operation {
+      ast::AlterTableOperation::AddColumn { column_def } => proc::AlterTable {
+        table_path: TablePath(name.0.get(0).unwrap().value.clone()),
+        alter_op: proc::AlterOp {
+          col_name: ColName(column_def.name.value.clone()),
+          maybe_col_type: Some(convert_data_type(&column_def.data_type)),
+        },
+      },
+      ast::AlterTableOperation::DropColumn { column_name, .. } => proc::AlterTable {
+        table_path: TablePath(name.0.get(0).unwrap().value.clone()),
+        alter_op: proc::AlterOp {
+          col_name: ColName(column_name.value.clone()),
+          maybe_col_type: None,
+        },
+      },
+      _ => panic!("Unsupported ast::Statement {:?}", stmt),
+    },
+    _ => panic!("Unsupported ast::Statement {:?}", stmt),
+  }
+}
+
+pub fn convert_data_type(raw_data_type: &ast::DataType) -> ColType {
+  match raw_data_type {
+    DataType::Int => ColType::Int,
+    DataType::Boolean => ColType::Bool,
+    DataType::String => ColType::String,
+    _ => panic!("Unsupported ast::DataType {:?}", raw_data_type),
   }
 }

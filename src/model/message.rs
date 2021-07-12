@@ -17,8 +17,8 @@ use std::collections::HashMap;
 pub enum ExternalMessage {
   ExternalQuerySuccess(ExternalQuerySuccess),
   ExternalQueryAborted(ExternalQueryAborted),
-  ExternalAlterTableSuccess(ExternalAlterTableSuccess),
-  ExternalAlterTableAbort(ExternalAlterTableAborted),
+  ExternalDDLQuerySuccess(ExternalDDLQuerySuccess),
+  ExternalDDLQueryAborted(ExternalDDLQueryAborted),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -87,8 +87,8 @@ pub enum TabletMessage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterMessage {
   // External AlterTable Messages
-  PerformExternalAlterTable(PerformExternalAlterTable),
-  CancelExternalAlterTable(CancelExternalAlterTable),
+  PerformExternalDDLQuery(PerformExternalDDLQuery),
+  CancelExternalDDLQuery(CancelExternalDDLQuery),
 
   // Internal AlterTable Messages
   AlterTablePrepared(AlterTablePrepared),
@@ -263,6 +263,7 @@ pub struct CancelExternalQuery {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ExternalQuerySuccess {
   pub request_id: RequestId,
+  pub timestamp: Timestamp,
   pub result: TableView,
 }
 
@@ -339,74 +340,66 @@ pub struct MasterFrozenColUsageSuccess {
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterOp {
-  col_name: ColName,
-  /// If the `ColName` is being deleted, then this is `None`. Otherwise, it takes
-  /// on the target `ColType`.
-  maybe_col_type: Option<ColType>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTablePrepare {
   query_id: QueryId,
-  alter_op: AlterOp,
+  alter_op: proc::AlterOp,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTablePrepared {
-  query_id: QueryId,
-  tablet_group_id: TabletGroupId,
-  timestamp: Timestamp,
+  pub query_id: QueryId,
+  pub tablet_group_id: TabletGroupId,
+  pub timestamp: Timestamp,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAborted {
-  query_id: QueryId,
+  pub query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAbort {
-  query_id: QueryId,
+  pub query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableCommit {
-  query_id: QueryId,
-  timestamp: Timestamp,
+  pub query_id: QueryId,
+  pub timestamp: Timestamp,
 }
 
 // -------------------------------------------------------------------------------------------------
-//  External AlterTable Messages
+//  External DDL Messages (AlterTable, CreateTable, etc)
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct PerformExternalAlterTable {
+pub struct PerformExternalDDLQuery {
+  pub sender_eid: EndpointId,
   pub request_id: RequestId,
-  pub table_path: TablePath,
-  pub alter_op: AlterOp,
+  pub query: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CancelExternalAlterTable {
+pub struct CancelExternalDDLQuery {
   pub request_id: RequestId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ExternalAlterTableAbortData {
+pub enum ExternalDDLQueryAbortData {
   NonUniqueRequestId,
   ParseError(String),
-  InvalidAlterOp(String),
+  InvalidAlterOp,
   Cancelled,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ExternalAlterTableAborted {
+pub struct ExternalDDLQueryAborted {
   pub request_id: RequestId,
-  pub payload: ExternalAlterTableAbortData,
+  pub payload: ExternalDDLQueryAbortData,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ExternalAlterTableSuccess {
+pub struct ExternalDDLQuerySuccess {
   pub request_id: RequestId,
   pub timestamp: Timestamp,
 }

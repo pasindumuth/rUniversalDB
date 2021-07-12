@@ -376,7 +376,7 @@ impl<T: IOTypes> SlaveContext<T> {
   /// Does some initial validations and MSQuery processing before we start
   /// servicing the request.
   fn init_request(
-    &mut self,
+    &self,
     external_query: &msg::PerformExternalQuery,
   ) -> Result<proc::MSQuery, msg::ExternalAbortedData> {
     if self.external_request_id_map.contains_key(&external_query.request_id) {
@@ -876,6 +876,7 @@ impl<T: IOTypes> SlaveContext<T> {
           msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
             msg::ExternalQuerySuccess {
               request_id: es.request_id.clone(),
+              timestamp: es.timestamp.clone(),
               result: table_view.clone(),
             },
           )),

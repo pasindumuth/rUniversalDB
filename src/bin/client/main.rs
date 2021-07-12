@@ -27,43 +27,24 @@
 //   }
 // }
 
-#[derive(Debug)]
-struct A {
-  p1: u32,
-  p2: u32,
-}
-
-impl A {
-  fn get_ref(&mut self) -> Ref {
-    return Ref { q: &mut self.p1 };
-  }
-}
-
-#[derive(Debug)]
-struct Ref<'a> {
-  q: &'a mut u32,
-}
-
 fn main() {
-  let mut a = A { p1: 1, p2: 2 };
-  let r = a.get_ref();
-  *r.q += 1;
-  println!("{:?}", a);
+  sql()
 }
 
-//
-// fn sql() {
-//   use sqlparser::dialect::GenericDialect;
-//   use sqlparser::parser::Parser;
-//
-//   let sql = "SELECT a, b, 123, myfunc(b) \
-//            FROM table_1 \
-//            WHERE a > b AND b < 100 \
-//            ORDER BY a DESC, b";
-//
-//   let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
-//
-//   let ast = Parser::parse_sql(&dialect, sql).unwrap();
-//
-//   println!("AST: {:#?}", ast);
-// }
+fn sql() {
+  use sqlparser::dialect::GenericDialect;
+  use sqlparser::parser::Parser;
+  //
+  // let sql = "SELECT a, b, 123, myfunc(b) \
+  //          FROM table_1 \
+  //          WHERE a > b AND b < 100 \
+  //          ORDER BY a DESC, b";
+
+  let sql = "ALTER TABLE Table ADD COLUMN col STRING;";
+
+  let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
+
+  let ast = Parser::parse_sql(&dialect, sql).unwrap();
+
+  println!("AST: {:#?}", ast);
+}

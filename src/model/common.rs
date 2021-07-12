@@ -216,7 +216,7 @@ impl RequestId {
 
 pub mod proc {
   use crate::model::common::iast::{BinaryOp, UnaryOp, Value};
-  use crate::model::common::{ColName, TablePath, TransTableName};
+  use crate::model::common::{ColName, ColType, QueryId, TablePath, TransTableName};
   use serde::{Deserialize, Serialize};
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -273,6 +273,25 @@ pub mod proc {
   pub struct MSQuery {
     pub trans_tables: Vec<(TransTableName, MSQueryStage)>,
     pub returning: TransTableName,
+  }
+
+  // DML
+
+  // (We add DML parsed SQL data here for consistency. These don't appear in
+  // `iast` because they can be constructed from SQL trivially.
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct AlterOp {
+    pub col_name: ColName,
+    /// If the `ColName` is being deleted, then this is `None`. Otherwise, it takes
+    /// on the target `ColType`.
+    pub maybe_col_type: Option<ColType>,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct AlterTable {
+    pub table_path: TablePath,
+    pub alter_op: AlterOp,
   }
 }
 
