@@ -7,6 +7,7 @@ use crate::model::message as msg;
 use crate::multiversion_map::MVM;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
+use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -81,6 +82,24 @@ impl TableSchema {
   }
 }
 
+/// A Serializable version of `TableSchema`. This is needed since it's
+/// not serializable automatically
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TableSchemaSer {
+  pub key_cols: Vec<(ColName, ColType)>,
+  pub val_cols: HashMap<ColName, (Timestamp, Vec<(Timestamp, Option<ColType>)>)>,
+}
+
+impl TableSchemaSer {
+  pub fn from_schema(schema: TableSchema) -> TableSchemaSer {
+    TableSchemaSer { key_cols: schema.key_cols, val_cols: schema.val_cols.map }
+  }
+
+  pub fn to_schema(self) -> TableSchema {
+    TableSchema { key_cols: self.key_cols, val_cols: MVM { map: self.val_cols } }
+  }
+}
+
 // -------------------------------------------------------------------------------------------------
 // Gossip
 // -------------------------------------------------------------------------------------------------
@@ -90,6 +109,38 @@ impl TableSchema {
 pub struct GossipData {
   pub gossip_gen: Gen,
   pub gossiped_db_schema: HashMap<TablePath, TableSchema>,
+}
+
+/// A Serializable version of `GossipData`. This is needed since it's
+/// not serializable automatically
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GossipDataSer {
+  pub gossip_gen: Gen,
+  pub gossiped_db_schema: HashMap<TablePath, TableSchemaSer>,
+}
+
+impl GossipDataSer {
+  pub fn from_gossip(gossip: GossipData) -> GossipDataSer {
+    GossipDataSer {
+      gossip_gen: gossip.gossip_gen,
+      gossiped_db_schema: gossip
+        .gossiped_db_schema
+        .into_iter()
+        .map(|(table_path, schema)| (table_path, TableSchemaSer::from_schema(schema)))
+        .collect(),
+    }
+  }
+
+  pub fn to_gossip(self) -> GossipData {
+    GossipData {
+      gossip_gen: self.gossip_gen,
+      gossiped_db_schema: self
+        .gossiped_db_schema
+        .into_iter()
+        .map(|(table_path, schema)| (table_path, schema.to_schema()))
+        .collect(),
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

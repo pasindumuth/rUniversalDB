@@ -1,4 +1,4 @@
-use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, TableSchema};
+use crate::common::{lookup, mk_qid, GossipData, GossipDataSer, IOTypes, NetworkOut, TableSchema};
 use crate::model::common::proc::AlterTable;
 use crate::model::common::{
   proc, ColName, EndpointId, Gen, QueryId, RequestId, SlaveGroupId, TablePath, TabletGroupId,
@@ -12,6 +12,7 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use sqlparser::test_utils::table;
+use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 
 // -----------------------------------------------------------------------------------------------
@@ -20,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug)]
 pub struct Executing {
+  responded_count: usize,
   tm_state: HashMap<TabletGroupId, Option<Timestamp>>,
 }
 
@@ -157,7 +159,7 @@ impl<T: IOTypes> MasterContext<T> {
         }
       }
       MasterMessage::CancelExternalDDLQuery(_) => {}
-      MasterMessage::AlterTablePrepared(_) => {}
+      MasterMessage::AlterTablePrepared(alter_table_prepared) => {}
       MasterMessage::AlterTableAborted(_) => {}
       MasterMessage::PerformMasterFrozenColUsage(_) => {}
       MasterMessage::CancelMasterFrozenColUsage(_) => {}
@@ -269,7 +271,69 @@ impl<T: IOTypes> MasterContext<T> {
         )
       }
 
-      es.state = AlterTableS::Executing(Executing { tm_state });
+      es.state = AlterTableS::Executing(Executing { responded_count: 0, tm_state });
+    }
+  }
+
+  /// Handle `AlterTablePrepared`
+  fn handle_alter_table_prepared(
+    &mut self,
+    statuses: &mut Statuses,
+    prepared: msg::AlterTablePrepared,
+  ) {
+    if let Some(es) = statuses.alter_table_ess.get_mut(&prepared.query_id) {
+      let executing = cast!(AlterTableS::Executing, &mut es.state).unwrap();
+      let rm_state = executing.tm_state.get_mut(&prepared.tablet_group_id).unwrap();
+      assert_eq!(rm_state, &None);
+      *rm_state = Some(prepared.timestamp.clone());
+      executing.responded_count += 1;
+
+      // Check if all RMs have responded and finish AlterTableES if so.
+      if executing.responded_count == executing.tm_state.len() {
+        // Compute the final timestamp to apply the `alter_op` at.
+        let table_schema = self.db_schema.get_mut(&es.table_path).unwrap();
+        let mut new_timestamp = table_schema.val_cols.get_lat(&es.alter_op.col_name);
+        for (_, rm_state) in &executing.tm_state {
+          new_timestamp = max(new_timestamp, rm_state.unwrap());
+        }
+
+        // Apply the `alter_op`.
+        self.gen.0 += 1;
+        table_schema.val_cols.write(
+          &es.alter_op.col_name,
+          es.alter_op.maybe_col_type.clone(),
+          new_timestamp,
+        );
+
+        // Send off AlterTableCommit to the Tablets.
+        let gossip_data = GossipDataSer::from_gossip(GossipData {
+          gossip_gen: self.gen.clone(),
+          gossiped_db_schema: self.db_schema.clone(),
+        });
+        for tid in executing.tm_state.keys() {
+          self.ctx().send_to_tablet(
+            tid.clone(),
+            msg::TabletMessage::AlterTableCommit(msg::AlterTableCommit {
+              query_id: es.query_id.clone(),
+              timestamp: new_timestamp,
+              gossip_data: gossip_data.clone(),
+            }),
+          );
+        }
+
+        // Send off a success message to the External and ECU this ES.
+        self.network_output.send(
+          &es.sender_eid,
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
+            msg::ExternalDDLQuerySuccess {
+              request_id: es.request_id.clone(),
+              timestamp: new_timestamp,
+            },
+          )),
+        );
+        let query_id = es.query_id.clone();
+        self.exit_and_clean_up(statuses, query_id);
+      }
     }
   }
 

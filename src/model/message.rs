@@ -1,5 +1,5 @@
 use crate::col_usage::FrozenColUsageNode;
-use crate::common::QueryPlan;
+use crate::common::{GossipDataSer, QueryPlan};
 use crate::model::common::{
   proc, ColName, ColType, Context, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, RequestId,
   SlaveGroupId, TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
@@ -331,8 +331,7 @@ pub struct MasterFrozenColUsageAborted {
 pub struct MasterFrozenColUsageSuccess {
   pub query_id: QueryId,
   pub frozen_col_usage_tree: FrozenColUsageTree,
-  // TODO: to address the `gossip` problem, we can just hold the underlying map of the MVM.
-  /* pub gossip: GossipData */
+  pub gossip: GossipDataSer,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -366,6 +365,7 @@ pub struct AlterTableAbort {
 pub struct AlterTableCommit {
   pub query_id: QueryId,
   pub timestamp: Timestamp,
+  pub gossip_data: GossipDataSer,
 }
 
 // -------------------------------------------------------------------------------------------------
