@@ -341,8 +341,8 @@ pub struct MasterFrozenColUsageSuccess {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTablePrepare {
-  query_id: QueryId,
-  alter_op: proc::AlterOp,
+  pub query_id: QueryId,
+  pub alter_op: proc::AlterOp,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

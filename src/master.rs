@@ -1,28 +1,99 @@
 use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, TableSchema};
 use crate::model::common::proc::AlterTable;
 use crate::model::common::{
-  proc, EndpointId, Gen, QueryId, RequestId, SlaveGroupId, TablePath, TabletGroupId,
+  proc, ColName, EndpointId, Gen, QueryId, RequestId, SlaveGroupId, TablePath, TabletGroupId,
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
 use crate::model::message::{ExternalDDLQueryAbortData, MasterMessage};
+use crate::server::CoreServerContext;
 use crate::sql_parser::convert_ddl_ast;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use sqlparser::test_utils::table;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+// -----------------------------------------------------------------------------------------------
+//  AlterTableES
+// -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub struct AlterTableTMStatus {
-  table_path: TablePath,
-  alter_op: proc::AlterOp,
-  request_id: RequestId,
+pub struct Executing {
   tm_state: HashMap<TabletGroupId, Option<Timestamp>>,
 }
 
 #[derive(Debug)]
+pub enum AlterTableS {
+  Start,
+  Executing(Executing),
+}
+
+#[derive(Debug)]
+pub struct AlterTableES {
+  // Metadata copied from outside.
+  request_id: RequestId,
+  sender_eid: EndpointId,
+
+  // Core ES data
+  query_id: QueryId,
+  table_path: TablePath,
+  alter_op: proc::AlterOp,
+
+  // State
+  state: AlterTableS,
+}
+
+#[derive(Debug, Default)]
+pub struct Statuses {
+  alter_table_ess: HashMap<QueryId, AlterTableES>,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Master State
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
 pub struct MasterState<T: IOTypes> {
+  context: MasterContext<T>,
+  statuses: Statuses,
+}
+
+impl<T: IOTypes> MasterState<T> {
+  pub fn new(
+    rand: T::RngCoreT,
+    clock: T::ClockT,
+    network_output: T::NetworkOutT,
+    tablet_forward_output: T::TabletForwardOutT,
+    db_schema: HashMap<TablePath, TableSchema>,
+    sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+    tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
+    slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+  ) -> MasterState<T> {
+    MasterState {
+      context: MasterContext {
+        rand,
+        clock,
+        network_output,
+        tablet_forward_output,
+        gen: Gen(0),
+        db_schema,
+        sharding_config,
+        tablet_address_config,
+        slave_address_config,
+        external_request_id_map: Default::default(),
+      },
+      statuses: Default::default(),
+    }
+  }
+
+  pub fn handle_incoming_message(&mut self, message: msg::MasterMessage) {
+    self.context.handle_incoming_message(&mut self.statuses, message);
+  }
+}
+
+#[derive(Debug)]
+pub struct MasterContext<T: IOTypes> {
   /// IO Objects.
   rand: T::RngCoreT,
   clock: T::ClockT,
@@ -38,47 +109,41 @@ pub struct MasterState<T: IOTypes> {
   tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   slave_address_config: HashMap<SlaveGroupId, EndpointId>,
 
-  /// AlterTable
+  /// Request Management
   external_request_id_map: HashMap<RequestId, QueryId>,
-  pending_alter_table_requests: HashMap<QueryId, (TablePath, proc::AlterOp, RequestId)>,
-  alter_table_tm_status: HashMap<QueryId, AlterTableTMStatus>,
 }
 
-impl<T: IOTypes> MasterState<T> {
-  pub fn new(
-    rand: T::RngCoreT,
-    clock: T::ClockT,
-    network_output: T::NetworkOutT,
-    tablet_forward_output: T::TabletForwardOutT,
-    db_schema: HashMap<TablePath, TableSchema>,
-    sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-    tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-    slave_address_config: HashMap<SlaveGroupId, EndpointId>,
-  ) -> MasterState<T> {
-    MasterState {
-      rand,
-      clock,
-      network_output,
-      tablet_forward_output,
-      gen: Gen(0),
-      db_schema,
-      sharding_config,
-      tablet_address_config,
-      slave_address_config,
-      external_request_id_map: Default::default(),
-      pending_alter_table_requests: Default::default(),
-      alter_table_tm_status: Default::default(),
+impl<T: IOTypes> MasterContext<T> {
+  pub fn ctx(&mut self) -> CoreServerContext<T> {
+    CoreServerContext {
+      rand: &mut self.rand,
+      clock: &mut self.clock,
+      network_output: &mut self.network_output,
+      sharding_config: &mut self.sharding_config,
+      tablet_address_config: &mut self.tablet_address_config,
+      slave_address_config: &mut self.slave_address_config,
     }
   }
 
-  pub fn handle_incoming_message(&mut self, message: msg::MasterMessage) {
+  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::MasterMessage) {
     match message {
       MasterMessage::PerformExternalDDLQuery(external_alter) => {
         match self.validate_ddl_query(&external_alter) {
           Ok(alter_table) => {
             let query_id = mk_qid(&mut self.rand);
-            let request_id = &external_alter.request_id;
+            let request_id = external_alter.request_id;
             self.external_request_id_map.insert(request_id.clone(), query_id.clone());
+            statuses.alter_table_ess.insert(
+              query_id.clone(),
+              AlterTableES {
+                request_id,
+                sender_eid: external_alter.sender_eid,
+                query_id,
+                table_path: alter_table.table_path,
+                alter_op: alter_table.alter_op,
+                state: AlterTableS::Start,
+              },
+            );
           }
           Err(payload) => {
             // We return an error because the RequestId is not unique.
@@ -97,6 +162,8 @@ impl<T: IOTypes> MasterState<T> {
       MasterMessage::PerformMasterFrozenColUsage(_) => {}
       MasterMessage::CancelMasterFrozenColUsage(_) => {}
     }
+
+    self.run_main_loop(statuses);
   }
 
   /// Validate the uniqueness of `RequestId`, parse the SQL, and do minor
@@ -129,6 +196,88 @@ impl<T: IOTypes> MasterState<T> {
           }))
         }
       }
+    }
+  }
+
+  /// Runs the `run_main_loop_once` until it finally results in no states changes.
+  fn run_main_loop(&mut self, statuses: &mut Statuses) {
+    while self.run_main_loop_once(statuses) {}
+  }
+
+  /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
+  fn run_main_loop_once(&mut self, statuses: &mut Statuses) -> bool {
+    // First, figure out which (TablePath, ColName)s are used by `alter_table_ess`.
+    let mut used_col_names = HashSet::<(&TablePath, &ColName)>::new();
+    for (_, es) in &statuses.alter_table_ess {
+      used_col_names.insert((&es.table_path, &es.alter_op.col_name));
+    }
+
+    // Then, see if there is a `pending_alter_table_requests` that doesn't use the above.
+    for (query_id, es) in &statuses.alter_table_ess {
+      if !used_col_names.contains(&(&es.table_path, &es.alter_op.col_name)) {
+        // Remove the element from `pending_*`, construct an AlterTableES, and start it.
+        self.start_alter_table(statuses, query_id.clone());
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /// Here, we start the AlterTable, sending out the Prepare messages.
+  fn start_alter_table(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    let es = statuses.alter_table_ess.get_mut(&query_id).unwrap();
+
+    // First, we compute if the `col_name` is currently present in the TableSchema of `table_path`.
+    let table_schema = self.db_schema.get(&es.table_path).unwrap();
+    let lat = table_schema.val_cols.get_lat(&es.alter_op.col_name);
+    let maybe_col_type = table_schema.val_cols.strong_static_read(&es.alter_op.col_name, lat);
+
+    // Next, we check if the current `alter_op` is Column Valid.
+    if (maybe_col_type.is_none() && es.alter_op.maybe_col_type.is_none())
+      || (maybe_col_type.is_some() && es.alter_op.maybe_col_type.is_some())
+    {
+      // This means the `alter_op` is not Column Valid. Thus, we can't service this request
+      // so we Exit and Clean Up, responding to the External.
+      self.network_output.send(
+        &es.sender_eid,
+        msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+          msg::ExternalDDLQueryAborted {
+            request_id: es.request_id.clone(),
+            payload: ExternalDDLQueryAbortData::InvalidAlterOp,
+          },
+        )),
+      );
+      self.exit_and_clean_up(statuses, query_id);
+    } else {
+      // Otherwise, we start the 2PC.
+
+      // Okay, so what now? move `state`, construct tm_state, send off altertableprepred.
+      let mut tm_state = HashMap::<TabletGroupId, Option<Timestamp>>::new();
+      for (_, tid) in self.sharding_config.get(&es.table_path).unwrap() {
+        tm_state.insert(tid.clone(), None);
+      }
+
+      // Send off AlterTablePrepare to the Tablets and move the `state` to Executing.
+      for tid in tm_state.keys() {
+        self.ctx().send_to_tablet(
+          tid.clone(),
+          msg::TabletMessage::AlterTablePrepare(msg::AlterTablePrepare {
+            query_id: query_id.clone(),
+            alter_op: es.alter_op.clone(),
+          }),
+        )
+      }
+
+      es.state = AlterTableS::Executing(Executing { tm_state });
+    }
+  }
+
+  /// Removes the `query_id` from the Master, cleaning up any remaining resources as well.
+  fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    if let Some(es) = statuses.alter_table_ess.remove(&query_id) {
+      // TODO: send aborts to all subqueries.
+      self.external_request_id_map.remove(&es.request_id);
     }
   }
 }

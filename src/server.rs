@@ -13,11 +13,66 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
-//  Common ServerContext
+//  Common Server Contexts
 // -----------------------------------------------------------------------------------------------
-// This is used to present a consistent view of Tablets and Slave to shared ESs so
-// that they can execute agnotisticly.
 
+/// This is used to present a consistent view of all servers in the system, include
+/// the Tablet, Slave, and Master. Fundamentally, in consists of basic IOTypes and the
+/// network configuration.
+pub struct CoreServerContext<'a, T: IOTypes> {
+  /// IO Objects.
+  pub rand: &'a mut T::RngCoreT,
+  pub clock: &'a mut T::ClockT,
+  pub network_output: &'a mut T::NetworkOutT,
+
+  /// Distribution
+  pub sharding_config: &'a mut HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: &'a mut HashMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: &'a mut HashMap<SlaveGroupId, EndpointId>,
+}
+
+impl<'a, T: IOTypes> CoreServerContext<'a, T> {
+  /// Send a message to the Tablet `tid`
+  pub fn send_to_tablet(&mut self, tablet_group_id: TabletGroupId, query: msg::TabletMessage) {
+    let sid = self.tablet_address_config.get(&tablet_group_id).unwrap();
+    let eid = self.slave_address_config.get(sid).unwrap();
+    self.network_output.send(
+      eid,
+      msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(tablet_group_id, query)),
+    );
+  }
+
+  /// Send a message to the Slave `sid`
+  pub fn send_to_slave(&mut self, sid: SlaveGroupId, query: msg::SlaveMessage) {
+    let eid = self.slave_address_config.get(&sid).unwrap();
+    self.network_output.send(eid, msg::NetworkMessage::Slave(query));
+  }
+
+  /// This function infers weather the CommonQuery is destined for a Slave or a Tablet
+  /// by using the `sender_path`, and then acts accordingly.
+  pub fn send_to_path(&mut self, sender_path: QueryPath, common_query: CommonQuery) {
+    if let Some(tablet_group_id) = sender_path.maybe_tablet_group_id {
+      self.send_to_tablet(tablet_group_id, common_query.tablet_msg());
+    } else {
+      self.send_to_slave(sender_path.slave_group_id, common_query.slave_msg());
+    }
+  }
+
+  /// This is similar to the above, except uses a `node_group_id`.
+  pub fn send_to_node(&mut self, node_group_id: NodeGroupId, common_query: CommonQuery) {
+    match node_group_id {
+      NodeGroupId::Tablet(tid) => {
+        self.send_to_tablet(tid, common_query.tablet_msg());
+      }
+      NodeGroupId::Slave(sid) => {
+        self.send_to_slave(sid, common_query.slave_msg());
+      }
+    };
+  }
+}
+
+/// This is used to present a consistent view of Tablets and Slave to shared ESs so
+/// that they can execute agnotisticly.
 pub struct ServerContext<'a, T: IOTypes> {
   /// IO Objects.
   pub rand: &'a mut T::RngCoreT,
@@ -42,23 +97,25 @@ pub struct ServerContext<'a, T: IOTypes> {
 }
 
 impl<'a, T: IOTypes> ServerContext<'a, T> {
-  /// This function infers weather the CommonQuery is destined for a Slave or a Tablet
-  /// by using the `sender_path`, and then acts accordingly.
-  pub fn send_to_path(&mut self, sender_path: QueryPath, common_query: CommonQuery) {
-    let sid = &sender_path.slave_group_id;
-    let eid = self.slave_address_config.get(sid).unwrap();
-    self.network_output.send(
-      &eid,
-      msg::NetworkMessage::Slave(
-        if let Some(tablet_group_id) = sender_path.maybe_tablet_group_id {
-          msg::SlaveMessage::TabletMessage(tablet_group_id.clone(), common_query.tablet_msg())
-        } else {
-          common_query.slave_msg()
-        },
-      ),
-    );
+  pub fn core_ctx(&mut self) -> CoreServerContext<T> {
+    CoreServerContext {
+      rand: &mut self.rand,
+      clock: &mut self.clock,
+      network_output: &mut self.network_output,
+      sharding_config: &mut self.sharding_config,
+      tablet_address_config: &mut self.tablet_address_config,
+      slave_address_config: &mut self.slave_address_config,
+    }
   }
 
+  /// See `CoreServerContext::send_to_path`
+  pub fn send_to_path(&mut self, sender_path: QueryPath, common_query: CommonQuery) {
+    self.core_ctx().send_to_path(sender_path, common_query);
+  }
+  /// See `CoreServerContext::send_to_node`
+  pub fn send_to_node(&mut self, node_group_id: NodeGroupId, common_query: CommonQuery) {
+    self.core_ctx().send_to_node(node_group_id, common_query);
+  }
   /// This responds to the given `sender_path` with a QueryAborted containing the given
   /// `abort_data`. Here, the `query_id` is that of the ES that's responding.
   pub fn send_abort_data(
@@ -84,27 +141,6 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
     query_error: msg::QueryError,
   ) {
     self.send_abort_data(sender_path, query_id, msg::AbortedData::QueryError(query_error));
-  }
-
-  /// This is similar to the above, except uses a `node_group_id`.
-  pub fn send_to_node(&mut self, node_group_id: NodeGroupId, common_query: CommonQuery) {
-    match node_group_id {
-      NodeGroupId::Tablet(tid) => {
-        let sid = self.tablet_address_config.get(&tid).unwrap();
-        let eid = self.slave_address_config.get(sid).unwrap();
-        self.network_output.send(
-          eid,
-          msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(
-            tid,
-            common_query.tablet_msg(),
-          )),
-        );
-      }
-      NodeGroupId::Slave(sid) => {
-        let eid = self.slave_address_config.get(&sid).unwrap();
-        self.network_output.send(eid, msg::NetworkMessage::Slave(common_query.slave_msg()));
-      }
-    };
   }
 
   /// This function computes a minimum set of `TabletGroupId`s whose `TabletKeyRange`

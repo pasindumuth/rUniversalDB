@@ -1024,6 +1024,9 @@ impl<T: IOTypes> TabletContext<T> {
     return false;
   }
 
+  // TODO: When a column change occured is done, we don't restarst the outer loop; rather
+  // we continue. This is wrong. Change the structure of this to be like should follow the
+  // structure in master.rs instead.
   fn run_main_loop(&mut self, statuses: &mut Statuses) {
     let mut change_occurred = true;
     while change_occurred {
