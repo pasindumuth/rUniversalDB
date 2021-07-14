@@ -1,12 +1,17 @@
-use crate::common::{lookup, mk_qid, GossipData, GossipDataSer, IOTypes, NetworkOut, TableSchema};
-use crate::model::common::proc::AlterTable;
+use crate::col_usage::{ColUsagePlanner, FrozenColUsageNode};
+use crate::common::{
+  lookup, mk_qid, GossipData, GossipDataSer, IOTypes, NetworkOut, TableSchema, TableSchemaSer,
+};
+use crate::model::common::proc::{AlterTable, TableRef};
 use crate::model::common::{
   proc, ColName, EndpointId, Gen, QueryId, RequestId, SlaveGroupId, TablePath, TabletGroupId,
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::model::message::{ExternalDDLQueryAbortData, MasterMessage};
-use crate::server::CoreServerContext;
+use crate::model::message::{
+  ColUsageTree, ExternalDDLQueryAbortData, FrozenColUsageTree, MasterMessage,
+};
+use crate::server::{CommonQuery, CoreServerContext};
 use crate::sql_parser::convert_ddl_ast;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -167,9 +172,46 @@ impl<T: IOTypes> MasterContext<T> {
         self.handle_alter_table_prepared(statuses, prepared);
       }
       MasterMessage::AlterTableAborted(_) => {
+        // The Tablets never send this.
         panic!()
       }
-      MasterMessage::PerformMasterFrozenColUsage(_) => {}
+      MasterMessage::PerformMasterFrozenColUsage(request) => {
+        // Construct the FrozenColUsageTree with the current database schema in the Master.
+        let timestamp = request.timestamp.clone();
+        let mut planner = ColUsagePlanner { gossiped_db_schema: &self.db_schema, timestamp };
+        let frozen_col_usage_tree = match request.col_usage_tree {
+          ColUsageTree::MSQuery(ms_query) => {
+            msg::FrozenColUsageTree::ColUsageNodes(planner.plan_ms_query(&ms_query))
+          }
+          ColUsageTree::GRQuery(gr_query) => {
+            let mut trans_table_schemas = request.trans_table_schemas;
+            msg::FrozenColUsageTree::ColUsageNodes(
+              planner.plan_gr_query(&mut trans_table_schemas, &gr_query),
+            )
+          }
+          ColUsageTree::MSQueryStage(stage_query) => {
+            let mut trans_table_schemas = request.trans_table_schemas;
+            msg::FrozenColUsageTree::ColUsageNode(
+              planner.plan_ms_query_stage(&mut trans_table_schemas, &stage_query),
+            )
+          }
+        };
+
+        // Freeze the `safe_present_cols` and `external_cols` used for every node in the
+        // FrozenColUsageTree computed above.
+        self.freeze_schema(&frozen_col_usage_tree, timestamp);
+
+        // Send the response to the originator.
+        let response = CommonQuery::MasterFrozenColUsageSuccess(msg::MasterFrozenColUsageSuccess {
+          return_qid: request.sender_path.query_id.clone(),
+          frozen_col_usage_tree,
+          gossip: GossipDataSer::from_gossip(GossipData {
+            gossip_gen: self.gen.clone(),
+            gossiped_db_schema: self.db_schema.clone(),
+          }),
+        });
+        self.ctx().send_to_path(request.sender_path, response);
+      }
       MasterMessage::CancelMasterFrozenColUsage(_) => {}
     }
 
@@ -341,6 +383,52 @@ impl<T: IOTypes> MasterContext<T> {
         );
         let query_id = es.query_id.clone();
         self.exit_and_clean_up(statuses, query_id);
+      }
+    }
+  }
+
+  /// For each node in the `frozen_col_usage_tree`, we take the union of `safe_present_cols`
+  /// and `external_col`, and then increase their lat to the `timestamp`.
+  fn freeze_schema(&mut self, frozen_col_usage_tree: &FrozenColUsageTree, timestamp: Timestamp) {
+    fn freeze_schema_r(
+      db_schema: &mut HashMap<TablePath, TableSchema>,
+      node: &FrozenColUsageNode,
+      timestamp: Timestamp,
+    ) {
+      match &node.table_ref {
+        TableRef::TablePath(table_path) => {
+          let table_schema = db_schema.get_mut(table_path).unwrap();
+          for col in &node.safe_present_cols {
+            // Update the LAT for non-Key Columns.
+            if lookup(&table_schema.key_cols, col).is_none() {
+              table_schema.val_cols.update_lat(col, timestamp);
+            }
+          }
+          for col in &node.external_cols {
+            // Recall that no External Column should be a Key Column.
+            assert!(lookup(&table_schema.key_cols, col).is_none());
+            table_schema.val_cols.update_lat(col, timestamp);
+          }
+        }
+        TableRef::TransTableName(_) => {}
+      }
+
+      // Recurse through the child nodes.
+      for child in &node.children {
+        for (_, (_, node)) in child {
+          freeze_schema_r(db_schema, node, timestamp);
+        }
+      }
+    }
+
+    match frozen_col_usage_tree {
+      FrozenColUsageTree::ColUsageNodes(nodes) => {
+        for (_, (_, node)) in nodes {
+          freeze_schema_r(&mut self.db_schema, node, timestamp);
+        }
+      }
+      FrozenColUsageTree::ColUsageNode((_, node)) => {
+        freeze_schema_r(&mut self.db_schema, node, timestamp);
       }
     }
   }

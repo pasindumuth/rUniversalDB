@@ -46,6 +46,14 @@ where
     }
   }
 
+  pub fn update_lat(&mut self, key: &K, timestamp: Timestamp) {
+    if let Some((lat, _)) = self.map.get_mut(key) {
+      *lat = max(*lat, timestamp);
+    } else {
+      self.map.insert(key.clone(), (timestamp, vec![]));
+    }
+  }
+
   /// Reads the version prior to the timestamp. Asserts that the `lat` is high enough.
   pub fn strong_static_read(&self, key: &K, timestamp: Timestamp) -> Option<V> {
     if let Some((lat, versions)) = self.map.get(key) {

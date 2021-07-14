@@ -32,7 +32,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 struct CoordQueryPlan {
   gossip_gen: Gen,
-  col_usage_nodes: HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)>,
+  col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 }
 
 #[derive(Debug)]
@@ -505,7 +505,8 @@ impl<T: IOTypes> SlaveContext<T> {
     // Get the corresponding MSQueryStage and FrozenColUsageNode.
     let (trans_table_name, ms_query_stage) =
       coord_es.sql_query.trans_tables.get(stage_idx).unwrap();
-    let (_, col_usage_node) = coord_es.query_plan.col_usage_nodes.get(trans_table_name).unwrap();
+    let (_, col_usage_node) =
+      lookup(&coord_es.query_plan.col_usage_nodes, trans_table_name).unwrap();
 
     // Compute the context of this `col_usage_node`. Recall there must be exactly one row.
     let external_trans_tables = node_external_trans_tables(col_usage_node);
@@ -524,7 +525,7 @@ impl<T: IOTypes> SlaveContext<T> {
     // Compute the `trans_table_schemas` using the `col_usage_nodes`.
     let mut trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
     for external_trans_table in external_trans_tables {
-      let (cols, _) = coord_es.query_plan.col_usage_nodes.get(&external_trans_table).unwrap();
+      let (cols, _) = lookup(&coord_es.query_plan.col_usage_nodes, &external_trans_table).unwrap();
       trans_table_schemas.insert(external_trans_table, cols.clone());
     }
 
@@ -721,7 +722,8 @@ impl<T: IOTypes> SlaveContext<T> {
       // Look up the schema for the stage in the QueryPlan, and assert it's the same as the result.
       let stage_idx = coord_es.state.stage_idx().unwrap();
       let (trans_table_name, _) = coord_es.sql_query.trans_tables.get(stage_idx).unwrap();
-      let (plan_schema, _) = coord_es.query_plan.col_usage_nodes.get(trans_table_name).unwrap();
+      let (plan_schema, _) =
+        lookup(&coord_es.query_plan.col_usage_nodes, trans_table_name).unwrap();
       assert_eq!(plan_schema, &schema);
       // Recall that since we only send out one ContextRow, there should only be one TableView.
       assert_eq!(table_views.len(), 1);
@@ -1187,6 +1189,11 @@ impl MSQueryCoordReplanningES {
           &ctx.master_eid,
           msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
             msg::PerformMasterFrozenColUsage {
+              sender_path: QueryPath {
+                slave_group_id: ctx.this_slave_group_id.clone(),
+                maybe_tablet_group_id: None,
+                query_id: self.query_id.clone(),
+              },
               query_id: master_query_id.clone(),
               timestamp: self.timestamp,
               trans_table_schemas: HashMap::new(),

@@ -184,6 +184,8 @@ pub enum CommonQuery {
   CancelQuery(msg::CancelQuery),
   QueryAborted(msg::QueryAborted),
   QuerySuccess(msg::QuerySuccess),
+  MasterFrozenColUsageSuccess(msg::MasterFrozenColUsageSuccess),
+  MasterFrozenColUsageAborted(msg::MasterFrozenColUsageAborted),
 }
 
 impl CommonQuery {
@@ -193,6 +195,12 @@ impl CommonQuery {
       CommonQuery::CancelQuery(query) => msg::TabletMessage::CancelQuery(query),
       CommonQuery::QueryAborted(query) => msg::TabletMessage::QueryAborted(query),
       CommonQuery::QuerySuccess(query) => msg::TabletMessage::QuerySuccess(query),
+      CommonQuery::MasterFrozenColUsageSuccess(query) => {
+        msg::TabletMessage::MasterFrozenColUsageSuccess(query)
+      }
+      CommonQuery::MasterFrozenColUsageAborted(query) => {
+        msg::TabletMessage::MasterFrozenColUsageAborted(query)
+      }
     }
   }
 
@@ -202,6 +210,12 @@ impl CommonQuery {
       CommonQuery::CancelQuery(query) => msg::SlaveMessage::CancelQuery(query),
       CommonQuery::QueryAborted(query) => msg::SlaveMessage::QueryAborted(query),
       CommonQuery::QuerySuccess(query) => msg::SlaveMessage::QuerySuccess(query),
+      CommonQuery::MasterFrozenColUsageSuccess(query) => {
+        msg::SlaveMessage::MasterFrozenColUsageSuccess(query)
+      }
+      CommonQuery::MasterFrozenColUsageAborted(query) => {
+        msg::SlaveMessage::MasterFrozenColUsageAborted(query)
+      }
     }
   }
 }

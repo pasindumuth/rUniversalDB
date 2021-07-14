@@ -1100,7 +1100,7 @@ impl<T: IOTypes> TabletContext<T> {
           // to be high enough in `val_cols`.
           for col in cols {
             if lookup_pos(&self.table_schema.key_cols, col).is_none() {
-              self.table_schema.val_cols.read(col, timestamp.clone());
+              self.table_schema.val_cols.update_lat(col, timestamp.clone());
             }
           }
 
@@ -2244,6 +2244,11 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
               &ctx.master_eid,
               msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
                 msg::PerformMasterFrozenColUsage {
+                  sender_path: QueryPath {
+                    slave_group_id: ctx.this_slave_group_id.clone(),
+                    maybe_tablet_group_id: Some(ctx.this_tablet_group_id.clone()),
+                    query_id: self.query_id.clone(),
+                  },
                   query_id: master_query_id.clone(),
                   timestamp: self.timestamp,
                   trans_table_schemas: self.query_plan.trans_table_schemas.clone(),

@@ -305,12 +305,16 @@ pub enum ColUsageTree {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum FrozenColUsageTree {
-  ColUsageNodes(HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)>),
-  ColUsageNode(FrozenColUsageNode),
+  ColUsageNodes(Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>),
+  ColUsageNode((Vec<ColName>, FrozenColUsageNode)),
 }
+
+// These messages follow the same PCSA pattern, including using common data members
+// (i.e. `sender_path`, `query_id`, and `return_qid`).
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformMasterFrozenColUsage {
+  pub sender_path: QueryPath,
   pub query_id: QueryId,
   pub timestamp: Timestamp,
   pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,
@@ -324,12 +328,12 @@ pub struct CancelMasterFrozenColUsage {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterFrozenColUsageAborted {
-  pub query_id: QueryId,
+  pub return_qid: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterFrozenColUsageSuccess {
-  pub query_id: QueryId,
+  pub return_qid: QueryId,
   pub frozen_col_usage_tree: FrozenColUsageTree,
   pub gossip: GossipDataSer,
 }

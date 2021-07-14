@@ -160,6 +160,57 @@ impl<'a> ColUsagePlanner<'a> {
     );
   }
 
+  pub fn plan_select(
+    &mut self,
+    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
+    select: &proc::SuperSimpleSelect,
+  ) -> (Vec<ColName>, FrozenColUsageNode) {
+    self.plan_stage_query(
+      trans_table_ctx,
+      &select.projection,
+      &select.from,
+      &vec![select.selection.clone()],
+    )
+  }
+
+  pub fn plan_update(
+    &mut self,
+    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
+    update: &proc::Update,
+  ) -> (Vec<ColName>, FrozenColUsageNode) {
+    let mut projection = Vec::new();
+    for (col, _) in &self.gossiped_db_schema.get(&update.table).unwrap().key_cols {
+      projection.push(col.clone());
+    }
+    for (col, _) in &update.assignment {
+      projection.push(col.clone());
+    }
+
+    let mut exprs = Vec::new();
+    exprs.push(update.selection.clone());
+    for (_, expr) in &update.assignment {
+      exprs.push(expr.clone());
+    }
+
+    self.plan_stage_query(
+      trans_table_ctx,
+      &projection,
+      &proc::TableRef::TablePath(update.table.clone()),
+      &exprs,
+    )
+  }
+
+  pub fn plan_ms_query_stage(
+    &mut self,
+    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
+    stage_query: &proc::MSQueryStage,
+  ) -> (Vec<ColName>, FrozenColUsageNode) {
+    match stage_query {
+      proc::MSQueryStage::SuperSimpleSelect(select) => self.plan_select(trans_table_ctx, select),
+      proc::MSQueryStage::Update(update) => self.plan_update(trans_table_ctx, update),
+    }
+  }
+
   pub fn plan_gr_query(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
@@ -169,12 +220,7 @@ impl<'a> ColUsagePlanner<'a> {
     for (trans_table_name, child_query) in &query.trans_tables {
       match child_query {
         proc::GRQueryStage::SuperSimpleSelect(select) => {
-          let (cols, node) = self.plan_stage_query(
-            trans_table_ctx,
-            &select.projection,
-            &select.from,
-            &vec![select.selection.clone()],
-          );
+          let (cols, node) = self.plan_select(trans_table_ctx, select);
           children.push((trans_table_name.clone(), (cols.clone(), node)));
           trans_table_ctx.insert(trans_table_name.clone(), cols);
         }
@@ -186,46 +232,13 @@ impl<'a> ColUsagePlanner<'a> {
   pub fn plan_ms_query(
     &mut self,
     query: &proc::MSQuery,
-  ) -> HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)> {
+  ) -> Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> {
     let mut trans_table_ctx = HashMap::<TransTableName, Vec<ColName>>::new();
-    let mut children = HashMap::<TransTableName, (Vec<ColName>, FrozenColUsageNode)>::new();
+    let mut children = Vec::<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>::new();
     for (trans_table_name, child_query) in &query.trans_tables {
-      match child_query {
-        proc::MSQueryStage::SuperSimpleSelect(select) => {
-          let (cols, node) = self.plan_stage_query(
-            &mut trans_table_ctx,
-            &select.projection,
-            &select.from,
-            &vec![select.selection.clone()],
-          );
-          children.insert(trans_table_name.clone(), (cols.clone(), node));
-          trans_table_ctx.insert(trans_table_name.clone(), cols);
-        }
-        proc::MSQueryStage::Update(update) => {
-          let mut projection = Vec::new();
-          for (col, _) in &self.gossiped_db_schema.get(&update.table).unwrap().key_cols {
-            projection.push(col.clone());
-          }
-          for (col, _) in &update.assignment {
-            projection.push(col.clone());
-          }
-
-          let mut exprs = Vec::new();
-          exprs.push(update.selection.clone());
-          for (_, expr) in &update.assignment {
-            exprs.push(expr.clone());
-          }
-
-          let (cols, node) = self.plan_stage_query(
-            &mut trans_table_ctx,
-            &projection,
-            &proc::TableRef::TablePath(update.table.clone()),
-            &exprs,
-          );
-          children.insert(trans_table_name.clone(), (cols.clone(), node));
-          trans_table_ctx.insert(trans_table_name.clone(), cols);
-        }
-      }
+      let (cols, node) = self.plan_ms_query_stage(&mut trans_table_ctx, child_query);
+      children.push((trans_table_name.clone(), (cols.clone(), node)));
+      trans_table_ctx.insert(trans_table_name.clone(), cols);
     }
     return children;
   }
@@ -430,7 +443,7 @@ mod test {
     let mut planner = ColUsagePlanner { gossiped_db_schema: &schema, timestamp: Timestamp(0) };
     let col_usage_nodes = planner.plan_ms_query(&ms_query);
 
-    let exp_col_usage_nodes: HashMap<TransTableName, (Vec<ColName>, FrozenColUsageNode)> = vec![
+    let exp_col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> = vec![
       (
         mk_ttab("tt0"),
         (
@@ -484,9 +497,7 @@ mod test {
           },
         ),
       ),
-    ]
-    .into_iter()
-    .collect();
+    ];
 
     assert_eq!(col_usage_nodes, exp_col_usage_nodes);
   }
