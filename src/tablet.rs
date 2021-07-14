@@ -551,7 +551,6 @@ pub struct TabletContext<T: IOTypes> {
 
   /// Child Queries
   pub ms_root_query_map: HashMap<QueryId, QueryId>,
-  pub master_query_map: HashMap<QueryId, OrigP>,
 }
 
 impl<T: IOTypes> TabletState<T> {
@@ -605,7 +604,6 @@ impl<T: IOTypes> TabletState<T> {
         request_index: Default::default(),
         requested_locked_columns: Default::default(),
         ms_root_query_map: Default::default(),
-        master_query_map: Default::default(),
       },
       statuses: Default::default(),
     }
@@ -629,7 +627,6 @@ impl<T: IOTypes> TabletContext<T> {
       sharding_config: &mut self.sharding_config,
       tablet_address_config: &mut self.tablet_address_config,
       slave_address_config: &mut self.slave_address_config,
-      master_query_map: &mut self.master_query_map,
     }
   }
 
@@ -2256,7 +2253,6 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
                 },
               )),
             );
-            ctx.master_query_map.insert(master_query_id.clone(), OrigP::new(self.query_id.clone()));
 
             // Advance Read Status
             self.state = CommonQueryReplanningS::MasterQueryReplanning { master_query_id };
@@ -2282,17 +2278,14 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         ctx.remove_col_locking_request(locked_columns_query_id.clone());
       }
       CommonQueryReplanningS::MasterQueryReplanning { master_query_id } => {
-        // Remove if present
-        if ctx.master_query_map.remove(&master_query_id).is_some() {
-          // If the removal was successful, we should also send a Cancellation
-          // message to the Master.
-          ctx.network_output.send(
-            &ctx.master_eid,
-            msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-              msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
-            )),
-          );
-        }
+        // If the removal was successful, we should also send a Cancellation
+        // message to the Master.
+        ctx.network_output.send(
+          &ctx.master_eid,
+          msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+            msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
+          )),
+        );
       }
       CommonQueryReplanningS::Done(_) => {}
     }

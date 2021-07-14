@@ -91,9 +91,6 @@ pub struct ServerContext<'a, T: IOTypes> {
   pub sharding_config: &'a mut HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: &'a mut HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: &'a mut HashMap<SlaveGroupId, EndpointId>,
-
-  /// Child Queries
-  pub master_query_map: &'a mut HashMap<QueryId, OrigP>,
 }
 
 impl<'a, T: IOTypes> ServerContext<'a, T> {

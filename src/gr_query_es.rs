@@ -300,17 +300,14 @@ impl GRQueryES {
         GRQueryAction::ExitAndCleanUp(vec![read_stage.pending_status.query_id.clone()])
       }
       GRExecutionS::MasterQueryReplanning(planning) => {
-        // Remove if present
-        if ctx.master_query_map.remove(&planning.master_query_id).is_some() {
-          // If the removal was successful, we should also send a Cancellation
-          // message to the Master.
-          ctx.network_output.send(
-            &ctx.master_eid,
-            msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-              msg::CancelMasterFrozenColUsage { query_id: planning.master_query_id.clone() },
-            )),
-          );
-        }
+        // If the removal was successful, we should also send a Cancellation
+        // message to the Master.
+        ctx.network_output.send(
+          &ctx.master_eid,
+          msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+            msg::CancelMasterFrozenColUsage { query_id: planning.master_query_id.clone() },
+          )),
+        );
         GRQueryAction::ExitAndCleanUp(vec![])
       }
     }

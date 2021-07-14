@@ -497,17 +497,14 @@ impl FullTransTableReadES {
         match &es.state {
           TransQueryReplanningS::Start => {}
           TransQueryReplanningS::MasterQueryReplanning { master_query_id } => {
-            // Remove if present
-            if ctx.master_query_map.remove(&master_query_id).is_some() {
-              // If the removal was successful, we should also send a Cancellation
-              // message to the Master.
-              ctx.network_output.send(
-                &ctx.master_eid,
-                msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-                  msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
-                )),
-              );
-            }
+            // If the removal was successful, we should also send a Cancellation
+            // message to the Master.
+            ctx.network_output.send(
+              &ctx.master_eid,
+              msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+                msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
+              )),
+            );
           }
           TransQueryReplanningS::Done(_) => {}
         }
@@ -636,7 +633,6 @@ impl TransQueryReplanningES {
               },
             )),
           );
-          ctx.master_query_map.insert(master_query_id.clone(), self.orig_p.clone());
 
           // Advance Replanning State.
           self.state = TransQueryReplanningS::MasterQueryReplanning { master_query_id };

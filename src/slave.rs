@@ -188,9 +188,6 @@ pub struct SlaveContext<T: IOTypes> {
 
   /// External Query Management
   external_request_id_map: HashMap<RequestId, QueryId>,
-
-  /// Child Queries
-  master_query_map: HashMap<QueryId, OrigP>,
 }
 
 impl<T: IOTypes> SlaveState<T> {
@@ -219,7 +216,6 @@ impl<T: IOTypes> SlaveState<T> {
         tablet_address_config,
         slave_address_config,
         external_request_id_map: Default::default(),
-        master_query_map: Default::default(),
       },
       statuses: Default::default(),
     }
@@ -243,7 +239,6 @@ impl<T: IOTypes> SlaveContext<T> {
       sharding_config: &mut self.sharding_config,
       tablet_address_config: &mut self.tablet_address_config,
       slave_address_config: &mut self.slave_address_config,
-      master_query_map: &mut self.master_query_map,
     }
   }
 
@@ -1079,17 +1074,14 @@ impl<T: IOTypes> SlaveContext<T> {
           match plan_es.state {
             MSQueryCoordReplanningS::Start => {}
             MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id } => {
-              // Remove if present
-              if self.master_query_map.remove(&master_query_id).is_some() {
-                // If the removal was successful, we should also send a Cancellation
-                // message to the Master.
-                self.network_output.send(
-                  &self.master_eid,
-                  msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-                    msg::CancelMasterFrozenColUsage { query_id: master_query_id },
-                  )),
-                );
-              }
+              // If the removal was successful, we should also send a Cancellation
+              // message to the Master.
+              self.network_output.send(
+                &self.master_eid,
+                msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+                  msg::CancelMasterFrozenColUsage { query_id: master_query_id },
+                )),
+              );
             }
             MSQueryCoordReplanningS::Done(_) => {}
           }
@@ -1201,7 +1193,6 @@ impl MSQueryCoordReplanningES {
             },
           )),
         );
-        ctx.master_query_map.insert(master_query_id.clone(), OrigP::new(self.query_id.clone()));
 
         // Advance Replanning State.
         self.state = MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id };
