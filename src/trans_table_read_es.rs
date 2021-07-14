@@ -614,7 +614,6 @@ impl TransQueryReplanningES {
         if !self.context.context_schema.column_context_schema.contains(&col) {
           // This means we need to consult the Master.
           let master_query_id = mk_qid(ctx.rand);
-
           ctx.network_output.send(
             &ctx.master_eid,
             msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(

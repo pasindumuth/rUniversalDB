@@ -900,8 +900,36 @@ impl<T: IOTypes> TabletContext<T> {
       msg::TabletMessage::Query2PCPrepare(_) => unimplemented!(),
       msg::TabletMessage::Query2PCAbort(_) => unimplemented!(),
       msg::TabletMessage::Query2PCCommit(_) => unimplemented!(),
-      msg::TabletMessage::MasterFrozenColUsageAborted(_) => unimplemented!(),
-      msg::TabletMessage::MasterFrozenColUsageSuccess(_) => unimplemented!(),
+      msg::TabletMessage::MasterFrozenColUsageAborted(_) => panic!(),
+      msg::TabletMessage::MasterFrozenColUsageSuccess(success) => {
+        // Update the Gossip with incoming Gossip data.
+        let gossip_data = success.gossip.clone().to_gossip();
+        if self.gossip.gossip_gen < gossip_data.gossip_gen {
+          self.gossip = Arc::new(gossip_data);
+        }
+
+        // Route the response to the appropriate ES.
+        let query_id = success.return_qid;
+        if let Some(table_read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
+          table_read_es.handle_master_response(
+            self,
+            success.gossip.gossip_gen,
+            success.frozen_col_usage_tree,
+          );
+        } else if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+          ms_read_es.handle_master_response(
+            self,
+            success.gossip.gossip_gen,
+            success.frozen_col_usage_tree,
+          );
+        } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
+          ms_write_es.handle_master_response(
+            self,
+            success.gossip.gossip_gen,
+            success.frozen_col_usage_tree,
+          );
+        }
+      }
       msg::TabletMessage::AlterTablePrepare(prepare) => {
         // Check a few guaranteed properties.
         let col_name = &prepare.alter_op.col_name;
@@ -2236,7 +2264,6 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           if !self.context.context_schema.column_context_schema.contains(&col) {
             // This means we need to consult the Master.
             let master_query_id = mk_qid(&mut ctx.rand);
-
             ctx.network_output.send(
               &ctx.master_eid,
               msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
@@ -2265,6 +2292,42 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         self.state = CommonQueryReplanningS::Done(true);
       }
       _ => panic!(),
+    }
+  }
+
+  /// Handles the Query Plan constructed by the Master.
+  pub fn handle_master_response<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+    gossip_gen: Gen,
+    tree: msg::FrozenColUsageTree,
+  ) {
+    // Recall that since we only send single nodes, we expect the `tree` to just be a `node`.
+    let (_, node) = cast!(msg::FrozenColUsageTree::ColUsageNode, tree).unwrap();
+
+    // Compute the set of External Columns that still aren't in the Context.
+    let mut missing_cols = Vec::<ColName>::new();
+    for col in &node.external_cols {
+      if !self.context.context_schema.column_context_schema.contains(&col) {
+        missing_cols.push(col.clone());
+      }
+    }
+
+    if !missing_cols.is_empty() {
+      // If the above set is non-empty, that means the QueryReplanning has conclusively
+      // detected an insufficient Context, and so we respond to the sender and move to Done.
+      ctx.ctx().send_abort_data(
+        self.sender_path.clone(),
+        self.query_id.clone(),
+        msg::AbortedData::ColumnsDNE { missing_cols },
+      );
+      self.state = CommonQueryReplanningS::Done(false);
+      return;
+    } else {
+      // This means the QueryReplanning was a success, so we update the QueryPlan and go to Done.
+      self.query_plan.gossip_gen = gossip_gen;
+      self.query_plan.col_usage_node = node;
+      self.state = CommonQueryReplanningS::Done(true);
     }
   }
 

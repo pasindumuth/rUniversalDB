@@ -1176,7 +1176,6 @@ impl MSQueryCoordReplanningES {
       if !child.external_cols.is_empty() {
         // If there are External Columns in any of the stages, then we need to consult the Master.
         let master_query_id = mk_qid(&mut ctx.rand);
-
         ctx.network_output.send(
           &ctx.master_eid,
           msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(

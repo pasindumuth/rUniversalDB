@@ -3,8 +3,8 @@ use crate::common::{map_insert, mk_qid, IOTypes, KeyBound, OrigP, QueryPlan, Tab
 use crate::expression::{compress_row_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, ColName, ColValN, Context, ContextRow, QueryId, QueryPath, TableView, TierMap, Timestamp,
-  TransTableName,
+  proc, ColName, ColValN, Context, ContextRow, Gen, QueryId, QueryPath, TableView, TierMap,
+  Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::{
@@ -111,48 +111,8 @@ impl FullMSTableReadES {
     match self {
       FullMSTableReadES::QueryReplanning(plan_es) => {
         // Advance the QueryReplanning now that the desired columns have been locked.
-        let comm_plan_es = &mut plan_es.status;
-        comm_plan_es.columns_locked::<T>(ctx);
-
-        // We check if the QueryReplanning is done.
-        if let CommonQueryReplanningS::Done(success) = comm_plan_es.state {
-          if success {
-            // If the QueryReplanning was successful, we move the FullMSTableReadES
-            // to Executing in the Start state, and immediately start executing it.
-
-            // First, we look up the `tier` of this Table being read.
-            let sql_query = comm_plan_es.sql_view.clone();
-            let tier_map = plan_es.tier_map.clone();
-            let tier = tier_map.map.get(sql_query.table()).unwrap().clone();
-
-            // Then, we construct the MSTableReadES.
-            *self = FullMSTableReadES::Executing(MSTableReadES {
-              root_query_path: plan_es.root_query_path.clone(),
-              tier_map,
-              timestamp: comm_plan_es.timestamp,
-              tier,
-              context: comm_plan_es.context.clone(),
-              sender_path: comm_plan_es.sender_path.clone(),
-              query_id: comm_plan_es.query_id.clone(),
-              sql_query,
-              query_plan: comm_plan_es.query_plan.clone(),
-              ms_query_id: plan_es.ms_query_id.clone(),
-              new_rms: Default::default(),
-              state: MSReadExecutionS::Start,
-            });
-
-            // Finally, we start the MSReadTableES.
-            self.start_ms_table_read_es(ctx)
-          } else {
-            // Recall that if QueryReplanning had ended in a failure (i.e. having missing
-            // columns), then `CommonQueryReplanningES` will have send back the necessary
-            // responses. Thus, we only need to Exit the ES here. (Recall this doesn't imply
-            // a fatal Error for the whole transaction, so we don't return ExitAll).
-            MSTableReadAction::ExitAndCleanUp(Vec::new())
-          }
-        } else {
-          MSTableReadAction::Wait
-        }
+        plan_es.status.columns_locked::<T>(ctx);
+        self.check_query_replanning_done(ctx)
       }
       FullMSTableReadES::Executing(es) => {
         let executing = cast!(MSReadExecutionS::Executing, &mut es.state).unwrap();
@@ -224,6 +184,65 @@ impl FullMSTableReadES {
           MSTableReadAction::Wait
         }
       }
+    }
+  }
+
+  /// Handle Master Response, routing it to the QueryReplanning.
+  pub fn handle_master_response<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+    gossip_gen: Gen,
+    tree: msg::FrozenColUsageTree,
+  ) -> MSTableReadAction {
+    let plan_es = cast!(FullMSTableReadES::QueryReplanning, self).unwrap();
+    plan_es.status.handle_master_response(ctx, gossip_gen, tree);
+    self.check_query_replanning_done(ctx)
+  }
+
+  /// Checks if the QueryReplanning is in `Done` and act accordingly.
+  pub fn check_query_replanning_done<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+  ) -> MSTableReadAction {
+    let plan_es = cast!(FullMSTableReadES::QueryReplanning, self).unwrap();
+    let comm_plan_es = &mut plan_es.status;
+    if let CommonQueryReplanningS::Done(success) = comm_plan_es.state {
+      if success {
+        // If the QueryReplanning was successful, we move the FullMSTableReadES
+        // to Executing in the Start state, and immediately start executing it.
+
+        // First, we look up the `tier` of this Table being read.
+        let sql_query = comm_plan_es.sql_view.clone();
+        let tier_map = plan_es.tier_map.clone();
+        let tier = tier_map.map.get(sql_query.table()).unwrap().clone();
+
+        // Then, we construct the MSTableReadES.
+        *self = FullMSTableReadES::Executing(MSTableReadES {
+          root_query_path: plan_es.root_query_path.clone(),
+          tier_map,
+          timestamp: comm_plan_es.timestamp,
+          tier,
+          context: comm_plan_es.context.clone(),
+          sender_path: comm_plan_es.sender_path.clone(),
+          query_id: comm_plan_es.query_id.clone(),
+          sql_query,
+          query_plan: comm_plan_es.query_plan.clone(),
+          ms_query_id: plan_es.ms_query_id.clone(),
+          new_rms: Default::default(),
+          state: MSReadExecutionS::Start,
+        });
+
+        // Finally, we start the MSReadTableES.
+        self.start_ms_table_read_es(ctx)
+      } else {
+        // Recall that if QueryReplanning had ended in a failure (i.e. having missing
+        // columns), then `CommonQueryReplanningES` will have send back the necessary
+        // responses. Thus, we only need to Exit the ES here. (Recall this doesn't imply
+        // a fatal Error for the whole transaction, so we don't return ExitAll).
+        MSTableReadAction::ExitAndCleanUp(Vec::new())
+      }
+    } else {
+      MSTableReadAction::Wait
     }
   }
 
