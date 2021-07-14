@@ -56,6 +56,19 @@ where
     }
   }
 
+  /// Get the latest version at the `lat`
+  pub fn get_last_version(&self, key: &K) -> Option<&V> {
+    if let Some((_, versions)) = self.map.get(key) {
+      if let Some((_, val)) = versions.iter().last() {
+        val.as_ref()
+      } else {
+        None
+      }
+    } else {
+      None
+    }
+  }
+
   /// Reads the version prior to the timestamp. This doesn't mutate
   /// the lat if the read happens with a future timestamp.
   pub fn static_read(&self, key: &K, timestamp: Timestamp) -> Option<V> {

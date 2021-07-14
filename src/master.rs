@@ -158,9 +158,17 @@ impl<T: IOTypes> MasterContext<T> {
           }
         }
       }
-      MasterMessage::CancelExternalDDLQuery(_) => {}
-      MasterMessage::AlterTablePrepared(alter_table_prepared) => {}
-      MasterMessage::AlterTableAborted(_) => {}
+      MasterMessage::CancelExternalDDLQuery(cancel) => {
+        if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
+          self.exit_and_clean_up(statuses, query_id.clone())
+        }
+      }
+      MasterMessage::AlterTablePrepared(prepared) => {
+        self.handle_alter_table_prepared(statuses, prepared);
+      }
+      MasterMessage::AlterTableAborted(_) => {
+        panic!()
+      }
       MasterMessage::PerformMasterFrozenColUsage(_) => {}
       MasterMessage::CancelMasterFrozenColUsage(_) => {}
     }
@@ -232,8 +240,7 @@ impl<T: IOTypes> MasterContext<T> {
 
     // First, we compute if the `col_name` is currently present in the TableSchema of `table_path`.
     let table_schema = self.db_schema.get(&es.table_path).unwrap();
-    let lat = table_schema.val_cols.get_lat(&es.alter_op.col_name);
-    let maybe_col_type = table_schema.val_cols.strong_static_read(&es.alter_op.col_name, lat);
+    let maybe_col_type = table_schema.val_cols.get_last_version(&es.alter_op.col_name);
 
     // Next, we check if the current `alter_op` is Column Valid.
     if (maybe_col_type.is_none() && es.alter_op.maybe_col_type.is_none())
@@ -296,6 +303,7 @@ impl<T: IOTypes> MasterContext<T> {
         for (_, rm_state) in &executing.tm_state {
           new_timestamp = max(new_timestamp, rm_state.unwrap());
         }
+        new_timestamp.0 += 1; // We add 1, since we can't actually modify a value at a `lat`.
 
         // Apply the `alter_op`.
         self.gen.0 += 1;
@@ -340,8 +348,20 @@ impl<T: IOTypes> MasterContext<T> {
   /// Removes the `query_id` from the Master, cleaning up any remaining resources as well.
   fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
     if let Some(es) = statuses.alter_table_ess.remove(&query_id) {
-      // TODO: send aborts to all subqueries.
       self.external_request_id_map.remove(&es.request_id);
+      match es.state {
+        AlterTableS::Start => {}
+        AlterTableS::Executing(executing) => {
+          for (tid, _) in executing.tm_state {
+            self.ctx().send_to_tablet(
+              tid.clone(),
+              msg::TabletMessage::AlterTableAbort(msg::AlterTableAbort {
+                query_id: es.query_id.clone(),
+              }),
+            );
+          }
+        }
+      }
     }
   }
 }
