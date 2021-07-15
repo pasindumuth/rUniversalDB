@@ -6,7 +6,8 @@ use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRExecutionS, GRQueryConstructorView, GRQueryES, GRQueryPlan};
 use crate::model::common::{
-  proc, ColName, ColType, ColValN, ContextRow, ContextSchema, TableView, Timestamp, TransTableName,
+  proc, ColName, ColType, ColValN, ContextRow, ContextSchema, Gen, TableView, Timestamp,
+  TransTableName,
 };
 use crate::model::common::{Context, QueryId, QueryPath, TierMap, TransTableLocationPrefix};
 use crate::model::message as msg;
@@ -187,6 +188,29 @@ impl FullTransTableReadES {
   ) -> TransTableAction {
     let plan_es = cast!(Self::QueryReplanning, self).unwrap();
     plan_es.start::<T, SourceT>(ctx, trans_table_source);
+    self.check_query_replanning_done(ctx, trans_table_source)
+  }
+
+  /// Handle Master Response, routing it to the QueryReplanning.
+  pub fn handle_master_response<T: IOTypes, SourceT: TransTableSource>(
+    &mut self,
+    ctx: &mut ServerContext<T>,
+    trans_table_source: &SourceT,
+    gossip_gen: Gen,
+    tree: msg::FrozenColUsageTree,
+  ) -> TransTableAction {
+    let plan_es = cast!(FullTransTableReadES::QueryReplanning, self).unwrap();
+    plan_es.handle_master_response(ctx, gossip_gen, tree);
+    self.check_query_replanning_done(ctx, trans_table_source)
+  }
+
+  /// Checks if the QueryReplanning is in `Done` and act accordingly.
+  pub fn check_query_replanning_done<T: IOTypes, SourceT: TransTableSource>(
+    &mut self,
+    ctx: &mut ServerContext<T>,
+    trans_table_source: &SourceT,
+  ) -> TransTableAction {
+    let plan_es = cast!(FullTransTableReadES::QueryReplanning, self).unwrap();
     if let TransQueryReplanningS::Done(success) = &plan_es.state {
       if *success {
         // If the QueryReplanning was successful, we move the FullTransTableReadES
@@ -642,6 +666,60 @@ impl TransQueryReplanningES {
       // If we get here that means we have successfully computed a valid QueryPlan,
       // and we are done.
       self.state = TransQueryReplanningS::Done(true);
+    }
+  }
+
+  /// Handles the Query Plan constructed by the Master.
+  pub fn handle_master_response<T: IOTypes>(
+    &mut self,
+    ctx: &mut ServerContext<T>,
+    gossip_gen: Gen,
+    tree: msg::FrozenColUsageTree,
+  ) {
+    // Recall that since we only send single nodes, we expect the `tree` to just be a `node`.
+    let (_, node) = cast!(msg::FrozenColUsageTree::ColUsageNode, tree).unwrap();
+
+    // Compute the set of External Columns that still aren't in the Context.
+    let mut missing_cols = Vec::<ColName>::new();
+    for col in &node.external_cols {
+      if !self.context.context_schema.column_context_schema.contains(&col) {
+        missing_cols.push(col.clone());
+      }
+    }
+
+    if !missing_cols.is_empty() {
+      // If the above set is non-empty, that means the QueryReplanning has conclusively
+      // detected an insufficient Context, and so we respond to the sender and move to Done.
+      ctx.send_abort_data(
+        self.sender_path.clone(),
+        self.query_id.clone(),
+        msg::AbortedData::ColumnsDNE { missing_cols },
+      );
+      self.state = TransQueryReplanningS::Done(false);
+      return;
+    } else {
+      // This means the QueryReplanning was a success, so we update the QueryPlan and go to Done.
+      self.query_plan.gossip_gen = gossip_gen;
+      self.query_plan.col_usage_node = node;
+      self.state = TransQueryReplanningS::Done(true);
+    }
+  }
+
+  /// This Exits and Cleans up this QueryReplanningES
+  pub fn exit_and_clean_up<T: IOTypes>(&self, ctx: &mut ServerContext<T>) {
+    match &self.state {
+      TransQueryReplanningS::Start => {}
+      TransQueryReplanningS::MasterQueryReplanning { master_query_id } => {
+        // If the removal was successful, we should also send a Cancellation
+        // message to the Master.
+        ctx.network_output.send(
+          &ctx.master_eid,
+          msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+            msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
+          )),
+        );
+      }
+      TransQueryReplanningS::Done(_) => {}
     }
   }
 }

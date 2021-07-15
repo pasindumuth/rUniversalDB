@@ -910,24 +910,41 @@ impl<T: IOTypes> TabletContext<T> {
 
         // Route the response to the appropriate ES.
         let query_id = success.return_qid;
-        if let Some(table_read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
-          table_read_es.handle_master_response(
+        if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
+          let action = read_es.handle_master_response(
             self,
             success.gossip.gossip_gen,
             success.frozen_col_usage_tree,
           );
-        } else if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
-          ms_read_es.handle_master_response(
-            self,
-            success.gossip.gossip_gen,
-            success.frozen_col_usage_tree,
-          );
+          self.handle_read_es_action(statuses, query_id, action);
+        } else if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+          let prefix = trans_read_es.location_prefix();
+          let action = if let Some(gr_query_es) = statuses.gr_query_ess.get(&prefix.query_id) {
+            trans_read_es.handle_master_response(
+              &mut self.ctx(),
+              gr_query_es,
+              success.gossip.gossip_gen,
+              success.frozen_col_usage_tree,
+            )
+          } else {
+            trans_read_es
+              .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+          };
+          self.handle_trans_read_es_action(statuses, query_id, action);
         } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
-          ms_write_es.handle_master_response(
+          let action = ms_write_es.handle_master_response(
             self,
             success.gossip.gossip_gen,
             success.frozen_col_usage_tree,
           );
+          self.handle_ms_write_es_action(statuses, query_id, action);
+        } else if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+          let action = ms_read_es.handle_master_response(
+            self,
+            success.gossip.gossip_gen,
+            success.frozen_col_usage_tree,
+          );
+          self.handle_ms_read_es_action(statuses, query_id, action);
         }
       }
       msg::TabletMessage::AlterTablePrepare(prepare) => {
