@@ -253,7 +253,7 @@ impl FullMSTableWriteES {
   pub fn read_protected<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
-    ms_query_ess: &HashMap<QueryId, MSQueryES>,
+    ms_query_ess: &mut HashMap<QueryId, MSQueryES>,
     protect_query_id: QueryId,
   ) -> MSTableWriteAction {
     let es = cast!(FullMSTableWriteES::Executing, self).unwrap();
@@ -285,27 +285,33 @@ impl FullMSTableWriteES {
           }
         };
 
-        // Here, we have computed all GRQueryESs, and we can now add them to Executing.
-        let mut gr_query_ids = Vec::<QueryId>::new();
-        let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-        for gr_query_es in &gr_query_statuses {
-          let query_id = gr_query_es.query_id.clone();
-          gr_query_ids.push(query_id.clone());
-          subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-            context: gr_query_es.context.clone(),
-            query_id: query_id.clone(),
-          }));
+        if gr_query_statuses.is_empty() {
+          // Since there are no subqueries, we can go straight to finishing the ES.
+          self.finish_ms_table_write_es(ctx, ms_query_ess)
+        } else {
+          // Here, we have to evaluate subqueries. Thus, we go to Executing and return
+          // SendSubqueries to the parent server.
+          let mut gr_query_ids = Vec::<QueryId>::new();
+          let mut subqueries = Vec::<SingleSubqueryStatus>::new();
+          for gr_query_es in &gr_query_statuses {
+            let query_id = gr_query_es.query_id.clone();
+            gr_query_ids.push(query_id.clone());
+            subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+              context: gr_query_es.context.clone(),
+              query_id: query_id.clone(),
+            }));
+          }
+
+          // Move the ES to the Executing state.
+          es.state = MSWriteExecutionS::Executing(Executing {
+            completed: 0,
+            subqueries,
+            row_region: pending.read_region.row_region.clone(),
+          });
+
+          // Return the subqueries
+          MSTableWriteAction::SendSubqueries(gr_query_statuses)
         }
-
-        // Move the ES to the Executing state.
-        es.state = MSWriteExecutionS::Executing(Executing {
-          completed: 0,
-          subqueries,
-          row_region: pending.read_region.row_region.clone(),
-        });
-
-        // Return the subqueries
-        MSTableWriteAction::SendSubqueries(gr_query_statuses)
       }
       MSWriteExecutionS::Executing(executing) => {
         let ms_query_es = ms_query_ess.get(&es.ms_query_id).unwrap();
@@ -414,125 +420,137 @@ impl FullMSTableWriteES {
     if executing_state.completed < executing_state.subqueries.len() {
       MSTableWriteAction::Wait
     } else {
-      // Compute children.
-      let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
-      for single_status in &executing_state.subqueries {
-        let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-        let context_schema = &result.context.context_schema;
-        children
-          .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
-      }
+      self.finish_ms_table_write_es(ctx, ms_query_ess)
+    }
+  }
 
-      // Create the ContextConstructor.
-      let update_views = &ms_query_ess.get_mut(&es.ms_query_id).unwrap().update_views;
-      let storage_view = MSStorageView::new(&ctx.storage, update_views, es.tier.clone() - 1);
-      let context_constructor = ContextConstructor::new(
-        es.context.context_schema.clone(),
-        StorageLocalTable::new(
-          &ctx.table_schema,
-          &es.timestamp,
-          &es.sql_query.selection,
-          storage_view,
-        ),
-        children,
-      );
+  /// Handles a ES finishing with all subqueries results in.
+  pub fn finish_ms_table_write_es<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+    ms_query_ess: &mut HashMap<QueryId, MSQueryES>,
+  ) -> MSTableWriteAction {
+    let es = cast!(FullMSTableWriteES::Executing, self).unwrap();
+    let executing_state = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
 
-      // These are all of the `ColNames` we need to evaluate the Update. This consists of all
-      // Top-Level Columns for every expression, as well as all Key Columns (since they are
-      // included in the projected columns).
-      let mut top_level_cols_set = HashSet::<ColName>::new();
-      top_level_cols_set.extend(ctx.table_schema.get_key_cols());
-      top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
-      for (_, expr) in &es.sql_query.assignment {
-        top_level_cols_set.extend(collect_top_level_cols(expr));
-      }
-      let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
+    // Compute children.
+    let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+    for single_status in &executing_state.subqueries {
+      let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
+      let context_schema = &result.context.context_schema;
+      children
+        .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
+    }
 
-      // Setup the TableView that we are going to return and the UpdateView that we're going
-      // to hold in the MSQueryES.
-      let mut res_col_names = Vec::<ColName>::new();
-      res_col_names.extend(ctx.table_schema.get_key_cols());
-      res_col_names.extend(es.sql_query.assignment.iter().map(|(name, _)| name.clone()));
-      let mut res_table_view = TableView::new(res_col_names.clone());
-      let mut update_view = GenericTable::new();
+    // Create the ContextConstructor.
+    let update_views = &ms_query_ess.get_mut(&es.ms_query_id).unwrap().update_views;
+    let storage_view = MSStorageView::new(&ctx.storage, update_views, es.tier.clone() - 1);
+    let context_constructor = ContextConstructor::new(
+      es.context.context_schema.clone(),
+      StorageLocalTable::new(
+        &ctx.table_schema,
+        &es.timestamp,
+        &es.sql_query.selection,
+        storage_view,
+      ),
+      children,
+    );
 
-      // Finally, iterate over the Context Rows of the subqueries and compute the final values.
-      let eval_res = context_constructor.run(
-        &es.context.context_rows,
-        top_level_col_names.clone(),
-        &mut |context_row_idx: usize,
-              top_level_col_vals: Vec<ColValN>,
-              contexts: Vec<(ContextRow, usize)>,
-              count: u64| {
-          assert_eq!(context_row_idx, 0); // Recall there is only one ContextRow for Updates.
+    // These are all of the `ColNames` we need to evaluate the Update. This consists of all
+    // Top-Level Columns for every expression, as well as all Key Columns (since they are
+    // included in the projected columns).
+    let mut top_level_cols_set = HashSet::<ColName>::new();
+    top_level_cols_set.extend(ctx.table_schema.get_key_cols());
+    top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
+    for (_, expr) in &es.sql_query.assignment {
+      top_level_cols_set.extend(collect_top_level_cols(expr));
+    }
+    let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
 
-          // First, we extract the subquery values using the child Context indices.
-          let mut subquery_vals = Vec::<TableView>::new();
-          for index in 0..contexts.len() {
-            let (_, child_context_idx) = contexts.get(index).unwrap();
-            let executing_state = cast!(MSWriteExecutionS::Executing, &es.state).unwrap();
-            let single_status = executing_state.subqueries.get(index).unwrap();
-            let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-            subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
+    // Setup the TableView that we are going to return and the UpdateView that we're going
+    // to hold in the MSQueryES.
+    let mut res_col_names = Vec::<ColName>::new();
+    res_col_names.extend(ctx.table_schema.get_key_cols());
+    res_col_names.extend(es.sql_query.assignment.iter().map(|(name, _)| name.clone()));
+    let mut res_table_view = TableView::new(res_col_names.clone());
+    let mut update_view = GenericTable::new();
+
+    // Finally, iterate over the Context Rows of the subqueries and compute the final values.
+    let eval_res = context_constructor.run(
+      &es.context.context_rows,
+      top_level_col_names.clone(),
+      &mut |context_row_idx: usize,
+            top_level_col_vals: Vec<ColValN>,
+            contexts: Vec<(ContextRow, usize)>,
+            count: u64| {
+        assert_eq!(context_row_idx, 0); // Recall there is only one ContextRow for Updates.
+
+        // First, we extract the subquery values using the child Context indices.
+        let mut subquery_vals = Vec::<TableView>::new();
+        for index in 0..contexts.len() {
+          let (_, child_context_idx) = contexts.get(index).unwrap();
+          let executing_state = cast!(MSWriteExecutionS::Executing, &es.state).unwrap();
+          let single_status = executing_state.subqueries.get(index).unwrap();
+          let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
+          subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
+        }
+
+        // Now, we evaluate all expressions in the SQL query and amend the
+        // result to this TableView (if the WHERE clause evaluates to true).
+        let evaluated_update = evaluate_update(
+          &es.sql_query,
+          &top_level_col_names,
+          &top_level_col_vals,
+          &subquery_vals,
+        )?;
+        if is_true(&evaluated_update.selection)? {
+          // This means that the current row should be selected for the result.
+          let mut res_row = Vec::<ColValN>::new();
+
+          // First, we add in the Key Columns
+          let mut primary_key = PrimaryKey { cols: vec![] };
+          for (key_col, _) in &ctx.table_schema.key_cols {
+            let idx = top_level_col_names.iter().position(|col| key_col == col).unwrap();
+            let col_val = top_level_col_vals.get(idx).unwrap().clone();
+            res_row.push(col_val.clone());
+            primary_key.cols.push(col_val.unwrap());
           }
 
-          // Now, we evaluate all expressions in the SQL query and amend the
-          // result to this TableView (if the WHERE clause evaluates to true).
-          let evaluated_update = evaluate_update(
-            &es.sql_query,
-            &top_level_col_names,
-            &top_level_col_vals,
-            &subquery_vals,
-          )?;
-          if is_true(&evaluated_update.selection)? {
-            // This means that the current row should be selected for the result.
-            let mut res_row = Vec::<ColValN>::new();
+          // Then, iterate through the assignment, updating `res_row` and `update_view`.
+          for (col_name, col_val) in evaluated_update.assignment {
+            res_row.push(col_val.clone());
+            update_view.insert((primary_key.clone(), Some(col_name)), col_val);
+          }
 
-            // First, we add in the Key Columns
-            let mut primary_key = PrimaryKey { cols: vec![] };
-            for (key_col, _) in &ctx.table_schema.key_cols {
-              let idx = top_level_col_names.iter().position(|col| key_col == col).unwrap();
-              let col_val = top_level_col_vals.get(idx).unwrap().clone();
-              res_row.push(col_val.clone());
-              primary_key.cols.push(col_val.unwrap());
-            }
+          // Finally, we add the `res_row` into the TableView.
+          res_table_view.add_row_multi(res_row, count);
+        };
+        Ok(())
+      },
+    );
 
-            // Then, iterate through the assignment, updating `res_row` and `update_view`.
-            for (col_name, col_val) in evaluated_update.assignment {
-              res_row.push(col_val.clone());
-              update_view.insert((primary_key.clone(), Some(col_name)), col_val);
-            }
-
-            // Finally, we add the `res_row` into the TableView.
-            res_table_view.add_row_multi(res_row, count);
-          };
-          Ok(())
-        },
-      );
-
-      if let Err(eval_error) = eval_res {
-        return MSTableWriteAction::ExitAll(mk_eval_error(eval_error));
-      }
-
-      // Build the success message and respond.
-      let success_msg = msg::QuerySuccess {
-        return_qid: es.sender_path.query_id.clone(),
-        query_id: es.query_id.clone(),
-        result: (res_col_names, vec![res_table_view]),
-        new_rms: es.new_rms.iter().cloned().collect(),
-      };
-      let sender_path = es.sender_path.clone();
-      ctx.ctx().send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
-
-      // Update the MSQuery. In particular, amend the `update_view` and remove this
-      // MSTableWriteES from the pending queries.
-      let ms_query = ms_query_ess.get_mut(&es.ms_query_id).unwrap();
-      ms_query.pending_queries.remove(&es.query_id);
-      ms_query.update_views.insert(es.tier.clone(), update_view);
-
-      // Signal that the subquery has finished successfully
-      MSTableWriteAction::Done
+    if let Err(eval_error) = eval_res {
+      return MSTableWriteAction::ExitAll(mk_eval_error(eval_error));
     }
+
+    // Build the success message and respond.
+    let success_msg = msg::QuerySuccess {
+      return_qid: es.sender_path.query_id.clone(),
+      query_id: es.query_id.clone(),
+      result: (res_col_names, vec![res_table_view]),
+      new_rms: es.new_rms.iter().cloned().collect(),
+    };
+    let sender_path = es.sender_path.clone();
+    ctx.ctx().send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
+
+    // Update the MSQuery. In particular, amend the `update_view` and remove this
+    // MSTableWriteES from the pending queries.
+    let ms_query = ms_query_ess.get_mut(&es.ms_query_id).unwrap();
+    ms_query.pending_queries.remove(&es.query_id);
+    ms_query.update_views.insert(es.tier.clone(), update_view);
+
+    // Signal that the subquery has finished successfully
+    MSTableWriteAction::Done
   }
 
   /// This Cleans up any Master queries we launched and it returns instructions for the

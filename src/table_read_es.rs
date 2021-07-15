@@ -267,27 +267,32 @@ impl FullTableReadES {
           }
         };
 
-        // Here, we have computed all GRQueryESs, and we can now add them to Executing.
-        let mut gr_query_ids = Vec::<QueryId>::new();
-        let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-        for gr_query_es in &gr_query_statuses {
-          let query_id = gr_query_es.query_id.clone();
-          gr_query_ids.push(query_id.clone());
-          subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-            context: gr_query_es.context.clone(),
-            query_id: query_id.clone(),
-          }));
+        if gr_query_statuses.is_empty() {
+          // Since there are no subqueries, we can go straight to finishing the ES.
+          self.finish_table_read_es(ctx)
+        } else {
+          // Here, we have computed all GRQueryESs, and we can now add them to Executing.
+          let mut gr_query_ids = Vec::<QueryId>::new();
+          let mut subqueries = Vec::<SingleSubqueryStatus>::new();
+          for gr_query_es in &gr_query_statuses {
+            let query_id = gr_query_es.query_id.clone();
+            gr_query_ids.push(query_id.clone());
+            subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+              context: gr_query_es.context.clone(),
+              query_id: query_id.clone(),
+            }));
+          }
+
+          // Move the ES to the Executing state.
+          es.state = ExecutionS::Executing(Executing {
+            completed: 0,
+            subqueries,
+            row_region: pending.read_region.row_region.clone(),
+          });
+
+          // Return the subqueries
+          TableAction::SendSubqueries(gr_query_statuses)
         }
-
-        // Move the ES to the Executing state.
-        es.state = ExecutionS::Executing(Executing {
-          completed: 0,
-          subqueries,
-          row_region: pending.read_region.row_region.clone(),
-        });
-
-        // Return the subqueries
-        TableAction::SendSubqueries(gr_query_statuses)
       }
       ExecutionS::Executing(executing) => {
         let (_, gr_query_es) = match recompute_subquery::<T, _, _>(
@@ -401,100 +406,108 @@ impl FullTableReadES {
     if executing_state.completed < executing_state.subqueries.len() {
       TableAction::Wait
     } else {
-      // Compute children.
-      let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
-      for single_status in &executing_state.subqueries {
-        let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-        let context_schema = &result.context.context_schema;
-        children
-          .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
-      }
+      self.finish_table_read_es(ctx)
+    }
+  }
 
-      // Create the ContextConstructor.
-      let context_constructor = ContextConstructor::new(
-        es.context.context_schema.clone(),
-        StorageLocalTable::new(
-          &ctx.table_schema,
-          &es.timestamp,
-          &es.sql_query.selection,
-          SimpleStorageView::new(&ctx.storage),
-        ),
-        children,
-      );
+  /// Handles a ES finishing with all subqueries results in.
+  pub fn finish_table_read_es<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
+    let es = cast!(FullTableReadES::Executing, self).unwrap();
+    let executing_state = cast!(ExecutionS::Executing, &mut es.state).unwrap();
 
-      // These are all of the `ColNames` we need to evaluate things.
-      let mut top_level_cols_set = HashSet::<ColName>::new();
-      top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
-      top_level_cols_set.extend(es.sql_query.projection.clone());
-      let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
+    // Compute children.
+    let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+    for single_status in &executing_state.subqueries {
+      let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
+      let context_schema = &result.context.context_schema;
+      children
+        .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
+    }
 
-      // Finally, iterate over the Context Rows of the subqueries and compute the final values.
-      let mut res_table_views = Vec::<TableView>::new();
-      for _ in 0..es.context.context_rows.len() {
-        res_table_views.push(TableView::new(es.sql_query.projection.clone()));
-      }
+    // Create the ContextConstructor.
+    let context_constructor = ContextConstructor::new(
+      es.context.context_schema.clone(),
+      StorageLocalTable::new(
+        &ctx.table_schema,
+        &es.timestamp,
+        &es.sql_query.selection,
+        SimpleStorageView::new(&ctx.storage),
+      ),
+      children,
+    );
 
-      let eval_res = context_constructor.run(
-        &es.context.context_rows,
-        top_level_col_names.clone(),
-        &mut |context_row_idx: usize,
-              top_level_col_vals: Vec<ColValN>,
-              contexts: Vec<(ContextRow, usize)>,
-              count: u64| {
-          // First, we extract the subquery values using the child Context indices.
-          let mut subquery_vals = Vec::<TableView>::new();
-          for index in 0..contexts.len() {
-            let (_, child_context_idx) = contexts.get(index).unwrap();
-            let executing_state = cast!(ExecutionS::Executing, &es.state).unwrap();
-            let single_status = executing_state.subqueries.get(index).unwrap();
-            let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-            subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
+    // These are all of the `ColNames` we need to evaluate things.
+    let mut top_level_cols_set = HashSet::<ColName>::new();
+    top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
+    top_level_cols_set.extend(es.sql_query.projection.clone());
+    let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
+
+    // Finally, iterate over the Context Rows of the subqueries and compute the final values.
+    let mut res_table_views = Vec::<TableView>::new();
+    for _ in 0..es.context.context_rows.len() {
+      res_table_views.push(TableView::new(es.sql_query.projection.clone()));
+    }
+
+    let eval_res = context_constructor.run(
+      &es.context.context_rows,
+      top_level_col_names.clone(),
+      &mut |context_row_idx: usize,
+            top_level_col_vals: Vec<ColValN>,
+            contexts: Vec<(ContextRow, usize)>,
+            count: u64| {
+        // First, we extract the subquery values using the child Context indices.
+        let mut subquery_vals = Vec::<TableView>::new();
+        for index in 0..contexts.len() {
+          let (_, child_context_idx) = contexts.get(index).unwrap();
+          let executing_state = cast!(ExecutionS::Executing, &es.state).unwrap();
+          let single_status = executing_state.subqueries.get(index).unwrap();
+          let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
+          subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
+        }
+
+        // Now, we evaluate all expressions in the SQL query and amend the
+        // result to this TableView (if the WHERE clause evaluates to true).
+        let evaluated_select = evaluate_super_simple_select(
+          &es.sql_query,
+          &top_level_col_names,
+          &top_level_col_vals,
+          &subquery_vals,
+        )?;
+        if is_true(&evaluated_select.selection)? {
+          // This means that the current row should be selected for the result. Thus, we take
+          // the values of the project columns and insert it into the appropriate TableView.
+          let mut res_row = Vec::<ColValN>::new();
+          for res_col_name in &es.sql_query.projection {
+            let idx = top_level_col_names.iter().position(|k| res_col_name == k).unwrap();
+            res_row.push(top_level_col_vals.get(idx).unwrap().clone());
           }
 
-          // Now, we evaluate all expressions in the SQL query and amend the
-          // result to this TableView (if the WHERE clause evaluates to true).
-          let evaluated_select = evaluate_super_simple_select(
-            &es.sql_query,
-            &top_level_col_names,
-            &top_level_col_vals,
-            &subquery_vals,
-          )?;
-          if is_true(&evaluated_select.selection)? {
-            // This means that the current row should be selected for the result. Thus, we take
-            // the values of the project columns and insert it into the appropriate TableView.
-            let mut res_row = Vec::<ColValN>::new();
-            for res_col_name in &es.sql_query.projection {
-              let idx = top_level_col_names.iter().position(|k| res_col_name == k).unwrap();
-              res_row.push(top_level_col_vals.get(idx).unwrap().clone());
-            }
+          res_table_views[context_row_idx].add_row_multi(res_row, count);
+        };
+        Ok(())
+      },
+    );
 
-            res_table_views[context_row_idx].add_row_multi(res_row, count);
-          };
-          Ok(())
-        },
+    if let Err(eval_error) = eval_res {
+      ctx.ctx().send_query_error(
+        es.sender_path.clone(),
+        es.query_id.clone(),
+        mk_eval_error(eval_error),
       );
-
-      if let Err(eval_error) = eval_res {
-        ctx.ctx().send_query_error(
-          es.sender_path.clone(),
-          es.query_id.clone(),
-          mk_eval_error(eval_error),
-        );
-        return self.exit_and_clean_up(ctx);
-      }
-
-      // Build the success message and respond.
-      let success_msg = msg::QuerySuccess {
-        return_qid: es.sender_path.query_id.clone(),
-        query_id: es.query_id.clone(),
-        result: (es.sql_query.projection.clone(), res_table_views),
-        new_rms: es.new_rms.iter().cloned().collect(),
-      };
-      ctx.ctx().send_to_path(es.sender_path.clone(), CommonQuery::QuerySuccess(success_msg));
-
-      // Signal that the subquery has finished successfully
-      TableAction::Done
+      return self.exit_and_clean_up(ctx);
     }
+
+    // Build the success message and respond.
+    let success_msg = msg::QuerySuccess {
+      return_qid: es.sender_path.query_id.clone(),
+      query_id: es.query_id.clone(),
+      result: (es.sql_query.projection.clone(), res_table_views),
+      new_rms: es.new_rms.iter().cloned().collect(),
+    };
+    ctx.ctx().send_to_path(es.sender_path.clone(), CommonQuery::QuerySuccess(success_msg));
+
+    // Signal that the subquery has finished successfully
+    TableAction::Done
   }
 
   /// This Cleans up any Master queries we launched and it returns instructions for the

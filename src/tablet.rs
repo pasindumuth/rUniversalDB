@@ -992,7 +992,8 @@ impl<T: IOTypes> TabletContext<T> {
         );
 
         // Use the GossipData sent by the Master to upate the local GossipData.
-        // TODO: When a Slave receives gossip_data, dispatch it to all tablets, not just the target tablet
+        // TODO: When a Slave receives gossip_data, dispatch it to all tablets,
+        // not just the target tablet
         let gossip_data = commit.gossip_data.to_gossip();
         if self.gossip.gossip_gen < gossip_data.gossip_gen {
           self.gossip = Arc::new(gossip_data);
@@ -1429,7 +1430,7 @@ impl<T: IOTypes> TabletContext<T> {
       let action = read_es.read_protected(self, protect_query_id);
       self.handle_read_es_action(statuses, query_id, action);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
-      let action = ms_write_es.read_protected(self, &statuses.ms_query_ess, protect_query_id);
+      let action = ms_write_es.read_protected(self, &mut statuses.ms_query_ess, protect_query_id);
       self.handle_ms_write_es_action(statuses, query_id, action);
     } else if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
       let action = ms_read_es.read_protected(self, &statuses.ms_query_ess, protect_query_id);
