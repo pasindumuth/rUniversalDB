@@ -349,14 +349,54 @@ impl<T: IOTypes> SlaveContext<T> {
       msg::SlaveMessage::QueryAborted(_) => unimplemented!(),
       msg::SlaveMessage::Query2PCPrepared(prepared) => self.handle_prepared(statuses, prepared),
       msg::SlaveMessage::Query2PCAborted(_) => panic!(),
-      msg::SlaveMessage::MasterFrozenColUsageAborted(_) => unimplemented!(),
-      msg::SlaveMessage::MasterFrozenColUsageSuccess(_) => unimplemented!(),
+      msg::SlaveMessage::MasterFrozenColUsageAborted(_) => panic!(),
+      msg::SlaveMessage::MasterFrozenColUsageSuccess(success) => {
+        // Update the Gossip with incoming Gossip data.
+        let gossip_data = success.gossip.clone().to_gossip();
+        if self.gossip.gossip_gen < gossip_data.gossip_gen {
+          self.gossip = Arc::new(gossip_data);
+        }
+
+        // Route the response to the appropriate ES.
+        let query_id = success.return_qid;
+        if let Some(trans_read_es) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+          let prefix = trans_read_es.location_prefix();
+          let action = if let Some(es) = statuses.gr_query_ess.get(&prefix.query_id) {
+            trans_read_es.handle_master_response(
+              &mut self.ctx(),
+              es,
+              success.gossip.gossip_gen,
+              success.frozen_col_usage_tree,
+            )
+          } else if let Some(ms_coord_es) = statuses.ms_coord_ess.get(&prefix.query_id) {
+            let es = cast!(FullMSQueryCoordES::Executing, ms_coord_es).unwrap();
+            trans_read_es.handle_master_response(
+              &mut self.ctx(),
+              es,
+              success.gossip.gossip_gen,
+              success.frozen_col_usage_tree,
+            )
+          } else {
+            trans_read_es
+              .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+          };
+          self.handle_trans_es_action(statuses, query_id, action);
+        } else if statuses.ms_coord_ess.contains_key(&query_id) {
+          self.handle_ms_master_response(
+            statuses,
+            query_id,
+            success.gossip.gossip_gen,
+            success.frozen_col_usage_tree,
+          );
+        }
+      }
       msg::SlaveMessage::RegisterQuery(register) => self.handle_register_query(statuses, register),
     }
   }
 
   /// A convenience function for sending messages to `query_path`s that are Tablets.
   /// The Slave most often communicates only with Tablets.
+  /// TODO: remove this in favor of the one in CoreServerContext.
   fn send_to_tablet(&mut self, query_path: &QueryPath, tablet_message: msg::TabletMessage) {
     let eid = self.slave_address_config.get(&query_path.slave_group_id).unwrap();
     self.network_output.send(
@@ -405,6 +445,27 @@ impl<T: IOTypes> SlaveContext<T> {
     let full_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
     let plan_es = cast!(FullMSQueryCoordES::QueryReplanning, full_es).unwrap();
     plan_es.start(self);
+    self.check_query_replanning_done(statuses, query_id);
+  }
+
+  /// Handle Master Response, routing it to the QueryReplanning.
+  fn handle_ms_master_response(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    gossip_gen: Gen,
+    tree: msg::FrozenColUsageTree,
+  ) {
+    let full_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+    let plan_es = cast!(FullMSQueryCoordES::QueryReplanning, full_es).unwrap();
+    plan_es.handle_master_response(self, gossip_gen, tree);
+    self.check_query_replanning_done(statuses, query_id);
+  }
+
+  /// Check if QueryReplanning is done, moving on if so.
+  pub fn check_query_replanning_done(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    let full_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+    let plan_es = cast!(FullMSQueryCoordES::QueryReplanning, full_es).unwrap();
     if let MSQueryCoordReplanningS::Done(maybe_plan) = &plan_es.state {
       if let Some(query_plan) = maybe_plan {
         // We compute the TierMap here.
@@ -1203,5 +1264,38 @@ impl MSQueryCoordReplanningES {
       gossip_gen: ctx.gossip.gossip_gen,
       col_usage_nodes,
     }));
+  }
+
+  /// Handles the Query Plan constructed by the Master.
+  pub fn handle_master_response<T: IOTypes>(
+    &mut self,
+    ctx: &mut SlaveContext<T>,
+    gossip_gen: Gen,
+    tree: msg::FrozenColUsageTree,
+  ) {
+    // Recall that since we only send single nodes, we expect the `tree` to just be a `node`.
+    let col_usage_nodes = cast!(msg::FrozenColUsageTree::ColUsageNodes, tree).unwrap();
+    for (_, (_, child)) in &col_usage_nodes {
+      if !child.external_cols.is_empty() {
+        // This means that the Master has confirmed that this Query doesn't have a
+        // valid Query Plan (i.e. one of the ColumnRefs don't exist). Thus, we send the
+        // client an abort and go to Done.
+        ctx.network_output.send(
+          &self.sender_eid,
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+            msg::ExternalQueryAborted {
+              request_id: self.request_id.clone(),
+              payload: msg::ExternalAbortedData::QueryExecutionError,
+            },
+          )),
+        );
+        self.state = MSQueryCoordReplanningS::Done(None);
+        return;
+      }
+    }
+
+    // If we get here, then the col_usage_nodes form a valid QueryPlan, so we finish successfully.
+    self.state =
+      MSQueryCoordReplanningS::Done(Some(CoordQueryPlan { gossip_gen, col_usage_nodes }));
   }
 }

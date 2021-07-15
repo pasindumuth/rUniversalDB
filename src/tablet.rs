@@ -2320,11 +2320,11 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
     tree: msg::FrozenColUsageTree,
   ) {
     // Recall that since we only send single nodes, we expect the `tree` to just be a `node`.
-    let (_, node) = cast!(msg::FrozenColUsageTree::ColUsageNode, tree).unwrap();
+    let (_, col_usage_node) = cast!(msg::FrozenColUsageTree::ColUsageNode, tree).unwrap();
 
     // Compute the set of External Columns that still aren't in the Context.
     let mut missing_cols = Vec::<ColName>::new();
-    for col in &node.external_cols {
+    for col in &col_usage_node.external_cols {
       if !self.context.context_schema.column_context_schema.contains(&col) {
         missing_cols.push(col.clone());
       }
@@ -2343,7 +2343,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
     } else {
       // This means the QueryReplanning was a success, so we update the QueryPlan and go to Done.
       self.query_plan.gossip_gen = gossip_gen;
-      self.query_plan.col_usage_node = node;
+      self.query_plan.col_usage_node = col_usage_node;
       self.state = CommonQueryReplanningS::Done(true);
     }
   }
