@@ -897,8 +897,44 @@ impl<T: IOTypes> TabletContext<T> {
       msg::TabletMessage::QuerySuccess(query_success) => {
         self.handle_query_success(statuses, query_success);
       }
-      msg::TabletMessage::Query2PCPrepare(_) => unimplemented!(),
-      msg::TabletMessage::Query2PCAbort(_) => unimplemented!(),
+      msg::TabletMessage::Query2PCPrepare(prepare) => {
+        // Since the only way an MSQueryES can disappear is if the Slave does it, if it ends
+        // up sending a Prepare instead, then there is no way the MSQueryES is gone.
+        let ms_query_es = statuses.ms_query_ess.get_mut(&prepare.ms_query_id).unwrap();
+        assert!(ms_query_es.pending_queries.is_empty());
+        assert_eq!(prepare.sender_path.query_id, ms_query_es.root_query_id);
+
+        // The VerifyingReadWriteRegion must also exist, so we move it to prepared_*.
+        let verifying_write = self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
+        assert!(verifying_write.m_waiting_read_protected.is_empty());
+        self.prepared_writes.insert(
+          ms_query_es.timestamp,
+          ReadWriteRegion {
+            orig_p: verifying_write.orig_p,
+            m_read_protected: verifying_write.m_read_protected,
+            m_write_protected: verifying_write.m_write_protected,
+          },
+        );
+
+        // Send back Prepared
+        let return_qid = prepare.sender_path.query_id.clone();
+        let rm_path = QueryPath {
+          slave_group_id: self.this_slave_group_id.clone(),
+          maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
+          query_id: prepare.ms_query_id,
+        };
+        self.ctx().core_ctx().send_to_slave(
+          prepare.sender_path.slave_group_id,
+          msg::SlaveMessage::Query2PCPrepared(msg::Query2PCPrepared { return_qid, rm_path }),
+        );
+      }
+      msg::TabletMessage::Query2PCAbort(abort) => {
+        // Recall that in order to get a Query2PCAbort, the Slave must already have sent a
+        // Query2PCPrepare that we received (since the network is FIFO). Thus, we may simply
+        // remove the ReadWriteRegion from `pending_*`.
+        let ms_query_es = statuses.ms_query_ess.remove(&abort.ms_query_id).unwrap();
+        self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
+      }
       msg::TabletMessage::Query2PCCommit(_) => unimplemented!(),
       msg::TabletMessage::MasterFrozenColUsageAborted(_) => panic!(),
       msg::TabletMessage::MasterFrozenColUsageSuccess(success) => {
@@ -1877,6 +1913,9 @@ impl<T: IOTypes> TabletContext<T> {
       // MSQueryES. We don't remove the MSQueryES via this code otherwise, since the Abort
       // message for the `pending_queries` to propagate up will generally vary. This anomaly is
       // rooted in the fact that MSQueryES does not own the MTable*ESs.
+      //
+      // This does not handle the case of a Query2PCAbort properly, since we would have moved
+      // the ReadWriteRegion to `prepared_*` by this point.
       self.exit_ms_query_es(statuses, ms_query_es.query_id.clone(), msg::QueryError::LateralError);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       // Abort the MSTableWriteES. Recall this only returns the subqueries we need to abort.

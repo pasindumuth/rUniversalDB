@@ -271,7 +271,11 @@ impl<T: IOTypes> SlaveContext<T> {
           ),
         }
       }
-      msg::SlaveMessage::CancelExternalQuery(_) => unimplemented!(),
+      msg::SlaveMessage::CancelExternalQuery(cancel) => {
+        if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
+          self.exit_and_clean_up(statuses, query_id.clone());
+        }
+      }
       msg::SlaveMessage::TabletMessage(tablet_group_id, tablet_msg) => {
         self.tablet_forward_output.forward(&tablet_group_id, tablet_msg);
       }
@@ -346,10 +350,16 @@ impl<T: IOTypes> SlaveContext<T> {
       msg::SlaveMessage::QuerySuccess(query_success) => {
         self.handle_query_success(statuses, query_success);
       }
-      msg::SlaveMessage::QueryAborted(_) => unimplemented!(),
+      msg::SlaveMessage::QueryAborted(query_aborted) => {
+        self.handle_query_aborted(statuses, query_aborted);
+      }
       msg::SlaveMessage::Query2PCPrepared(prepared) => self.handle_prepared(statuses, prepared),
-      msg::SlaveMessage::Query2PCAborted(_) => panic!(),
-      msg::SlaveMessage::MasterFrozenColUsageAborted(_) => panic!(),
+      msg::SlaveMessage::Query2PCAborted(_) => {
+        panic!(); // In practice, this is never received.
+      }
+      msg::SlaveMessage::MasterFrozenColUsageAborted(_) => {
+        panic!(); // In practice, this is never received.
+      }
       msg::SlaveMessage::MasterFrozenColUsageSuccess(success) => {
         // Update the Gossip with incoming Gossip data.
         let gossip_data = success.gossip.clone().to_gossip();
@@ -538,7 +548,7 @@ impl<T: IOTypes> SlaveContext<T> {
           &query_path,
           msg::TabletMessage::Query2PCPrepare(msg::Query2PCPrepare {
             sender_path: sender_path.clone(),
-            ms_query_id: coord_es.query_id.clone(),
+            ms_query_id: query_path.query_id.clone(),
           }),
         );
       }
@@ -1173,7 +1183,7 @@ impl<T: IOTypes> SlaveContext<T> {
                 self.send_to_tablet(
                   &query_path,
                   msg::TabletMessage::Query2PCAbort(msg::Query2PCAbort {
-                    ms_query_id: es.query_id.clone(),
+                    ms_query_id: query_path.query_id.clone(),
                   }),
                 )
               }
