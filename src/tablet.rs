@@ -5,8 +5,8 @@ use crate::col_usage::{
 };
 use crate::common::{
   btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
-  mk_qid, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue,
-  TableRegion, TableSchema,
+  mk_qid, ColBound, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, PolyColBound, QueryPlan,
+  SingleBound, TMStatus, TMWaitValue, TableRegion, TableSchema,
 };
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
@@ -322,6 +322,35 @@ enum ReadProtectionGrant {
 //  Storage
 // -----------------------------------------------------------------------------------------------
 
+/// The multi-versioned container used to hold committed data.
+pub type GenericMVTable = BTreeMap<(PrimaryKey, Option<ColName>), Vec<(Timestamp, ColValN)>>;
+/// A single-versioned version of the above to hold views constructed by a write.
+pub type GenericTable = BTreeMap<(PrimaryKey, Option<ColName>), ColValN>;
+
+/// Finds the version at the given `timestamp`.
+pub fn find_version<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> &Option<V> {
+  for (t, value) in versions.iter().rev() {
+    if *t <= timestamp {
+      return value;
+    }
+  }
+  return &None;
+}
+
+/// Reads the version prior to the timestamp. This doesn't mutate
+/// the lat if the read happens with a future timestamp.
+pub fn static_read<'a>(
+  mvt: &'a GenericMVTable,
+  key: &(PrimaryKey, Option<ColName>),
+  timestamp: Timestamp,
+) -> &'a ColValN {
+  if let Some(versions) = mvt.get(key) {
+    find_version(versions, timestamp)
+  } else {
+    &None
+  }
+}
+
 /// A trait for reading subtables from some kind of underlying table data view. The `key_region`
 /// indicates the set of rows to read from the Table, and the `col_region` are the columns to read.
 ///
@@ -331,17 +360,19 @@ pub trait StorageView {
     &self,
     key_region: &Vec<KeyBound>,
     col_region: &Vec<ColName>,
-  ) -> (Vec<ColName>, Vec<(Vec<ColValN>, u64)>);
+    timestamp: &Timestamp,
+  ) -> Vec<(Vec<ColValN>, u64)>;
 }
 
 /// This is used to directly read data from persistent storage.
 pub struct SimpleStorageView<'a> {
   storage: &'a GenericMVTable,
+  table_schema: &'a TableSchema,
 }
 
 impl<'a> SimpleStorageView<'a> {
-  pub fn new(storage: &GenericMVTable) -> SimpleStorageView {
-    SimpleStorageView { storage }
+  pub fn new(storage: &'a GenericMVTable, table_schema: &'a TableSchema) -> SimpleStorageView<'a> {
+    SimpleStorageView { storage, table_schema }
   }
 }
 
@@ -350,11 +381,8 @@ impl<'a> StorageView for SimpleStorageView<'a> {
     &self,
     key_region: &Vec<KeyBound>,
     column_region: &Vec<ColName>,
-  ) -> (Vec<ColName>, Vec<(Vec<ColValN>, u64)>) {
-    // TODO: We can probably change the key type used in the GenericMVTable so that we
-    // can do range querys in BTreeMaps, where we can directly use the KeyBound bounds
-    // (inclusive, exclusive, and unbounded bounds) to get what we need directly. This
-    // is an implementation detail.
+    timestamp: &Timestamp,
+  ) -> Vec<(Vec<ColValN>, u64)> {
     unimplemented!()
   }
 }
@@ -362,6 +390,7 @@ impl<'a> StorageView for SimpleStorageView<'a> {
 /// This reads data by first replaying the Update Views on top of the persistant data.
 pub struct MSStorageView<'a> {
   storage: &'a GenericMVTable,
+  table_schema: &'a TableSchema,
   update_views: &'a BTreeMap<u32, GenericTable>,
   tier: u32,
 }
@@ -372,10 +401,11 @@ impl<'a> MSStorageView<'a> {
   /// update should be applied.
   pub fn new(
     storage: &'a GenericMVTable,
+    table_schema: &'a TableSchema,
     update_views: &'a BTreeMap<u32, GenericTable>,
     tier: u32,
   ) -> MSStorageView<'a> {
-    MSStorageView { storage, update_views, tier }
+    MSStorageView { storage, table_schema, update_views, tier }
   }
 }
 
@@ -384,7 +414,8 @@ impl<'a> StorageView for MSStorageView<'a> {
     &self,
     key_region: &Vec<KeyBound>,
     column_region: &Vec<ColName>,
-  ) -> (Vec<ColName>, Vec<(Vec<ColValN>, u64)>) {
+    timestamp: &Timestamp,
+  ) -> Vec<(Vec<ColValN>, u64)> {
     unimplemented!()
   }
 }
@@ -441,63 +472,13 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
 
     // Compute the KeyBound, the subtable, and return it.
     let key_bounds = compute_key_region(&self.selection, col_map, &self.table_schema.key_cols)?;
-    let (_, subtable) = self.storage.compute_subtable(&key_bounds, col_names);
-    Ok(subtable)
+    Ok(self.storage.compute_subtable(&key_bounds, col_names, self.timestamp))
   }
 }
 
 // -----------------------------------------------------------------------------------------------
 //  Tablet State
 // -----------------------------------------------------------------------------------------------
-
-// The best method is to have a method for every transition out of a state in an ES.
-// This function will digs down from the root. The function will make decision
-// on how to best short-circuit to other states, or even finish/respond to the client.
-// We refer to the code that short-circuits from state A to B as the "A to B Transition Logic".
-// Note that if we Immediately transition to another state, then we have re-lookup the ES
-// from the root. In the future, if this lookup is too expensive, we can create
-// a shared auxiliary function called by both. It will have many args.
-// ...
-// The big issue with the above solution is that Transition Logic will often be common
-// when transition to some State (regardless of what the prior state was). We have to
-// pull this logic into their own functions, as usual, but I think the right approach will
-// be to first write out all Transition Logics, and then pull out common parts later.
-// It's good to generally have a Start State to instatiate things like `CommonQueryReplanningES`,
-// Since I don't want to duplicate the logic for instiating it in when first constructing
-// the FullTableReadES. If we construct from outside in at the top, then we should be good.
-//
-// What if driving the GRQuery fails? We have these valid states of the system. While
-// one ES is being modified, no other ES should be in an invalid state. This can happen
-// if one ES is trying to create another ES, and simply puses it's own execution to start
-// executing the new ES. Instead, we should define our ESs in a way that's default constructible.
-// Thus, we finish modifying the parent ES + add in the new ESs into `read_statuses`, which gets
-// us back to a valid state, and then we can execute the new ESs one by one. Note that the
-// execution of these ESs are still driven from code that modified the parent (i.e. not from
-// the main loop or an incoming message). This is totally okay.
-
-// We also can't do the "shared auxiliary function" part, because the code we pull out
-// will call functions that use `self`.
-//
-// Alternatively, we can stop trying to short-circuit forward and just always move onto
-// the next state. Design is such a way that that's possible. Use the Main Loop.
-
-// Naming: ES for structs, S for enums, names consistent with type (potentially shorter),
-// perform_query, query, sql_query.
-// `query_id` for main Query's one in question.
-// We use "Main" to prefix to distinguish it from a child that we are trying to build (i.e.
-// the "Main" Context).
-
-// Every method call to a deep object will be driven from the top here, and all data
-// will be looked up and passed in as references. This allows for many different
-// sub-objects to have (potentially mutable) access to other sub-objects.
-
-// The sender has to send the full SenderPath. The responder
-// just needs to send the SenderStatePath, since it will use the
-// other data to figure out the node and back that into the NetworkMessage
-// separately.
-
-pub type GenericMVTable = MVM<(PrimaryKey, Option<ColName>), ColValN>;
-pub type GenericTable = HashMap<(PrimaryKey, Option<ColName>), ColValN>;
 
 #[derive(Debug)]
 pub struct TabletState<T: IOTypes> {

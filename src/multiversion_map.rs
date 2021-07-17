@@ -39,7 +39,7 @@ where
   pub fn read(&mut self, key: &K, timestamp: Timestamp) -> Option<V> {
     if let Some((lat, versions)) = self.map.get_mut(key) {
       *lat = max(*lat, timestamp);
-      MVM::<K, V>::find_version(versions, timestamp)
+      find_version(versions, timestamp).cloned()
     } else {
       self.map.insert(key.clone(), (timestamp, vec![]));
       None
@@ -55,10 +55,10 @@ where
   }
 
   /// Reads the version prior to the timestamp. Asserts that the `lat` is high enough.
-  pub fn strong_static_read(&self, key: &K, timestamp: Timestamp) -> Option<V> {
+  pub fn strong_static_read(&self, key: &K, timestamp: Timestamp) -> Option<&V> {
     if let Some((lat, versions)) = self.map.get(key) {
       assert!(&timestamp <= lat);
-      MVM::<K, V>::find_version(versions, timestamp)
+      find_version(versions, timestamp)
     } else {
       None
     }
@@ -79,9 +79,9 @@ where
 
   /// Reads the version prior to the timestamp. This doesn't mutate
   /// the lat if the read happens with a future timestamp.
-  pub fn static_read(&self, key: &K, timestamp: Timestamp) -> Option<V> {
+  pub fn static_read(&self, key: &K, timestamp: Timestamp) -> Option<&V> {
     if let Some((_, versions)) = self.map.get(key) {
-      MVM::<K, V>::find_version(versions, timestamp)
+      find_version(versions, timestamp)
     } else {
       None
     }
@@ -92,7 +92,7 @@ where
   pub fn static_snapshot_read(&self, timestamp: Timestamp) -> HashMap<K, V> {
     let mut snapshot = HashMap::new();
     for (key, (_, versions)) in &self.map {
-      if let Some(value) = MVM::<K, V>::find_version(versions, timestamp) {
+      if let Some(value) = find_version(versions, timestamp) {
         snapshot.insert(key.clone(), value.clone());
       }
     }
@@ -107,15 +107,15 @@ where
       Timestamp(0)
     }
   }
+}
 
-  fn find_version(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> Option<V> {
-    for (t, value) in versions.iter().rev() {
-      if *t <= timestamp {
-        return value.clone();
-      }
+pub fn find_version<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> Option<&V> {
+  for (t, value) in versions.iter().rev() {
+    if *t <= timestamp {
+      return value.as_ref();
     }
-    return None;
   }
+  return None;
 }
 
 #[cfg(test)]

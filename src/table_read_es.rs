@@ -253,7 +253,7 @@ impl FullTableReadES {
             &ctx.table_schema,
             &es.timestamp,
             &es.sql_query.selection,
-            SimpleStorageView::new(&ctx.storage),
+            SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
           ),
         ) {
           Ok(gr_query_statuses) => gr_query_statuses,
@@ -310,7 +310,7 @@ impl FullTableReadES {
             &ctx.table_schema,
             &es.timestamp,
             &es.sql_query.selection,
-            SimpleStorageView::new(&ctx.storage),
+            SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
           ),
           executing,
           &protect_query_id,
@@ -431,7 +431,7 @@ impl FullTableReadES {
         &ctx.table_schema,
         &es.timestamp,
         &es.sql_query.selection,
-        SimpleStorageView::new(&ctx.storage),
+        SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
       ),
       children,
     );

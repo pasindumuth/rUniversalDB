@@ -46,6 +46,12 @@ pub struct PrimaryKey {
   pub cols: Vec<ColVal>,
 }
 
+impl PrimaryKey {
+  pub fn new(cols: Vec<ColVal>) -> PrimaryKey {
+    PrimaryKey { cols }
+  }
+}
+
 /// The key range that a tablet manages. The `start` and `end` are
 /// PrimaryKey types, which are convenient for splitting the key-space.
 /// If either `start` or `end` is `None`, that means there is no bound

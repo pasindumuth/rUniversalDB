@@ -273,7 +273,12 @@ impl FullMSTableReadES {
             &ctx.table_schema,
             &es.timestamp,
             &es.sql_query.selection,
-            MSStorageView::new(&ctx.storage, &ms_query_es.update_views, es.tier.clone()),
+            MSStorageView::new(
+              &ctx.storage,
+              &ctx.table_schema,
+              &ms_query_es.update_views,
+              es.tier.clone(),
+            ),
           ),
         ) {
           Ok(gr_query_statuses) => gr_query_statuses,
@@ -326,7 +331,12 @@ impl FullMSTableReadES {
             &ctx.table_schema,
             &es.timestamp,
             &es.sql_query.selection,
-            MSStorageView::new(&ctx.storage, &ms_query_es.update_views, es.tier.clone()),
+            MSStorageView::new(
+              &ctx.storage,
+              &ctx.table_schema,
+              &ms_query_es.update_views,
+              es.tier.clone(),
+            ),
           ),
           executing,
           &protect_query_id,
@@ -440,7 +450,8 @@ impl FullMSTableReadES {
 
     // Create the ContextConstructor.
     let update_views = &ms_query_ess.get(&es.ms_query_id).unwrap().update_views;
-    let storage_view = MSStorageView::new(&ctx.storage, update_views, es.tier.clone() - 1);
+    let storage_view =
+      MSStorageView::new(&ctx.storage, &ctx.table_schema, update_views, es.tier.clone() - 1);
     let context_constructor = ContextConstructor::new(
       es.context.context_schema.clone(),
       StorageLocalTable::new(
