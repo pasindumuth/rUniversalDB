@@ -241,6 +241,50 @@ impl<'a> StorageView for MSStorageView<'a> {
   }
 }
 
+/// Compress the `update_views` by iterating from latest to earliest tier.
+fn compress_updates_views(update_views: &BTreeMap<u32, GenericTable>) -> GenericTable {
+  let mut snapshot_table = GenericTable::new();
+  for (_, generic_table) in update_views.iter() {
+    // Iterate over the the UpdateView Rows and insert them into `snapshot_table` if they
+    // are within `key_bound` and aren't shadowed by an existing entry.
+    let mut it = generic_table.iter();
+    let mut entry = it.next();
+    while let Some(((pkey, ci), _)) = entry {
+      assert!(ci.is_none()); // Recall that this should be the Presence Storage Row of `pkey`.
+      entry = it.next();
+      while let Some(((_, Some(col_name)), val)) = entry {
+        let storage_key = (pkey.clone(), Some(col_name.clone()));
+        if !snapshot_table.contains_key(&storage_key) {
+          snapshot_table.insert(storage_key, val.clone());
+        }
+        entry = it.next();
+      }
+    }
+  }
+  snapshot_table
+}
+
+/// Compress the `update_views` and apply it to `storage` and `timestamp`.
+pub fn commit_to_storage(
+  storage: &mut GenericMVTable,
+  timestamp: &Timestamp,
+  update_views: &BTreeMap<u32, GenericTable>,
+) {
+  let compressed_view = compress_updates_views(update_views);
+  for (key, value) in compressed_view {
+    // Recall that since MSWriteES does Type Checking, the Compressed View can be applied
+    // directory to `storage` without further checks.
+    if let Some(versions) = storage.get_mut(&key) {
+      // We do a sanity check that that the Region Isolation Algorithm did its job.
+      let (last_timestamp, _) = versions.last().unwrap();
+      assert!(timestamp > last_timestamp);
+      versions.push((*timestamp, value));
+    } else {
+      storage.insert(key, vec![(*timestamp, value)]);
+    }
+  }
+}
+
 // -----------------------------------------------------------------------------------------------
 //  Subtable Utils
 // -----------------------------------------------------------------------------------------------

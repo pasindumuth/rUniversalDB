@@ -32,7 +32,7 @@ use crate::server::{
   contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error, CommonQuery,
   ContextConstructor, LocalTable, ServerContext,
 };
-use crate::storage::{GenericMVTable, GenericTable, StorageView};
+use crate::storage::{commit_to_storage, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{FullTableReadES, QueryReplanningES, TableAction};
 use crate::trans_table_read_es::{
   FullTransTableReadES, TransQueryReplanningES, TransQueryReplanningS, TransTableAction,
@@ -415,7 +415,6 @@ pub struct TabletContext<T: IOTypes> {
   pub prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
   pub committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
 
-  // TODO: make (OrigP, QueryId, TableRegion) into a proper type.
   pub waiting_read_protected: BTreeMap<Timestamp, BTreeSet<(OrigP, QueryId, TableRegion)>>,
   pub read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
 
@@ -814,7 +813,17 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_query_es = statuses.ms_query_ess.remove(&abort.ms_query_id).unwrap();
         self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
       }
-      msg::TabletMessage::Query2PCCommit(_) => unimplemented!(),
+      msg::TabletMessage::Query2PCCommit(commit) => {
+        // First, remove the MSQueryES
+        let ms_query_es = statuses.ms_query_ess.remove(&commit.ms_query_id).unwrap();
+
+        // Move the ReadWriteRegion to Committed.
+        let read_write_region = self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
+        self.committed_writes.insert(ms_query_es.timestamp.clone(), read_write_region);
+
+        // Apply the UpdateViews to the storage container.
+        commit_to_storage(&mut self.storage, &ms_query_es.timestamp, &ms_query_es.update_views);
+      }
       msg::TabletMessage::MasterFrozenColUsageAborted(_) => panic!(),
       msg::TabletMessage::MasterFrozenColUsageSuccess(success) => {
         // Update the Gossip with incoming Gossip data.

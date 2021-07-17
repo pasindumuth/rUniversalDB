@@ -530,6 +530,7 @@ impl FullMSTableWriteES {
 
           // Then, iterate through the assignment, updating `res_row` and `update_view`.
           for (col_name, col_val) in evaluated_update.assignment {
+            // TODO: make sure we do type checking here to avoid producing bad UpdateViews
             res_row.push(col_val.clone());
             update_view.insert((primary_key.clone(), Some(col_name)), col_val);
           }
