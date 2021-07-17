@@ -17,6 +17,7 @@ pub mod query_converter;
 pub mod server;
 pub mod slave;
 pub mod sql_parser;
+pub mod storage;
 pub mod table_read_es;
 pub mod tablet;
 pub mod test_utils;

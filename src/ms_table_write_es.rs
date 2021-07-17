@@ -11,11 +11,12 @@ use crate::ms_table_read_es::FullMSTableReadES;
 use crate::server::{
   contains_col, evaluate_update, mk_eval_error, CommonQuery, ContextConstructor,
 };
+use crate::storage::{GenericTable, MSStorageView};
 use crate::tablet::{
   compute_subqueries, recompute_subquery, CommonQueryReplanningES, CommonQueryReplanningS,
-  ContextKeyboundComputer, Executing, GenericTable, MSQueryES, MSStorageView, Pending,
-  QueryReplanningSqlView, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
-  SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion, TabletContext,
+  ContextKeyboundComputer, Executing, MSQueryES, Pending, QueryReplanningSqlView,
+  SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryLockingSchemas,
+  SubqueryPending, SubqueryPendingReadRegion, TabletContext,
 };
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;

@@ -10,9 +10,10 @@ use crate::model::message as msg;
 use crate::server::{
   contains_col, evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor,
 };
+use crate::storage::MSStorageView;
 use crate::tablet::{
   compute_subqueries, recompute_subquery, CommonQueryReplanningES, CommonQueryReplanningS,
-  ContextKeyboundComputer, Executing, MSQueryES, MSStorageView, Pending, QueryReplanningSqlView,
+  ContextKeyboundComputer, Executing, MSQueryES, Pending, QueryReplanningSqlView,
   SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryLockingSchemas,
   SubqueryPending, SubqueryPendingReadRegion, TabletContext,
 };

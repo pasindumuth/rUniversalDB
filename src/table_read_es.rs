@@ -13,11 +13,12 @@ use crate::server::{
   contains_col, evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor,
   ServerContext,
 };
+use crate::storage::SimpleStorageView;
 use crate::tablet::{
   compute_subqueries, recompute_subquery, CommonQueryReplanningES, CommonQueryReplanningS,
-  ContextKeyboundComputer, Executing, Pending, SimpleStorageView, SingleSubqueryStatus,
-  StorageLocalTable, SubqueryFinished, SubqueryLockingSchemas, SubqueryPending,
-  SubqueryPendingReadRegion, TabletContext,
+  ContextKeyboundComputer, Executing, Pending, SingleSubqueryStatus, StorageLocalTable,
+  SubqueryFinished, SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion,
+  TabletContext,
 };
 use std::collections::HashSet;
 use std::iter::FromIterator;

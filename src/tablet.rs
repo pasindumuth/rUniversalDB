@@ -32,6 +32,7 @@ use crate::server::{
   contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error, CommonQuery,
   ContextConstructor, LocalTable, ServerContext,
 };
+use crate::storage::{GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{FullTableReadES, QueryReplanningES, TableAction};
 use crate::trans_table_read_es::{
   FullTransTableReadES, TransQueryReplanningES, TransQueryReplanningS, TransTableAction,
@@ -310,114 +311,11 @@ pub struct ReadWriteRegion {
 // -----------------------------------------------------------------------------------------------
 // These enums are used for communication between algorithms.
 
-// TODO: sync the `TableRegion`.
 enum ReadProtectionGrant {
   Read { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
   MRead { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
   DeadlockSafetyReadAbort { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
   DeadlockSafetyWriteAbort { timestamp: Timestamp, orig_p: OrigP },
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Storage
-// -----------------------------------------------------------------------------------------------
-
-/// The multi-versioned container used to hold committed data.
-pub type GenericMVTable = BTreeMap<(PrimaryKey, Option<ColName>), Vec<(Timestamp, ColValN)>>;
-/// A single-versioned version of the above to hold views constructed by a write.
-pub type GenericTable = BTreeMap<(PrimaryKey, Option<ColName>), ColValN>;
-
-/// Finds the version at the given `timestamp`.
-pub fn find_version<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> &Option<V> {
-  for (t, value) in versions.iter().rev() {
-    if *t <= timestamp {
-      return value;
-    }
-  }
-  return &None;
-}
-
-/// Reads the version prior to the timestamp. This doesn't mutate
-/// the lat if the read happens with a future timestamp.
-pub fn static_read<'a>(
-  mvt: &'a GenericMVTable,
-  key: &(PrimaryKey, Option<ColName>),
-  timestamp: Timestamp,
-) -> &'a ColValN {
-  if let Some(versions) = mvt.get(key) {
-    find_version(versions, timestamp)
-  } else {
-    &None
-  }
-}
-
-/// A trait for reading subtables from some kind of underlying table data view. The `key_region`
-/// indicates the set of rows to read from the Table, and the `col_region` are the columns to read.
-///
-/// This function must a pure function; the order of the returned vectors matter.
-pub trait StorageView {
-  fn compute_subtable(
-    &self,
-    key_region: &Vec<KeyBound>,
-    col_region: &Vec<ColName>,
-    timestamp: &Timestamp,
-  ) -> Vec<(Vec<ColValN>, u64)>;
-}
-
-/// This is used to directly read data from persistent storage.
-pub struct SimpleStorageView<'a> {
-  storage: &'a GenericMVTable,
-  table_schema: &'a TableSchema,
-}
-
-impl<'a> SimpleStorageView<'a> {
-  pub fn new(storage: &'a GenericMVTable, table_schema: &'a TableSchema) -> SimpleStorageView<'a> {
-    SimpleStorageView { storage, table_schema }
-  }
-}
-
-impl<'a> StorageView for SimpleStorageView<'a> {
-  fn compute_subtable(
-    &self,
-    key_region: &Vec<KeyBound>,
-    column_region: &Vec<ColName>,
-    timestamp: &Timestamp,
-  ) -> Vec<(Vec<ColValN>, u64)> {
-    unimplemented!()
-  }
-}
-
-/// This reads data by first replaying the Update Views on top of the persistant data.
-pub struct MSStorageView<'a> {
-  storage: &'a GenericMVTable,
-  table_schema: &'a TableSchema,
-  update_views: &'a BTreeMap<u32, GenericTable>,
-  tier: u32,
-}
-
-impl<'a> MSStorageView<'a> {
-  /// Here, in addition to the persistent storage, we pass in the `update_views` that
-  /// we want to apply on top before reading data, and a `tier` to indicate up to which
-  /// update should be applied.
-  pub fn new(
-    storage: &'a GenericMVTable,
-    table_schema: &'a TableSchema,
-    update_views: &'a BTreeMap<u32, GenericTable>,
-    tier: u32,
-  ) -> MSStorageView<'a> {
-    MSStorageView { storage, table_schema, update_views, tier }
-  }
-}
-
-impl<'a> StorageView for MSStorageView<'a> {
-  fn compute_subtable(
-    &self,
-    key_region: &Vec<KeyBound>,
-    column_region: &Vec<ColName>,
-    timestamp: &Timestamp,
-  ) -> Vec<(Vec<ColValN>, u64)> {
-    unimplemented!()
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
