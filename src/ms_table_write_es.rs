@@ -9,7 +9,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::ms_table_read_es::FullMSTableReadES;
 use crate::query_replanning_es::{
-  CommonQueryReplanningES, CommonQueryReplanningS, QueryReplanningSqlView,
+  CommonQueryReplanningES, CommonQueryReplanningS, QueryReplanningAction, QueryReplanningSqlView,
 };
 use crate::server::{
   contains_col, evaluate_update, mk_eval_error, CommonQuery, ContextConstructor,
@@ -102,8 +102,8 @@ pub enum MSTableWriteAction {
 impl FullMSTableWriteES {
   pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> MSTableWriteAction {
     let plan_es = cast!(Self::QueryReplanning, self).unwrap();
-    plan_es.status.start(ctx);
-    MSTableWriteAction::Wait
+    let action = plan_es.status.start(ctx);
+    self.handle_replanning_action(ctx, action)
   }
 
   /// Handle Columns being locked
@@ -114,9 +114,8 @@ impl FullMSTableWriteES {
   ) -> MSTableWriteAction {
     match self {
       FullMSTableWriteES::QueryReplanning(plan_es) => {
-        // Advance the QueryReplanning now that the desired columns have been locked.
-        plan_es.status.columns_locked::<T>(ctx);
-        self.check_query_replanning_done(ctx)
+        let action = plan_es.status.columns_locked::<T>(ctx);
+        self.handle_replanning_action(ctx, action)
       }
       FullMSTableWriteES::Executing(es) => {
         let executing = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
@@ -199,21 +198,23 @@ impl FullMSTableWriteES {
     tree: msg::FrozenColUsageTree,
   ) -> MSTableWriteAction {
     let plan_es = cast!(FullMSTableWriteES::QueryReplanning, self).unwrap();
-    plan_es.status.handle_master_response(ctx, gossip_gen, tree);
-    self.check_query_replanning_done(ctx)
+    let action = plan_es.status.handle_master_response(ctx, gossip_gen, tree);
+    self.handle_replanning_action(ctx, action)
   }
 
-  /// Checks if the QueryReplanning is in `Done` and act accordingly.
-  pub fn check_query_replanning_done<T: IOTypes>(
+  /// Handle the `action` sent back by the `CommonQueryReplanningES`.
+  fn handle_replanning_action<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
+    action: QueryReplanningAction,
   ) -> MSTableWriteAction {
-    let plan_es = cast!(FullMSTableWriteES::QueryReplanning, self).unwrap();
-    let comm_plan_es = &mut plan_es.status;
-    if let CommonQueryReplanningS::Done(success) = comm_plan_es.state {
-      if success {
+    match action {
+      QueryReplanningAction::Wait => MSTableWriteAction::Wait,
+      QueryReplanningAction::Success => {
         // If the QueryReplanning was successful, we move the FullMSTableWriteES
         // to Executing in the Start state, and immediately start executing it.
+        let plan_es = cast!(FullMSTableWriteES::QueryReplanning, self).unwrap();
+        let comm_plan_es = &mut plan_es.status;
 
         // First, we look up the `tier` of this Table being
         // written, update the `tier_map`.
@@ -240,15 +241,14 @@ impl FullMSTableWriteES {
 
         // Finally, we start the MSWriteTableES.
         self.start_ms_table_write_es(ctx)
-      } else {
+      }
+      QueryReplanningAction::Failure => {
         // Recall that if QueryReplanning had ended in a failure (i.e. having missing
         // columns), then `CommonQueryReplanningES` will have send back the necessary
         // responses. Thus, we only need to Exit the ES here. (Recall this doesn't imply
         // a fatal Error for the whole transaction, so we don't return ExitAll).
         MSTableWriteAction::ExitAndCleanUp(Vec::new())
       }
-    } else {
-      MSTableWriteAction::Wait
     }
   }
 

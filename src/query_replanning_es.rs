@@ -7,7 +7,7 @@ use crate::tablet::TabletContext;
 use std::rc::Rc;
 
 // -----------------------------------------------------------------------------------------------
-//  CommonQueryReplanningES
+//  QueryReplanningSqlView
 // -----------------------------------------------------------------------------------------------
 
 pub trait QueryReplanningSqlView {
@@ -23,6 +23,7 @@ pub trait QueryReplanningSqlView {
   fn ms_query_stage(&self) -> proc::MSQueryStage;
 }
 
+/// Implementation for `SuperSimpleSelect`.
 impl QueryReplanningSqlView for proc::SuperSimpleSelect {
   fn required_local_cols(&self) -> Vec<ColName> {
     return self.projection.clone();
@@ -41,6 +42,7 @@ impl QueryReplanningSqlView for proc::SuperSimpleSelect {
   }
 }
 
+/// Implementation for `Update`.
 impl QueryReplanningSqlView for proc::Update {
   fn required_local_cols(&self) -> Vec<ColName> {
     self.assignment.iter().map(|(col, _)| col.clone()).collect()
@@ -64,6 +66,10 @@ impl QueryReplanningSqlView for proc::Update {
   }
 }
 
+// -----------------------------------------------------------------------------------------------
+//  CommonQueryReplanningES
+// -----------------------------------------------------------------------------------------------
+
 #[derive(Debug)]
 pub enum CommonQueryReplanningS {
   Start,
@@ -83,7 +89,7 @@ pub enum CommonQueryReplanningS {
   MasterQueryReplanning {
     master_query_id: QueryId,
   },
-  Done(bool),
+  Done,
 }
 
 #[derive(Debug)]
@@ -102,13 +108,26 @@ pub struct CommonQueryReplanningES<T: QueryReplanningSqlView> {
   pub state: CommonQueryReplanningS,
 }
 
+pub enum QueryReplanningAction {
+  /// Indicates the parent needs to wait, making sure to fowards Column Locking and
+  /// MasterQueryReplanning responses.
+  Wait,
+  /// Indicates the that CommonQueryReplanningES has computed a valid query where the Context
+  /// is sufficient, and it's stored in the `query_plan` field.
+  Success,
+  /// Indicates a valid QueryPlan couldn't be computed. Here, either a Required Column
+  /// wasn't present in the TableSchema, or one wasn't present in the context. In the latter
+  /// case, in both cases, the appropriate responses were sent back to the originator.
+  Failure,
+}
+
 // -----------------------------------------------------------------------------------------------
-//  Query Replanning
+//  Implementation
 // -----------------------------------------------------------------------------------------------
 
 impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
   /// This is the entrypoint of the ES.
-  pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
+  pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> QueryReplanningAction {
     matches!(self.state, CommonQueryReplanningS::Start);
     // See if all Required Column are locked at this Timestamp.
     if !are_cols_locked(&ctx.table_schema, &self.sql_view.required_local_cols(), &self.timestamp) {
@@ -119,13 +138,16 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         self.sql_view.required_local_cols(),
       );
       self.state = CommonQueryReplanningS::RequiredLocalColumnLocking { locked_columns_query_id };
-      return;
+      QueryReplanningAction::Wait
     } else {
-      self.check_required_cols_present(ctx);
+      self.check_required_cols_present(ctx)
     }
   }
 
-  fn check_required_cols_present<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
+  fn check_required_cols_present<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+  ) -> QueryReplanningAction {
     // By this point, the Required Columns are locked, but we still need to verify
     // that the they are present in the TableSchema.
     for col in &self.sql_view.required_local_cols() {
@@ -136,8 +158,8 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           self.query_id.clone(),
           msg::QueryError::RequiredColumnsDNE { msg: String::new() },
         );
-        self.state = CommonQueryReplanningS::Done(false);
-        return;
+        self.state = CommonQueryReplanningS::Done;
+        return QueryReplanningAction::Failure;
       }
     }
 
@@ -158,18 +180,23 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           all_cols,
         );
         self.state = CommonQueryReplanningS::ColumnLocking { locked_columns_query_id };
+        QueryReplanningAction::Wait
       } else {
         // Note that here, the `safe_present_cols` and `external_cols` of `node` must align
         // with the TableSchema. See the else clause in `check_cols_aligned`.
-        self.state = CommonQueryReplanningS::Done(true);
+        self.state = CommonQueryReplanningS::Done;
+        QueryReplanningAction::Success
       }
     } else {
       // Here, we compute a new QueryPlan using the local GossipGen.
-      self.replan_query(ctx);
+      self.replan_query(ctx)
     }
   }
 
-  fn check_cols_aligned<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
+  fn check_cols_aligned<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+  ) -> QueryReplanningAction {
     // Now, we need to verify that the `external_cols` and `safe_present_cols` (in the
     // QueryPlan sent to us) are all absent and present in the TableSchema respectively.
     let does_query_plan_align = (|| {
@@ -193,15 +220,16 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
 
     if does_query_plan_align {
       // Here, QueryReplanning is finished and we may start executing the query.
-      self.state = CommonQueryReplanningS::Done(true);
+      self.state = CommonQueryReplanningS::Done;
+      QueryReplanningAction::Success
     } else {
       // Here, we compute a new QueryPlan using the local GossipGen.
       assert!(ctx.gossip.gossip_gen > self.query_plan.gossip_gen);
-      self.replan_query(ctx);
+      self.replan_query(ctx)
     }
   }
 
-  fn replan_query<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
+  fn replan_query<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> QueryReplanningAction {
     // First, we compute the union of `safe_present_cols` and `external_cols` that we would
     // have if we were to create a new QueryPlan right now.
     let mut planner = ColUsagePlanner {
@@ -220,6 +248,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         all_cols.clone(),
       );
       self.state = CommonQueryReplanningS::RecomputeQueryPlan { locked_columns_query_id };
+      QueryReplanningAction::Wait
     } else {
       // Otherwise, we compute the QueryPlan. Recall that we needed `all_cols` above to be
       // locked in the TableSchema so we can figure out which are External and which are not.
@@ -263,29 +292,29 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
 
           // Advance Read Status
           self.state = CommonQueryReplanningS::MasterQueryReplanning { master_query_id };
-          return;
+          return QueryReplanningAction::Wait;
         }
       }
 
       // If we make it here, we have a valid QueryPlan and we are done.
       self.query_plan.gossip_gen = ctx.gossip.gossip_gen;
       self.query_plan.col_usage_node = col_usage_node;
-      self.state = CommonQueryReplanningS::Done(true);
+      self.state = CommonQueryReplanningS::Done;
+      QueryReplanningAction::Success
     }
   }
 
   /// This is called when Columns have been locked, and the originator was this ES.
-  pub fn columns_locked<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
+  pub fn columns_locked<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+  ) -> QueryReplanningAction {
     match &self.state {
       CommonQueryReplanningS::RequiredLocalColumnLocking { .. } => {
-        self.check_required_cols_present(ctx);
+        self.check_required_cols_present(ctx)
       }
-      CommonQueryReplanningS::ColumnLocking { .. } => {
-        self.check_cols_aligned(ctx);
-      }
-      CommonQueryReplanningS::RecomputeQueryPlan { .. } => {
-        self.replan_query(ctx);
-      }
+      CommonQueryReplanningS::ColumnLocking { .. } => self.check_cols_aligned(ctx),
+      CommonQueryReplanningS::RecomputeQueryPlan { .. } => self.replan_query(ctx),
       _ => panic!(),
     }
   }
@@ -296,7 +325,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
     ctx: &mut TabletContext<T>,
     gossip_gen: Gen,
     tree: msg::FrozenColUsageTree,
-  ) {
+  ) -> QueryReplanningAction {
     // Recall that since we only send single nodes, we expect the `tree` to just be a `node`.
     let (_, col_usage_node) = cast!(msg::FrozenColUsageTree::ColUsageNode, tree).unwrap();
 
@@ -316,13 +345,14 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         self.query_id.clone(),
         msg::AbortedData::ColumnsDNE { missing_cols },
       );
-      self.state = CommonQueryReplanningS::Done(false);
-      return;
+      self.state = CommonQueryReplanningS::Done;
+      QueryReplanningAction::Failure
     } else {
       // This means the QueryReplanning was a success, so we update the QueryPlan and go to Done.
       self.query_plan.gossip_gen = gossip_gen;
       self.query_plan.col_usage_node = col_usage_node;
-      self.state = CommonQueryReplanningS::Done(true);
+      self.state = CommonQueryReplanningS::Done;
+      QueryReplanningAction::Success
     }
   }
 
@@ -345,7 +375,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
           )),
         );
       }
-      CommonQueryReplanningS::Done(_) => {}
+      CommonQueryReplanningS::Done => {}
     }
   }
 }

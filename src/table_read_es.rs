@@ -9,7 +9,9 @@ use crate::model::common::{
   Timestamp, TransTableName,
 };
 use crate::model::message as msg;
-use crate::query_replanning_es::{CommonQueryReplanningES, CommonQueryReplanningS};
+use crate::query_replanning_es::{
+  CommonQueryReplanningES, CommonQueryReplanningS, QueryReplanningAction,
+};
 use crate::server::{
   contains_col, evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor,
   ServerContext,
@@ -92,8 +94,8 @@ pub enum FullTableReadES {
 impl FullTableReadES {
   pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
     let plan_es = cast!(Self::QueryReplanning, self).unwrap();
-    plan_es.status.start(ctx);
-    TableAction::Wait
+    let action = plan_es.status.start(ctx);
+    self.handle_replanning_action(ctx, action)
   }
 
   /// Handle Columns being locked
@@ -104,9 +106,8 @@ impl FullTableReadES {
   ) -> TableAction {
     match self {
       FullTableReadES::QueryReplanning(plan_es) => {
-        // Advance the QueryReplanning now that the desired columns have been locked.
-        plan_es.status.columns_locked::<T>(ctx);
-        self.check_query_replanning_done(ctx)
+        let action = plan_es.status.columns_locked::<T>(ctx);
+        self.handle_replanning_action(ctx, action)
       }
       FullTableReadES::Executing(es) => {
         let executing = cast!(ExecutionS::Executing, &mut es.state).unwrap();
@@ -189,21 +190,23 @@ impl FullTableReadES {
     tree: msg::FrozenColUsageTree,
   ) -> TableAction {
     let plan_es = cast!(FullTableReadES::QueryReplanning, self).unwrap();
-    plan_es.status.handle_master_response(ctx, gossip_gen, tree);
-    self.check_query_replanning_done(ctx)
+    let action = plan_es.status.handle_master_response(ctx, gossip_gen, tree);
+    self.handle_replanning_action(ctx, action)
   }
 
-  /// Checks if the QueryReplanning is in `Done` and act accordingly.
-  pub fn check_query_replanning_done<T: IOTypes>(
+  /// Handle the `action` sent back by the `CommonQueryReplanningES`.
+  fn handle_replanning_action<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
+    action: QueryReplanningAction,
   ) -> TableAction {
-    let plan_es = cast!(FullTableReadES::QueryReplanning, self).unwrap();
-    let comm_plan_es = &mut plan_es.status;
-    if let CommonQueryReplanningS::Done(success) = comm_plan_es.state {
-      if success {
+    match action {
+      QueryReplanningAction::Wait => TableAction::Wait,
+      QueryReplanningAction::Success => {
         // If the QueryReplanning was successful, we move the FullTableReadES
         // to Executing in the Start state, and immediately start executing it.
+        let plan_es = cast!(FullTableReadES::QueryReplanning, self).unwrap();
+        let comm_plan_es = &mut plan_es.status;
         *self = FullTableReadES::Executing(TableReadES {
           root_query_path: plan_es.root_query_path.clone(),
           tier_map: plan_es.tier_map.clone(),
@@ -217,15 +220,14 @@ impl FullTableReadES {
           state: ExecutionS::Start,
         });
         self.start_table_read_es(ctx)
-      } else {
+      }
+      QueryReplanningAction::Failure => {
         // Recall that if QueryReplanning had ended in a failure (i.e.
         // having missing columns), then `CommonQueryReplanningES` will
         // have send back the necessary responses. Thus, we only need to
         // Exit the ES here.
         TableAction::ExitAndCleanUp(Vec::new())
       }
-    } else {
-      TableAction::Wait
     }
   }
 
