@@ -28,9 +28,10 @@ use crate::model::message as msg;
 use crate::ms_table_read_es::{FullMSTableReadES, MSReadQueryReplanningES, MSTableReadAction};
 use crate::ms_table_write_es::{FullMSTableWriteES, MSTableWriteAction, MSWriteQueryReplanningES};
 use crate::multiversion_map::MVM;
+use crate::query_replanning_es::{CommonQueryReplanningES, CommonQueryReplanningS};
 use crate::server::{
-  contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error, CommonQuery,
-  ContextConstructor, LocalTable, ServerContext,
+  are_cols_locked, contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error,
+  CommonQuery, ContextConstructor, LocalTable, ServerContext,
 };
 use crate::storage::{commit_to_storage, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{FullTableReadES, QueryReplanningES, TableAction};
@@ -43,103 +44,6 @@ use std::iter::FromIterator;
 use std::ops::{Add, Bound, Deref, Sub};
 use std::rc::Rc;
 use std::sync::Arc;
-
-// -----------------------------------------------------------------------------------------------
-//  CommonQueryReplanningES
-// -----------------------------------------------------------------------------------------------
-
-pub trait QueryReplanningSqlView {
-  /// Get the ColNames that must exist in the TableSchema (the Context is not sufficient).
-  fn required_local_cols(&self) -> Vec<ColName>;
-  /// Get the TablePath that the query reads.
-  fn table(&self) -> &TablePath;
-  /// Get all expressions in the Query (in some deterministic order)
-  fn exprs(&self) -> Vec<proc::ValExpr>;
-  /// This converts the underlying SQL into an MSQueryStage, useful
-  /// for sending it out over the network.
-  fn ms_query_stage(&self) -> proc::MSQueryStage;
-}
-
-impl QueryReplanningSqlView for proc::SuperSimpleSelect {
-  fn required_local_cols(&self) -> Vec<ColName> {
-    return self.projection.clone();
-  }
-
-  fn table(&self) -> &TablePath {
-    cast!(proc::TableRef::TablePath, &self.from).unwrap()
-  }
-
-  fn exprs(&self) -> Vec<proc::ValExpr> {
-    vec![self.selection.clone()]
-  }
-
-  fn ms_query_stage(&self) -> proc::MSQueryStage {
-    proc::MSQueryStage::SuperSimpleSelect(self.clone())
-  }
-}
-
-impl QueryReplanningSqlView for proc::Update {
-  fn required_local_cols(&self) -> Vec<ColName> {
-    self.assignment.iter().map(|(col, _)| col.clone()).collect()
-  }
-
-  fn table(&self) -> &TablePath {
-    &self.table
-  }
-
-  fn exprs(&self) -> Vec<proc::ValExpr> {
-    let mut exprs = Vec::new();
-    exprs.push(self.selection.clone());
-    for (_, expr) in &self.assignment {
-      exprs.push(expr.clone());
-    }
-    exprs
-  }
-
-  fn ms_query_stage(&self) -> proc::MSQueryStage {
-    proc::MSQueryStage::Update(self.clone())
-  }
-}
-
-#[derive(Debug)]
-pub enum CommonQueryReplanningS {
-  Start,
-  /// Used to lock the columsn in the SELECT clause or SET clause.
-  RequiredLocalColumnLocking {
-    locked_columns_query_id: QueryId,
-  },
-  /// Used to lock the query plan's columns
-  ColumnLocking {
-    locked_columns_query_id: QueryId,
-  },
-  /// Used to lock the query plan's columns after recomputation.
-  RecomputeQueryPlan {
-    locked_columns_query_id: QueryId,
-    // The `ColName`s being locked. This is a minor optimization to save a few computations.
-    locking_cols: Vec<ColName>,
-  },
-  /// Used to wait on the master
-  MasterQueryReplanning {
-    master_query_id: QueryId,
-  },
-  Done(bool),
-}
-
-#[derive(Debug)]
-pub struct CommonQueryReplanningES<T: QueryReplanningSqlView> {
-  // These members are parallel to the messages in `msg::GeneralQuery`.
-  pub timestamp: Timestamp,
-  pub context: Rc<Context>,
-  pub sql_view: T,
-  pub query_plan: QueryPlan,
-
-  /// Path of the original sender (needed for responding with errors).
-  pub sender_path: QueryPath,
-  /// The OrigP of the Task holding this CommonQueryReplanningES
-  pub query_id: QueryId,
-  /// The state of the CommonQueryReplanningES
-  pub state: CommonQueryReplanningS,
-}
 
 // -----------------------------------------------------------------------------------------------
 //  SubqueryStatus
@@ -619,11 +523,10 @@ impl<T: IOTypes> TabletContext<T> {
 
               // Lookup the MSQuery and add the QueryId of the new Query into `pending_queries`.
               let ms_query_id = self.ms_root_query_map.get(&root_query_id).unwrap().clone();
-              let ms_query = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-              ms_query.pending_queries.insert(perform_query.query_id.clone());
+              let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+              ms_query_es.pending_queries.insert(perform_query.query_id.clone());
 
-              // Create an MSReadTableES in the QueryReplanning state, and add it to
-              // the MSQueryES.
+              // Create an MSReadTableES in the QueryReplanning state, and start it.
               let ms_read_es = map_insert(
                 &mut statuses.full_ms_table_read_ess,
                 &perform_query.query_id,
@@ -634,7 +537,7 @@ impl<T: IOTypes> TabletContext<T> {
                   status: CommonQueryReplanningES {
                     timestamp: query.timestamp,
                     context: Rc::new(query.context),
-                    sql_view: query.sql_query.clone(),
+                    sql_view: query.sql_query,
                     query_plan: query.query_plan,
                     sender_path: perform_query.sender_path,
                     query_id: perform_query.query_id.clone(),
@@ -668,7 +571,7 @@ impl<T: IOTypes> TabletContext<T> {
           }
           msg::GeneralQuery::UpdateQuery(query) => {
             // We first do some basic verification of the SQL query, namely assert that the
-            // assigned columns aren't key columns. (Recall this should be enformed by the Slave.)
+            // assigned columns aren't key columns. (Recall this should be enforced by the Slave.)
             for (col, _) in &query.sql_query.assignment {
               assert!(lookup(&self.table_schema.key_cols, col).is_none())
             }
@@ -738,8 +641,8 @@ impl<T: IOTypes> TabletContext<T> {
 
             // Lookup the MSQuery and add the QueryId of the new Query into `pending_queries`.
             let ms_query_id = self.ms_root_query_map.get(&root_query_id).unwrap().clone();
-            let ms_query = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-            ms_query.pending_queries.insert(perform_query.query_id.clone());
+            let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+            ms_query_es.pending_queries.insert(perform_query.query_id.clone());
 
             // Create an MSWriteTableES in the QueryReplanning state, and add it to
             // the MSQueryES.
@@ -1660,8 +1563,8 @@ impl<T: IOTypes> TabletContext<T> {
         // and also update the MSQueryES.
         let ms_write_es = statuses.full_ms_table_write_ess.remove(&query_id).unwrap();
         // Remove the MSTableWriteES from the MSQuery::pending_queries.
-        let ms_query = statuses.ms_query_ess.get_mut(ms_write_es.ms_query_id()).unwrap();
-        ms_query.pending_queries.remove(&query_id);
+        let ms_query_es = statuses.ms_query_ess.get_mut(ms_write_es.ms_query_id()).unwrap();
+        ms_query_es.pending_queries.remove(&query_id);
         // Abort all of the subqueries.
         for subquery_id in subquery_ids {
           self.exit_and_clean_up(statuses, subquery_id);
@@ -1716,8 +1619,8 @@ impl<T: IOTypes> TabletContext<T> {
         // and also update the MSQueryES.
         let ms_read_es = statuses.full_ms_table_read_ess.remove(&query_id).unwrap();
         // Remove the MSTableReadES from the MSQuery::pending_queries.
-        let ms_query = statuses.ms_query_ess.get_mut(ms_read_es.ms_query_id()).unwrap();
-        ms_query.pending_queries.remove(&query_id);
+        let ms_query_es = statuses.ms_query_ess.get_mut(ms_read_es.ms_query_id()).unwrap();
+        ms_query_es.pending_queries.remove(&query_id);
         // Abort all of the subqueries.
         for subquery_id in subquery_ids {
           self.exit_and_clean_up(statuses, subquery_id);
@@ -2004,298 +1907,4 @@ pub fn recompute_subquery<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: Subque
     SingleSubqueryStatus::Pending(SubqueryPending { context, query_id: gr_query_id.clone() });
 
   Ok((gr_query_id, gr_query_es))
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Query Replanning
-// -----------------------------------------------------------------------------------------------
-
-impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
-  pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
-    matches!(self.state, CommonQueryReplanningS::Start);
-    // Add column locking
-    let locked_cols_qid = ctx.add_requested_locked_columns(
-      OrigP::new(self.query_id.clone()),
-      self.timestamp,
-      self.sql_view.required_local_cols(),
-    );
-    self.state = CommonQueryReplanningS::RequiredLocalColumnLocking {
-      locked_columns_query_id: locked_cols_qid,
-    };
-  }
-
-  /// This is called when Columns have been locked, and the originator was this ES.
-  /// Note: The reason that `start` above is not just another case statement in this function
-  /// because functions are generally  suppose to take in arguments specific to the states
-  /// that they are transitioning. however, many of the other states do wait for column locking.
-  pub fn columns_locked<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
-    match &self.state {
-      CommonQueryReplanningS::RequiredLocalColumnLocking { .. } => {
-        // We need to verify that the projected columns are present.
-        for col in &self.sql_view.required_local_cols() {
-          if !contains_col(&ctx.table_schema, col, &self.timestamp) {
-            // This means a projected column doesn't exist. Thus, we Exit and Clean Up.
-            ctx.ctx().send_query_error(
-              self.sender_path.clone(),
-              self.query_id.clone(),
-              msg::QueryError::ProjectedColumnsDNE { msg: String::new() },
-            );
-            self.state = CommonQueryReplanningS::Done(false);
-            return;
-          }
-        }
-
-        // Next, we check if the `gen` in the query plan is more recent than the
-        // current Tablet's `gen`, and we act accordingly.
-        if ctx.gossip.gossip_gen <= self.query_plan.gossip_gen {
-          // Lock all of the `external_cols` and `safe_present` columns in this query plan.
-          let node = &self.query_plan.col_usage_node;
-          let mut all_cols = node.external_cols.clone();
-          all_cols.extend(node.safe_present_cols.iter().cloned());
-
-          // Add column locking
-          let locked_cols_qid = ctx.add_requested_locked_columns(
-            OrigP::new(self.query_id.clone()),
-            self.timestamp.clone(),
-            all_cols,
-          );
-
-          // Advance Read Status
-          self.state =
-            CommonQueryReplanningS::ColumnLocking { locked_columns_query_id: locked_cols_qid };
-        } else {
-          // Replan the query. First, we need to gather the set of `ColName`s touched by the
-          // query, and then we need to lock them.
-          let mut planner = ColUsagePlanner {
-            gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
-            timestamp: self.timestamp,
-          };
-
-          let all_cols = planner
-            .get_all_cols(&mut self.query_plan.trans_table_schemas.clone(), &self.sql_view.exprs());
-
-          // Add column locking
-          let locked_cols_qid = ctx.add_requested_locked_columns(
-            OrigP::new(self.query_id.clone()),
-            self.timestamp.clone(),
-            all_cols.clone(),
-          );
-
-          // Advance Read Status
-          self.state = CommonQueryReplanningS::RecomputeQueryPlan {
-            locked_columns_query_id: locked_cols_qid,
-            locking_cols: all_cols,
-          };
-        }
-      }
-      CommonQueryReplanningS::ColumnLocking { .. } => {
-        // Now, we need to verify that the `external_cols` are all absent and the
-        // `safe_present_cols` are all present.
-
-        let does_query_plan_align = (|| {
-          // First, check that `external_cols are absent.
-          for col in &self.query_plan.col_usage_node.external_cols {
-            // Since the key_cols are static, no query plan should have a
-            // key_col as an external col. Thus, we assert.
-            assert!(lookup_pos(&ctx.table_schema.key_cols, col).is_none());
-            if ctx.table_schema.val_cols.strong_static_read(&col, self.timestamp).is_some() {
-              return false;
-            }
-          }
-          // Next, check that `safe_present_cols` are present.
-          for col in &self.query_plan.col_usage_node.safe_present_cols {
-            if !contains_col(&ctx.table_schema, col, &self.timestamp) {
-              return false;
-            }
-          }
-          return true;
-        })();
-
-        if does_query_plan_align {
-          // Here, QueryReplanning is finished and we may start executing the query.
-          self.state = CommonQueryReplanningS::Done(true);
-        } else {
-          // This means the current schema didn't line up with the QueryPlan.
-          // The only explanation is that the schema had changed very recently.
-          // Thus, we re-plan the query.
-          assert!(self.query_plan.gossip_gen > ctx.gossip.gossip_gen);
-          let mut planner = ColUsagePlanner {
-            gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
-            timestamp: self.timestamp,
-          };
-
-          let all_cols = planner
-            .get_all_cols(&mut self.query_plan.trans_table_schemas.clone(), &self.sql_view.exprs());
-
-          // Add column locking
-          let locked_cols_qid = ctx.add_requested_locked_columns(
-            OrigP::new(self.query_id.clone()),
-            self.timestamp.clone(),
-            all_cols.clone(),
-          );
-
-          // Advance Read Status
-          self.state = CommonQueryReplanningS::RecomputeQueryPlan {
-            locked_columns_query_id: locked_cols_qid,
-            locking_cols: all_cols,
-          };
-        }
-      }
-      CommonQueryReplanningS::RecomputeQueryPlan { locking_cols, .. } => {
-        // This means have provisinally locked the necessary columns. However,
-        // while we were locking, the current Gossip could have updated. Thus,
-        // we need to make sure we actually have indeed locked the necessary
-        // columns, and re-lock otherwise.
-        let mut planner = ColUsagePlanner {
-          gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
-          timestamp: self.timestamp,
-        };
-
-        let all_cols = planner
-          .get_all_cols(&mut self.query_plan.trans_table_schemas.clone(), &self.sql_view.exprs());
-
-        let mut did_lock_all = true;
-        for col in all_cols.clone() {
-          did_lock_all |= locking_cols.contains(&col);
-        }
-
-        if !did_lock_all {
-          // Add column locking
-          let locked_cols_qid = ctx.add_requested_locked_columns(
-            OrigP::new(self.query_id.clone()),
-            self.timestamp.clone(),
-            all_cols.clone(),
-          );
-          // Repeat this state
-          self.state = CommonQueryReplanningS::RecomputeQueryPlan {
-            locked_columns_query_id: locked_cols_qid,
-            locking_cols: all_cols,
-          };
-          return;
-        }
-
-        // Here, we have locked all necessary columns and we can finish the QueryPlan. However,
-        // if we find that the context is insufficient, we need to contact the Master.
-
-        // Compute `schema_cols`, the cols that are present among all relevent cols.
-        let mut schema_cols = Vec::<ColName>::new();
-        for col in locking_cols {
-          if contains_col(&ctx.table_schema, col, &self.timestamp) {
-            schema_cols.push(col.clone());
-          }
-        }
-
-        // Construct a new QueryPlan using the above `schema_cols`.
-        let mut planner = ColUsagePlanner {
-          gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
-          timestamp: self.timestamp,
-        };
-
-        let (_, col_usage_node) = planner.plan_stage_query_with_schema(
-          &mut self.query_plan.trans_table_schemas.clone(),
-          &self.sql_view.required_local_cols(), // TODO: we shouldn't have to pass this in.
-          &proc::TableRef::TablePath(self.sql_view.table().clone()),
-          schema_cols,
-          &self.sql_view.exprs(),
-        );
-
-        let external_cols = col_usage_node.external_cols.clone();
-        self.query_plan.gossip_gen = ctx.gossip.gossip_gen;
-        self.query_plan.col_usage_node = col_usage_node;
-
-        // Next, we check to see if all ColNames in `external_cols` is contaiend
-        // in the context. If not, we have to consult the Master.
-        for col in external_cols {
-          if !self.context.context_schema.column_context_schema.contains(&col) {
-            // This means we need to consult the Master.
-            let master_query_id = mk_qid(&mut ctx.rand);
-            ctx.network_output.send(
-              &ctx.master_eid,
-              msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
-                msg::PerformMasterFrozenColUsage {
-                  sender_path: QueryPath {
-                    slave_group_id: ctx.this_slave_group_id.clone(),
-                    maybe_tablet_group_id: Some(ctx.this_tablet_group_id.clone()),
-                    query_id: self.query_id.clone(),
-                  },
-                  query_id: master_query_id.clone(),
-                  timestamp: self.timestamp,
-                  trans_table_schemas: self.query_plan.trans_table_schemas.clone(),
-                  col_usage_tree: msg::ColUsageTree::MSQueryStage(self.sql_view.ms_query_stage()),
-                },
-              )),
-            );
-
-            // Advance Read Status
-            self.state = CommonQueryReplanningS::MasterQueryReplanning { master_query_id };
-            return;
-          }
-        }
-
-        // If we get here that means we have successfully computed a valid QueryPlan,
-        // and we are done.
-        self.state = CommonQueryReplanningS::Done(true);
-      }
-      _ => panic!(),
-    }
-  }
-
-  /// Handles the Query Plan constructed by the Master.
-  pub fn handle_master_response<T: IOTypes>(
-    &mut self,
-    ctx: &mut TabletContext<T>,
-    gossip_gen: Gen,
-    tree: msg::FrozenColUsageTree,
-  ) {
-    // Recall that since we only send single nodes, we expect the `tree` to just be a `node`.
-    let (_, col_usage_node) = cast!(msg::FrozenColUsageTree::ColUsageNode, tree).unwrap();
-
-    // Compute the set of External Columns that still aren't in the Context.
-    let mut missing_cols = Vec::<ColName>::new();
-    for col in &col_usage_node.external_cols {
-      if !self.context.context_schema.column_context_schema.contains(&col) {
-        missing_cols.push(col.clone());
-      }
-    }
-
-    if !missing_cols.is_empty() {
-      // If the above set is non-empty, that means the QueryReplanning has conclusively
-      // detected an insufficient Context, and so we respond to the sender and move to Done.
-      ctx.ctx().send_abort_data(
-        self.sender_path.clone(),
-        self.query_id.clone(),
-        msg::AbortedData::ColumnsDNE { missing_cols },
-      );
-      self.state = CommonQueryReplanningS::Done(false);
-      return;
-    } else {
-      // This means the QueryReplanning was a success, so we update the QueryPlan and go to Done.
-      self.query_plan.gossip_gen = gossip_gen;
-      self.query_plan.col_usage_node = col_usage_node;
-      self.state = CommonQueryReplanningS::Done(true);
-    }
-  }
-
-  /// This Exits and Cleans up this QueryReplanningES
-  pub fn exit_and_clean_up<T: IOTypes>(&self, ctx: &mut TabletContext<T>) {
-    match &self.state {
-      CommonQueryReplanningS::Start => {}
-      CommonQueryReplanningS::RequiredLocalColumnLocking { locked_columns_query_id }
-      | CommonQueryReplanningS::ColumnLocking { locked_columns_query_id }
-      | CommonQueryReplanningS::RecomputeQueryPlan { locked_columns_query_id, .. } => {
-        ctx.remove_col_locking_request(locked_columns_query_id.clone());
-      }
-      CommonQueryReplanningS::MasterQueryReplanning { master_query_id } => {
-        // If the removal was successful, we should also send a Cancellation
-        // message to the Master.
-        ctx.network_output.send(
-          &ctx.master_eid,
-          msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-            msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
-          )),
-        );
-      }
-      CommonQueryReplanningS::Done(_) => {}
-    }
-  }
 }

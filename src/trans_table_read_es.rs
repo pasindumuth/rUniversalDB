@@ -11,13 +11,13 @@ use crate::model::common::{
 };
 use crate::model::common::{Context, QueryId, QueryPath, TierMap, TransTableLocationPrefix};
 use crate::model::message as msg;
+use crate::query_replanning_es::QueryReplanningSqlView;
 use crate::server::{
   evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor, LocalTable,
   ServerContext,
 };
 use crate::tablet::{
-  compute_contexts, Executing, QueryReplanningSqlView, SingleSubqueryStatus, SubqueryFinished,
-  SubqueryPending,
+  compute_contexts, Executing, SingleSubqueryStatus, SubqueryFinished, SubqueryPending,
 };
 use crate::trans_table_read_es::TransTableAction::Wait;
 use std::collections::{HashMap, HashSet};

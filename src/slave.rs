@@ -848,7 +848,7 @@ impl<T: IOTypes> SlaveContext<T> {
         msg::AbortedData::ColumnsDNE { .. }
         | msg::AbortedData::QueryError(QueryError::TypeError { .. })
         | msg::AbortedData::QueryError(QueryError::RuntimeError { .. })
-        | msg::AbortedData::QueryError(QueryError::ProjectedColumnsDNE { .. }) => {
+        | msg::AbortedData::QueryError(QueryError::RequiredColumnsDNE { .. }) => {
           // Here, we simply respond to the External with a `QueryExecutionError`,
           // and Exit and Clean Up.
           self.network_output.send(

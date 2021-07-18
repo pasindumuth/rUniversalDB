@@ -57,7 +57,7 @@ impl<'a> ColUsagePlanner<'a> {
     let mut requested_cols = Vec::<ColName>::new();
     let mut children = Vec::<Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>>::new();
     for expr in exprs {
-      collect_top_level_cols_R(expr, &mut requested_cols);
+      collect_top_level_cols_r(expr, &mut requested_cols);
       self.collect_subqueries(trans_table_ctx, &mut children, expr);
     }
 
@@ -84,6 +84,8 @@ impl<'a> ColUsagePlanner<'a> {
   ///
   /// Here, we return the projected cols (i.e. the Schema of the resulting TransTable) and
   /// the FrozenColUsageNode.
+  ///
+  /// The `schema_cols` sure better have all relevent columns; forgetting one is fatal.
   pub fn plan_stage_query_with_schema(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
@@ -94,7 +96,7 @@ impl<'a> ColUsagePlanner<'a> {
   ) -> (Vec<ColName>, FrozenColUsageNode) {
     let mut node = FrozenColUsageNode::new(table_ref.clone());
     for expr in exprs {
-      collect_top_level_cols_R(expr, &mut node.requested_cols);
+      collect_top_level_cols_r(expr, &mut node.requested_cols);
       self.collect_subqueries(trans_table_ctx, &mut node.children, expr);
     }
 
@@ -248,17 +250,17 @@ impl<'a> ColUsagePlanner<'a> {
 /// under a `Subquery`.
 pub fn collect_top_level_cols(expr: &proc::ValExpr) -> Vec<ColName> {
   let mut cols = Vec::<ColName>::new();
-  collect_top_level_cols_R(expr, &mut cols);
+  collect_top_level_cols_r(expr, &mut cols);
   cols
 }
 
-fn collect_top_level_cols_R(expr: &proc::ValExpr, cols: &mut Vec<ColName>) {
+fn collect_top_level_cols_r(expr: &proc::ValExpr, cols: &mut Vec<ColName>) {
   match expr {
     proc::ValExpr::ColumnRef { col_ref } => cols.push(col_ref.clone()),
-    proc::ValExpr::UnaryExpr { expr, .. } => collect_top_level_cols_R(&expr, cols),
+    proc::ValExpr::UnaryExpr { expr, .. } => collect_top_level_cols_r(&expr, cols),
     proc::ValExpr::BinaryExpr { left, right, .. } => {
-      collect_top_level_cols_R(&left, cols);
-      collect_top_level_cols_R(&right, cols);
+      collect_top_level_cols_r(&left, cols);
+      collect_top_level_cols_r(&right, cols);
     }
     proc::ValExpr::Value { .. } => {}
     proc::ValExpr::Subquery { .. } => {}
@@ -269,9 +271,9 @@ fn collect_top_level_cols_R(expr: &proc::ValExpr, cols: &mut Vec<ColName>) {
 pub fn collect_update_subqueries(sql_query: &proc::Update) -> Vec<proc::GRQuery> {
   let mut subqueries = Vec::<proc::GRQuery>::new();
   for (_, expr) in &sql_query.assignment {
-    collect_expr_subqueries_R(expr, &mut subqueries);
+    collect_expr_subqueries_r(expr, &mut subqueries);
   }
-  collect_expr_subqueries_R(&sql_query.selection, &mut subqueries);
+  collect_expr_subqueries_r(&sql_query.selection, &mut subqueries);
   return subqueries;
 }
 
@@ -283,17 +285,17 @@ pub fn collect_select_subqueries(sql_query: &proc::SuperSimpleSelect) -> Vec<pro
 // Computes the set of all GRQuerys that appear as immediate children of `expr`.
 fn collect_expr_subqueries(expr: &proc::ValExpr) -> Vec<proc::GRQuery> {
   let mut subqueries = Vec::<proc::GRQuery>::new();
-  collect_expr_subqueries_R(expr, &mut subqueries);
+  collect_expr_subqueries_r(expr, &mut subqueries);
   subqueries
 }
 
-fn collect_expr_subqueries_R(expr: &proc::ValExpr, subqueries: &mut Vec<proc::GRQuery>) {
+fn collect_expr_subqueries_r(expr: &proc::ValExpr, subqueries: &mut Vec<proc::GRQuery>) {
   match expr {
     proc::ValExpr::ColumnRef { .. } => {}
-    proc::ValExpr::UnaryExpr { expr, .. } => collect_expr_subqueries_R(expr, subqueries),
+    proc::ValExpr::UnaryExpr { expr, .. } => collect_expr_subqueries_r(expr, subqueries),
     proc::ValExpr::BinaryExpr { left, right, .. } => {
-      collect_expr_subqueries_R(left, subqueries);
-      collect_expr_subqueries_R(right, subqueries);
+      collect_expr_subqueries_r(left, subqueries);
+      collect_expr_subqueries_r(right, subqueries);
     }
     proc::ValExpr::Value { .. } => {}
     proc::ValExpr::Subquery { query, .. } => subqueries.push(query.deref().clone()),
@@ -304,7 +306,7 @@ fn collect_expr_subqueries_R(expr: &proc::ValExpr, subqueries: &mut Vec<proc::GR
 /// TransTableNames in `col_usage_node` that's also not in `defined_trans_tables`
 pub fn node_external_trans_tables(col_usage_node: &FrozenColUsageNode) -> Vec<TransTableName> {
   let mut accum = Vec::<TransTableName>::new();
-  node_external_trans_tables_R(col_usage_node, &mut HashSet::new(), &mut accum);
+  node_external_trans_tables_r(col_usage_node, &mut HashSet::new(), &mut accum);
   accum
 }
 
@@ -313,12 +315,12 @@ pub fn nodes_external_trans_tables(
   nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 ) -> Vec<TransTableName> {
   let mut accum = Vec::<TransTableName>::new();
-  nodes_external_trans_tables_R(nodes, &mut HashSet::new(), &mut accum);
+  nodes_external_trans_tables_r(nodes, &mut HashSet::new(), &mut accum);
   accum
 }
 
 /// Accumulates external TransTables in `node`.
-fn node_external_trans_tables_R(
+fn node_external_trans_tables_r(
   node: &FrozenColUsageNode,
   defined_trans_tables: &mut HashSet<TransTableName>,
   accum: &mut Vec<TransTableName>,
@@ -329,19 +331,19 @@ fn node_external_trans_tables_R(
     }
   }
   for nodes in &node.children {
-    nodes_external_trans_tables_R(nodes, defined_trans_tables, accum);
+    nodes_external_trans_tables_r(nodes, defined_trans_tables, accum);
   }
 }
 
 /// Accumulates external TransTables in `nodes`.
-fn nodes_external_trans_tables_R(
+fn nodes_external_trans_tables_r(
   nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
   defined_trans_tables: &mut HashSet<TransTableName>,
   accum: &mut Vec<TransTableName>,
 ) {
   for (trans_table_name, (_, node)) in nodes {
     defined_trans_tables.insert(trans_table_name.clone());
-    node_external_trans_tables_R(node, defined_trans_tables, accum);
+    node_external_trans_tables_r(node, defined_trans_tables, accum);
   }
   for (trans_table_name, _) in nodes {
     defined_trans_tables.remove(trans_table_name);

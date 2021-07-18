@@ -7,6 +7,7 @@ use crate::model::common::{
   TransTableName,
 };
 use crate::model::message as msg;
+use sqlparser::test_utils::table;
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 use std::rc::Rc;
@@ -354,21 +355,33 @@ pub fn mk_eval_error(eval_error: EvalError) -> msg::QueryError {
 // -----------------------------------------------------------------------------------------------
 //  Tablet Utilities
 // -----------------------------------------------------------------------------------------------
-// These are here solely so other shared code can compile (normally, Tablet related thins
-// shouldn't be shared between Tablet and Slave).
 
 /// Computes whether `col` is in `table_schema` at `timestamp`. Note that it must be
 /// ensured that `col` is a locked column at this Timestamp.
 pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
-  if lookup_pos(&table_schema.key_cols, col).is_some() {
-    return true;
+  lookup_pos(&table_schema.key_cols, col).is_some()
+    || table_schema.val_cols.strong_static_read(col, *timestamp).is_some()
+}
+
+/// Returns true iff the `col` is either a KeyCol in `table_schema`, or a ValCol
+/// with high enough `lat`.
+pub fn is_col_locked(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
+  lookup_pos(&table_schema.key_cols, col).is_some()
+    || table_schema.val_cols.get_lat(col) >= *timestamp
+}
+
+/// Returns true iff one of the columns in `cols` passes `is_col_locked`.
+pub fn are_cols_locked(
+  table_schema: &TableSchema,
+  cols: &Vec<ColName>,
+  timestamp: &Timestamp,
+) -> bool {
+  for col in cols {
+    if !is_col_locked(table_schema, col, timestamp) {
+      return false;
+    }
   }
-  // If the `col` wasn't part of the PrimaryKey, then we need to
-  // check the `val_cols` to check for presence
-  if table_schema.val_cols.strong_static_read(col, *timestamp).is_some() {
-    return true;
-  }
-  return false;
+  return true;
 }
 
 // -----------------------------------------------------------------------------------------------

@@ -8,13 +8,15 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::ms_table_read_es::FullMSTableReadES;
+use crate::query_replanning_es::{
+  CommonQueryReplanningES, CommonQueryReplanningS, QueryReplanningSqlView,
+};
 use crate::server::{
   contains_col, evaluate_update, mk_eval_error, CommonQuery, ContextConstructor,
 };
 use crate::storage::{GenericTable, MSStorageView};
 use crate::tablet::{
-  compute_subqueries, recompute_subquery, CommonQueryReplanningES, CommonQueryReplanningS,
-  ContextKeyboundComputer, Executing, MSQueryES, Pending, QueryReplanningSqlView,
+  compute_subqueries, recompute_subquery, ContextKeyboundComputer, Executing, MSQueryES, Pending,
   SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryLockingSchemas,
   SubqueryPending, SubqueryPendingReadRegion, TabletContext,
 };

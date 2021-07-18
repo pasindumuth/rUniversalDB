@@ -7,13 +7,15 @@ use crate::model::common::{
   Timestamp, TransTableName,
 };
 use crate::model::message as msg;
+use crate::query_replanning_es::{
+  CommonQueryReplanningES, CommonQueryReplanningS, QueryReplanningSqlView,
+};
 use crate::server::{
   contains_col, evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor,
 };
 use crate::storage::MSStorageView;
 use crate::tablet::{
-  compute_subqueries, recompute_subquery, CommonQueryReplanningES, CommonQueryReplanningS,
-  ContextKeyboundComputer, Executing, MSQueryES, Pending, QueryReplanningSqlView,
+  compute_subqueries, recompute_subquery, ContextKeyboundComputer, Executing, MSQueryES, Pending,
   SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryLockingSchemas,
   SubqueryPending, SubqueryPendingReadRegion, TabletContext,
 };

@@ -9,16 +9,16 @@ use crate::model::common::{
   Timestamp, TransTableName,
 };
 use crate::model::message as msg;
+use crate::query_replanning_es::{CommonQueryReplanningES, CommonQueryReplanningS};
 use crate::server::{
   contains_col, evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor,
   ServerContext,
 };
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
-  compute_subqueries, recompute_subquery, CommonQueryReplanningES, CommonQueryReplanningS,
-  ContextKeyboundComputer, Executing, Pending, SingleSubqueryStatus, StorageLocalTable,
-  SubqueryFinished, SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion,
-  TabletContext,
+  compute_subqueries, recompute_subquery, ContextKeyboundComputer, Executing, Pending,
+  SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryLockingSchemas,
+  SubqueryPending, SubqueryPendingReadRegion, TabletContext,
 };
 use std::collections::HashSet;
 use std::iter::FromIterator;

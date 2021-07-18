@@ -143,7 +143,7 @@ pub enum QueryError {
   // Fatal Query Errors to be propagated to the user.
   TypeError { msg: String },
   RuntimeError { msg: String },
-  ProjectedColumnsDNE { msg: String },
+  RequiredColumnsDNE { msg: String },
 
   // Transient Errors that can be solved by retrying.
   WriteRegionConflictWithSubsequentRead,
