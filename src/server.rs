@@ -363,6 +363,14 @@ pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Times
     || table_schema.val_cols.strong_static_read(col, *timestamp).is_some()
 }
 
+/// Computes whether `col` is in `table_schema` at `timestamp`. Here, the `col` need not be
+/// locked at `timestamp`; we just use a `static_read`, which doesn't guarantee idempotence
+/// of any sort.
+pub fn weak_contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
+  lookup_pos(&table_schema.key_cols, col).is_some()
+    || table_schema.val_cols.static_read(col, *timestamp).is_some()
+}
+
 /// Returns true iff the `col` is either a KeyCol in `table_schema`, or a ValCol
 /// with high enough `lat`.
 pub fn is_col_locked(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {

@@ -636,11 +636,11 @@ impl TransQueryReplanningES {
         gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
         timestamp: self.timestamp,
       };
-      let (_, col_usage_node) = planner.plan_stage_query_with_schema(
+
+      // Recall that `trans_table_schemas` should contain the schema of the `trans_table_source`.
+      let col_usage_node = planner.compute_frozen_col_usage_node(
         &mut self.query_plan.trans_table_schemas.clone(),
-        &self.sql_query.projection,
         &self.sql_query.from,
-        schema_cols.clone(),
         &self.sql_query.exprs(),
       );
 

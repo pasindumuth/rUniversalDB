@@ -3,6 +3,7 @@ use crate::model::common::{
   iast, proc, ColName, ColType, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
   TransTableName,
 };
+use crate::server::{contains_col, weak_contains_col};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
@@ -77,23 +78,15 @@ impl<'a> ColUsagePlanner<'a> {
     return all_cols.into_iter().collect();
   }
 
-  /// This computes a QueryPlan for a Table (or TransTable) whose schema is `schema_cols`,
-  /// with TransTable context `trans_table_ctx`. This is used for both Selects and Updates,
-  /// and in order to support both, we simply pass in `projection`, `table_ref` and `expr`,
-  /// which is a consistent decomposition fo the two.
-  ///
-  /// Here, we return the projected cols (i.e. the Schema of the resulting TransTable) and
-  /// the FrozenColUsageNode.
-  ///
-  /// The `schema_cols` sure better have all relevent columns; forgetting one is fatal.
-  pub fn plan_stage_query_with_schema(
+  /// This is a generic function for computing a `FrozenColUsageNode` for both Selects
+  /// as well as Updates. Here, we use `trans_table_ctx` to check for column inclusions in
+  /// the TransTables, and `self.gossip_db_schema` to check for column inclusion in the Tables.
+  pub fn compute_frozen_col_usage_node(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
-    projection: &Vec<ColName>,
     table_ref: &proc::TableRef,
-    schema_cols: Vec<ColName>,
     exprs: &Vec<proc::ValExpr>,
-  ) -> (Vec<ColName>, FrozenColUsageNode) {
+  ) -> FrozenColUsageNode {
     let mut node = FrozenColUsageNode::new(table_ref.clone());
     for expr in exprs {
       collect_top_level_cols_r(expr, &mut node.requested_cols);
@@ -114,52 +107,34 @@ impl<'a> ColUsagePlanner<'a> {
       all_cols.insert(col.clone());
     }
 
-    let schema_cols_set = HashSet::<ColName>::from_iter(schema_cols.into_iter());
-    for col in all_cols {
-      if schema_cols_set.contains(&col) {
-        node.safe_present_cols.push(col);
-      } else {
-        node.external_cols.push(col);
-      }
-    }
-
-    return (projection.clone(), node);
-  }
-
-  fn plan_stage_query(
-    &mut self,
-    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
-    projection: &Vec<ColName>,
-    table_ref: &proc::TableRef,
-    exprs: &Vec<proc::ValExpr>,
-  ) -> (Vec<ColName>, FrozenColUsageNode) {
-    // Determine the set of existing columns for this table_ref.
-    let current_cols = match table_ref {
+    // Split `all_cols` into `safe_present_cols` and `external_cols` based on
+    // the (Trans)Table in question.
+    match table_ref {
       proc::TableRef::TransTableName(trans_table_name) => {
         // The Query converter should make sure that all TransTableNames actually exist.
-        trans_table_ctx.get(trans_table_name).unwrap().clone()
+        let schema = trans_table_ctx.get(trans_table_name).unwrap();
+        for col in all_cols {
+          if schema.contains(&col) {
+            node.safe_present_cols.push(col);
+          } else {
+            node.external_cols.push(col);
+          }
+        }
       }
       proc::TableRef::TablePath(table_path) => {
         // The Query converter should make sure that all TablePaths actually exist.
-        let mut current_cols = Vec::new();
         let table_schema = self.gossiped_db_schema.get(table_path).unwrap();
-        for (col_name, _) in &table_schema.key_cols {
-          current_cols.push(col_name.clone());
+        for col in all_cols {
+          if weak_contains_col(&table_schema, &col, &self.timestamp) {
+            node.safe_present_cols.push(col);
+          } else {
+            node.external_cols.push(col);
+          }
         }
-        for (col_name, _) in &table_schema.val_cols.static_snapshot_read(self.timestamp) {
-          current_cols.push(col_name.clone());
-        }
-        current_cols
       }
     };
 
-    return self.plan_stage_query_with_schema(
-      trans_table_ctx,
-      projection,
-      table_ref,
-      current_cols,
-      exprs,
-    );
+    return node;
   }
 
   pub fn plan_select(
@@ -167,11 +142,13 @@ impl<'a> ColUsagePlanner<'a> {
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
     select: &proc::SuperSimpleSelect,
   ) -> (Vec<ColName>, FrozenColUsageNode) {
-    self.plan_stage_query(
-      trans_table_ctx,
-      &select.projection,
-      &select.from,
-      &vec![select.selection.clone()],
+    (
+      select.projection.clone(),
+      self.compute_frozen_col_usage_node(
+        trans_table_ctx,
+        &select.from,
+        &vec![select.selection.clone()],
+      ),
     )
   }
 
@@ -194,11 +171,13 @@ impl<'a> ColUsagePlanner<'a> {
       exprs.push(expr.clone());
     }
 
-    self.plan_stage_query(
-      trans_table_ctx,
-      &projection,
-      &proc::TableRef::TablePath(update.table.clone()),
-      &exprs,
+    (
+      projection,
+      self.compute_frozen_col_usage_node(
+        trans_table_ctx,
+        &proc::TableRef::TablePath(update.table.clone()),
+        &exprs,
+      ),
     )
   }
 

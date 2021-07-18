@@ -1,5 +1,5 @@
 use crate::col_usage::ColUsagePlanner;
-use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan};
+use crate::common::{lookup, lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan};
 use crate::model::common::{proc, ColName, Context, Gen, QueryId, QueryPath, TablePath, Timestamp};
 use crate::model::message as msg;
 use crate::server::{are_cols_locked, contains_col};
@@ -182,8 +182,9 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
         self.state = CommonQueryReplanningS::ColumnLocking { locked_columns_query_id };
         QueryReplanningAction::Wait
       } else {
-        // Note that here, the `safe_present_cols` and `external_cols` of `node` must align
-        // with the TableSchema. See the else clause in `check_cols_aligned`.
+        // Since `ctx.gossip.gossip_gen <= self.query_plan.gossip_gen`, with a little proof by
+        // contradiction, we see that the QueryPlan must align with the TableSchema.
+        assert!(self.does_query_plan_align(ctx));
         self.state = CommonQueryReplanningS::Done;
         QueryReplanningAction::Success
       }
@@ -193,32 +194,32 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
     }
   }
 
+  /// This requires all columns in `query_plan` to be locked in the TableSchema. This checks
+  /// that `external_cols` aren't present, and `safe_present_cols` are present.
+  fn does_query_plan_align<T: IOTypes>(&self, ctx: &TabletContext<T>) -> bool {
+    // First, check that `external_cols are absent.
+    for col in &self.query_plan.col_usage_node.external_cols {
+      // Since the `key_cols` are static, no query plan should have one of
+      // these as an External Column.
+      assert!(lookup(&ctx.table_schema.key_cols, col).is_none());
+      if ctx.table_schema.val_cols.strong_static_read(&col, self.timestamp).is_some() {
+        return false;
+      }
+    }
+    // Next, check that `safe_present_cols` are present.
+    for col in &self.query_plan.col_usage_node.safe_present_cols {
+      if !contains_col(&ctx.table_schema, col, &self.timestamp) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   fn check_cols_aligned<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
   ) -> QueryReplanningAction {
-    // Now, we need to verify that the `external_cols` and `safe_present_cols` (in the
-    // QueryPlan sent to us) are all absent and present in the TableSchema respectively.
-    let does_query_plan_align = (|| {
-      // First, check that `external_cols are absent.
-      for col in &self.query_plan.col_usage_node.external_cols {
-        // Since the `key_cols` are static, no query plan should have one of
-        // these as an External Column.
-        assert!(lookup_pos(&ctx.table_schema.key_cols, col).is_none());
-        if ctx.table_schema.val_cols.strong_static_read(&col, self.timestamp).is_some() {
-          return false;
-        }
-      }
-      // Next, check that `safe_present_cols` are present.
-      for col in &self.query_plan.col_usage_node.safe_present_cols {
-        if !contains_col(&ctx.table_schema, col, &self.timestamp) {
-          return false;
-        }
-      }
-      return true;
-    })();
-
-    if does_query_plan_align {
+    if self.does_query_plan_align(ctx) {
       // Here, QueryReplanning is finished and we may start executing the query.
       self.state = CommonQueryReplanningS::Done;
       QueryReplanningAction::Success
@@ -230,15 +231,22 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
   }
 
   fn replan_query<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> QueryReplanningAction {
-    // First, we compute the union of `safe_present_cols` and `external_cols` that we would
-    // have if we were to create a new QueryPlan right now.
+    // Here, we compute a new QueryPlan. Recall that `gossiped_db_schema` will contain
+    // the most up-to-date TableSchema of this Tablet.
     let mut planner = ColUsagePlanner {
       gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
       timestamp: self.timestamp,
     };
 
-    let all_cols = planner
-      .get_all_cols(&mut self.query_plan.trans_table_schemas.clone(), &self.sql_view.exprs());
+    let col_usage_node = planner.compute_frozen_col_usage_node(
+      &mut self.query_plan.trans_table_schemas.clone(),
+      &proc::TableRef::TablePath(self.sql_view.table().clone()),
+      &self.sql_view.exprs(),
+    );
+
+    // Make sure that all `external_cols` and `safe_present_cols` are locked in the TabletSchema.
+    let mut all_cols = col_usage_node.safe_present_cols.clone();
+    all_cols.extend(col_usage_node.external_cols.clone());
 
     if !are_cols_locked(&ctx.table_schema, &all_cols, &self.timestamp) {
       // If they aren't all locked, then lock them.
@@ -250,24 +258,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
       self.state = CommonQueryReplanningS::RecomputeQueryPlan { locked_columns_query_id };
       QueryReplanningAction::Wait
     } else {
-      // Otherwise, we compute the QueryPlan. Recall that we needed `all_cols` above to be
-      // locked in the TableSchema so we can figure out which are External and which are not.
-      let mut schema_cols = Vec::<ColName>::new();
-      for col in all_cols {
-        if contains_col(&ctx.table_schema, &col, &self.timestamp) {
-          schema_cols.push(col.clone());
-        }
-      }
-
-      let (_, col_usage_node) = planner.plan_stage_query_with_schema(
-        &mut self.query_plan.trans_table_schemas.clone(),
-        &self.sql_view.required_local_cols(), // TODO: we shouldn't have to pass this in.
-        &proc::TableRef::TablePath(self.sql_view.table().clone()),
-        schema_cols,
-        &self.sql_view.exprs(),
-      );
-
-      // Next, we check to see if all ColNames in `external_cols` is contaiend
+      // If they are locked, we check to see if all ColNames in `external_cols` is contaiend
       // in the context. If not, we have to consult the Master.
       for col in &col_usage_node.external_cols {
         if !self.context.context_schema.column_context_schema.contains(&col) {
