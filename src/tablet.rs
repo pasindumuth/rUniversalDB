@@ -196,14 +196,21 @@ impl Statuses {
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProtectRequest {
+  pub orig_p: OrigP,
+  pub protect_qid: QueryId,
+  pub read_region: TableRegion,
+}
+
+#[derive(Debug, Clone)]
 pub struct VerifyingReadWriteRegion {
   pub orig_p: OrigP,
-  pub m_waiting_read_protected: BTreeSet<(OrigP, QueryId, TableRegion)>,
+  pub m_waiting_read_protected: BTreeSet<ProtectRequest>,
   pub m_read_protected: BTreeSet<TableRegion>,
   pub m_write_protected: BTreeSet<TableRegion>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct ReadWriteRegion {
   pub orig_p: OrigP,
   pub m_read_protected: BTreeSet<TableRegion>,
@@ -216,10 +223,24 @@ pub struct ReadWriteRegion {
 // These enums are used for communication between algorithms.
 
 enum ReadProtectionGrant {
-  Read { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
-  MRead { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
-  DeadlockSafetyReadAbort { timestamp: Timestamp, protect_request: (OrigP, QueryId, TableRegion) },
-  DeadlockSafetyWriteAbort { timestamp: Timestamp, orig_p: OrigP },
+  /// This signals when an element `waiting_read_protected` is ready to go to `read_protected`.
+  Read {
+    timestamp: Timestamp,
+    protect_request: ProtectRequest,
+  },
+  /// This signals when an element `m_waiting_read_protected` is ready to go to `m_read_protected`.
+  MRead {
+    timestamp: Timestamp,
+    protect_request: ProtectRequest,
+  },
+  DeadlockSafetyReadAbort {
+    timestamp: Timestamp,
+    protect_request: ProtectRequest,
+  },
+  DeadlockSafetyWriteAbort {
+    timestamp: Timestamp,
+    orig_p: OrigP,
+  },
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -319,7 +340,7 @@ pub struct TabletContext<T: IOTypes> {
   pub prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
   pub committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
 
-  pub waiting_read_protected: BTreeMap<Timestamp, BTreeSet<(OrigP, QueryId, TableRegion)>>,
+  pub waiting_read_protected: BTreeMap<Timestamp, BTreeSet<ProtectRequest>>,
   pub read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
 
   // Schema Change and Locking
@@ -867,13 +888,12 @@ impl<T: IOTypes> TabletContext<T> {
   /// `query_id` at the given `timestamp`, if it exists, and returns it.
   pub fn remove_read_protected_request(
     &mut self,
-    timestamp: Timestamp,
-    query_id: QueryId,
-  ) -> Option<(OrigP, QueryId, TableRegion)> {
+    timestamp: &Timestamp,
+    query_id: &QueryId,
+  ) -> Option<ProtectRequest> {
     if let Some(waiting) = self.waiting_read_protected.get_mut(&timestamp) {
       for protect_request in waiting.iter() {
-        let (_, cur_query_id, _) = protect_request;
-        if cur_query_id == &query_id {
+        if &protect_request.protect_qid == query_id {
           // Here, we found a request with matching QueryId, so we remove it.
           let protect_request = protect_request.clone();
           waiting.remove(&protect_request);
@@ -891,13 +911,12 @@ impl<T: IOTypes> TabletContext<T> {
   /// `query_id` at the given `timestamp`, if it exists, and returns it.
   pub fn remove_m_read_protected_request(
     &mut self,
-    timestamp: Timestamp,
-    query_id: QueryId,
-  ) -> Option<(OrigP, QueryId, TableRegion)> {
-    if let Some(verifying_write) = self.verifying_writes.get_mut(&timestamp) {
+    timestamp: &Timestamp,
+    query_id: &QueryId,
+  ) -> Option<ProtectRequest> {
+    if let Some(verifying_write) = self.verifying_writes.get_mut(timestamp) {
       for protect_request in verifying_write.m_waiting_read_protected.iter() {
-        let (_, cur_query_id, _) = protect_request;
-        if cur_query_id == &query_id {
+        if &protect_request.protect_qid == query_id {
           // Here, we found a request with matching QueryId, so we remove it.
           let protect_request = protect_request.clone();
           verifying_write.m_waiting_read_protected.remove(&protect_request);
@@ -996,14 +1015,14 @@ impl<T: IOTypes> TabletContext<T> {
       for (cur_timestamp, verifying_write) in &self.verifying_writes {
         all_cur_writes.insert(*cur_timestamp, verifying_write.clone());
       }
-      for (cur_timestamp, verifying_write) in &self.prepared_writes {
+      for (cur_timestamp, prepared_write) in &self.prepared_writes {
         all_cur_writes.insert(
           *cur_timestamp,
           VerifyingReadWriteRegion {
-            orig_p: verifying_write.orig_p.clone(),
+            orig_p: prepared_write.orig_p.clone(),
             m_waiting_read_protected: Default::default(),
-            m_read_protected: verifying_write.m_read_protected.clone(),
-            m_write_protected: verifying_write.m_write_protected.clone(),
+            m_read_protected: prepared_write.m_read_protected.clone(),
+            m_write_protected: prepared_write.m_write_protected.clone(),
           },
         );
       }
@@ -1034,15 +1053,14 @@ impl<T: IOTypes> TabletContext<T> {
         let bound = (Bound::Excluded(first_write_timestamp), Bound::Unbounded);
         for (cur_timestamp, verifying_write) in all_cur_writes.range(bound) {
           // The loop state is that `cum_write_regions` contains all WriteRegions <=
-          // `prev_write_timestamp`, all `m_read_protected` <= have been processed, and
-          // all `read_protected`s < have been processed.
+          // `prev_write_timestamp`, all `m_read_protected` <= `prev_write_timestamp` have been
+          // processed, and all `read_protected`s < `prev_write_timestamp` have been processed.
 
           // Process `m_read_protected`
           for protect_request in &verifying_write.m_waiting_read_protected {
-            let (_, _, read_region) = protect_request;
-            if does_intersect(read_region, &cum_write_regions) {
+            if !does_intersect(&protect_request.read_region, &cum_write_regions) {
               return Some(ReadProtectionGrant::MRead {
-                timestamp: *first_write_timestamp,
+                timestamp: *cur_timestamp,
                 protect_request: protect_request.clone(),
               });
             }
@@ -1052,8 +1070,7 @@ impl<T: IOTypes> TabletContext<T> {
           let bound = (Bound::Included(prev_write_timestamp), Bound::Excluded(cur_timestamp));
           for (timestamp, set) in self.waiting_read_protected.range(bound) {
             for protect_request in set {
-              let (_, _, read_region) = protect_request;
-              if does_intersect(read_region, &cum_write_regions) {
+              if !does_intersect(&protect_request.read_region, &cum_write_regions) {
                 return Some(ReadProtectionGrant::Read {
                   timestamp: *timestamp,
                   protect_request: protect_request.clone(),
@@ -1073,8 +1090,7 @@ impl<T: IOTypes> TabletContext<T> {
         let bound = (Bound::Included(prev_write_timestamp), Bound::Unbounded);
         for (timestamp, set) in self.waiting_read_protected.range(bound) {
           for protect_request in set {
-            let (_, _, read_region) = protect_request;
-            if does_intersect(read_region, &cum_write_regions) {
+            if !does_intersect(&protect_request.read_region, &cum_write_regions) {
               return Some(ReadProtectionGrant::Read {
                 timestamp: *timestamp,
                 protect_request: protect_request.clone(),
@@ -1084,8 +1100,12 @@ impl<T: IOTypes> TabletContext<T> {
         }
       } else {
         for (timestamp, set) in &self.waiting_read_protected {
-          let protect_request = set.first().unwrap().clone();
-          return Some(ReadProtectionGrant::Read { timestamp: *timestamp, protect_request });
+          for protect_request in set {
+            return Some(ReadProtectionGrant::Read {
+              timestamp: *timestamp,
+              protect_request: protect_request.clone(),
+            });
+          }
         }
       }
 
@@ -1093,11 +1113,10 @@ impl<T: IOTypes> TabletContext<T> {
       for (timestamp, set) in &self.waiting_read_protected {
         if let Some(verifying_write) = self.verifying_writes.get(timestamp) {
           for protect_request in set {
-            let (orig_p, _, read_region) = protect_request;
-            if does_intersect(read_region, &verifying_write.m_write_protected) {
+            if does_intersect(&protect_request.read_region, &verifying_write.m_write_protected) {
               return Some(ReadProtectionGrant::DeadlockSafetyWriteAbort {
                 timestamp: *timestamp,
-                orig_p: orig_p.clone(),
+                orig_p: protect_request.orig_p.clone(),
               });
             }
           }
@@ -1108,8 +1127,7 @@ impl<T: IOTypes> TabletContext<T> {
       for (timestamp, set) in &self.waiting_read_protected {
         if let Some(prepared_write) = self.prepared_writes.get(timestamp) {
           for protect_request in set {
-            let (_, _, read_region) = protect_request;
-            if does_intersect(read_region, &prepared_write.m_write_protected) {
+            if does_intersect(&protect_request.read_region, &prepared_write.m_write_protected) {
               return Some(ReadProtectionGrant::DeadlockSafetyReadAbort {
                 timestamp: *timestamp,
                 protect_request: protect_request.clone(),
@@ -1121,42 +1139,47 @@ impl<T: IOTypes> TabletContext<T> {
 
       return None;
     })();
+
     if let Some(read_protected) = maybe_first_done {
       match read_protected {
         ReadProtectionGrant::Read { timestamp, protect_request } => {
-          // Remove the protect_request, doing any extra cleanups too.
-          let (_, query_id, _) = protect_request;
-          let (orig_p, query_id, read_region) =
-            self.remove_read_protected_request(timestamp, query_id).unwrap();
-
-          // Add the ReadRegion to `read_protected`.
-          btree_multimap_insert(&mut self.read_protected, &timestamp, read_region.clone());
+          // Remove the ProtectRequest, and move the TableRegion forward.
+          self.remove_read_protected_request(&timestamp, &protect_request.protect_qid).unwrap();
+          btree_multimap_insert(&mut self.read_protected, &timestamp, protect_request.read_region);
 
           // Inform the originator.
-          self.read_protected_for_query(statuses, orig_p, query_id);
+          self.read_protected_for_query(
+            statuses,
+            protect_request.orig_p,
+            protect_request.protect_qid,
+          );
         }
         ReadProtectionGrant::MRead { timestamp, protect_request } => {
-          // Remove the protect_request, adding the ReadRegion to `m_read_protected`.
+          // Remove the ProtectRequest, and move the TableRegion forward.
           let verifying_write = self.verifying_writes.get_mut(&timestamp).unwrap();
           verifying_write.m_waiting_read_protected.remove(&protect_request);
-
-          let (orig_p, query_id, read_region) = protect_request;
-          verifying_write.m_read_protected.insert(read_region.clone());
+          verifying_write.m_read_protected.insert(protect_request.read_region);
 
           // Inform the originator.
-          self.read_protected_for_query(statuses, orig_p, query_id);
+          self.read_protected_for_query(
+            statuses,
+            protect_request.orig_p,
+            protect_request.protect_qid,
+          );
         }
         ReadProtectionGrant::DeadlockSafetyReadAbort { timestamp, protect_request } => {
-          // Remove the protect_request, doing any extra cleanups too.
-          let (_, query_id, _) = protect_request;
-          let (orig_p, _, read_region) =
-            self.remove_read_protected_request(timestamp, query_id).unwrap();
+          // Remove the ProtectRequest.
+          self.remove_read_protected_request(&timestamp, &protect_request.protect_qid).unwrap();
 
           // Inform the originator
-          self.deadlock_safety_read_abort(statuses, orig_p, read_region);
+          self.deadlock_safety_read_abort(
+            statuses,
+            protect_request.orig_p,
+            protect_request.read_region,
+          );
         }
         ReadProtectionGrant::DeadlockSafetyWriteAbort { orig_p, timestamp } => {
-          // Remove the `verifying_write` at `timestamp`.
+          // Remove the VerifyingReadWriteRegion.
           self.verifying_writes.remove(&timestamp);
 
           // Inform the originator.
@@ -1400,6 +1423,27 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
+  /// Adds the given `gr_query_ess` to `statuses`, executing them one at a time.
+  fn launch_subqueries(&mut self, statuses: &mut Statuses, gr_query_ess: Vec<GRQueryES>) {
+    /// Here, we have to add in the GRQueryESs and start them.
+    let mut subquery_ids = Vec::<QueryId>::new();
+    for gr_query_es in gr_query_ess {
+      let subquery_id = gr_query_es.query_id.clone();
+      statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
+      subquery_ids.push(subquery_id);
+    }
+
+    // Drive GRQueries
+    for query_id in subquery_ids {
+      if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
+        // Generally, we use an `if` guard in case one child Query aborts the parent and
+        // thus all other children. (This won't happen for GRQueryESs, though)
+        let action = es.start::<T>(&mut self.ctx());
+        self.handle_gr_query_es_action(statuses, query_id, action);
+      }
+    }
+  }
+
   /// Handles the actions specified by a TransTableReadES.
   fn handle_trans_read_es_action(
     &mut self,
@@ -1410,23 +1454,7 @@ impl<T: IOTypes> TabletContext<T> {
     match action {
       TransTableAction::Wait => {}
       TransTableAction::SendSubqueries(gr_query_ess) => {
-        /// Here, we have to add in the GRQueryESs and start them.
-        let mut subquery_ids = Vec::<QueryId>::new();
-        for gr_query_es in gr_query_ess {
-          let subquery_id = gr_query_es.query_id.clone();
-          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
-          subquery_ids.push(subquery_id);
-        }
-
-        // Drive GRQueries
-        for query_id in subquery_ids {
-          if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
-            // Generally, we use an `if` guard in case one child Query aborts the parent and
-            // thus all other children. (This won't happen for GRQueryESs, though)
-            let action = es.start::<T>(&mut self.ctx());
-            self.handle_gr_query_es_action(statuses, query_id, action);
-          }
-        }
+        self.launch_subqueries(statuses, gr_query_ess);
       }
       TransTableAction::Done => {
         // Recall that all responses will have been sent. Here, the ES should not be
@@ -1454,23 +1482,7 @@ impl<T: IOTypes> TabletContext<T> {
     match action {
       TableAction::Wait => {}
       TableAction::SendSubqueries(gr_query_ess) => {
-        /// Here, we have to add in the GRQueryESs and start them.
-        let mut subquery_ids = Vec::<QueryId>::new();
-        for gr_query_es in gr_query_ess {
-          let subquery_id = gr_query_es.query_id.clone();
-          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
-          subquery_ids.push(subquery_id);
-        }
-
-        // Drive GRQueries
-        for query_id in subquery_ids {
-          if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
-            // Generally, we use an `if` guard in case one child Query aborts the parent and
-            // thus all other children. (This won't happen for GRQueryESs, though)
-            let action = es.start::<T>(&mut self.ctx());
-            self.handle_gr_query_es_action(statuses, query_id, action);
-          }
-        }
+        self.launch_subqueries(statuses, gr_query_ess);
       }
       TableAction::Done => {
         // Recall that all responses will have been sent. Here, the ES should not be
@@ -1527,23 +1539,7 @@ impl<T: IOTypes> TabletContext<T> {
     match action {
       MSTableWriteAction::Wait => {}
       MSTableWriteAction::SendSubqueries(gr_query_ess) => {
-        /// Here, we have to add in the GRQueryESs and start them.
-        let mut subquery_ids = Vec::<QueryId>::new();
-        for gr_query_es in gr_query_ess {
-          let subquery_id = gr_query_es.query_id.clone();
-          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
-          subquery_ids.push(subquery_id);
-        }
-
-        // Drive GRQueries
-        for query_id in subquery_ids {
-          if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
-            // Generally, we use an `if` guard in case one child Query aborts the parent and
-            // thus all other children. (This won't happen for GRQueryESs, though)
-            let action = es.start::<T>(&mut self.ctx());
-            self.handle_gr_query_es_action(statuses, query_id, action);
-          }
-        }
+        self.launch_subqueries(statuses, gr_query_ess);
       }
       MSTableWriteAction::Done => {
         // Simply remove the MSTableReadES.
@@ -1583,23 +1579,7 @@ impl<T: IOTypes> TabletContext<T> {
     match action {
       MSTableReadAction::Wait => {}
       MSTableReadAction::SendSubqueries(gr_query_ess) => {
-        /// Here, we have to add in the GRQueryESs and start them.
-        let mut subquery_ids = Vec::<QueryId>::new();
-        for gr_query_es in gr_query_ess {
-          let subquery_id = gr_query_es.query_id.clone();
-          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query_es);
-          subquery_ids.push(subquery_id);
-        }
-
-        // Drive GRQueries
-        for query_id in subquery_ids {
-          if let Some(es) = statuses.gr_query_ess.get_mut(&query_id) {
-            // Generally, we use an `if` guard in case one child Query aborts the parent and
-            // thus all other children. (This won't happen for GRQueryESs, though)
-            let action = es.start::<T>(&mut self.ctx());
-            self.handle_gr_query_es_action(statuses, query_id, action);
-          }
-        }
+        self.launch_subqueries(statuses, gr_query_ess);
       }
       MSTableReadAction::Done => {
         // Simply remove the MSTableReadES.
@@ -1659,6 +1639,7 @@ impl<T: IOTypes> TabletContext<T> {
         self.handle_internal_query_error(statuses, es.orig_p, query_error);
       }
       GRQueryAction::ExitAndCleanUp(subquery_ids) => {
+        // TODO: I'm... pretty sure we're supposed to be removing from TMStatuses.
         // Recall that all responses will have been sent. There only resources that the ES
         // has are subqueries, so we Exit and Clean Up them here.
         statuses.gr_query_ess.remove(&query_id);

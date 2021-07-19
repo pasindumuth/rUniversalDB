@@ -19,8 +19,8 @@ use crate::server::{
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
   compute_subqueries, recompute_subquery, ContextKeyboundComputer, Executing, Pending,
-  SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryLockingSchemas,
-  SubqueryPending, SubqueryPendingReadRegion, TabletContext,
+  ProtectRequest, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
+  SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion, TabletContext,
 };
 use std::collections::HashSet;
 use std::iter::FromIterator;
@@ -164,16 +164,22 @@ impl FullTableReadES {
             TableRegion { col_region: new_col_region, row_region: executing.row_region.clone() };
 
           // Add a read protection requested
-          let protect_query_id = mk_qid(&mut ctx.rand);
-          let protect_request =
-            (OrigP::new(es.query_id.clone()), protect_query_id.clone(), new_read_region.clone());
-          btree_multimap_insert(&mut ctx.waiting_read_protected, &es.timestamp, protect_request);
+          let protect_qid = mk_qid(&mut ctx.rand);
+          btree_multimap_insert(
+            &mut ctx.waiting_read_protected,
+            &es.timestamp,
+            ProtectRequest {
+              orig_p: OrigP::new(es.query_id.clone()),
+              protect_qid: protect_qid.clone(),
+              read_region: new_read_region.clone(),
+            },
+          );
 
           // Finally, update the SingleSubqueryStatus to wait for the Region Protection.
           *single_status = SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion {
             new_columns,
             trans_table_names: locking_status.trans_table_names.clone(),
-            query_id: protect_query_id,
+            query_id: protect_qid,
           });
 
           TableAction::Wait
@@ -521,7 +527,7 @@ impl FullTableReadES {
           ExecutionS::Start => {}
           ExecutionS::Pending(pending) => {
             // Here, we remove the ReadRegion from `waiting_read_protected`, if it still exists.
-            ctx.remove_read_protected_request(es.timestamp.clone(), pending.query_id.clone());
+            ctx.remove_read_protected_request(&es.timestamp, &pending.query_id);
           }
           ExecutionS::Executing(executing) => {
             // Here, we need to cancel every Subquery. Depending on the state of the
@@ -533,10 +539,7 @@ impl FullTableReadES {
                   ctx.remove_col_locking_request(locking_status.query_id.clone());
                 }
                 SingleSubqueryStatus::PendingReadRegion(protect_status) => {
-                  ctx.remove_read_protected_request(
-                    es.timestamp.clone(),
-                    protect_status.query_id.clone(),
-                  );
+                  ctx.remove_read_protected_request(&es.timestamp, &protect_status.query_id);
                 }
                 SingleSubqueryStatus::Pending(pending_status) => {
                   subquery_ids.push(pending_status.query_id.clone());
@@ -590,17 +593,21 @@ impl FullTableReadES {
     col_region.extend(es.query_plan.col_usage_node.safe_present_cols.clone());
 
     // Move the TableReadES to the Pending state with the given ReadRegion.
-    let protect_query_id = mk_qid(&mut ctx.rand);
+    let protect_qid = mk_qid(&mut ctx.rand);
     let col_region = Vec::from_iter(col_region.into_iter());
     let read_region = TableRegion { col_region, row_region };
     es.state = ExecutionS::Pending(Pending {
       read_region: read_region.clone(),
-      query_id: protect_query_id.clone(),
+      query_id: protect_qid.clone(),
     });
 
     // Add a read protection requested
-    let protect_request = (OrigP::new(es.query_id.clone()), protect_query_id, read_region);
-    btree_multimap_insert(&mut ctx.waiting_read_protected, &es.timestamp, protect_request);
+    btree_multimap_insert(
+      &mut ctx.waiting_read_protected,
+      &es.timestamp,
+      ProtectRequest { orig_p: OrigP::new(es.query_id.clone()), protect_qid, read_region },
+    );
+
     TableAction::Wait
   }
 
