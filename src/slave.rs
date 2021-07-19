@@ -116,27 +116,6 @@ impl TransTableSource for MSQueryCoordES {
 }
 
 #[derive(Debug)]
-enum MSQueryCoordReplanningS {
-  Start,
-  MasterQueryReplanning { master_query_id: QueryId },
-  Done(Option<CoordQueryPlan>),
-}
-
-#[derive(Debug)]
-struct MSQueryCoordReplanningES {
-  timestamp: Timestamp,
-  /// The following are needed for responding.
-  sender_eid: EndpointId,
-  request_id: RequestId,
-  /// The query to do the replanning with.
-  sql_query: proc::MSQuery,
-  /// The OrigP of the Task holding this MSQueryCoordReplanningES
-  query_id: QueryId,
-  /// Used for managing MasterQueryReplanning
-  state: MSQueryCoordReplanningS,
-}
-
-#[derive(Debug)]
 enum FullMSQueryCoordES {
   QueryReplanning(MSQueryCoordReplanningES),
   Executing(MSQueryCoordES),
@@ -454,8 +433,8 @@ impl<T: IOTypes> SlaveContext<T> {
   fn drive_ms_coord(&mut self, statuses: &mut Statuses, query_id: QueryId) {
     let full_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
     let plan_es = cast!(FullMSQueryCoordES::QueryReplanning, full_es).unwrap();
-    plan_es.start(self);
-    self.check_query_replanning_done(statuses, query_id);
+    let action = plan_es.start(self);
+    self.handle_replanning_action(statuses, query_id, action);
   }
 
   /// Handle Master Response, routing it to the QueryReplanning.
@@ -468,16 +447,23 @@ impl<T: IOTypes> SlaveContext<T> {
   ) {
     let full_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
     let plan_es = cast!(FullMSQueryCoordES::QueryReplanning, full_es).unwrap();
-    plan_es.handle_master_response(self, gossip_gen, tree);
-    self.check_query_replanning_done(statuses, query_id);
+    let action = plan_es.handle_master_response(self, gossip_gen, tree);
+    self.handle_replanning_action(statuses, query_id, action);
   }
 
-  /// Check if QueryReplanning is done, moving on if so.
-  pub fn check_query_replanning_done(&mut self, statuses: &mut Statuses, query_id: QueryId) {
-    let full_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
-    let plan_es = cast!(FullMSQueryCoordES::QueryReplanning, full_es).unwrap();
-    if let MSQueryCoordReplanningS::Done(maybe_plan) = &plan_es.state {
-      if let Some(query_plan) = maybe_plan {
+  /// Handle the `action` sent back by the `MSQueryCoordReplanningES`.
+  fn handle_replanning_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: MSQueryCoordReplanningAction,
+  ) {
+    match action {
+      MSQueryCoordReplanningAction::Wait => {}
+      MSQueryCoordReplanningAction::Success(query_plan) => {
+        let full_es = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+        let plan_es = cast!(FullMSQueryCoordES::QueryReplanning, full_es).unwrap();
+
         // We compute the TierMap here.
         let mut tier_map = HashMap::<TablePath, u32>::new();
         for (_, stage) in &plan_es.sql_query.trans_tables {
@@ -519,7 +505,8 @@ impl<T: IOTypes> SlaveContext<T> {
 
         // Move the ES onto the next stage.
         self.advance_ms_coord_es(statuses, query_id);
-      } else {
+      }
+      MSQueryCoordReplanningAction::Failure => {
         // Here, the QueryReplanning had failed. Recall that QueryReplanning will
         // have sent back the proper error message, so we just need to Exit and Clean Up.
         self.exit_and_clean_up(statuses, query_id);
@@ -1142,20 +1129,7 @@ impl<T: IOTypes> SlaveContext<T> {
       match ms_coord_es {
         FullMSQueryCoordES::QueryReplanning(plan_es) => {
           self.external_request_id_map.remove(&plan_es.request_id);
-          match plan_es.state {
-            MSQueryCoordReplanningS::Start => {}
-            MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id } => {
-              // If the removal was successful, we should also send a Cancellation
-              // message to the Master.
-              self.network_output.send(
-                &self.master_eid,
-                msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-                  msg::CancelMasterFrozenColUsage { query_id: master_query_id },
-                )),
-              );
-            }
-            MSQueryCoordReplanningS::Done(_) => {}
-          }
+          plan_es.exit_and_clean_up(self);
         }
         FullMSQueryCoordES::Executing(es) => {
           self.external_request_id_map.remove(&es.request_id);
@@ -1234,8 +1208,41 @@ fn lookup_location(
 //  QueryReplanning
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Debug)]
+enum MSQueryCoordReplanningS {
+  Start,
+  MasterQueryReplanning { master_query_id: QueryId },
+  Done,
+}
+
+#[derive(Debug)]
+struct MSQueryCoordReplanningES {
+  timestamp: Timestamp,
+  /// The following are needed for responding.
+  sender_eid: EndpointId,
+  request_id: RequestId,
+  /// The query to do the replanning with.
+  sql_query: proc::MSQuery,
+  /// The OrigP of the Task holding this MSQueryCoordReplanningES
+  query_id: QueryId,
+  /// Used for managing MasterQueryReplanning
+  state: MSQueryCoordReplanningS,
+}
+
+enum MSQueryCoordReplanningAction {
+  /// Indicates the parent needs to wait, making sure to fowards MasterQueryReplanning responses.
+  Wait,
+  /// Indicates the that MSQueryCoordReplanningES has computed a valid query, and it's stored
+  /// in the `query_plan` field.
+  Success(CoordQueryPlan),
+  /// Indicates a valid QueryPlan couldn't be computed. This is evidence by a column not having
+  /// any ancestral TableRef contain it in their schemas (confirmed by the Master). In this case,
+  /// the appropriate response was sent back to the originator.
+  Failure,
+}
+
 impl MSQueryCoordReplanningES {
-  fn start<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) {
+  fn start<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> MSQueryCoordReplanningAction {
     // First, we compute the ColUsageNode.
     let mut planner = ColUsagePlanner {
       gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
@@ -1266,14 +1273,15 @@ impl MSQueryCoordReplanningES {
 
         // Advance Replanning State.
         self.state = MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id };
-        return;
+        return MSQueryCoordReplanningAction::Wait;
       }
     }
 
-    self.state = MSQueryCoordReplanningS::Done(Some(CoordQueryPlan {
+    self.state = MSQueryCoordReplanningS::Done;
+    MSQueryCoordReplanningAction::Success(CoordQueryPlan {
       gossip_gen: ctx.gossip.gossip_gen,
       col_usage_nodes,
-    }));
+    })
   }
 
   /// Handles the Query Plan constructed by the Master.
@@ -1282,8 +1290,8 @@ impl MSQueryCoordReplanningES {
     ctx: &mut SlaveContext<T>,
     gossip_gen: Gen,
     tree: msg::FrozenColUsageTree,
-  ) {
-    // Recall that since we only send single nodes, we expect the `tree` to just be a `node`.
+  ) -> MSQueryCoordReplanningAction {
+    // Here, we expect the `tree` to be multiple `nodes`.
     let col_usage_nodes = cast!(msg::FrozenColUsageTree::ColUsageNodes, tree).unwrap();
     for (_, (_, child)) in &col_usage_nodes {
       if !child.external_cols.is_empty() {
@@ -1299,13 +1307,31 @@ impl MSQueryCoordReplanningES {
             },
           )),
         );
-        self.state = MSQueryCoordReplanningS::Done(None);
-        return;
+        self.state = MSQueryCoordReplanningS::Done;
+        return MSQueryCoordReplanningAction::Failure;
       }
     }
 
-    // If we get here, then the col_usage_nodes form a valid QueryPlan, so we finish successfully.
-    self.state =
-      MSQueryCoordReplanningS::Done(Some(CoordQueryPlan { gossip_gen, col_usage_nodes }));
+    // This means the QueryReplanning was a success, so we update the QueryPlan and go to Done.
+    self.state = MSQueryCoordReplanningS::Done;
+    MSQueryCoordReplanningAction::Success(CoordQueryPlan { gossip_gen, col_usage_nodes })
+  }
+
+  /// This Exits and Cleans up this QueryReplanningES
+  pub fn exit_and_clean_up<T: IOTypes>(&self, ctx: &mut SlaveContext<T>) {
+    match &self.state {
+      MSQueryCoordReplanningS::Start => {}
+      MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id } => {
+        // If the removal was successful, we should also send a Cancellation
+        // message to the Master.
+        ctx.network_output.send(
+          &ctx.master_eid,
+          msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
+            msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
+          )),
+        );
+      }
+      MSQueryCoordReplanningS::Done => {}
+    }
   }
 }

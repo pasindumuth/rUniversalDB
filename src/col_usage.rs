@@ -42,6 +42,8 @@ impl<'a> ColUsagePlanner<'a> {
   /// This is a generic function for computing a `FrozenColUsageNode` for both Selects
   /// as well as Updates. Here, we use `trans_table_ctx` to check for column inclusions in
   /// the TransTables, and `self.gossip_db_schema` to check for column inclusion in the Tables.
+  /// The `trans_table_ctx` is modified, accumulating all descendent TransTables. This is okay
+  /// since TransTableNames are all uniques anyways.
   pub fn compute_frozen_col_usage_node(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,

@@ -59,40 +59,6 @@ pub struct TransTableReadES {
   pub timestamp: Timestamp, // The timestamp read from the GRQueryES
 }
 
-#[derive(Debug)]
-pub enum TransQueryReplanningS {
-  Start,
-  /// Used to wait on the master
-  MasterQueryReplanning {
-    master_query_id: QueryId,
-  },
-  Done(bool),
-}
-
-#[derive(Debug)]
-pub struct TransQueryReplanningES {
-  /// The below fields are from PerformQuery and are passed through to TableReadES.
-  pub root_query_path: QueryPath,
-  pub tier_map: TierMap,
-  pub query_id: QueryId,
-
-  // These members are parallel to the messages in `msg::GeneralQuery`.
-  pub location_prefix: TransTableLocationPrefix,
-  pub context: Rc<Context>,
-  pub sql_query: proc::SuperSimpleSelect,
-  pub query_plan: QueryPlan,
-
-  /// Path of the original sender (needed for responding with errors).
-  pub sender_path: QueryPath,
-  /// The OrigP of the Task holding this CommonQueryReplanningES
-  pub orig_p: OrigP,
-  /// The state of the CommonQueryReplanningES
-  pub state: TransQueryReplanningS,
-
-  // Convenience fields
-  pub timestamp: Timestamp, // The timestamp read from the GRQueryES
-}
-
 pub enum TransTableAction {
   /// This tells the parent Server to wait. This is used after this ES sends
   /// out a MasterQueryReplanning, while it's waiting for subqueries, etc.
@@ -187,8 +153,8 @@ impl FullTransTableReadES {
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     let plan_es = cast!(Self::QueryReplanning, self).unwrap();
-    plan_es.start::<T, SourceT>(ctx, trans_table_source);
-    self.check_query_replanning_done(ctx, trans_table_source)
+    let action = plan_es.start::<T, SourceT>(ctx, trans_table_source);
+    self.handle_replanning_action(ctx, trans_table_source, action)
   }
 
   /// Handle Master Response, routing it to the QueryReplanning.
@@ -200,21 +166,23 @@ impl FullTransTableReadES {
     tree: msg::FrozenColUsageTree,
   ) -> TransTableAction {
     let plan_es = cast!(FullTransTableReadES::QueryReplanning, self).unwrap();
-    plan_es.handle_master_response(ctx, gossip_gen, tree);
-    self.check_query_replanning_done(ctx, trans_table_source)
+    let action = plan_es.handle_master_response(ctx, gossip_gen, tree);
+    self.handle_replanning_action(ctx, trans_table_source, action)
   }
 
-  /// Checks if the QueryReplanning is in `Done` and act accordingly.
-  pub fn check_query_replanning_done<T: IOTypes, SourceT: TransTableSource>(
+  /// Handle the `action` sent back by the `TransQueryReplanningES`.
+  fn handle_replanning_action<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
     trans_table_source: &SourceT,
+    action: TransQueryReplanningAction,
   ) -> TransTableAction {
-    let plan_es = cast!(FullTransTableReadES::QueryReplanning, self).unwrap();
-    if let TransQueryReplanningS::Done(success) = &plan_es.state {
-      if *success {
+    match action {
+      TransQueryReplanningAction::Wait => TransTableAction::Wait,
+      TransQueryReplanningAction::Success => {
         // If the QueryReplanning was successful, we move the FullTransTableReadES
         // to Executing in the Start state, and immediately start executing it.
+        let plan_es = cast!(FullTransTableReadES::QueryReplanning, self).unwrap();
         *self = FullTransTableReadES::Executing(TransTableReadES {
           root_query_path: plan_es.root_query_path.clone(),
           tier_map: plan_es.tier_map.clone(),
@@ -229,13 +197,12 @@ impl FullTransTableReadES {
           timestamp: plan_es.timestamp,
         });
         self.start_trans_table_read_es(ctx, trans_table_source)
-      } else {
+      }
+      TransQueryReplanningAction::Failure => {
         // If the replanning was unsuccessful, the Abort message should already have
         // been sent, and we may exit.
         TransTableAction::ExitAndCleanUp(Vec::new())
       }
-    } else {
-      TransTableAction::Wait
     }
   }
 
@@ -532,20 +499,7 @@ impl FullTransTableReadES {
   pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> TransTableAction {
     match self {
       FullTransTableReadES::QueryReplanning(es) => {
-        match &es.state {
-          TransQueryReplanningS::Start => {}
-          TransQueryReplanningS::MasterQueryReplanning { master_query_id } => {
-            // If the removal was successful, we should also send a Cancellation
-            // message to the Master.
-            ctx.network_output.send(
-              &ctx.master_eid,
-              msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-                msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
-              )),
-            );
-          }
-          TransQueryReplanningS::Done(_) => {}
-        }
+        es.exit_and_clean_up(ctx);
         TransTableAction::ExitAndCleanUp(Vec::new())
       }
       FullTransTableReadES::Executing(es) => {
@@ -596,28 +550,75 @@ impl FullTransTableReadES {
   }
 }
 
+// -----------------------------------------------------------------------------------------------
+//  TransQueryReplanningES
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum TransQueryReplanningS {
+  Start,
+  /// Used to wait on the master
+  MasterQueryReplanning {
+    master_query_id: QueryId,
+  },
+  Done,
+}
+
+#[derive(Debug)]
+pub struct TransQueryReplanningES {
+  /// The below fields are from PerformQuery and are passed through to TableReadES.
+  pub root_query_path: QueryPath,
+  pub tier_map: TierMap,
+  pub query_id: QueryId,
+
+  // These members are parallel to the messages in `msg::GeneralQuery`.
+  pub location_prefix: TransTableLocationPrefix,
+  pub context: Rc<Context>,
+  pub sql_query: proc::SuperSimpleSelect,
+  pub query_plan: QueryPlan,
+
+  /// Path of the original sender (needed for responding with errors).
+  pub sender_path: QueryPath,
+  /// The OrigP of the Task holding this CommonQueryReplanningES
+  pub orig_p: OrigP,
+  /// The state of the CommonQueryReplanningES
+  pub state: TransQueryReplanningS,
+
+  // Convenience fields
+  pub timestamp: Timestamp, // The timestamp read from the GRQueryES
+}
+
+pub enum TransQueryReplanningAction {
+  /// Indicates the parent needs to wait, making sure to fowards MasterQueryReplanning responses.
+  Wait,
+  /// Indicates the that TransQueryReplanningES has computed a valid query where the Context
+  /// is sufficient, and it's stored in the `query_plan` field.
+  Success,
+  /// Indicates a valid QueryPlan couldn't be computed. Here, either a Required Column
+  /// wasn't present in the TableSchema, or a column wasn't present in the context. In
+  /// both cases, the appropriate responses were sent back to the originator.
+  Failure,
+}
+
 impl TransQueryReplanningES {
   fn start<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
     trans_table_source: &SourceT,
-  ) {
+  ) -> TransQueryReplanningAction {
     matches!(self.state, TransQueryReplanningS::Start);
     // First, verify that the select columns are in the TransTable.
     let schema_cols = trans_table_source.get_schema(&self.location_prefix.trans_table_name);
     for col in &self.sql_query.projection {
       if !schema_cols.contains(col) {
-        // One of the projected columns aren't in the schema, indicating that the
-        // SuperSimpleTransTableSelect is invalid. Thus, we abort.
-        let sender_path = self.sender_path.clone();
-        let aborted_msg = msg::QueryAborted {
-          return_qid: sender_path.query_id.clone(),
-          query_id: self.query_id.clone(),
-          payload: msg::AbortedData::QueryError(msg::QueryError::LateralError),
-        };
-        ctx.send_to_path(sender_path, CommonQuery::QueryAborted(aborted_msg));
-        self.state = TransQueryReplanningS::Done(true);
-        return;
+        // This means a Required Column is not present. Thus, we exit, send back an error.
+        ctx.send_query_error(
+          self.sender_path.clone(),
+          self.query_id.clone(),
+          msg::QueryError::RequiredColumnsDNE { msg: String::new() },
+        );
+        self.state = TransQueryReplanningS::Done;
+        return TransQueryReplanningAction::Failure;
       }
     }
 
@@ -626,7 +627,8 @@ impl TransQueryReplanningES {
       // This means that the sender knew everything this Node knew and more when it made the
       // QueryPlan, so we can use it directly. Note that since there is no column locking
       // required, we can move to the Execting state immediately.
-      self.state = TransQueryReplanningS::Done(true);
+      self.state = TransQueryReplanningS::Done;
+      TransQueryReplanningAction::Success
     } else {
       // This means we must recompute the QueryPlan.
       let mut planner = ColUsagePlanner {
@@ -641,14 +643,9 @@ impl TransQueryReplanningES {
         &self.sql_query.exprs(),
       );
 
-      // Update the QueryPlan
-      let external_cols = col_usage_node.external_cols.clone();
-      self.query_plan.gossip_gen = ctx.gossip.gossip_gen;
-      self.query_plan.col_usage_node = col_usage_node;
-
       // Next, we check to see if all ColNames in `external_cols` is contaiend
       // in the Context. If not, we have to consult the Master.
-      for col in external_cols {
+      for col in &col_usage_node.external_cols {
         if !self.context.context_schema.column_context_schema.contains(&col) {
           // This means we need to consult the Master.
           let master_query_id = mk_qid(ctx.rand);
@@ -673,13 +670,15 @@ impl TransQueryReplanningES {
 
           // Advance Replanning State.
           self.state = TransQueryReplanningS::MasterQueryReplanning { master_query_id };
-          return;
+          return TransQueryReplanningAction::Wait;
         }
       }
 
-      // If we get here that means we have successfully computed a valid QueryPlan,
-      // and we are done.
-      self.state = TransQueryReplanningS::Done(true);
+      // If we make it here, we have a valid QueryPlan and we are done.
+      self.query_plan.gossip_gen = ctx.gossip.gossip_gen;
+      self.query_plan.col_usage_node = col_usage_node;
+      self.state = TransQueryReplanningS::Done;
+      TransQueryReplanningAction::Success
     }
   }
 
@@ -689,7 +688,7 @@ impl TransQueryReplanningES {
     ctx: &mut ServerContext<T>,
     gossip_gen: Gen,
     tree: msg::FrozenColUsageTree,
-  ) {
+  ) -> TransQueryReplanningAction {
     // Recall that since we only send single nodes, we expect the `tree` to just be a `node`.
     let (_, col_usage_node) = cast!(msg::FrozenColUsageTree::ColUsageNode, tree).unwrap();
 
@@ -709,13 +708,14 @@ impl TransQueryReplanningES {
         self.query_id.clone(),
         msg::AbortedData::ColumnsDNE { missing_cols },
       );
-      self.state = TransQueryReplanningS::Done(false);
-      return;
+      self.state = TransQueryReplanningS::Done;
+      TransQueryReplanningAction::Failure
     } else {
       // This means the QueryReplanning was a success, so we update the QueryPlan and go to Done.
       self.query_plan.gossip_gen = gossip_gen;
       self.query_plan.col_usage_node = col_usage_node;
-      self.state = TransQueryReplanningS::Done(true);
+      self.state = TransQueryReplanningS::Done;
+      TransQueryReplanningAction::Success
     }
   }
 
@@ -733,7 +733,7 @@ impl TransQueryReplanningES {
           )),
         );
       }
-      TransQueryReplanningS::Done(_) => {}
+      TransQueryReplanningS::Done => {}
     }
   }
 }

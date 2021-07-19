@@ -116,8 +116,8 @@ pub enum QueryReplanningAction {
   /// is sufficient, and it's stored in the `query_plan` field.
   Success,
   /// Indicates a valid QueryPlan couldn't be computed. Here, either a Required Column
-  /// wasn't present in the TableSchema, or one wasn't present in the context. In the latter
-  /// case, in both cases, the appropriate responses were sent back to the originator.
+  /// wasn't present in the TableSchema, or a column wasn't present in the context. In
+  /// both cases, the appropriate responses were sent back to the originator.
   Failure,
 }
 
