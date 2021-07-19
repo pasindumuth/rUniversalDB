@@ -391,16 +391,29 @@ impl FullMSTableWriteES {
     MSTableWriteAction::Wait
   }
 
-  /// This is called if a subquery fails. This simply responds to the sender and Exits
-  /// and Clean Ups this ES. This can also be called if the whole MSQuery decides to
-  /// abort each of its children, requiring them to send back an error.
+  /// This is called if a subquery fails.
   pub fn handle_internal_query_error<T: IOTypes>(
     &mut self,
     _: &mut TabletContext<T>,
     query_error: msg::QueryError,
   ) -> MSTableWriteAction {
-    // TODO: here, and in `read_protected`, don't we have to send the thing back to the sender?
     MSTableWriteAction::ExitAll(query_error)
+  }
+
+  /// This is called when a non-owning ES (the MSQueryES in this case) wants to ECU this
+  /// ES. We need to send an Aborted to the owner before, though.
+  pub fn handle_lateral_error<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+    query_error: msg::QueryError,
+  ) -> MSTableWriteAction {
+    let es = cast!(FullMSTableWriteES::Executing, self).unwrap();
+    ctx.ctx().send_abort_data(
+      es.sender_path.clone(),
+      es.query_id.clone(),
+      msg::AbortedData::QueryError(query_error),
+    );
+    self.exit_and_clean_up(ctx)
   }
 
   /// Handles a Subquery completing

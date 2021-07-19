@@ -1501,11 +1501,11 @@ impl<T: IOTypes> TabletContext<T> {
     for query_id in ms_query_es.pending_queries.clone() {
       if let Some(ms_read_es) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
         // Here, this `query_id` is an MSTableReadES, and we abort it.
-        let action = ms_read_es.handle_internal_query_error(self, query_error.clone());
+        let action = ms_read_es.handle_lateral_error(self, query_error.clone());
         self.handle_ms_read_es_action(statuses, query_id.clone(), action);
       } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
         // Here, this `query_id` is an MSTableWriteES, and we abort it.
-        let action = ms_write_es.handle_internal_query_error(self, query_error.clone());
+        let action = ms_write_es.handle_lateral_error(self, query_error.clone());
         self.handle_ms_write_es_action(statuses, query_id.clone(), action);
       }
     }

@@ -79,8 +79,8 @@ pub enum MSTableReadAction {
   Done,
   /// This singals the parent server to Exit exit the whole MSQueryES. When we send this,
   /// we don't clean up anything in this ES immediately; we leave it in it's previous state
-  /// totally unchanged, and without having changed the `TabletContext` either. (The parent
-  /// server will Exit and Clean Up each ES immediately after, including this one.)
+  /// totally unchanged, and without having changed the `TabletContext` either. The parent
+  /// server will Exit and Clean Up each ES immediately after, including this one.
   ExitAll(msg::QueryError),
   /// This tells the parent Server that this TableReadES has completed
   /// unsuccessfully, and that the given `QueryId`s (subqueries) should be
@@ -388,15 +388,29 @@ impl FullMSTableReadES {
     MSTableReadAction::Wait
   }
 
-  /// This is called if a subquery fails. This simply responds to the sender and Exits
-  /// and Clean Ups this ES. This can also be called if the whole MSQuery descides to
-  /// abort each of its children, requiring them to send back an error.
+  /// This is called if a subquery fails.
   pub fn handle_internal_query_error<T: IOTypes>(
     &mut self,
     _: &mut TabletContext<T>,
     query_error: msg::QueryError,
   ) -> MSTableReadAction {
     MSTableReadAction::ExitAll(query_error)
+  }
+
+  /// This is called when a non-owning ES (the MSQueryES in this case) wants to ECU this
+  /// ES. We need to send an Aborted to the owner before, though.
+  pub fn handle_lateral_error<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+    query_error: msg::QueryError,
+  ) -> MSTableReadAction {
+    let es = cast!(FullMSTableReadES::Executing, self).unwrap();
+    ctx.ctx().send_abort_data(
+      es.sender_path.clone(),
+      es.query_id.clone(),
+      msg::AbortedData::QueryError(query_error),
+    );
+    self.exit_and_clean_up(ctx)
   }
 
   /// Handles a Subquery completing
