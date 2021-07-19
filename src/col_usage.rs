@@ -10,7 +10,7 @@ use std::iter::FromIterator;
 use std::ops::Deref;
 
 // -----------------------------------------------------------------------------------------------
-//  FrozenColUsageAlgorithm
+//  ColUsagePlanner
 // -----------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FrozenColUsageNode {
@@ -39,45 +39,6 @@ pub struct ColUsagePlanner<'a> {
 }
 
 impl<'a> ColUsagePlanner<'a> {
-  fn collect_subqueries(
-    &mut self,
-    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
-    subqueries: &mut Vec<Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>>,
-    expr: &proc::ValExpr,
-  ) {
-    for query in collect_expr_subqueries(expr) {
-      subqueries.push(self.plan_gr_query(trans_table_ctx, &query));
-    }
-  }
-
-  pub fn get_all_cols(
-    &mut self,
-    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
-    exprs: &Vec<proc::ValExpr>,
-  ) -> Vec<ColName> {
-    let mut requested_cols = Vec::<ColName>::new();
-    let mut children = Vec::<Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>>::new();
-    for expr in exprs {
-      collect_top_level_cols_r(expr, &mut requested_cols);
-      self.collect_subqueries(trans_table_ctx, &mut children, expr);
-    }
-
-    // Determine all columns in use by the query.
-    let mut all_cols = HashSet::<ColName>::new();
-    for child_map in children {
-      for (_, (_, child)) in child_map {
-        for col in &child.external_cols {
-          all_cols.insert(col.clone());
-        }
-      }
-    }
-    for col in requested_cols {
-      all_cols.insert(col.clone());
-    }
-
-    return all_cols.into_iter().collect();
-  }
-
   /// This is a generic function for computing a `FrozenColUsageNode` for both Selects
   /// as well as Updates. Here, we use `trans_table_ctx` to check for column inclusions in
   /// the TransTables, and `self.gossip_db_schema` to check for column inclusion in the Tables.
@@ -90,7 +51,9 @@ impl<'a> ColUsagePlanner<'a> {
     let mut node = FrozenColUsageNode::new(table_ref.clone());
     for expr in exprs {
       collect_top_level_cols_r(expr, &mut node.requested_cols);
-      self.collect_subqueries(trans_table_ctx, &mut node.children, expr);
+      for query in collect_expr_subqueries(expr) {
+        node.children.push(self.plan_gr_query(trans_table_ctx, &query));
+      }
     }
 
     // Determine which columns are safe, and which are external.
@@ -137,6 +100,7 @@ impl<'a> ColUsagePlanner<'a> {
     return node;
   }
 
+  /// Construct a `FrozenColUsageNode` for the `select`.
   pub fn plan_select(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
@@ -152,6 +116,7 @@ impl<'a> ColUsagePlanner<'a> {
     )
   }
 
+  /// Construct a `FrozenColUsageNode` for the `update`.
   pub fn plan_update(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
@@ -181,6 +146,7 @@ impl<'a> ColUsagePlanner<'a> {
     )
   }
 
+  /// Construct a `FrozenColUsageNode` for the `stage_query`.
   pub fn plan_ms_query_stage(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
@@ -192,13 +158,14 @@ impl<'a> ColUsagePlanner<'a> {
     }
   }
 
+  /// Construct a `FrozenColUsageNode` for the `gr_query`.
   pub fn plan_gr_query(
     &mut self,
     trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
-    query: &proc::GRQuery,
+    gr_query: &proc::GRQuery,
   ) -> Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> {
     let mut children = Vec::<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>::new();
-    for (trans_table_name, child_query) in &query.trans_tables {
+    for (trans_table_name, child_query) in &gr_query.trans_tables {
       match child_query {
         proc::GRQueryStage::SuperSimpleSelect(select) => {
           let (cols, node) = self.plan_select(trans_table_ctx, select);
@@ -210,13 +177,14 @@ impl<'a> ColUsagePlanner<'a> {
     return children;
   }
 
+  /// Construct a `FrozenColUsageNode` for the `ms_query`.
   pub fn plan_ms_query(
     &mut self,
-    query: &proc::MSQuery,
+    ms_query: &proc::MSQuery,
   ) -> Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> {
     let mut trans_table_ctx = HashMap::<TransTableName, Vec<ColName>>::new();
     let mut children = Vec::<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>::new();
-    for (trans_table_name, child_query) in &query.trans_tables {
+    for (trans_table_name, child_query) in &ms_query.trans_tables {
       let (cols, node) = self.plan_ms_query_stage(&mut trans_table_ctx, child_query);
       children.push((trans_table_name.clone(), (cols.clone(), node)));
       trans_table_ctx.insert(trans_table_name.clone(), cols);
@@ -224,6 +192,10 @@ impl<'a> ColUsagePlanner<'a> {
     return children;
   }
 }
+
+// -----------------------------------------------------------------------------------------------
+//  Collection functions
+// -----------------------------------------------------------------------------------------------
 
 /// This function returns all `ColName`s in the `expr` that don't fall
 /// under a `Subquery`.
@@ -281,15 +253,19 @@ fn collect_expr_subqueries_r(expr: &proc::ValExpr, subqueries: &mut Vec<proc::GR
   }
 }
 
-/// Recall that all TransTablesNames are unique. This function computes all external
-/// TransTableNames in `col_usage_node` that's also not in `defined_trans_tables`
+// -----------------------------------------------------------------------------------------------
+//  External Column and TransTable Computation
+// -----------------------------------------------------------------------------------------------
+
+/// Accumulates and returns all External `TransTableName`s that appear under `node`.
+/// Recall that all `TransTablesName`s are unique. This should be determinisitic.
 pub fn node_external_trans_tables(col_usage_node: &FrozenColUsageNode) -> Vec<TransTableName> {
   let mut accum = Vec::<TransTableName>::new();
   node_external_trans_tables_r(col_usage_node, &mut HashSet::new(), &mut accum);
   accum
 }
 
-/// Same as above, except we compute for all `nodes`.
+/// Same as above, except for multiple `nodes`. This should be determinisitic.
 pub fn nodes_external_trans_tables(
   nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 ) -> Vec<TransTableName> {
@@ -298,7 +274,10 @@ pub fn nodes_external_trans_tables(
   accum
 }
 
-/// Accumulates external TransTables in `node`.
+/// Accumulates all External `TransTableName`s that appear under `node` into `accum`, where we
+/// also exclude any that appear in `defined_trans_tables`.
+///
+/// Here, `defined_trans_tables` should remain unchanged, and `accum` should be determinisitic.
 fn node_external_trans_tables_r(
   node: &FrozenColUsageNode,
   defined_trans_tables: &mut HashSet<TransTableName>,
@@ -314,7 +293,7 @@ fn node_external_trans_tables_r(
   }
 }
 
-/// Accumulates external TransTables in `nodes`.
+/// Same as the above function, except for multiple `nodes`.
 fn nodes_external_trans_tables_r(
   nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
   defined_trans_tables: &mut HashSet<TransTableName>,
@@ -339,6 +318,10 @@ pub fn nodes_external_cols(
   }
   col_name_set.into_iter().collect()
 }
+
+// -----------------------------------------------------------------------------------------------
+//  Tests
+// -----------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod test {

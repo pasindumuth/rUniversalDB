@@ -221,7 +221,6 @@ impl CommonQuery {
 // -----------------------------------------------------------------------------------------------
 //  Query Evaluations
 // -----------------------------------------------------------------------------------------------
-// These enums are used for communication between algorithms.
 
 /// Maps all `ColName`s to `ColValN`s by first using that in the subtable, and then the context.
 pub fn mk_col_map(
@@ -395,7 +394,6 @@ pub fn are_cols_locked(
 // -----------------------------------------------------------------------------------------------
 //  Context Computation
 // -----------------------------------------------------------------------------------------------
-// These enums are used for communication between algorithms.
 
 /// This container computes and remembers how to construct a child ContextRow
 /// from a parent ContexRow + Table row.
@@ -534,7 +532,6 @@ impl ContextConverter {
 // -----------------------------------------------------------------------------------------------
 //  Context Construction
 // -----------------------------------------------------------------------------------------------
-// These enums are used for communication between algorithms.
 
 pub trait LocalTable {
   /// Checks if the given `col` is in the schema of the LocalTable.
@@ -552,6 +549,8 @@ pub trait LocalTable {
   ) -> Result<Vec<(Vec<ColValN>, u64)>, EvalError>;
 }
 
+/// This is used to construct Child Contexts and iterate over them, where it can
+/// run a custom callback.
 pub struct ContextConstructor<LocalTableT: LocalTable> {
   parent_context_schema: ContextSchema,
   local_table: LocalTableT,
@@ -588,7 +587,12 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
   }
 
   /// Here, the rows in the `parent_context_rows` must correspond to `parent_context_schema`.
-  /// The first `usize` in the `callback` is the parent ContextRow currently being used.
+  /// The elements in `extra_cols` must be in either `parent_context_schema` or the LocalTable.
+  ///
+  /// Consider the `callback`. The first `usize` is the parent ContextRow currently being
+  /// used. The `Vec<ColValN>` correspond to `extra_cols` passed in here. The `u64` is the
+  /// count. (This is an optimization; the alternatively would be for callback can to be called
+  /// consecutively multiple times.)
   pub fn run<
     CbT: FnMut(usize, Vec<ColValN>, Vec<(ContextRow, usize)>, u64) -> Result<(), EvalError>,
   >(

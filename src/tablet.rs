@@ -1839,6 +1839,8 @@ pub fn compute_contexts<LocalTableT: LocalTable>(
 
     Ok(())
   };
+
+  // Run the Constructor. Recall that this can return an error during to subtable computation.
   context_constructor.run(&parent_context.context_rows, Vec::new(), callback)?;
   Ok(child_contexts)
 }

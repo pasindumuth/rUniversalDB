@@ -287,14 +287,11 @@ impl FullTransTableReadES {
     } else {
       // Here, we have computed all GRQueryESs, and we can now add them to
       // `subquery_status`.
-      let mut gr_query_ids = Vec::<QueryId>::new();
       let mut subqueries = Vec::<SingleSubqueryStatus>::new();
       for gr_query_es in &gr_query_statuses {
-        let query_id = gr_query_es.query_id.clone();
-        gr_query_ids.push(query_id.clone());
         subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
           context: gr_query_es.context.clone(),
-          query_id,
+          query_id: gr_query_es.query_id.clone(),
         }));
       }
 

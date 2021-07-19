@@ -299,14 +299,11 @@ impl FullMSTableWriteES {
         } else {
           // Here, we have to evaluate subqueries. Thus, we go to Executing and return
           // SendSubqueries to the parent server.
-          let mut gr_query_ids = Vec::<QueryId>::new();
           let mut subqueries = Vec::<SingleSubqueryStatus>::new();
           for gr_query_es in &gr_query_statuses {
-            let query_id = gr_query_es.query_id.clone();
-            gr_query_ids.push(query_id.clone());
             subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
               context: gr_query_es.context.clone(),
-              query_id: query_id.clone(),
+              query_id: gr_query_es.query_id.clone(),
             }));
           }
 
@@ -395,13 +392,14 @@ impl FullMSTableWriteES {
   }
 
   /// This is called if a subquery fails. This simply responds to the sender and Exits
-  /// and Clean Ups this ES. This can also be called if the whole MSQuery descides to
+  /// and Clean Ups this ES. This can also be called if the whole MSQuery decides to
   /// abort each of its children, requiring them to send back an error.
   pub fn handle_internal_query_error<T: IOTypes>(
     &mut self,
     _: &mut TabletContext<T>,
     query_error: msg::QueryError,
   ) -> MSTableWriteAction {
+    // TODO: here, and in `read_protected`, don't we have to send the thing back to the sender?
     MSTableWriteAction::ExitAll(query_error)
   }
 
