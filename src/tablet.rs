@@ -218,32 +218,6 @@ pub struct ReadWriteRegion {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Internal Communication
-// -----------------------------------------------------------------------------------------------
-// These enums are used for communication between algorithms.
-
-enum ReadProtectionGrant {
-  /// This signals when an element `waiting_read_protected` is ready to go to `read_protected`.
-  Read {
-    timestamp: Timestamp,
-    protect_request: ProtectRequest,
-  },
-  /// This signals when an element `m_waiting_read_protected` is ready to go to `m_read_protected`.
-  MRead {
-    timestamp: Timestamp,
-    protect_request: ProtectRequest,
-  },
-  DeadlockSafetyReadAbort {
-    timestamp: Timestamp,
-    protect_request: ProtectRequest,
-  },
-  DeadlockSafetyWriteAbort {
-    timestamp: Timestamp,
-    orig_p: OrigP,
-  },
-}
-
-// -----------------------------------------------------------------------------------------------
 //  StorageLocalTable
 // -----------------------------------------------------------------------------------------------
 
@@ -927,7 +901,7 @@ impl<T: IOTypes> TabletContext<T> {
     return None;
   }
 
-  /// Checks if the give `write_region` has a conflict with a subsequent read.
+  /// Checks if the give `write_region` has a Region Isolation with subsequent reads.
   pub fn check_write_region_isolation(
     &self,
     write_region: &TableRegion,
@@ -963,12 +937,17 @@ impl<T: IOTypes> TabletContext<T> {
     }
 
     // If we get here, it means we have Region Isolation.
-    return false;
+    return true;
+  }
+
+  // The Main Loop
+  fn run_main_loop(&mut self, statuses: &mut Statuses) {
+    while !self.run_main_loop_once(statuses) {}
   }
 
   /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
   fn run_main_loop_once(&mut self, statuses: &mut Statuses) -> bool {
-    // First, we see if we can satisfy Column Lockiing
+    // First, we see if we can satisfy Column Locking
 
     // Iterate through every `request_locked_columns` and see if that can be satisfied.
     for (_, query_set) in &self.request_index {
@@ -1006,196 +985,127 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Next, we see if we can provide Region Protection
 
-    let maybe_first_done = (|| {
-      // To account for both `verifying_writes` and `prepared_writes`, we merge
-      // them into a single container similar to `verifying_writes`. This is just
-      // for expedience; it should be optimized later. (We can probably change
-      // `prepared_writes` to `VerifyingReadWriteRegion` and then zip 2 iterators).
-      let mut all_cur_writes = BTreeMap::<Timestamp, VerifyingReadWriteRegion>::new();
-      for (cur_timestamp, verifying_write) in &self.verifying_writes {
-        all_cur_writes.insert(*cur_timestamp, verifying_write.clone());
-      }
-      for (cur_timestamp, prepared_write) in &self.prepared_writes {
-        all_cur_writes.insert(
-          *cur_timestamp,
-          VerifyingReadWriteRegion {
-            orig_p: prepared_write.orig_p.clone(),
-            m_waiting_read_protected: Default::default(),
-            m_read_protected: prepared_write.m_read_protected.clone(),
-            m_write_protected: prepared_write.m_write_protected.clone(),
-          },
-        );
-      }
-
-      // First, we see if any `(m_)waiting_read_protected`s can be moved to `(m_)read_protected`.
-      if !all_cur_writes.is_empty() {
-        let (first_write_timestamp, verifying_write) = all_cur_writes.first_key_value().unwrap();
-
-        // First, process all `read_protected`s before the `first_write_timestamp`
-        let bound = (Bound::Unbounded, Bound::Excluded(first_write_timestamp));
-        for (timestamp, set) in self.waiting_read_protected.range(bound) {
-          let protect_request = set.first().unwrap().clone();
-          return Some(ReadProtectionGrant::Read { timestamp: *timestamp, protect_request });
-        }
-
-        // Next, process all `m_read_protected`s for the first `verifying_write`
-        for protect_request in &verifying_write.m_waiting_read_protected {
-          return Some(ReadProtectionGrant::MRead {
-            timestamp: *first_write_timestamp,
-            protect_request: protect_request.clone(),
-          });
-        }
-
-        // Next, accumulate the WriteRegions, and then search for region protection with
-        // all subsequent `(m_)waiting_read_protected`s.
-        let mut cum_write_regions = verifying_write.m_write_protected.clone();
-        let mut prev_write_timestamp = first_write_timestamp;
-        let bound = (Bound::Excluded(first_write_timestamp), Bound::Unbounded);
-        for (cur_timestamp, verifying_write) in all_cur_writes.range(bound) {
-          // The loop state is that `cum_write_regions` contains all WriteRegions <=
-          // `prev_write_timestamp`, all `m_read_protected` <= `prev_write_timestamp` have been
-          // processed, and all `read_protected`s < `prev_write_timestamp` have been processed.
-
-          // Process `m_read_protected`
-          for protect_request in &verifying_write.m_waiting_read_protected {
-            if !does_intersect(&protect_request.read_region, &cum_write_regions) {
-              return Some(ReadProtectionGrant::MRead {
-                timestamp: *cur_timestamp,
-                protect_request: protect_request.clone(),
-              });
-            }
-          }
-
-          // Process `read_protected`
-          let bound = (Bound::Included(prev_write_timestamp), Bound::Excluded(cur_timestamp));
-          for (timestamp, set) in self.waiting_read_protected.range(bound) {
-            for protect_request in set {
-              if !does_intersect(&protect_request.read_region, &cum_write_regions) {
-                return Some(ReadProtectionGrant::Read {
-                  timestamp: *timestamp,
-                  protect_request: protect_request.clone(),
-                });
-              }
-            }
-          }
-
-          // Add the WriteRegions into `cur_write_regions`.
-          for write_region in &verifying_write.m_write_protected {
-            cum_write_regions.insert(write_region.clone());
-          }
-          prev_write_timestamp = cur_timestamp;
-        }
-
-        // Finally, finish processing any remaining `read_protected`s
-        let bound = (Bound::Included(prev_write_timestamp), Bound::Unbounded);
-        for (timestamp, set) in self.waiting_read_protected.range(bound) {
-          for protect_request in set {
-            if !does_intersect(&protect_request.read_region, &cum_write_regions) {
-              return Some(ReadProtectionGrant::Read {
-                timestamp: *timestamp,
-                protect_request: protect_request.clone(),
-              });
-            }
-          }
-        }
-      } else {
-        for (timestamp, set) in &self.waiting_read_protected {
-          for protect_request in set {
-            return Some(ReadProtectionGrant::Read {
-              timestamp: *timestamp,
-              protect_request: protect_request.clone(),
-            });
-          }
-        }
-      }
-
-      // Next, we search for any DeadlockSafetyWriteAbort.
-      for (timestamp, set) in &self.waiting_read_protected {
-        if let Some(verifying_write) = self.verifying_writes.get(timestamp) {
-          for protect_request in set {
-            if does_intersect(&protect_request.read_region, &verifying_write.m_write_protected) {
-              return Some(ReadProtectionGrant::DeadlockSafetyWriteAbort {
-                timestamp: *timestamp,
-                orig_p: protect_request.orig_p.clone(),
-              });
-            }
-          }
-        }
-      }
-
-      // Finally, we search for any DeadlockSafetyWriteAbort.
-      for (timestamp, set) in &self.waiting_read_protected {
-        if let Some(prepared_write) = self.prepared_writes.get(timestamp) {
-          for protect_request in set {
-            if does_intersect(&protect_request.read_region, &prepared_write.m_write_protected) {
-              return Some(ReadProtectionGrant::DeadlockSafetyReadAbort {
-                timestamp: *timestamp,
-                protect_request: protect_request.clone(),
-              });
-            }
-          }
-        }
-      }
-
-      return None;
-    })();
-
-    if let Some(read_protected) = maybe_first_done {
-      match read_protected {
-        ReadProtectionGrant::Read { timestamp, protect_request } => {
-          // Remove the ProtectRequest, and move the TableRegion forward.
-          self.remove_read_protected_request(&timestamp, &protect_request.protect_qid).unwrap();
-          btree_multimap_insert(&mut self.read_protected, &timestamp, protect_request.read_region);
-
-          // Inform the originator.
-          self.read_protected_for_query(
-            statuses,
-            protect_request.orig_p,
-            protect_request.protect_qid,
-          );
-        }
-        ReadProtectionGrant::MRead { timestamp, protect_request } => {
-          // Remove the ProtectRequest, and move the TableRegion forward.
-          let verifying_write = self.verifying_writes.get_mut(&timestamp).unwrap();
-          verifying_write.m_waiting_read_protected.remove(&protect_request);
-          verifying_write.m_read_protected.insert(protect_request.read_region);
-
-          // Inform the originator.
-          self.read_protected_for_query(
-            statuses,
-            protect_request.orig_p,
-            protect_request.protect_qid,
-          );
-        }
-        ReadProtectionGrant::DeadlockSafetyReadAbort { timestamp, protect_request } => {
-          // Remove the ProtectRequest.
-          self.remove_read_protected_request(&timestamp, &protect_request.protect_qid).unwrap();
-
-          // Inform the originator
-          self.deadlock_safety_read_abort(
-            statuses,
-            protect_request.orig_p,
-            protect_request.read_region,
-          );
-        }
-        ReadProtectionGrant::DeadlockSafetyWriteAbort { orig_p, timestamp } => {
-          // Remove the VerifyingReadWriteRegion.
-          self.verifying_writes.remove(&timestamp);
-
-          // Inform the originator.
-          self.deadlock_safety_write_abort(statuses, orig_p);
-        }
-      }
-      return true;
+    // To account for both `verifying_writes` and `prepared_writes`, we merge
+    // them into a single container similar to `verifying_writes`. This is just
+    // for expedience; it should be optimized later. (We can probably change
+    // `prepared_writes` to `VerifyingReadWriteRegion` and then zip 2 iterators).
+    let mut all_cur_writes = BTreeMap::<Timestamp, VerifyingReadWriteRegion>::new();
+    for (cur_timestamp, verifying_write) in &self.verifying_writes {
+      all_cur_writes.insert(*cur_timestamp, verifying_write.clone());
     }
+    for (cur_timestamp, prepared_write) in &self.prepared_writes {
+      all_cur_writes.insert(
+        *cur_timestamp,
+        VerifyingReadWriteRegion {
+          orig_p: prepared_write.orig_p.clone(),
+          m_waiting_read_protected: Default::default(),
+          m_read_protected: prepared_write.m_read_protected.clone(),
+          m_write_protected: prepared_write.m_write_protected.clone(),
+        },
+      );
+    }
+
+    // First, we see if any `(m_)waiting_read_protected`s can be moved to `(m_)read_protected`.
+    if !all_cur_writes.is_empty() {
+      let (first_write_timestamp, verifying_write) = all_cur_writes.first_key_value().unwrap();
+
+      // First, process all `read_protected`s before the `first_write_timestamp`
+      let bound = (Bound::Unbounded, Bound::Excluded(first_write_timestamp));
+      for (timestamp, set) in self.waiting_read_protected.range(bound) {
+        let protect_request = set.first().unwrap().clone();
+        self.grant_read_region(statuses, *timestamp, protect_request);
+        return true;
+      }
+
+      // Next, process all `m_read_protected`s for the first `verifying_write`
+      for protect_request in &verifying_write.m_waiting_read_protected {
+        self.grant_m_read_region(statuses, *first_write_timestamp, protect_request.clone());
+        return true;
+      }
+
+      // Next, accumulate the WriteRegions, and then search for region protection with
+      // all subsequent `(m_)waiting_read_protected`s.
+      let mut cum_write_regions = verifying_write.m_write_protected.clone();
+      let mut prev_write_timestamp = first_write_timestamp;
+      let bound = (Bound::Excluded(first_write_timestamp), Bound::Unbounded);
+      for (cur_timestamp, verifying_write) in all_cur_writes.range(bound) {
+        // The loop state is that `cum_write_regions` contains all WriteRegions <=
+        // `prev_write_timestamp`, all `m_read_protected` <= `prev_write_timestamp` have been
+        // processed, and all `read_protected`s < `prev_write_timestamp` have been processed.
+
+        // Process `m_read_protected`
+        for protect_request in &verifying_write.m_waiting_read_protected {
+          if !does_intersect(&protect_request.read_region, &cum_write_regions) {
+            self.grant_m_read_region(statuses, *cur_timestamp, protect_request.clone());
+            return true;
+          }
+        }
+
+        // Process `read_protected`
+        let bound = (Bound::Included(prev_write_timestamp), Bound::Excluded(cur_timestamp));
+        for (timestamp, set) in self.waiting_read_protected.range(bound) {
+          for protect_request in set {
+            if !does_intersect(&protect_request.read_region, &cum_write_regions) {
+              self.grant_read_region(statuses, *timestamp, protect_request.clone());
+              return true;
+            }
+          }
+        }
+
+        // Add the WriteRegions into `cur_write_regions`.
+        for write_region in &verifying_write.m_write_protected {
+          cum_write_regions.insert(write_region.clone());
+        }
+        prev_write_timestamp = cur_timestamp;
+      }
+
+      // Finally, finish processing any remaining `read_protected`s
+      let bound = (Bound::Included(prev_write_timestamp), Bound::Unbounded);
+      for (timestamp, set) in self.waiting_read_protected.range(bound) {
+        for protect_request in set {
+          if !does_intersect(&protect_request.read_region, &cum_write_regions) {
+            self.grant_read_region(statuses, *timestamp, protect_request.clone());
+            return true;
+          }
+        }
+      }
+    } else {
+      for (timestamp, set) in &self.waiting_read_protected {
+        for protect_request in set {
+          self.grant_read_region(statuses, *timestamp, protect_request.clone());
+          return true;
+        }
+      }
+    }
+
+    // Next, we search for any DeadlockSafetyWriteAbort.
+    for (timestamp, set) in &self.waiting_read_protected {
+      if let Some(verifying_write) = self.verifying_writes.get(timestamp) {
+        for protect_request in set {
+          if does_intersect(&protect_request.read_region, &verifying_write.m_write_protected) {
+            self.deadlock_safety_write_abort(statuses, verifying_write.orig_p.clone(), *timestamp);
+            return true;
+          }
+        }
+      }
+    }
+
+    // Finally, we search for any DeadlockSafetyReadAbort.
+    for (timestamp, set) in &self.waiting_read_protected {
+      if let Some(prepared_write) = self.prepared_writes.get(timestamp) {
+        for protect_request in set {
+          if does_intersect(&protect_request.read_region, &prepared_write.m_write_protected) {
+            self.deadlock_safety_read_abort(statuses, *timestamp, protect_request.clone());
+            return true;
+          }
+        }
+      }
+    }
+
     return false;
   }
 
-  // The Main Loop
-  fn run_main_loop(&mut self, statuses: &mut Statuses) {
-    while !self.run_main_loop_once(statuses) {}
-  }
-
+  /// Route the column locking to the appropriate ES.
   fn columns_locked_for_query(
     &mut self,
     statuses: &mut Statuses,
@@ -1215,20 +1125,67 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
+  /// Move the ProtectRequest in `waiting_read_protected` forward.
+  fn grant_read_region(
+    &mut self,
+    statuses: &mut Statuses,
+    timestamp: Timestamp,
+    protect_request: ProtectRequest,
+  ) {
+    self.remove_read_protected_request(&timestamp, &protect_request.protect_qid).unwrap();
+    btree_multimap_insert(&mut self.read_protected, &timestamp, protect_request.read_region);
+
+    // Inform the originator.
+    self.read_protected_for_query(statuses, protect_request.orig_p, protect_request.protect_qid);
+  }
+
+  /// Move the ProtectRequest in `m_waiting_read_protected` forward.
+  fn grant_m_read_region(
+    &mut self,
+    statuses: &mut Statuses,
+    timestamp: Timestamp,
+    protect_request: ProtectRequest,
+  ) {
+    let verifying_write = self.verifying_writes.get_mut(&timestamp).unwrap();
+    verifying_write.m_waiting_read_protected.remove(&protect_request);
+    verifying_write.m_read_protected.insert(protect_request.read_region);
+
+    // Inform the originator.
+    self.read_protected_for_query(statuses, protect_request.orig_p, protect_request.protect_qid);
+  }
+
   /// We call this when a DeadlockSafetyReadAbort happens for a `waiting_read_protected`.
-  /// Recall this behavior is distinct than if a `verifying_writes` aborts. Also recall that
-  /// this only affects TableReadESs
-  fn deadlock_safety_read_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP, _: TableRegion) {
-    let query_id = orig_p.query_id;
+  fn deadlock_safety_read_abort(
+    &mut self,
+    statuses: &mut Statuses,
+    timestamp: Timestamp,
+    protect_request: ProtectRequest,
+  ) {
+    // Remove the ProtectRequest.
+    self.remove_read_protected_request(&timestamp, &protect_request.protect_qid).unwrap();
+
+    // Inform the originator.
+    let query_id = protect_request.orig_p.query_id;
     if let Some(read_es) = statuses.full_table_read_ess.get_mut(&query_id) {
+      // TODO: do we want to make this a lateral error instead, and just reserver
+      // InternalQueryError for when a GRQueryES responds with bad? For now, this works.
       let action =
         read_es.handle_internal_query_error(self, msg::QueryError::DeadlockSafetyAbortion);
-      self.handle_read_es_action(statuses, query_id, action)
+      self.handle_read_es_action(statuses, query_id, action);
     }
   }
 
-  /// We call this when a DeadlockSafetyReadAbort happens for a `verifying_writes`.
-  fn deadlock_safety_write_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP) {
+  /// We call this when a DeadlockSafetyWriteAbort happens for a `verifying_writes`.
+  fn deadlock_safety_write_abort(
+    &mut self,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    timestamp: Timestamp,
+  ) {
+    // Remove the VerifyingReadWriteRegion.
+    self.verifying_writes.remove(&timestamp);
+
+    // Inform the originator.
     self.exit_ms_query_es(statuses, orig_p.query_id, msg::QueryError::DeadlockSafetyAbortion);
   }
 
@@ -1525,8 +1482,8 @@ impl<T: IOTypes> TabletContext<T> {
     // Finally, we remove  Clean the MSQueryES, making sure to clean up TabletContext too.
     let ms_query_es = statuses.ms_query_ess.remove(&query_id).unwrap();
     assert!(ms_query_es.pending_queries.is_empty()); // All ES should have been removed.
-    self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
-    self.ms_root_query_map.remove(&ms_query_es.root_query_id).unwrap();
+    self.verifying_writes.remove(&ms_query_es.timestamp);
+    self.ms_root_query_map.remove(&ms_query_es.root_query_id);
   }
 
   /// Handles the actions specified by a MSTableWriteES.
@@ -1680,13 +1637,12 @@ impl<T: IOTypes> TabletContext<T> {
         }
       }
     } else if let Some(ms_query_es) = statuses.ms_query_ess.get(&query_id) {
-      // TODO: understand this better when we know how Exit And Cleanup works more.
       // Note: this code is only run when a CancelQuery comes in (from the Slave) for the
-      // MSQueryES. We don't remove the MSQueryES via this code otherwise, since the Abort
-      // message for the `pending_queries` to propagate up will generally vary. This anomaly is
-      // rooted in the fact that MSQueryES does not own the MTable*ESs.
+      // MSQueryES. We shouldn't run this code in any other circumstance, since this doesn't
+      // specify a non-trivial Abort message, which is needed for the MSTable*ESs to abort with
+      // meaningful messages.
       //
-      // This does not handle the case of a Query2PCAbort properly, since we would have moved
+      // This also does not handle the case of a Query2PCAbort properly, since we would have moved
       // the ReadWriteRegion to `prepared_*` by this point.
       self.exit_ms_query_es(statuses, ms_query_es.query_id.clone(), msg::QueryError::LateralError);
     } else if let Some(ms_write_es) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
