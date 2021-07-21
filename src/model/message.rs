@@ -129,7 +129,7 @@ pub struct CancelQuery {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QuerySuccess {
-  /// The receiving node's State that the responses should be routed to.
+  /// The receiving nodes' State that the responses should be routed to. (e.g. TMStatus)
   pub return_qid: QueryId,
   pub query_id: QueryId,
   pub result: (Vec<ColName>, Vec<TableView>),

@@ -6,7 +6,7 @@ use crate::col_usage::{
 use crate::common::{
   btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
   mk_qid, ColBound, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, PolyColBound, QueryPlan,
-  SingleBound, TMStatus, TMWaitValue, TableRegion, TableSchema,
+  SingleBound, TMStatus, TableRegion, TableSchema,
 };
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
@@ -1246,20 +1246,19 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   fn handle_query_success(&mut self, statuses: &mut Statuses, query_success: msg::QuerySuccess) {
-    let tm_query_id = &query_success.query_id;
+    let tm_query_id = &query_success.return_qid;
     if let Some(tm_status) = statuses.tm_statuss.get_mut(tm_query_id) {
       // We just add the result of the `query_success` here.
-      let tm_wait_value = tm_status.tm_state.get_mut(&query_success.query_id).unwrap();
-      *tm_wait_value = TMWaitValue::Result(query_success.result.clone());
+      tm_status.tm_state.insert(query_success.query_id, Some(query_success.result.clone()));
       tm_status.new_rms.extend(query_success.new_rms);
       tm_status.responded_count += 1;
       if tm_status.responded_count == tm_status.tm_state.len() {
         // Remove the `TMStatus` and take ownership
-        let tm_status = statuses.tm_statuss.remove(&query_success.query_id).unwrap();
+        let tm_status = statuses.tm_statuss.remove(tm_query_id).unwrap();
         // Merge there TableViews together
         let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
-        for (_, tm_wait_value) in tm_status.tm_state {
-          results.push(cast!(TMWaitValue::Result, tm_wait_value).unwrap());
+        for (_, rm_result) in tm_status.tm_state {
+          results.push(rm_result.unwrap());
         }
         let merged_result = merge_table_views(results);
         let gr_query_id = tm_status.orig_p.query_id;
@@ -1333,7 +1332,7 @@ impl<T: IOTypes> TabletContext<T> {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all
       // remaining participants) and send the QueryAborted back to the orig_p
       for (node_group_id, child_query_id) in tm_status.node_group_ids {
-        if tm_status.tm_state.get(&child_query_id).unwrap() == &TMWaitValue::Nothing
+        if tm_status.tm_state.get(&child_query_id).is_none()
           && child_query_id != query_aborted.query_id
         {
           // If the child Query hasn't responded yet, and isn't also the Query that
@@ -1595,13 +1594,12 @@ impl<T: IOTypes> TabletContext<T> {
         let es = statuses.gr_query_ess.remove(&query_id).unwrap();
         self.handle_internal_query_error(statuses, es.orig_p, query_error);
       }
-      GRQueryAction::ExitAndCleanUp(subquery_ids) => {
-        // TODO: I'm... pretty sure we're supposed to be removing from TMStatuses.
-        // Recall that all responses will have been sent. There only resources that the ES
-        // has are subqueries, so we Exit and Clean Up them here.
+      GRQueryAction::ExitAndCleanUp(tm_query_ids) => {
+        // Recall that all responses will have been sent. The only resources that the ES
+        // has are child queries (TMStatuses), so we Exit and Clean Up them here.
         statuses.gr_query_ess.remove(&query_id);
-        for subquery_id in subquery_ids {
-          self.exit_and_clean_up(statuses, subquery_id);
+        for tm_query_id in tm_query_ids {
+          self.exit_and_clean_up(statuses, tm_query_id);
         }
       }
     }
@@ -1628,7 +1626,7 @@ impl<T: IOTypes> TabletContext<T> {
     } else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all remaining participants)
       for (node_group_id, child_query_id) in tm_status.node_group_ids {
-        if tm_status.tm_state.get(&child_query_id).unwrap() == &TMWaitValue::Nothing {
+        if tm_status.tm_state.get(&child_query_id).is_none() {
           // If the child Query hasn't responded, then sent it a CancelQuery
           self.ctx().send_to_node(
             node_group_id,

@@ -147,21 +147,16 @@ impl GossipDataSer {
 //  TMStatus
 // -----------------------------------------------------------------------------------------------
 // These are used to perform PCSA over the network for reads and writes.
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum TMWaitValue {
-  Nothing,
-  Result((Vec<ColName>, Vec<TableView>)),
-}
-
 #[derive(Debug)]
 pub struct TMStatus {
+  /// Maps every the `NodeGroupId` Server involved in the PCSA to the `QueryId` sent to it.
+  /// This is needed for cancelling.
   pub node_group_ids: HashMap<NodeGroupId, QueryId>,
   pub query_id: QueryId,
   pub new_rms: HashSet<QueryPath>,
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   pub responded_count: usize,
-  pub tm_state: HashMap<QueryId, TMWaitValue>,
+  pub tm_state: HashMap<QueryId, Option<(Vec<ColName>, Vec<TableView>)>>,
   pub orig_p: OrigP,
 }
 
@@ -180,6 +175,8 @@ impl OrigP {
   }
 }
 
+/// Here, every element of `results` has the same `Vec<ColName>`, and all `Vec<TableView>`s
+/// have the same length. This function essentially merges together corresponding `TableView`.
 pub fn merge_table_views(
   mut results: Vec<(Vec<ColName>, Vec<TableView>)>,
 ) -> (Vec<ColName>, Vec<TableView>) {

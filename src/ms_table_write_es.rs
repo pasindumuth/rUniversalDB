@@ -570,11 +570,9 @@ impl FullMSTableWriteES {
     let sender_path = es.sender_path.clone();
     ctx.ctx().send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
 
-    // Update the MSQuery. In particular, amend the `update_view` and remove this
-    // MSTableWriteES from the pending queries.
-    let ms_query = ms_query_ess.get_mut(&es.ms_query_id).unwrap();
-    ms_query.pending_queries.remove(&es.query_id);
-    ms_query.update_views.insert(es.tier.clone(), update_view);
+    // Amend the `update_view` in the MSQueryES.
+    let ms_query_es = ms_query_ess.get_mut(&es.ms_query_id).unwrap();
+    ms_query_es.update_views.insert(es.tier.clone(), update_view);
 
     // Signal that the subquery has finished successfully
     MSTableWriteAction::Done

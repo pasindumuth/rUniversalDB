@@ -1,7 +1,7 @@
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, Clock, GossipData, IOTypes,
-  NetworkOut, OrigP, QueryPlan, TMStatus, TMWaitValue, TabletForwardOut,
+  NetworkOut, OrigP, QueryPlan, TMStatus, TabletForwardOut,
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
@@ -645,7 +645,7 @@ impl<T: IOTypes> SlaveContext<T> {
 
               let node_group_id = NodeGroupId::Tablet(tablet_group_id.clone());
               tm_status.node_group_ids.insert(node_group_id, child_query_id.clone());
-              tm_status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
+              tm_status.tm_state.insert(child_query_id, None);
             }
           }
           proc::TableRef::TransTableName(trans_table_name) => {
@@ -678,7 +678,7 @@ impl<T: IOTypes> SlaveContext<T> {
             );
 
             tm_status.node_group_ids.insert(location.source, child_query_id.clone());
-            tm_status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
+            tm_status.tm_state.insert(child_query_id, None);
           }
         }
 
@@ -716,7 +716,7 @@ impl<T: IOTypes> SlaveContext<T> {
 
           let node_group_id = NodeGroupId::Tablet(tablet_group_id.clone());
           tm_status.node_group_ids.insert(node_group_id, child_query_id.clone());
-          tm_status.tm_state.insert(child_query_id, TMWaitValue::Nothing);
+          tm_status.tm_state.insert(child_query_id, None);
         }
 
         CoordState::WriteStage { stage_idx, stage_query_id: tm_query_id.clone() }
@@ -733,7 +733,7 @@ impl<T: IOTypes> SlaveContext<T> {
     if let Some(tm_status) = statuses.tm_statuss.get_mut(&query_success.query_id) {
       // We just add the result of the `query_success` here.
       let tm_wait_value = tm_status.tm_state.get_mut(&query_success.return_qid).unwrap();
-      *tm_wait_value = TMWaitValue::Result(query_success.result.clone());
+      *tm_wait_value = Some(query_success.result.clone());
       tm_status.new_rms.extend(query_success.new_rms.into_iter());
       tm_status.responded_count += 1;
       if tm_status.responded_count == tm_status.tm_state.len() {
@@ -742,7 +742,7 @@ impl<T: IOTypes> SlaveContext<T> {
         // Merge there TableViews together
         let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
         for (_, tm_wait_value) in tm_status.tm_state {
-          results.push(cast!(TMWaitValue::Result, tm_wait_value).unwrap());
+          results.push(tm_wait_value.unwrap());
         }
         let merged_result = merge_table_views(results);
         self.handle_tm_done(
@@ -798,7 +798,7 @@ impl<T: IOTypes> SlaveContext<T> {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all
       // remaining participants) and send the QueryAborted back to the orig_p
       for (node_group_id, child_query_id) in tm_status.node_group_ids {
-        if tm_status.tm_state.get(&child_query_id).unwrap() == &TMWaitValue::Nothing
+        if tm_status.tm_state.get(&child_query_id).unwrap() == &None
           && child_query_id != query_aborted.query_id
         {
           // If the child Query hasn't responded yet, and isn't also the Query that
@@ -1180,7 +1180,7 @@ impl<T: IOTypes> SlaveContext<T> {
     } else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
       // We Exit and Clean up this TMStatus (sending CancelQuery to all remaining participants)
       for (node_group_id, child_query_id) in tm_status.node_group_ids {
-        if tm_status.tm_state.get(&child_query_id).unwrap() == &TMWaitValue::Nothing {
+        if tm_status.tm_state.get(&child_query_id).unwrap() == &None {
           // If the child Query hasn't responded, then sent it a CancelQuery
           self.ctx().send_to_node(
             node_group_id,

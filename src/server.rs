@@ -155,7 +155,8 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
     match &compute_key_region(selection, HashMap::new(), key_cols) {
       Ok(_) => {
         // We use a trivial implementation for now, where we just return all TabletGroupIds
-        tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone()).collect()
+        tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone());
+        unimplemented!()
       }
       Err(_) => panic!(),
     }
