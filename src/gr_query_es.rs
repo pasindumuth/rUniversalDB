@@ -549,7 +549,8 @@ impl GRQueryES {
         for tablet_group_id in ctx.get_min_tablets(table_path, &child_sql_query.selection) {
           // TODO if there are 0 tablet_group_id, then we'll wait on the TMStatus forever.
           // The code for checking if it's done needs to be in TMState. That way, we can
-          // call it after this switch statement.
+          // call it after this switch statement. Not only can `handle_query_success` be
+          // reused,
 
           // Maybe look into pulling out MSQueryCoordES.
           // Construct PerformQuery

@@ -90,7 +90,10 @@ struct MSQueryCoordES {
   // Results of the query planning.
   query_plan: CoordQueryPlan,
 
-  // Precomputed data for execute stages faster.
+  /// For every TierMap, a TablePath should appear here iff that Table is written
+  /// to in the MSQuery. The Tier for every such TablePath here is the Tier that
+  /// MSTableRead should be using. If the TransTable is corresponds to an Update,
+  /// the Tier for TablePath being updated should be one ahead (i.e. lower).
   all_tier_maps: HashMap<TransTableName, TierMap>,
 
   // The dynamically evolving fields.
@@ -221,6 +224,7 @@ impl<T: IOTypes> SlaveContext<T> {
     }
   }
 
+  /// Handles all messages, coming from Tablets, the Master, External, etc.
   pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::SlaveMessage) {
     match message {
       msg::SlaveMessage::PerformExternalQuery(external_query) => {
@@ -410,12 +414,9 @@ impl<T: IOTypes> SlaveContext<T> {
       // Parse the SQL
       match Parser::parse_sql(&GenericDialect {}, &external_query.query) {
         Ok(parsed_ast) => {
-          let internal_ast = convert_ast(&parsed_ast);
           // Convert to MSQuery
-          match convert_to_msquery(&self.gossip.gossiped_db_schema, internal_ast) {
-            Ok(ms_query) => Ok(ms_query),
-            Err(payload) => Err(payload),
-          }
+          let internal_ast = convert_ast(&parsed_ast);
+          convert_to_msquery(&self.gossip.gossiped_db_schema, internal_ast)
         }
         Err(parse_error) => {
           // Extract error string
@@ -493,7 +494,7 @@ impl<T: IOTypes> SlaveContext<T> {
           request_id: plan_es.request_id.clone(),
           sender_eid: plan_es.sender_eid.clone(),
           timestamp: plan_es.timestamp.clone(),
-          query_id: query_id.clone(),
+          query_id: plan_es.query_id.clone(),
           sql_query: plan_es.sql_query.clone(),
           query_plan: query_plan.clone(),
           all_tier_maps,
@@ -730,19 +731,19 @@ impl<T: IOTypes> SlaveContext<T> {
   /// Called when one of the child queries in the current Stages respond successfully.
   /// This accumulates the results and sends the result to the MSQueryCoordES when done.
   fn handle_query_success(&mut self, statuses: &mut Statuses, query_success: msg::QuerySuccess) {
-    if let Some(tm_status) = statuses.tm_statuss.get_mut(&query_success.query_id) {
+    let tm_query_id = &query_success.return_qid;
+    if let Some(tm_status) = statuses.tm_statuss.get_mut(tm_query_id) {
       // We just add the result of the `query_success` here.
-      let tm_wait_value = tm_status.tm_state.get_mut(&query_success.return_qid).unwrap();
-      *tm_wait_value = Some(query_success.result.clone());
-      tm_status.new_rms.extend(query_success.new_rms.into_iter());
+      tm_status.tm_state.insert(query_success.query_id, Some(query_success.result.clone()));
+      tm_status.new_rms.extend(query_success.new_rms);
       tm_status.responded_count += 1;
       if tm_status.responded_count == tm_status.tm_state.len() {
         // Remove the `TMStatus` and take ownership
-        let tm_status = statuses.tm_statuss.remove(&query_success.query_id).unwrap();
+        let tm_status = statuses.tm_statuss.remove(tm_query_id).unwrap();
         // Merge there TableViews together
         let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
-        for (_, tm_wait_value) in tm_status.tm_state {
-          results.push(tm_wait_value.unwrap());
+        for (_, rm_result) in tm_status.tm_state {
+          results.push(rm_result.unwrap());
         }
         let merged_result = merge_table_views(results);
         self.handle_tm_done(
@@ -1264,7 +1265,7 @@ impl MSQueryCoordReplanningES {
                 query_id: self.query_id.clone(),
               },
               query_id: master_query_id.clone(),
-              timestamp: self.timestamp,
+              timestamp: self.timestamp.clone(),
               trans_table_schemas: HashMap::new(),
               col_usage_tree: msg::ColUsageTree::MSQuery(self.sql_query.clone()),
             },
@@ -1277,6 +1278,7 @@ impl MSQueryCoordReplanningES {
       }
     }
 
+    // If we get here, the QueryPlan is valid, so we return it and go to Done.
     self.state = MSQueryCoordReplanningS::Done;
     MSQueryCoordReplanningAction::Success(CoordQueryPlan {
       gossip_gen: ctx.gossip.gossip_gen,
