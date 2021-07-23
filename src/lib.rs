@@ -9,6 +9,7 @@ pub mod expression;
 pub mod gr_query_es;
 pub mod master;
 pub mod model;
+pub mod ms_query_coord_es;
 pub mod ms_table_read_es;
 pub mod ms_table_write_es;
 pub mod multiversion_map;

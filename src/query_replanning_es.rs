@@ -268,11 +268,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
             &ctx.master_eid,
             msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
               msg::PerformMasterFrozenColUsage {
-                sender_path: QueryPath {
-                  slave_group_id: ctx.this_slave_group_id.clone(),
-                  maybe_tablet_group_id: Some(ctx.this_tablet_group_id.clone()),
-                  query_id: self.query_id.clone(),
-                },
+                sender_path: ctx.mk_query_path(self.query_id.clone()),
                 query_id: master_query_id.clone(),
                 timestamp: self.timestamp,
                 trans_table_schemas: self.query_plan.trans_table_schemas.clone(),

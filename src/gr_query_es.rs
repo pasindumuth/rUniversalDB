@@ -552,7 +552,7 @@ impl GRQueryES {
           // call it after this switch statement. Not only can `handle_query_success` be
           // reused,
 
-          // Maybe look into pulling out MSQueryCoordES.
+          // Maybe look into pulling out MSCoordES.
           // Construct PerformQuery
           let general_query = msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query.clone());
           let child_query_id = mk_qid(ctx.rand);

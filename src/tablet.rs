@@ -490,11 +490,7 @@ impl<T: IOTypes> TabletContext<T> {
                   // Send a register message back to the root.
                   let register_query = msg::RegisterQuery {
                     root_query_id: root_query_id.clone(),
-                    query_path: QueryPath {
-                      slave_group_id: self.this_slave_group_id.clone(),
-                      maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
-                      query_id: ms_query_id.clone(),
-                    },
+                    query_path: self.mk_query_path(ms_query_id.clone()),
                   };
                   let sid = perform_query.sender_path.slave_group_id.clone();
                   let eid = self.slave_address_config.get(&sid).unwrap();
@@ -608,11 +604,7 @@ impl<T: IOTypes> TabletContext<T> {
                 // Send a register message back to the root.
                 let register_query = msg::RegisterQuery {
                   root_query_id: root_query_id.clone(),
-                  query_path: QueryPath {
-                    slave_group_id: self.this_slave_group_id.clone(),
-                    maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
-                    query_id: ms_query_id.clone(),
-                  },
+                  query_path: self.mk_query_path(ms_query_id.clone()),
                 };
                 let sid = perform_query.sender_path.slave_group_id.clone();
                 let eid = self.slave_address_config.get(&sid).unwrap();
@@ -694,11 +686,7 @@ impl<T: IOTypes> TabletContext<T> {
 
         // Send back Prepared
         let return_qid = prepare.sender_path.query_id.clone();
-        let rm_path = QueryPath {
-          slave_group_id: self.this_slave_group_id.clone(),
-          maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
-          query_id: prepare.ms_query_id,
-        };
+        let rm_path = self.mk_query_path(prepare.ms_query_id);
         self.ctx().core_ctx().send_to_slave(
           prepare.sender_path.slave_group_id,
           msg::SlaveMessage::Query2PCPrepared(msg::Query2PCPrepared { return_qid, rm_path }),
@@ -1653,6 +1641,15 @@ impl<T: IOTypes> TabletContext<T> {
       // Also, recall that `handle_ms_read_es_action` will maintain the MSQueryES.
       let action = ms_read_es.exit_and_clean_up(self);
       self.handle_ms_read_es_action(statuses, query_id, action);
+    }
+  }
+
+  /// Construct QueryPath for a given `query_id` that belongs to this Tablet.
+  pub fn mk_query_path(&self, query_id: QueryId) -> QueryPath {
+    QueryPath {
+      slave_group_id: self.this_slave_group_id.clone(),
+      maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
+      query_id,
     }
   }
 }
