@@ -115,10 +115,10 @@ pub enum QueryReplanningAction {
   /// Indicates the that CommonQueryReplanningES has computed a valid query where the Context
   /// is sufficient, and it's stored in the `query_plan` field.
   Success,
-  /// Indicates a valid QueryPlan couldn't be computed. Here, either a Required Column
-  /// wasn't present in the TableSchema, or a column wasn't present in the context. In
-  /// both cases, the appropriate responses were sent back to the originator.
-  Failure,
+  /// Indicates a valid QueryPlan couldn't be computed and resulted in a QueryError.
+  QueryError(msg::QueryError),
+  /// Indicates a valid QueryPlan couldn't be computed because there were insufficient columns.
+  ColumnsDNE(Vec<ColName>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -152,14 +152,11 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
     // that the they are present in the TableSchema.
     for col in &self.sql_view.required_local_cols() {
       if !contains_col(&ctx.table_schema, col, &self.timestamp) {
-        // This means a Required Column is not present. Thus, we exit, send back an error.
-        ctx.ctx().send_query_error(
-          self.sender_path.clone(),
-          self.query_id.clone(),
-          msg::QueryError::RequiredColumnsDNE { msg: String::new() },
-        );
+        // This means a Required Column is not present. Thus, we go to Done and return the error.
         self.state = CommonQueryReplanningS::Done;
-        return QueryReplanningAction::Failure;
+        return QueryReplanningAction::QueryError(msg::QueryError::RequiredColumnsDNE {
+          msg: String::new(),
+        });
       }
     }
 
@@ -309,7 +306,7 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
   /// Handles the Query Plan constructed by the Master.
   pub fn handle_master_response<T: IOTypes>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    _: &mut TabletContext<T>,
     gossip_gen: Gen,
     tree: msg::FrozenColUsageTree,
   ) -> QueryReplanningAction {
@@ -326,14 +323,9 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
 
     if !missing_cols.is_empty() {
       // If the above set is non-empty, that means the QueryReplanning has conclusively
-      // detected an insufficient Context, and so we respond to the sender and move to Done.
-      ctx.ctx().send_abort_data(
-        self.sender_path.clone(),
-        self.query_id.clone(),
-        msg::AbortedData::ColumnsDNE { missing_cols },
-      );
+      // detected an insufficient Context, and move to Done and return the missing columns.
       self.state = CommonQueryReplanningS::Done;
-      QueryReplanningAction::Failure
+      QueryReplanningAction::ColumnsDNE(missing_cols)
     } else {
       // This means the QueryReplanning was a success, so we update the QueryPlan and go to Done.
       self.query_plan.gossip_gen = gossip_gen;
@@ -343,8 +335,8 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
     }
   }
 
-  /// This Exits and Cleans up this QueryReplanningES
-  pub fn exit_and_clean_up<T: IOTypes>(&self, ctx: &mut TabletContext<T>) {
+  /// This Exits and Cleans up this QueryReplanningES.
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
     match &self.state {
       CommonQueryReplanningS::Start => {}
       CommonQueryReplanningS::RequiredLocalColumnLocking { locked_columns_query_id }
@@ -364,5 +356,6 @@ impl<R: QueryReplanningSqlView> CommonQueryReplanningES<R> {
       }
       CommonQueryReplanningS::Done => {}
     }
+    self.state = CommonQueryReplanningS::Done;
   }
 }

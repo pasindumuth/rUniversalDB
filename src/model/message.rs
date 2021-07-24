@@ -284,6 +284,8 @@ pub enum ExternalAbortedData {
   /// understand that their query was invalid, but might become valid for the same timestamp
   /// later (i.e. the invalidity is not idempotent).
   QueryExecutionError,
+  /// This is sent back as a repsonse when a CancelExternalQuery comes in.
+  ConfirmCancel,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

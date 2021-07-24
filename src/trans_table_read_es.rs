@@ -2,7 +2,7 @@ use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, nodes_external_cols,
   nodes_external_trans_tables, ColUsagePlanner,
 };
-use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan};
+use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryESResult, QueryPlan};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRExecutionS, GRQueryConstructorView, GRQueryES, GRQueryPlan};
 use crate::model::common::{
@@ -34,6 +34,7 @@ pub trait TransTableSource {
 pub enum TransExecutionS {
   Start,
   Executing(Executing),
+  Done,
 }
 
 #[derive(Debug)]
@@ -60,18 +61,16 @@ pub struct TransTableReadES {
 }
 
 pub enum TransTableAction {
-  /// This tells the parent Server to wait. This is used after this ES sends
-  /// out a MasterQueryReplanning, while it's waiting for subqueries, etc.
+  /// This tells the parent Server to wait.
   Wait,
   /// This tells the parent Server to perform subqueries.
   SendSubqueries(Vec<GRQueryES>),
-  /// This tells the parent Server that this TransTableReadES has completed
-  /// successfully (having already responded, etc).
-  Done,
-  /// This tells the parent Server that this TransTableReadES has completed
-  /// unsuccessfully, and that the given `QueryId`s (subqueries) should be
-  /// Exit and Cleaned Up, along with this one.
-  ExitAndCleanUp(Vec<QueryId>),
+  /// Indicates the ES succeeded with the given result.
+  Success(QueryESResult),
+  /// Indicates the ES failed with a QueryError.
+  QueryError(msg::QueryError),
+  /// Indicates the ES failed with insufficient columns in the Context.
+  ColumnsDNE(Vec<ColName>),
 }
 
 #[derive(Debug)]
@@ -198,10 +197,15 @@ impl FullTransTableReadES {
         });
         self.start_trans_table_read_es(ctx, trans_table_source)
       }
-      TransQueryReplanningAction::Failure => {
-        // If the replanning was unsuccessful, the Abort message should already have
-        // been sent, and we may exit.
-        TransTableAction::ExitAndCleanUp(Vec::new())
+      TransQueryReplanningAction::QueryError(query_error) => {
+        // Forward up the QueryError. We do not need to ECU because
+        // QueryReplanning will be in Done
+        TransTableAction::QueryError(query_error)
+      }
+      TransQueryReplanningAction::ColumnsDNE(missing_cols) => {
+        // Forward up the QueryError. We do not need to ECU because
+        // QueryReplanning will be in Done
+        TransTableAction::ColumnsDNE(missing_cols)
       }
     }
   }
@@ -303,14 +307,9 @@ impl FullTransTableReadES {
     }
 
     if !missing_cols.is_empty() {
-      // If there are missing columns, we construct a ColumnsDNE containing
-      // `missing_cols`, send it back to the originator, and finish the ES.
-      ctx.send_abort_data(
-        self.sender_path(),
-        self.query_id(),
-        msg::AbortedData::ColumnsDNE { missing_cols },
-      );
-      self.exit_and_clean_up(ctx)
+      // If there are missing columns, we ECU and propagate up the ColumnsDNE.
+      self.exit_and_clean_up(ctx);
+      TransTableAction::ColumnsDNE(missing_cols)
     } else {
       // This means there are no missing columns, and so we can try the
       // GRQueryES again by extending its Context.
@@ -363,8 +362,8 @@ impl FullTransTableReadES {
     ctx: &mut ServerContext<T>,
     query_error: msg::QueryError,
   ) -> TransTableAction {
-    ctx.send_query_error(self.sender_path(), self.query_id(), query_error);
-    self.exit_and_clean_up(ctx)
+    self.exit_and_clean_up(ctx);
+    TransTableAction::QueryError(query_error)
   }
 
   /// Handles a Subquery completing
@@ -478,32 +477,23 @@ impl FullTransTableReadES {
     );
 
     if let Err(eval_error) = eval_res {
-      ctx.send_query_error(self.sender_path(), self.query_id(), mk_eval_error(eval_error));
-      return self.exit_and_clean_up(ctx);
+      es.state = TransExecutionS::Done;
+      return TransTableAction::QueryError(mk_eval_error(eval_error));
     }
 
-    // Build the success message and respond.
-    let success_msg = msg::QuerySuccess {
-      return_qid: es.sender_path.query_id.clone(),
-      query_id: es.query_id.clone(),
+    // Signal Success and return the data.
+    es.state = TransExecutionS::Done;
+    TransTableAction::Success(QueryESResult {
       result: (es.sql_query.projection.clone(), res_table_views),
       new_rms: es.new_rms.iter().cloned().collect(),
-    };
-    let sender_path = es.sender_path.clone();
-    ctx.send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
-    TransTableAction::Done
+    })
   }
 
-  /// This Cleans up any Master queries we launched and it returns instructions for the
-  /// parent Server to follow to clean up subqueries.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> TransTableAction {
+  /// Cleans up all currently owned resources, and goes to Done.
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) {
     match self {
-      FullTransTableReadES::QueryReplanning(es) => {
-        es.exit_and_clean_up(ctx);
-        TransTableAction::ExitAndCleanUp(Vec::new())
-      }
+      FullTransTableReadES::QueryReplanning(es) => es.exit_and_clean_up(ctx),
       FullTransTableReadES::Executing(es) => {
-        let mut subquery_ids = Vec::<QueryId>::new();
         match &es.state {
           TransExecutionS::Start => {}
           TransExecutionS::Executing(executing) => {
@@ -512,15 +502,14 @@ impl FullTransTableReadES {
               match single_status {
                 SingleSubqueryStatus::LockingSchemas(_) => panic!(),
                 SingleSubqueryStatus::PendingReadRegion(_) => panic!(),
-                SingleSubqueryStatus::Pending(pending_status) => {
-                  subquery_ids.push(pending_status.query_id.clone());
-                }
+                SingleSubqueryStatus::Pending(_) => {}
                 SingleSubqueryStatus::Finished(_) => {}
               }
             }
           }
+          TransExecutionS::Done => {}
         }
-        TransTableAction::ExitAndCleanUp(subquery_ids)
+        es.state = TransExecutionS::Done
       }
     }
   }
@@ -594,10 +583,10 @@ pub enum TransQueryReplanningAction {
   /// Indicates the that TransQueryReplanningES has computed a valid query where the Context
   /// is sufficient, and it's stored in the `query_plan` field.
   Success,
-  /// Indicates a valid QueryPlan couldn't be computed. Here, either a Required Column
-  /// wasn't present in the TableSchema, or a column wasn't present in the context. In
-  /// both cases, the appropriate responses were sent back to the originator.
-  Failure,
+  /// Indicates a valid QueryPlan couldn't be computed and resulted in a QueryError.
+  QueryError(msg::QueryError),
+  /// Indicates a valid QueryPlan couldn't be computed because there were insufficient columns.
+  ColumnsDNE(Vec<ColName>),
 }
 
 impl TransQueryReplanningES {
@@ -611,14 +600,11 @@ impl TransQueryReplanningES {
     let schema_cols = trans_table_source.get_schema(&self.location_prefix.trans_table_name);
     for col in &self.sql_query.projection {
       if !schema_cols.contains(col) {
-        // This means a Required Column is not present. Thus, we exit, send back an error.
-        ctx.send_query_error(
-          self.sender_path.clone(),
-          self.query_id.clone(),
-          msg::QueryError::RequiredColumnsDNE { msg: String::new() },
-        );
+        // This means a Required Column is not present. Thus, we go to Done and return the error.
         self.state = TransQueryReplanningS::Done;
-        return TransQueryReplanningAction::Failure;
+        return TransQueryReplanningAction::QueryError(msg::QueryError::RequiredColumnsDNE {
+          msg: String::new(),
+        });
       }
     }
 
@@ -702,14 +688,9 @@ impl TransQueryReplanningES {
 
     if !missing_cols.is_empty() {
       // If the above set is non-empty, that means the QueryReplanning has conclusively
-      // detected an insufficient Context, and so we respond to the sender and move to Done.
-      ctx.send_abort_data(
-        self.sender_path.clone(),
-        self.query_id.clone(),
-        msg::AbortedData::ColumnsDNE { missing_cols },
-      );
+      // detected an insufficient Context, and move to Done and return the missing columns.
       self.state = TransQueryReplanningS::Done;
-      TransQueryReplanningAction::Failure
+      TransQueryReplanningAction::ColumnsDNE(missing_cols)
     } else {
       // This means the QueryReplanning was a success, so we update the QueryPlan and go to Done.
       self.query_plan.gossip_gen = gossip_gen;
@@ -720,7 +701,7 @@ impl TransQueryReplanningES {
   }
 
   /// This Exits and Cleans up this QueryReplanningES
-  pub fn exit_and_clean_up<T: IOTypes>(&self, ctx: &mut ServerContext<T>) {
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) {
     match &self.state {
       TransQueryReplanningS::Start => {}
       TransQueryReplanningS::MasterQueryReplanning { master_query_id } => {
@@ -735,5 +716,6 @@ impl TransQueryReplanningES {
       }
       TransQueryReplanningS::Done => {}
     }
+    self.state = TransQueryReplanningS::Done;
   }
 }

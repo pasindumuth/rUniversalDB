@@ -12,6 +12,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 
+// -----------------------------------------------------------------------------------------------
+//  IOTypes
+// -----------------------------------------------------------------------------------------------
+
 pub trait Clock {
   fn now(&mut self) -> Timestamp;
 }
@@ -31,26 +35,72 @@ pub trait IOTypes {
   type TabletForwardOutT: TabletForwardOut + Debug;
 }
 
-/// These are very low-level utilities where I consider
-/// it a shortcoming of the language that there isn't something
-/// I can already use.
+// -----------------------------------------------------------------------------------------------
+//  Language
+// -----------------------------------------------------------------------------------------------
+/// These are very low-level utilities whose absence I consider a shortcoming of Rust.
 
+/// Constructs a Vec out of the given indices.
 pub fn rvec(i: i32, j: i32) -> Vec<i32> {
   (i..j).collect()
 }
 
-pub fn mk_qid<R: Rng>(rng: &mut R) -> QueryId {
-  let mut bytes: [u8; 8] = [0; 8];
-  rng.fill(&mut bytes);
-  QueryId(bytes)
-}
-
+/// Lookup the position of a `key` in an associative list.
 pub fn lookup_pos<K: Eq, V>(assoc: &Vec<(K, V)>, key: &K) -> Option<usize> {
   assoc.iter().position(|(k, _)| k == key)
 }
 
+/// Lookup the value, given the `key`, in an associative list.
 pub fn lookup<'a, K: Eq, V>(assoc: &'a Vec<(K, V)>, key: &K) -> Option<&'a V> {
   assoc.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+/// Remove an item from the Vector
+pub fn remove_item<V: Eq>(vec: &mut Vec<V>, item: &V) {
+  if let Some(pos) = vec.iter().position(|x| x == item) {
+    vec.remove(pos);
+  }
+}
+
+/// This is a simple insert-get operation for HashMaps. We usually want to create a value
+/// in the same expression as the insert operation, but we also want to get a &mut to the
+/// inserted value. This function does this.
+pub fn map_insert<'a, K: Clone + Eq + Hash, V>(
+  map: &'a mut HashMap<K, V>,
+  key: &K,
+  value: V,
+) -> &'a mut V {
+  map.insert(key.clone(), value);
+  map.get_mut(key).unwrap()
+}
+
+/// Used to add elements form a BTree MultiMap
+pub fn btree_multimap_insert<K: Ord + Clone, V: Ord>(
+  map: &mut BTreeMap<K, BTreeSet<V>>,
+  key: &K,
+  value: V,
+) {
+  if let Some(set) = map.get_mut(key) {
+    set.insert(value);
+  } else {
+    let mut set = BTreeSet::<V>::new();
+    set.insert(value);
+    map.insert(key.clone(), set);
+  }
+}
+
+/// Used to removed elements form a BTree MultiMap
+pub fn btree_multimap_remove<K: Ord, V: Ord>(
+  map: &mut BTreeMap<K, BTreeSet<V>>,
+  key: &K,
+  value: &V,
+) {
+  if let Some(set) = map.get_mut(key) {
+    set.remove(value);
+    if set.is_empty() {
+      map.remove(key);
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -164,6 +214,12 @@ pub struct TMStatus {
 //  Basic Utils
 // -----------------------------------------------------------------------------------------------
 
+pub fn mk_qid<R: Rng>(rng: &mut R) -> QueryId {
+  let mut bytes: [u8; 8] = [0; 8];
+  rng.fill(&mut bytes);
+  QueryId(bytes)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrigP {
   pub query_id: QueryId,
@@ -197,47 +253,6 @@ pub fn merge_table_views(
     }
   }
   (schema, views)
-}
-
-/// This is a simple insert-get operation for HashMaps. We usually want to create a value
-/// in the same expression as the insert operation, but we also want to get a &mut to the
-/// inserted value. This function does this.
-pub fn map_insert<'a, K: Clone + Eq + Hash, V>(
-  map: &'a mut HashMap<K, V>,
-  key: &K,
-  value: V,
-) -> &'a mut V {
-  map.insert(key.clone(), value);
-  map.get_mut(key).unwrap()
-}
-
-/// Used to add elements form a BTree MultiMap
-pub fn btree_multimap_insert<K: Ord + Clone, V: Ord>(
-  map: &mut BTreeMap<K, BTreeSet<V>>,
-  key: &K,
-  value: V,
-) {
-  if let Some(set) = map.get_mut(key) {
-    set.insert(value);
-  } else {
-    let mut set = BTreeSet::<V>::new();
-    set.insert(value);
-    map.insert(key.clone(), set);
-  }
-}
-
-/// Used to removed elements form a BTree MultiMap
-pub fn btree_multimap_remove<K: Ord, V: Ord>(
-  map: &mut BTreeMap<K, BTreeSet<V>>,
-  key: &K,
-  value: &V,
-) {
-  if let Some(set) = map.get_mut(key) {
-    set.remove(value);
-    if set.is_empty() {
-      map.remove(key);
-    }
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -295,4 +310,15 @@ pub struct KeyBound {
 pub struct TableRegion {
   pub col_region: Vec<ColName>,
   pub row_region: Vec<KeyBound>,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Wrapper Utilities
+// -----------------------------------------------------------------------------------------------
+
+/// Contains the result of ESs like *Table*ES and TransTableReadES.
+#[derive(Debug)]
+pub struct QueryESResult {
+  pub result: (Vec<ColName>, Vec<TableView>),
+  pub new_rms: Vec<QueryPath>,
 }

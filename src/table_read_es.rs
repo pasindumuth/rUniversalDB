@@ -1,6 +1,6 @@
 use crate::col_usage::collect_top_level_cols;
 use crate::common::{
-  btree_multimap_insert, mk_qid, IOTypes, KeyBound, OrigP, QueryPlan, TableRegion,
+  btree_multimap_insert, mk_qid, IOTypes, KeyBound, OrigP, QueryESResult, QueryPlan, TableRegion,
 };
 use crate::expression::{compress_row_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
@@ -34,6 +34,7 @@ enum ExecutionS {
   Start,
   Pending(Pending),
   Executing(Executing),
+  Done,
 }
 
 #[derive(Debug)]
@@ -66,19 +67,16 @@ pub struct QueryReplanningES {
 }
 
 pub enum TableAction {
-  /// This tells the parent Server to wait. This is used after this ES sends
-  /// out a MasterQueryReplanning, while it's waiting for subqueries, column
-  /// locking, ReadRegion protection, etc.
+  /// This tells the parent Server to wait.
   Wait,
   /// This tells the parent Server to perform subqueries.
   SendSubqueries(Vec<GRQueryES>),
-  /// This tells the parent Server that this TableReadES has completed
-  /// successfully (having already responded, etc).
-  Done,
-  /// This tells the parent Server that this TableReadES has completed
-  /// unsuccessfully, and that the given `QueryId`s (subqueries) should be
-  /// Exit and Cleaned Up, along with this one.
-  ExitAndCleanUp(Vec<QueryId>),
+  /// Indicates the ES succeeded with the given result.
+  Success(QueryESResult),
+  /// Indicates the ES failed with a QueryError.
+  QueryError(msg::QueryError),
+  /// Indicates the ES failed with insufficient columns in the Context.
+  ColumnsDNE(Vec<ColName>),
 }
 
 #[derive(Debug)]
@@ -136,14 +134,9 @@ impl FullTableReadES {
         }
 
         if !missing_cols.is_empty() {
-          // If there are missing columns, we Exit and clean up, and propagate
-          // the ColumnsDNE to the originator.
-          ctx.ctx().send_abort_data(
-            es.sender_path.clone(),
-            es.query_id.clone(),
-            msg::AbortedData::ColumnsDNE { missing_cols },
-          );
-          self.exit_and_clean_up(ctx)
+          // If there are missing columns, we ECU and propagate up the ColumnsDNE.
+          self.exit_and_clean_up(ctx);
+          TableAction::ColumnsDNE(missing_cols)
         } else {
           // Here, we know all `new_cols` are in this Context, and so we can continue
           // trying to evaluate the subquery.
@@ -227,12 +220,15 @@ impl FullTableReadES {
         });
         self.start_table_read_es(ctx)
       }
-      QueryReplanningAction::Failure => {
-        // Recall that if QueryReplanning had ended in a failure (i.e.
-        // having missing columns), then `CommonQueryReplanningES` will
-        // have send back the necessary responses. Thus, we only need to
-        // Exit the ES here.
-        TableAction::ExitAndCleanUp(Vec::new())
+      QueryReplanningAction::QueryError(query_error) => {
+        // Forward up the QueryError. We do not need to ECU because
+        // QueryReplanning will be in Done
+        TableAction::QueryError(query_error)
+      }
+      QueryReplanningAction::ColumnsDNE(missing_cols) => {
+        // Forward up the QueryError. We do not need to ECU because
+        // QueryReplanning will be in Done
+        TableAction::ColumnsDNE(missing_cols)
       }
     }
   }
@@ -267,12 +263,8 @@ impl FullTableReadES {
         ) {
           Ok(gr_query_statuses) => gr_query_statuses,
           Err(eval_error) => {
-            ctx.ctx().send_query_error(
-              es.sender_path.clone(),
-              es.query_id.clone(),
-              mk_eval_error(eval_error),
-            );
-            return self.exit_and_clean_up(ctx);
+            es.state = ExecutionS::Done;
+            return TableAction::QueryError(mk_eval_error(eval_error));
           }
         };
 
@@ -323,18 +315,15 @@ impl FullTableReadES {
         ) {
           Ok(gr_query_statuses) => gr_query_statuses,
           Err(eval_error) => {
-            ctx.ctx().send_query_error(
-              es.sender_path.clone(),
-              es.query_id.clone(),
-              mk_eval_error(eval_error),
-            );
-            return self.exit_and_clean_up(ctx);
+            self.exit_and_clean_up(ctx);
+            return TableAction::QueryError(mk_eval_error(eval_error));
           }
         };
 
         // Return the subquery
         TableAction::SendSubqueries(vec![gr_query_es])
       }
+      ExecutionS::Done => panic!(),
     }
   }
 
@@ -380,9 +369,8 @@ impl FullTableReadES {
     ctx: &mut TabletContext<T>,
     query_error: msg::QueryError,
   ) -> TableAction {
-    let es = cast!(FullTableReadES::Executing, self).unwrap();
-    ctx.ctx().send_query_error(es.sender_path.clone(), es.query_id.clone(), query_error);
-    self.exit_and_clean_up(ctx)
+    self.exit_and_clean_up(ctx);
+    TableAction::QueryError(query_error)
   }
 
   /// Handles a Subquery completing
@@ -495,31 +483,20 @@ impl FullTableReadES {
     );
 
     if let Err(eval_error) = eval_res {
-      ctx.ctx().send_query_error(
-        es.sender_path.clone(),
-        es.query_id.clone(),
-        mk_eval_error(eval_error),
-      );
-      return self.exit_and_clean_up(ctx);
+      es.state = ExecutionS::Done;
+      return TableAction::QueryError(mk_eval_error(eval_error));
     }
 
-    // Build the success message and respond.
-    let success_msg = msg::QuerySuccess {
-      return_qid: es.sender_path.query_id.clone(),
-      query_id: es.query_id.clone(),
+    // Signal Success and return the data.
+    es.state = ExecutionS::Done;
+    TableAction::Success(QueryESResult {
       result: (es.sql_query.projection.clone(), res_table_views),
       new_rms: es.new_rms.iter().cloned().collect(),
-    };
-    ctx.ctx().send_to_path(es.sender_path.clone(), CommonQuery::QuerySuccess(success_msg));
-
-    // Signal that the subquery has finished successfully
-    TableAction::Done
+    })
   }
 
-  /// This Cleans up any Master queries we launched and it returns instructions for the
-  /// parent Server to follow to clean up subqueries.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
-    let mut subquery_ids = Vec::<QueryId>::new();
+  /// Cleans up all currently owned resources, and goes to Done.
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
     match self {
       FullTableReadES::QueryReplanning(es) => es.status.exit_and_clean_up(ctx),
       FullTableReadES::Executing(es) => {
@@ -531,8 +508,8 @@ impl FullTableReadES {
           }
           ExecutionS::Executing(executing) => {
             // Here, we need to cancel every Subquery. Depending on the state of the
-            // SingleSubqueryStatus, we either need to either clean up the column locking request,
-            // the ReadRegion from read protection, or abort the underlying GRQueryES.
+            // SingleSubqueryStatus, we either need to either clean up the column locking
+            // request or the ReadRegion from read protection.
             for single_status in &executing.subqueries {
               match single_status {
                 SingleSubqueryStatus::LockingSchemas(locking_status) => {
@@ -541,17 +518,16 @@ impl FullTableReadES {
                 SingleSubqueryStatus::PendingReadRegion(protect_status) => {
                   ctx.remove_read_protected_request(&es.timestamp, &protect_status.query_id);
                 }
-                SingleSubqueryStatus::Pending(pending_status) => {
-                  subquery_ids.push(pending_status.query_id.clone());
-                }
+                SingleSubqueryStatus::Pending(_) => {}
                 SingleSubqueryStatus::Finished(_) => {}
               }
             }
           }
+          ExecutionS::Done => {}
         }
+        es.state = ExecutionS::Done;
       }
     }
-    TableAction::ExitAndCleanUp(subquery_ids)
   }
 
   /// Processes the Start state of TableReadES.
@@ -576,12 +552,8 @@ impl FullTableReadES {
           }
         }
         Err(eval_error) => {
-          ctx.ctx().send_query_error(
-            es.sender_path.clone(),
-            es.query_id.clone(),
-            mk_eval_error(eval_error),
-          );
-          return self.exit_and_clean_up(ctx);
+          es.state = ExecutionS::Done;
+          return TableAction::QueryError(mk_eval_error(eval_error));
         }
       }
     }

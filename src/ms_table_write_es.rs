@@ -1,5 +1,7 @@
 use crate::col_usage::collect_top_level_cols;
-use crate::common::{map_insert, mk_qid, IOTypes, KeyBound, OrigP, QueryPlan, TableRegion};
+use crate::common::{
+  map_insert, mk_qid, IOTypes, KeyBound, OrigP, QueryESResult, QueryPlan, TableRegion,
+};
 use crate::expression::{compress_row_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
@@ -32,6 +34,7 @@ enum MSWriteExecutionS {
   Start,
   Pending(Pending),
   Executing(Executing),
+  Done,
 }
 
 #[derive(Debug)]
@@ -68,31 +71,23 @@ pub struct MSWriteQueryReplanningES {
   pub status: CommonQueryReplanningES<proc::Update>,
 }
 
+pub enum MSTableWriteAction {
+  /// This tells the parent Server to wait.
+  Wait,
+  /// This tells the parent Server to perform subqueries.
+  SendSubqueries(Vec<GRQueryES>),
+  /// Indicates the ES succeeded with the given result.
+  Success(QueryESResult),
+  /// Indicates the ES failed with a QueryError.
+  QueryError(msg::QueryError),
+  /// Indicates the ES failed with insufficient columns in the Context.
+  ColumnsDNE(Vec<ColName>),
+}
+
 #[derive(Debug)]
 pub enum FullMSTableWriteES {
   QueryReplanning(MSWriteQueryReplanningES),
   Executing(MSTableWriteES),
-}
-
-pub enum MSTableWriteAction {
-  /// This tells the parent Server to wait. This is used after this ES sends
-  /// out a MasterQueryReplanning, while it's waiting for subqueries, column
-  /// locking, ReadRegion protection, etc.
-  Wait,
-  /// This tells the parent Server to perform subqueries.
-  SendSubqueries(Vec<GRQueryES>),
-  /// This tells the parent Server that this TableReadES has completed
-  /// successfully (having already responded, etc).
-  Done,
-  /// This singals the parent server to Exit exit the whole MSQueryES. When we send this,
-  /// we don't clean up anything in this ES immediately; we leave it in it's previous state
-  /// totally unchanged, and without having changed the `TabletContext` either. (The parent
-  /// server will Exit and Clean Up each ES immediately after, including this one.)
-  ExitAll(msg::QueryError),
-  /// This tells the parent Server that this TableReadES has completed
-  /// unsuccessfully, and that the given `QueryId`s (subqueries) should be
-  /// Exit and Cleaned Up, along with this one.
-  ExitAndCleanUp(Vec<QueryId>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -144,14 +139,9 @@ impl FullMSTableWriteES {
         }
 
         if !missing_cols.is_empty() {
-          // If there are missing columns, we Exit and clean up, and propagate
-          // the ColumnsDNE to the originator.
-          ctx.ctx().send_abort_data(
-            es.sender_path.clone(),
-            es.query_id.clone(),
-            msg::AbortedData::ColumnsDNE { missing_cols },
-          );
-          self.exit_and_clean_up(ctx)
+          // If there are missing columns, we ECU and propagate up the ColumnsDNE.
+          self.exit_and_clean_up(ctx);
+          MSTableWriteAction::ColumnsDNE(missing_cols)
         } else {
           // Here, we know all `new_cols` are in this Context, and so we can continue
           // trying to evaluate the subquery.
@@ -243,12 +233,15 @@ impl FullMSTableWriteES {
         // Finally, we start the MSWriteTableES.
         self.start_ms_table_write_es(ctx)
       }
-      QueryReplanningAction::Failure => {
-        // Recall that if QueryReplanning had ended in a failure (i.e. having missing
-        // columns), then `CommonQueryReplanningES` will have send back the necessary
-        // responses. Thus, we only need to Exit the ES here. (Recall this doesn't imply
-        // a fatal Error for the whole transaction, so we don't return ExitAll).
-        MSTableWriteAction::ExitAndCleanUp(Vec::new())
+      QueryReplanningAction::QueryError(query_error) => {
+        // Forward up the QueryError. We do not need to ECU because
+        // QueryReplanning will be in Done
+        MSTableWriteAction::QueryError(query_error)
+      }
+      QueryReplanningAction::ColumnsDNE(missing_cols) => {
+        // Forward up the QueryError. We do not need to ECU because
+        // QueryReplanning will be in Done
+        MSTableWriteAction::ColumnsDNE(missing_cols)
       }
     }
   }
@@ -290,7 +283,8 @@ impl FullMSTableWriteES {
         ) {
           Ok(gr_query_statuses) => gr_query_statuses,
           Err(eval_error) => {
-            return MSTableWriteAction::ExitAll(mk_eval_error(eval_error));
+            es.state = MSWriteExecutionS::Done;
+            return MSTableWriteAction::QueryError(mk_eval_error(eval_error));
           }
         };
 
@@ -348,13 +342,15 @@ impl FullMSTableWriteES {
         ) {
           Ok(gr_query_statuses) => gr_query_statuses,
           Err(eval_error) => {
-            return MSTableWriteAction::ExitAll(mk_eval_error(eval_error));
+            self.exit_and_clean_up(ctx);
+            return MSTableWriteAction::QueryError(mk_eval_error(eval_error));
           }
         };
 
         // Return the subquery
         MSTableWriteAction::SendSubqueries(vec![gr_query_es])
       }
+      MSWriteExecutionS::Done => panic!(),
     }
   }
 
@@ -395,29 +391,15 @@ impl FullMSTableWriteES {
   /// This is called if a subquery fails.
   pub fn handle_internal_query_error<T: IOTypes>(
     &mut self,
-    _: &mut TabletContext<T>,
-    query_error: msg::QueryError,
-  ) -> MSTableWriteAction {
-    MSTableWriteAction::ExitAll(query_error)
-  }
-
-  /// This is called when a non-owning ES (the MSQueryES in this case) wants to ECU this
-  /// ES. We need to send an Aborted to the owner before, though.
-  pub fn handle_lateral_error<T: IOTypes>(
-    &mut self,
     ctx: &mut TabletContext<T>,
     query_error: msg::QueryError,
   ) -> MSTableWriteAction {
-    let es = cast!(FullMSTableWriteES::Executing, self).unwrap();
-    ctx.ctx().send_abort_data(
-      es.sender_path.clone(),
-      es.query_id.clone(),
-      msg::AbortedData::QueryError(query_error),
-    );
-    self.exit_and_clean_up(ctx)
+    self.exit_and_clean_up(ctx);
+    MSTableWriteAction::QueryError(query_error)
   }
 
-  /// Handles a Subquery completing
+  /// Handles a Subquery completing.
+  /// TODO: see if we can just pass in MSQueryES
   pub fn handle_subquery_done<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
@@ -557,36 +539,24 @@ impl FullMSTableWriteES {
     );
 
     if let Err(eval_error) = eval_res {
-      return MSTableWriteAction::ExitAll(mk_eval_error(eval_error));
+      es.state = MSWriteExecutionS::Done;
+      return MSTableWriteAction::QueryError(mk_eval_error(eval_error));
     }
-
-    // Build the success message and respond.
-    let success_msg = msg::QuerySuccess {
-      return_qid: es.sender_path.query_id.clone(),
-      query_id: es.query_id.clone(),
-      result: (res_col_names, vec![res_table_view]),
-      new_rms: es.new_rms.iter().cloned().collect(),
-    };
-    let sender_path = es.sender_path.clone();
-    ctx.ctx().send_to_path(sender_path, CommonQuery::QuerySuccess(success_msg));
 
     // Amend the `update_view` in the MSQueryES.
     let ms_query_es = ms_query_ess.get_mut(&es.ms_query_id).unwrap();
     ms_query_es.update_views.insert(es.tier.clone(), update_view);
 
-    // Signal that the subquery has finished successfully
-    MSTableWriteAction::Done
+    // Signal Success and return the data.
+    es.state = MSWriteExecutionS::Done;
+    MSTableWriteAction::Success(QueryESResult {
+      result: (res_col_names, vec![res_table_view]),
+      new_rms: es.new_rms.iter().cloned().collect(),
+    })
   }
 
-  /// This Cleans up any Master queries we launched and it returns instructions for the
-  /// parent Server to follow to clean up subqueries. Note that this function doesn't assume
-  /// anything about if the whole MSQueryES is being cleaned up or not; it only expects to clean
-  /// up this ES.
-  pub fn exit_and_clean_up<T: IOTypes>(
-    &mut self,
-    ctx: &mut TabletContext<T>,
-  ) -> MSTableWriteAction {
-    let mut subquery_ids = Vec::<QueryId>::new();
+  /// Cleans up all currently owned resources, and goes to Done.
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
     match self {
       FullMSTableWriteES::QueryReplanning(es) => es.status.exit_and_clean_up(ctx),
       FullMSTableWriteES::Executing(es) => {
@@ -600,8 +570,8 @@ impl FullMSTableWriteES {
           }
           MSWriteExecutionS::Executing(executing) => {
             // Here, we need to cancel every Subquery. Depending on the state of the
-            // SingleSubqueryStatus, we either need to either clean up the column locking request,
-            // the ReadRegion from m_waiting_read_protected, or abort the underlying GRQueryES.
+            // SingleSubqueryStatus, we either need to either clean up the column locking
+            // request or the ReadRegion from m_waiting_read_protected.
 
             // Note that we leave `m_read_protected` and `m_write_protected` in-tact
             // since they are inconvenient to change (since they don't have `query_id`).
@@ -613,17 +583,16 @@ impl FullMSTableWriteES {
                 SingleSubqueryStatus::PendingReadRegion(protect_status) => {
                   ctx.remove_m_read_protected_request(&es.timestamp, &protect_status.query_id);
                 }
-                SingleSubqueryStatus::Pending(pending_status) => {
-                  subquery_ids.push(pending_status.query_id.clone());
-                }
+                SingleSubqueryStatus::Pending(_) => {}
                 SingleSubqueryStatus::Finished(_) => {}
               }
             }
           }
+          MSWriteExecutionS::Done => {}
         }
+        es.state = MSWriteExecutionS::Done;
       }
     }
-    MSTableWriteAction::ExitAndCleanUp(subquery_ids)
   }
 
   /// Starts the Execution state
@@ -651,7 +620,8 @@ impl FullMSTableWriteES {
           }
         }
         Err(eval_error) => {
-          return MSTableWriteAction::ExitAll(mk_eval_error(eval_error));
+          es.state = MSWriteExecutionS::Done;
+          return MSTableWriteAction::QueryError(mk_eval_error(eval_error));
         }
       }
     }
@@ -668,7 +638,8 @@ impl FullMSTableWriteES {
     // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
     // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
     if !ctx.check_write_region_isolation(&write_region, &es.timestamp) {
-      MSTableWriteAction::ExitAll(msg::QueryError::WriteRegionConflictWithSubsequentRead)
+      es.state = MSWriteExecutionS::Done;
+      MSTableWriteAction::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
     } else {
       // Compute the Read Column Region.
       let col_region = es.query_plan.col_usage_node.safe_present_cols.clone();

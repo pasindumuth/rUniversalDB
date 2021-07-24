@@ -34,17 +34,13 @@ pub enum GRQueryAction {
   ExecuteTMStatus(TMStatus),
   /// This tells the parent Server that this GRQueryES has completed
   /// successfully (having already responded, etc).
-  Done(GRQueryResult),
+  Success(GRQueryResult),
   /// This indicates that the GRQueryES failed, where the Context was insufficient.
   /// Here, the GRQueryES can just be trivially erased from the parent.
   InternalColumnsDNE(Vec<ColName>),
   /// This indicates that the GRQueryES failed, where a child query responded with a QueryError.
   /// Here, the GRQueryES can just be trivially erased from the parent.
   QueryError(msg::QueryError),
-  /// This tells the parent Server that this GRQueryES has completed
-  /// unsuccessfully, and that the given `QueryId` should be
-  /// Exit and Cleaned Up, along with this one.
-  ExitAndCleanUp(Vec<QueryId>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -276,8 +272,8 @@ impl GRQueryES {
         }
 
         if !rem_cols.is_empty() {
-          // If the Context has the missing columns, propagate the error upward. Note that
-          // we don't have to call `exit_and_clean_up`, since the only TMStatus has finished.
+          // If the Context has the missing columns, propagate the error up.
+          self.state = GRExecutionS::Done;
           GRQueryAction::InternalColumnsDNE(rem_cols)
         } else {
           // If the GRQueryES Context is sufficient, we simply amend the new columns
@@ -291,20 +287,18 @@ impl GRQueryES {
         }
       }
       msg::AbortedData::QueryError(query_error) => {
-        // In the case of a QueryError, we just propagate it up. Note that we don't
-        // have to call `exit_and_clean_up`, since the only TMStatus has finished.
+        // In the case of a QueryError, we just propagate it up.
+        self.state = GRExecutionS::Done;
         GRQueryAction::QueryError(query_error)
       }
     }
   }
 
-  /// This is called to Exit and Clean Up this GRQueryES.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) -> GRQueryAction {
-    let action = match &self.state {
-      GRExecutionS::Start => GRQueryAction::ExitAndCleanUp(vec![]),
-      GRExecutionS::ReadStage(read_stage) => {
-        GRQueryAction::ExitAndCleanUp(vec![read_stage.pending_status.query_id.clone()])
-      }
+  /// This Exits and Cleans up this GRQueryES.
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) {
+    match &self.state {
+      GRExecutionS::Start => {}
+      GRExecutionS::ReadStage(_) => {}
       GRExecutionS::MasterQueryReplanning(planning) => {
         ctx.network_output.send(
           &ctx.master_eid,
@@ -312,12 +306,10 @@ impl GRQueryES {
             msg::CancelMasterFrozenColUsage { query_id: planning.master_query_id.clone() },
           )),
         );
-        GRQueryAction::ExitAndCleanUp(vec![])
       }
-      GRExecutionS::Done => GRQueryAction::ExitAndCleanUp(vec![]),
+      GRExecutionS::Done => {}
     };
     self.state = GRExecutionS::Done;
-    return action;
   }
 
   /// This advanced the Stage of the GRQueryES. If there is no next Stage, then we
@@ -348,7 +340,8 @@ impl GRQueryES {
       }
 
       // Finally, we signal that the GRQueryES is done and send back the results.
-      GRQueryAction::Done(GRQueryResult {
+      self.state = GRExecutionS::Done;
+      GRQueryAction::Success(GRQueryResult {
         new_rms: self.new_rms.clone(),
         schema: schema.clone(),
         result,
