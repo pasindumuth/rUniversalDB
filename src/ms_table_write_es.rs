@@ -45,8 +45,6 @@ pub struct MSTableWriteES {
   tier: u32,
   context: Rc<Context>,
 
-  // Fields needed for responding.
-  sender_path: QueryPath,
   query_id: QueryId,
 
   // Query-related fields.
@@ -221,7 +219,6 @@ impl FullMSTableWriteES {
           timestamp: comm_plan_es.timestamp,
           tier,
           context: comm_plan_es.context.clone(),
-          sender_path: comm_plan_es.sender_path.clone(),
           query_id: comm_plan_es.query_id.clone(),
           sql_query,
           query_plan: comm_plan_es.query_plan.clone(),
@@ -662,14 +659,6 @@ impl FullMSTableWriteES {
       });
       verifying.m_write_protected.insert(write_region);
       MSTableWriteAction::Wait
-    }
-  }
-
-  /// Get the `QueryPath` of the sender of this ES.
-  pub fn sender_path(&self) -> &QueryPath {
-    match &self {
-      FullMSTableWriteES::QueryReplanning(es) => &es.status.sender_path,
-      FullMSTableWriteES::Executing(es) => &es.sender_path,
     }
   }
 

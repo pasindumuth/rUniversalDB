@@ -576,7 +576,6 @@ impl<T: IOTypes> TabletContext<T> {
                       context: Rc::new(query.context),
                       sql_view: query.sql_query,
                       query_plan: query.query_plan,
-                      sender_path: perform_query.sender_path,
                       query_id: perform_query.query_id.clone(),
                       state: CommonQueryReplanningS::Start,
                     },
@@ -600,7 +599,6 @@ impl<T: IOTypes> TabletContext<T> {
                       context: Rc::new(query.context),
                       sql_view: query.sql_query,
                       query_plan: query.query_plan,
-                      sender_path: perform_query.sender_path,
                       query_id: perform_query.query_id.clone(),
                       state: CommonQueryReplanningS::Start,
                     },
@@ -699,7 +697,6 @@ impl<T: IOTypes> TabletContext<T> {
                     context: Rc::new(query.context),
                     sql_view: query.sql_query,
                     query_plan: query.query_plan,
-                    sender_path: perform_query.sender_path,
                     query_id: perform_query.query_id.clone(),
                     state: CommonQueryReplanningS::Start,
                   },
@@ -1243,49 +1240,6 @@ impl<T: IOTypes> TabletContext<T> {
     self.exit_ms_query_es(statuses, orig_p.query_id, msg::QueryError::DeadlockSafetyAbortion);
   }
 
-  /// This function just routes the InternalColumnsDNE notification from the GRQueryES.
-  /// Recall that the originator must exist (since the GRQueryES had existed).
-  fn handle_internal_columns_dne(
-    &mut self,
-    statuses: &mut Statuses,
-    orig_p: OrigP,
-    subquery_id: QueryId,
-    rem_cols: Vec<ColName>,
-  ) {
-    let query_id = orig_p.query_id;
-    if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
-      // TableReadES
-      remove_item(&mut read.child_queries, &subquery_id);
-      let action = read.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
-      self.handle_read_es_action(statuses, query_id, action);
-    } else if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-      // TransTableReadES
-      let prefix = trans_read.es.location_prefix();
-      remove_item(&mut trans_read.child_queries, &subquery_id);
-      let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
-        trans_read.es.handle_internal_columns_dne(
-          &mut self.ctx(),
-          &gr_query.es,
-          subquery_id.clone(),
-          rem_cols,
-        )
-      } else {
-        trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-      };
-      self.handle_trans_read_es_action(statuses, query_id, action);
-    } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
-      // MSTableWriteES
-      remove_item(&mut ms_write.child_queries, &subquery_id);
-      let action = ms_write.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
-      self.handle_ms_write_es_action(statuses, query_id, action);
-    } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
-      // MSTableReadES
-      remove_item(&mut ms_read.child_queries, &subquery_id);
-      let action = ms_read.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
-      self.handle_ms_read_es_action(statuses, query_id, action);
-    }
-  }
-
   /// We get this if a ReadProtection was granted by the Main Loop. This includes standard
   /// read_protected, or m_read_protected.
   fn read_protected_for_query(
@@ -1338,6 +1292,34 @@ impl<T: IOTypes> TabletContext<T> {
         );
         self.handle_gr_query_es_action(statuses, gr_query_id, action);
       }
+    }
+  }
+
+  /// Handles an incoming QueryAborted message.
+  fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
+    let tm_query_id = &query_aborted.return_qid;
+    if let Some(tm_status) = statuses.tm_statuss.remove(tm_query_id) {
+      // We Exit and Clean up this TMStatus (sending CancelQuery to all
+      // remaining participants) and send the QueryAborted back to the orig_p
+      for (node_group_id, child_query_id) in tm_status.node_group_ids {
+        if tm_status.tm_state.get(&child_query_id).is_none()
+          && child_query_id != query_aborted.query_id
+        {
+          // If the child Query hasn't responded yet, and isn't also the Query that
+          // just aborted, then we send it a CancelQuery
+          self.ctx().send_to_node(
+            node_group_id,
+            CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
+          );
+        }
+      }
+
+      // Finally, we propagate up the AbortData to the GRQueryES that owns this TMStatus
+      let gr_query_id = tm_status.orig_p.query_id;
+      let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
+      remove_item(&mut gr_query.child_queries, tm_query_id);
+      let action = gr_query.es.handle_tm_aborted(&mut self.ctx(), query_aborted.payload);
+      self.handle_gr_query_es_action(statuses, gr_query_id, action);
     }
   }
 
@@ -1402,37 +1384,50 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// Handles an incoming QueryAborted message.
-  fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
-    let tm_query_id = &query_aborted.return_qid;
-    if let Some(tm_status) = statuses.tm_statuss.remove(tm_query_id) {
-      // We Exit and Clean up this TMStatus (sending CancelQuery to all
-      // remaining participants) and send the QueryAborted back to the orig_p
-      for (node_group_id, child_query_id) in tm_status.node_group_ids {
-        if tm_status.tm_state.get(&child_query_id).is_none()
-          && child_query_id != query_aborted.query_id
-        {
-          // If the child Query hasn't responded yet, and isn't also the Query that
-          // just aborted, then we send it a CancelQuery
-          self.ctx().send_to_node(
-            node_group_id,
-            CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
-          );
-        }
-      }
-
-      // Finally, we propagate up the AbortData to the GRQueryES that owns this TMStatus
-      let gr_query_id = tm_status.orig_p.query_id;
-      let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
-      remove_item(&mut gr_query.child_queries, tm_query_id);
-      let action = gr_query.es.handle_tm_aborted(&mut self.ctx(), query_aborted.payload);
-      self.handle_gr_query_es_action(statuses, gr_query_id, action);
+  /// This function just routes the InternalColumnsDNE notification from the GRQueryES.
+  /// Recall that the originator must exist (since the GRQueryES had existed).
+  fn handle_internal_columns_dne(
+    &mut self,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    subquery_id: QueryId,
+    rem_cols: Vec<ColName>,
+  ) {
+    let query_id = orig_p.query_id;
+    if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
+      // TableReadES
+      remove_item(&mut read.child_queries, &subquery_id);
+      let action = read.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
+      self.handle_read_es_action(statuses, query_id, action);
+    } else if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+      // TransTableReadES
+      let prefix = trans_read.es.location_prefix();
+      remove_item(&mut trans_read.child_queries, &subquery_id);
+      let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
+        trans_read.es.handle_internal_columns_dne(
+          &mut self.ctx(),
+          &gr_query.es,
+          subquery_id.clone(),
+          rem_cols,
+        )
+      } else {
+        trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+      };
+      self.handle_trans_read_es_action(statuses, query_id, action);
+    } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
+      // MSTableWriteES
+      remove_item(&mut ms_write.child_queries, &subquery_id);
+      let action = ms_write.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
+      self.handle_ms_write_es_action(statuses, query_id, action);
+    } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+      // MSTableReadES
+      remove_item(&mut ms_read.child_queries, &subquery_id);
+      let action = ms_read.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
+      self.handle_ms_read_es_action(statuses, query_id, action);
     }
   }
 
   /// This routes the QueryError propagated by a GRQueryES up to the appropriate top-level ES.
-  /// TODO: reorder these functions, clumping GRQueryES outputs together so that it actually
-  /// sense.
   fn handle_internal_query_error(
     &mut self,
     statuses: &mut Statuses,

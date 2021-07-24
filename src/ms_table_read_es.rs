@@ -45,8 +45,6 @@ pub struct MSTableReadES {
   tier: u32,
   context: Rc<Context>,
 
-  // Fields needed for responding.
-  sender_path: QueryPath,
   query_id: QueryId,
 
   // Query-related fields.
@@ -221,7 +219,6 @@ impl FullMSTableReadES {
           timestamp: comm_plan_es.timestamp,
           tier,
           context: comm_plan_es.context.clone(),
-          sender_path: comm_plan_es.sender_path.clone(),
           query_id: comm_plan_es.query_id.clone(),
           sql_query,
           query_plan: comm_plan_es.query_plan.clone(),
@@ -621,14 +618,6 @@ impl FullMSTableReadES {
       read_region,
     });
     MSTableReadAction::Wait
-  }
-
-  /// Get the `QueryPath` of the sender of this ES.
-  pub fn sender_path(&self) -> &QueryPath {
-    match &self {
-      FullMSTableReadES::QueryReplanning(es) => &es.status.sender_path,
-      FullMSTableReadES::Executing(es) => &es.sender_path,
-    }
   }
 
   /// Get the `QueryId` of the owning originating MSQueryES.

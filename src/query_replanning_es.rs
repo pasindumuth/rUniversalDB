@@ -100,8 +100,6 @@ pub struct CommonQueryReplanningES<T: QueryReplanningSqlView> {
   pub sql_view: T,
   pub query_plan: QueryPlan,
 
-  /// Path of the original sender (needed for responding with errors).
-  pub sender_path: QueryPath,
   /// The OrigP of the Task holding this CommonQueryReplanningES
   pub query_id: QueryId,
   /// The state of the CommonQueryReplanningES

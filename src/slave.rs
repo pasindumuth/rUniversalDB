@@ -165,7 +165,7 @@ impl<T: IOTypes> SlaveContext<T> {
               },
             );
             let action = ms_coord.es.start(self);
-            self.handle_ms_coord_action(statuses, query_id, action);
+            self.handle_ms_coord_es_action(statuses, query_id, action);
           }
           Err(payload) => self.network_output.send(
             &external_query.sender_eid,
@@ -327,7 +327,7 @@ impl<T: IOTypes> SlaveContext<T> {
             success.gossip.gossip_gen,
             success.frozen_col_usage_tree,
           );
-          self.handle_ms_coord_action(statuses, query_id, action);
+          self.handle_ms_coord_es_action(statuses, query_id, action);
         }
       }
       msg::SlaveMessage::RegisterQuery(register) => self.handle_register_query(statuses, register),
@@ -405,7 +405,7 @@ impl<T: IOTypes> SlaveContext<T> {
       // Route TM results to MSQueryES
       remove_item(&mut ms_coord.child_queries, &tm_qid);
       let action = ms_coord.es.handle_tm_success(self, tm_qid, new_rms, (schema, table_views));
-      self.handle_ms_coord_action(statuses, query_id, action);
+      self.handle_ms_coord_es_action(statuses, query_id, action);
     } else if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
       // Route TM results to GRQueryES
       remove_item(&mut gr_query.child_queries, &tm_qid);
@@ -453,7 +453,7 @@ impl<T: IOTypes> SlaveContext<T> {
       self.handle_gr_query_es_action(statuses, query_id, action);
     } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
       let action = ms_coord.es.handle_tm_aborted(self, aborted_data);
-      self.handle_ms_coord_action(statuses, query_id, action);
+      self.handle_ms_coord_es_action(statuses, query_id, action);
     }
   }
 
@@ -548,7 +548,7 @@ impl<T: IOTypes> SlaveContext<T> {
   }
 
   /// Handles the actions specified by a GRQueryES.
-  fn handle_ms_coord_action(
+  fn handle_ms_coord_es_action(
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
@@ -613,7 +613,7 @@ impl<T: IOTypes> SlaveContext<T> {
 
         // Start executing the new MSCoordES.
         let action = ms_coord.es.start(self);
-        self.handle_ms_coord_action(statuses, query_id, action);
+        self.handle_ms_coord_es_action(statuses, query_id, action);
       }
     }
   }

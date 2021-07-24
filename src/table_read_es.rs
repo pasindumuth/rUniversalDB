@@ -44,8 +44,6 @@ pub struct TableReadES {
   timestamp: Timestamp,
   context: Rc<Context>,
 
-  // Fields needed for responding.
-  sender_path: QueryPath,
   query_id: QueryId,
 
   // Query-related fields.
@@ -211,7 +209,6 @@ impl FullTableReadES {
           tier_map: plan_es.tier_map.clone(),
           timestamp: comm_plan_es.timestamp,
           context: comm_plan_es.context.clone(),
-          sender_path: comm_plan_es.sender_path.clone(),
           query_id: comm_plan_es.query_id.clone(),
           sql_query: comm_plan_es.sql_view.clone(),
           query_plan: comm_plan_es.query_plan.clone(),
@@ -581,14 +578,6 @@ impl FullTableReadES {
     );
 
     TableAction::Wait
-  }
-
-  /// Get the `QueryPath` of the sender of this ES.
-  pub fn sender_path(&self) -> QueryPath {
-    match &self {
-      FullTableReadES::QueryReplanning(es) => es.status.sender_path.clone(),
-      FullTableReadES::Executing(es) => es.sender_path.clone(),
-    }
   }
 
   /// Get the `QueryId` of the sender of this ES.
