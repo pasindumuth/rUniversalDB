@@ -538,14 +538,10 @@ impl GRQueryES {
           query_plan,
         };
 
-        // Compute the TabletGroups involved.
-        for tablet_group_id in ctx.get_min_tablets(table_path, &child_sql_query.selection) {
-          // TODO if there are 0 tablet_group_id, then we'll wait on the TMStatus forever.
-          // The code for checking if it's done needs to be in TMState. That way, we can
-          // call it after this switch statement. Not only can `handle_query_success` be
-          // reused,
-
-          // Maybe look into pulling out MSCoordES.
+        let tids = ctx.get_min_tablets(table_path, &child_sql_query.selection);
+        // Having non-empty `tids` solves the TMStatus deadlock and determining the child schema.
+        assert!(tids.len() > 0);
+        for tid in tids {
           // Construct PerformQuery
           let general_query = msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query.clone());
           let child_query_id = mk_qid(ctx.rand);
@@ -558,7 +554,7 @@ impl GRQueryES {
           };
 
           // Send out PerformQuery. Recall that this could only be a a Tablet.
-          let node_group_id = NodeGroupId::Tablet(tablet_group_id);
+          let node_group_id = NodeGroupId::Tablet(tid);
           ctx.send_to_node(node_group_id.clone(), CommonQuery::PerformQuery(perform_query));
 
           // Add the TabletGroup into the TMStatus.

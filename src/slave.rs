@@ -280,12 +280,18 @@ impl<T: IOTypes> SlaveContext<T> {
         self.handle_query_aborted(statuses, query_aborted);
       }
       msg::SlaveMessage::Query2PCPrepared(prepared) => {
-        if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&prepared.return_qid) {
-          ms_coord.es.handle_prepared(self, prepared);
+        let query_id = prepared.return_qid.clone();
+        if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
+          let action = ms_coord.es.handle_prepared(self, prepared);
+          self.handle_ms_coord_es_action(statuses, query_id, action);
         }
       }
-      msg::SlaveMessage::Query2PCAborted(_) => {
-        panic!(); // In practice, this is never received.
+      msg::SlaveMessage::Query2PCAborted(aborted) => {
+        let query_id = aborted.return_qid.clone();
+        if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
+          let action = ms_coord.es.handle_aborted(self, aborted);
+          self.handle_ms_coord_es_action(statuses, query_id, action);
+        }
       }
       msg::SlaveMessage::MasterFrozenColUsageAborted(_) => {
         panic!(); // In practice, this is never received.
@@ -316,6 +322,8 @@ impl<T: IOTypes> SlaveContext<T> {
               success.frozen_col_usage_tree,
             )
           } else {
+            // TODO: I'm not fully convinced it's a good practice to use
+            // handle_internal_query_error for this.
             trans_read
               .es
               .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
@@ -742,7 +750,7 @@ impl<T: IOTypes> SlaveContext<T> {
       ms_coord.es.handle_register_query(register);
     } else {
       // Otherwise, the MSCoordES no longer exists, and we should
-      // cancel MSQueryES immediately.
+      // cancel the MSQueryES immediately.
       let query_path = register.query_path;
       self.ctx().core_ctx().send_to_tablet(
         query_path.maybe_tablet_group_id.clone().unwrap(),

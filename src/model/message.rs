@@ -229,9 +229,17 @@ pub struct Query2PCPrepared {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum Query2PCAbortReason {
+  /// The MSQueryES in the Tablet couldn't respond with Prepared because it was removed
+  /// due to a DeadlockSafetyWriteAbort.
+  DeadlockSafetyAbortion,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Query2PCAborted {
   pub return_qid: QueryId,
   pub rm_path: QueryPath,
+  pub reason: Query2PCAbortReason,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

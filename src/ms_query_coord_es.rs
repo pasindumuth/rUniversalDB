@@ -5,6 +5,7 @@ use crate::model::common::{
   TablePath, TableView, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::message as msg;
+use crate::model::message::{Query2PCAbortReason, Query2PCAborted};
 use crate::server::CommonQuery;
 use crate::slave::SlaveContext;
 use crate::trans_table_read_es::TransTableSource;
@@ -29,12 +30,7 @@ pub struct PreparingState {
 pub enum CoordState {
   Start,
   /// Here, `stage_query_id` is the QueryId of the TMStatus
-  ReadStage {
-    stage_idx: usize,
-    stage_query_id: QueryId,
-  },
-  /// Here, `stage_query_id` is the QueryId of the TMStatus
-  WriteStage {
+  Stage {
     stage_idx: usize,
     stage_query_id: QueryId,
   },
@@ -46,16 +42,14 @@ impl CoordState {
   fn stage_idx(&self) -> Option<usize> {
     match self {
       CoordState::Start => Some(0),
-      CoordState::ReadStage { stage_idx, .. } => Some(*stage_idx),
-      CoordState::WriteStage { stage_idx, .. } => Some(*stage_idx),
+      CoordState::Stage { stage_idx, .. } => Some(*stage_idx),
       _ => None,
     }
   }
 
   fn stage_query_id(&self) -> Option<QueryId> {
     match self {
-      CoordState::ReadStage { stage_query_id, .. } => Some(stage_query_id.clone()),
-      CoordState::WriteStage { stage_query_id, .. } => Some(stage_query_id.clone()),
+      CoordState::Stage { stage_query_id, .. } => Some(stage_query_id.clone()),
       _ => None,
     }
   }
@@ -197,9 +191,8 @@ impl FullMSCoordES {
         self.advance(ctx)
       }
       MSQueryCoordReplanningAction::Failed(error) => {
-        // Here, the QueryReplanning had failed. Recall that QueryReplanning will
-        // have sent back the proper error message, so we just need to Exit and Clean Up.
-        self.exit_and_clean_up(ctx);
+        // Here, the QueryReplanning had failed. We do not need to ECU because
+        // QueryReplanning will be in Done.
         MSQueryCoordAction::FatalFailure(error)
       }
     }
@@ -278,77 +271,108 @@ impl FullMSCoordES {
     let preparing = cast!(CoordState::Preparing, &mut es.state).unwrap();
 
     // First, insert the QueryPath of the RM into the prepare state.
-    assert!(preparing.prepared_rms.contains(&prepared.rm_path));
+    assert!(!preparing.prepared_rms.contains(&prepared.rm_path));
     preparing.prepared_rms.insert(prepared.rm_path);
 
     // Next see if the prepare state is done.
     if preparing.prepared_rms.len() < es.all_rms.len() {
       MSQueryCoordAction::Wait
     } else {
-      // Here, we simply send out the commit message.
-      for query_path in &es.all_rms {
+      self.finish_ms_coord(ctx)
+    }
+  }
+
+  /// Handle a Aborted message sent to an MSCoordES.
+  pub fn handle_aborted<T: IOTypes>(
+    &mut self,
+    ctx: &mut SlaveContext<T>,
+    aborted: msg::Query2PCAborted,
+  ) -> MSQueryCoordAction {
+    // Recall that although ECU will send Abort to the RM that just responded,
+    // this is not incorrect. We ignore this for simplicity.
+    self.exit_and_clean_up(ctx);
+    match aborted.reason {
+      Query2PCAbortReason::DeadlockSafetyAbortion => {
+        // Since this error is an anomaly that usually does not happen, we may try again the
+        // transaction again at a higher timestamp. Thus, we signal that the failure is non-fatal.
+        MSQueryCoordAction::NonFatalFailure
+      }
+    }
+  }
+
+  /// By now, all Prepared must have come on. Thus, we send out Commit, abort the
+  /// RegisteredQueries, and return the results.
+  fn finish_ms_coord<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> MSQueryCoordAction {
+    let es = cast!(FullMSCoordES::Executing, self).unwrap();
+
+    // First, we commit all RMs.
+    for query_path in &es.all_rms {
+      ctx.ctx().core_ctx().send_to_tablet(
+        query_path.maybe_tablet_group_id.clone().unwrap(),
+        msg::TabletMessage::Query2PCCommit(msg::Query2PCCommit {
+          ms_query_id: query_path.query_id.clone(),
+        }),
+      );
+    }
+
+    // Next, we inform all `registered_query`s that are not an RM that they should exit,
+    // since they were falsely added to this transaction.
+    for query_path in &es.registered_queries {
+      if !es.all_rms.contains(query_path) {
         ctx.ctx().core_ctx().send_to_tablet(
           query_path.maybe_tablet_group_id.clone().unwrap(),
-          msg::TabletMessage::Query2PCCommit(msg::Query2PCCommit {
-            ms_query_id: es.query_id.clone(),
+          msg::TabletMessage::CancelQuery(msg::CancelQuery {
+            query_id: query_path.query_id.clone(),
           }),
         );
       }
-
-      // Next, we need to inform all `registered_query`s that aren't an RM
-      // that they should exit, since they were falsely added to this transaction.
-      for query_path in &es.registered_queries {
-        if !es.all_rms.contains(query_path) {
-          ctx.ctx().core_ctx().send_to_tablet(
-            query_path.maybe_tablet_group_id.clone().unwrap(),
-            msg::TabletMessage::CancelQuery(msg::CancelQuery {
-              query_id: query_path.query_id.clone(),
-            }),
-          );
-        }
-      }
-
-      // Finally, we send out an ExternalQuerySuccess with the appropriate TableView.
-      let (_, (_, table_view)) = es
-        .trans_table_views
-        .iter()
-        .find(|(trans_table_name, _)| trans_table_name == &es.sql_query.returning)
-        .unwrap();
-      MSQueryCoordAction::Success(table_view.clone())
     }
+
+    // Finally, we go to Done and return the appropriate TableView.
+    let (_, (_, table_view)) = es
+      .trans_table_views
+      .iter()
+      .find(|(trans_table_name, _)| trans_table_name == &es.sql_query.returning)
+      .unwrap();
+    es.state = CoordState::Done;
+    MSQueryCoordAction::Success(table_view.clone())
   }
 
   /// This function accepts the results for the subquery, and then decides either
   /// to move onto the next stage, or start 2PC to commit the change.
   fn advance<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> MSQueryCoordAction {
+    // Compute the next stage
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
-
     let next_stage_idx = es.state.stage_idx().unwrap() + 1;
+
     if next_stage_idx < es.sql_query.trans_tables.len() {
-      self.process_ms_coord_es_stage(ctx, next_stage_idx)
+      self.process_ms_query_stage(ctx, next_stage_idx)
     } else {
-      // TODO: as usual, if es.all_rms is empty, we need to short circuit
+      if es.all_rms.is_empty() {
+        // If there are no RMs, that means this was purely a read, so we can finish up.
+        self.finish_ms_coord(ctx)
+      } else {
+        // Otherwise, this transaction had writes, so we start 2PC by sending out Prepared.
+        let sender_path = ctx.mk_query_path(es.query_id.clone());
+        for query_path in &es.all_rms {
+          ctx.ctx().core_ctx().send_to_tablet(
+            query_path.maybe_tablet_group_id.clone().unwrap(),
+            msg::TabletMessage::Query2PCPrepare(msg::Query2PCPrepare {
+              sender_path: sender_path.clone(),
+              ms_query_id: query_path.query_id.clone(),
+            }),
+          );
+        }
 
-      // Finish the ES by sending out Prepared.
-      let sender_path = ctx.mk_query_path(es.query_id.clone());
-      for query_path in &es.all_rms {
-        ctx.ctx().core_ctx().send_to_tablet(
-          query_path.maybe_tablet_group_id.clone().unwrap(),
-          msg::TabletMessage::Query2PCPrepare(msg::Query2PCPrepare {
-            sender_path: sender_path.clone(),
-            ms_query_id: query_path.query_id.clone(),
-          }),
-        );
+        es.state = CoordState::Preparing(PreparingState { prepared_rms: HashSet::new() });
+        MSQueryCoordAction::Wait
       }
-
-      es.state = CoordState::Preparing(PreparingState { prepared_rms: HashSet::new() });
-      MSQueryCoordAction::Wait
     }
   }
 
-  /// This function advances the given MSCoordES at `query_id` to the next stage, `stage_idx`.
-  /// This stage is gauranteed to be another `ReadStage` or `WriteStage`.
-  fn process_ms_coord_es_stage<T: IOTypes>(
+  /// This function advances the given MSCoordES at `query_id` to the next
+  /// `Stage` with index `stage_idx`.
+  fn process_ms_query_stage<T: IOTypes>(
     &mut self,
     ctx: &mut SlaveContext<T>,
     stage_idx: usize,
@@ -376,7 +400,7 @@ impl FullMSCoordES {
     // Construct the QueryPlan
     let mut trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
     for trans_table_name in trans_table_names {
-      let (cols, _) = lookup(&es.query_plan.col_usage_nodes, &trans_table_name).unwrap();
+      let (cols, _) = lookup(&es.trans_table_views, &trans_table_name).unwrap();
       trans_table_schemas.insert(trans_table_name, cols.clone());
     }
     let query_plan = QueryPlan {
@@ -398,10 +422,11 @@ impl FullMSCoordES {
 
     // The `sender_path` for the TMStatus above.
     let sender_path = ctx.mk_query_path(tm_qid.clone());
+    // The `root_query_path` pointing to this MSCoordES.
     let root_query_path = ctx.mk_query_path(es.query_id.clone());
 
-    // Send out the PerformQuery and populate TMStatus accordingly.
-    es.state = match ms_query_stage {
+    // Send out the PerformQuery.
+    match ms_query_stage {
       proc::MSQueryStage::SuperSimpleSelect(select_query) => {
         match &select_query.from {
           proc::TableRef::TablePath(table_path) => {
@@ -414,7 +439,10 @@ impl FullMSCoordES {
             };
 
             // Compute the TabletGroups involved.
-            for tablet_group_id in ctx.ctx().get_min_tablets(table_path, &select_query.selection) {
+            let tids = ctx.ctx().get_min_tablets(table_path, &select_query.selection);
+            // Having non-empty `tids` solves the TMStatus deadlock and determining the child schema.
+            assert!(tids.len() > 0);
+            for tid in tids {
               let child_query_id = mk_qid(&mut ctx.rand);
               let perform_query = msg::PerformQuery {
                 root_query_path: root_query_path.clone(),
@@ -425,7 +453,7 @@ impl FullMSCoordES {
               };
 
               // Send out PerformQuery. Recall that this could only be a a Tablet.
-              let nid = NodeGroupId::Tablet(tablet_group_id);
+              let nid = NodeGroupId::Tablet(tid);
               ctx.ctx().send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
 
               // Add the TabletGroup into the TMStatus.
@@ -470,8 +498,6 @@ impl FullMSCoordES {
             tm_status.tm_state.insert(child_query_id, None);
           }
         }
-
-        CoordState::ReadStage { stage_idx, stage_query_id: tm_qid.clone() }
       }
       proc::MSQueryStage::Update(update_query) => {
         // Here, we must do a Update.
@@ -482,7 +508,11 @@ impl FullMSCoordES {
           query_plan,
         };
 
-        for tid in ctx.ctx().get_min_tablets(&update_query.table, &update_query.selection) {
+        // Compute the TabletGroups involved.
+        let tids = ctx.ctx().get_min_tablets(&update_query.table, &update_query.selection);
+        // Having non-empty `tids` solves the TMStatus deadlock and determining the child schema.
+        assert!(tids.len() > 0);
+        for tid in tids {
           let child_query_id = mk_qid(&mut ctx.rand);
           let perform_query = msg::PerformQuery {
             root_query_path: root_query_path.clone(),
@@ -500,11 +530,11 @@ impl FullMSCoordES {
           tm_status.node_group_ids.insert(nid, child_query_id.clone());
           tm_status.tm_state.insert(child_query_id, None);
         }
-
-        CoordState::WriteStage { stage_idx, stage_query_id: tm_qid.clone() }
       }
     };
 
+    // Populate the TMStatus accordingly.
+    es.state = CoordState::Stage { stage_idx, stage_query_id: tm_qid.clone() };
     MSQueryCoordAction::ExecuteTMStatus(tm_status)
   }
 
@@ -515,7 +545,7 @@ impl FullMSCoordES {
       FullMSCoordES::Executing(es) => {
         match &es.state {
           CoordState::Start => {}
-          CoordState::ReadStage { .. } | CoordState::WriteStage { .. } => {
+          CoordState::Stage { .. } => {
             // Clean up any Registered Queries in the MSCoordES. Recall that in the
             // absence of Commit/Abort, this is the only way that MSQueryESs can get cleaned up.
             for registered_query in &es.registered_queries {
@@ -528,8 +558,9 @@ impl FullMSCoordES {
             }
           }
           CoordState::Preparing(_) => {
-            // Recall that here, all non-`all_rms` in `registered_queries` should have gotten
-            // a CancelQuery, so we don't have to do that again.
+            // Recall that by now, Prepare should have been sent to all RMs. They need to be
+            // cancelled with Query2PCAbort (they don't react to CancelQuery). The remaining
+            // `registered_queries` can be cancelled with CancelQuery.
             for query_path in &es.all_rms {
               ctx.ctx().core_ctx().send_to_tablet(
                 query_path.maybe_tablet_group_id.clone().unwrap(),
@@ -537,6 +568,16 @@ impl FullMSCoordES {
                   ms_query_id: query_path.query_id.clone(),
                 }),
               );
+            }
+            for query_path in &es.registered_queries {
+              if !es.all_rms.contains(query_path) {
+                ctx.ctx().core_ctx().send_to_tablet(
+                  query_path.maybe_tablet_group_id.clone().unwrap(),
+                  msg::TabletMessage::CancelQuery(msg::CancelQuery {
+                    query_id: query_path.query_id.clone(),
+                  }),
+                );
+              }
             }
           }
           CoordState::Done => {}

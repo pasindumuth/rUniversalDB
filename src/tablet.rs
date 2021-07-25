@@ -25,6 +25,7 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
+use crate::model::message::QueryError;
 use crate::ms_table_read_es::{FullMSTableReadES, MSReadQueryReplanningES, MSTableReadAction};
 use crate::ms_table_write_es::{FullMSTableWriteES, MSTableWriteAction, MSWriteQueryReplanningES};
 use crate::multiversion_map::MVM;
@@ -172,7 +173,6 @@ struct MSTableReadESWrapper {
   es: FullMSTableReadES,
 }
 
-// TODO: remove the `sender_path` in the `es`s.
 #[derive(Debug)]
 struct MSTableWriteESWrapper {
   sender_path: QueryPath,
@@ -494,97 +494,50 @@ impl<T: IOTypes> TabletContext<T> {
             // We inspect the TierMap to see what kind of ES to create
             let table_path = cast!(proc::TableRef::TablePath, &query.sql_query.from).unwrap();
             if perform_query.tier_map.map.contains_key(table_path) {
-              // Here, we create an MSTableReadQueryES.
+              // Here, we create an MSTableReadES.
+              let root_query_path = perform_query.root_query_path;
+              match self.get_msquery_id(statuses, root_query_path.clone(), query.timestamp) {
+                Ok(ms_query_id) => {
+                  // Lookup the MSQueryES and add the new Query into `pending_queries`.
+                  let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+                  ms_query_es.pending_queries.insert(perform_query.query_id.clone());
 
-              // Lookup the MSQueryES
-              let root_query_id = perform_query.root_query_path.query_id.clone();
-              if !self.ms_root_query_map.contains_key(&root_query_id) {
-                // If it doesn't exist, we try adding one. Of course, we must first
-                // check whether the Timestamp is available or not.
-                let timestamp = query.timestamp;
-                if self.verifying_writes.contains_key(&timestamp)
-                  || self.prepared_writes.contains_key(&timestamp)
-                  || self.committed_writes.contains_key(&timestamp)
-                {
-                  // This means the Timestamp is already in use, so we have to Abort.
+                  // Create an MSReadTableES in the QueryReplanning state, and start it.
+                  let ms_read = map_insert(
+                    &mut statuses.full_ms_table_read_ess,
+                    &perform_query.query_id,
+                    MSTableReadESWrapper {
+                      sender_path: perform_query.sender_path.clone(),
+                      child_queries: vec![],
+                      es: FullMSTableReadES::QueryReplanning(MSReadQueryReplanningES {
+                        root_query_path,
+                        tier_map: perform_query.tier_map,
+                        ms_query_id,
+                        status: CommonQueryReplanningES {
+                          timestamp: query.timestamp,
+                          context: Rc::new(query.context),
+                          sql_view: query.sql_query,
+                          query_plan: query.query_plan,
+                          query_id: perform_query.query_id.clone(),
+                          state: CommonQueryReplanningS::Start,
+                        },
+                      }),
+                    },
+                  );
+                  let action = ms_read.es.start(self);
+                  self.handle_ms_read_es_action(statuses, perform_query.query_id, action);
+                }
+                Err(query_error) => {
+                  // The MSQueryES couldn't be constructed.
                   self.ctx().send_query_error(
                     perform_query.sender_path,
                     perform_query.query_id,
-                    msg::QueryError::TimestampConflict,
-                  );
-                  return;
-                } else {
-                  // This means that we can add an MSQueryES at the Timestamp
-                  let ms_query_id = mk_qid(&mut self.rand);
-                  statuses.ms_query_ess.insert(
-                    ms_query_id.clone(),
-                    MSQueryES {
-                      root_query_id: root_query_id.clone(),
-                      query_id: ms_query_id.clone(),
-                      timestamp: query.timestamp,
-                      update_views: Default::default(),
-                      pending_queries: Default::default(),
-                    },
-                  );
-
-                  // We also amend the `ms_root_query_map` to associate the root query.
-                  self.ms_root_query_map.insert(root_query_id.clone(), ms_query_id.clone());
-
-                  // Send a register message back to the root.
-                  let register_query = msg::RegisterQuery {
-                    root_query_id: root_query_id.clone(),
-                    query_path: self.mk_query_path(ms_query_id.clone()),
-                  };
-                  let sid = perform_query.sender_path.slave_group_id.clone();
-                  let eid = self.slave_address_config.get(&sid).unwrap();
-                  self.network_output.send(
-                    eid,
-                    msg::NetworkMessage::Slave(msg::SlaveMessage::RegisterQuery(register_query)),
-                  );
-
-                  // Finally, add an empty VerifyingReadWriteRegion
-                  self.verifying_writes.insert(
-                    timestamp,
-                    VerifyingReadWriteRegion {
-                      orig_p: OrigP::new(ms_query_id),
-                      m_waiting_read_protected: BTreeSet::new(),
-                      m_read_protected: BTreeSet::new(),
-                      m_write_protected: BTreeSet::new(),
-                    },
+                    query_error,
                   );
                 }
               }
-
-              // Lookup the MSQuery and add the QueryId of the new Query into `pending_queries`.
-              let ms_query_id = self.ms_root_query_map.get(&root_query_id).unwrap().clone();
-              let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-              ms_query_es.pending_queries.insert(perform_query.query_id.clone());
-
-              // Create an MSReadTableES in the QueryReplanning state, and start it.
-              let ms_read = map_insert(
-                &mut statuses.full_ms_table_read_ess,
-                &perform_query.query_id,
-                MSTableReadESWrapper {
-                  sender_path: perform_query.sender_path.clone(),
-                  child_queries: vec![],
-                  es: FullMSTableReadES::QueryReplanning(MSReadQueryReplanningES {
-                    root_query_path: perform_query.root_query_path,
-                    tier_map: perform_query.tier_map,
-                    ms_query_id,
-                    status: CommonQueryReplanningES {
-                      timestamp: query.timestamp,
-                      context: Rc::new(query.context),
-                      sql_view: query.sql_query,
-                      query_plan: query.query_plan,
-                      query_id: perform_query.query_id.clone(),
-                      state: CommonQueryReplanningS::Start,
-                    },
-                  }),
-                },
-              );
-              let action = ms_read.es.start(self);
-              self.handle_ms_read_es_action(statuses, perform_query.query_id, action);
             } else {
+              // Here, we create a standard TableReadES.
               let read = map_insert(
                 &mut statuses.full_table_read_ess,
                 &perform_query.query_id,
@@ -616,95 +569,49 @@ impl<T: IOTypes> TabletContext<T> {
               assert!(lookup(&self.table_schema.key_cols, col).is_none())
             }
 
-            // Lookup the MSQueryES
-            let root_query_id = perform_query.root_query_path.query_id.clone();
-            if !self.ms_root_query_map.contains_key(&root_query_id) {
-              // If it doesn't exist, we try adding one. Of course, we must first
-              // check whether the Timestamp is available or not.
-              let timestamp = query.timestamp;
-              if self.verifying_writes.contains_key(&timestamp)
-                || self.prepared_writes.contains_key(&timestamp)
-                || self.committed_writes.contains_key(&timestamp)
-              {
-                // This means the Timestamp is already in use, so we have to Abort.
+            // Here, we create an MSTableWriteES.
+            let root_query_path = perform_query.root_query_path;
+            match self.get_msquery_id(statuses, root_query_path.clone(), query.timestamp) {
+              Ok(ms_query_id) => {
+                // Lookup the MSQueryES and add the new Query into `pending_queries`.
+                let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+                ms_query_es.pending_queries.insert(perform_query.query_id.clone());
+
+                // Create an MSWriteTableES in the QueryReplanning state, and add it to
+                // the MSQueryES.
+                let ms_write = map_insert(
+                  &mut statuses.full_ms_table_write_ess,
+                  &perform_query.query_id,
+                  MSTableWriteESWrapper {
+                    sender_path: perform_query.sender_path.clone(),
+                    child_queries: vec![],
+                    es: FullMSTableWriteES::QueryReplanning(MSWriteQueryReplanningES {
+                      root_query_path,
+                      tier_map: perform_query.tier_map,
+                      ms_query_id,
+                      status: CommonQueryReplanningES {
+                        timestamp: query.timestamp,
+                        context: Rc::new(query.context),
+                        sql_view: query.sql_query,
+                        query_plan: query.query_plan,
+                        query_id: perform_query.query_id.clone(),
+                        state: CommonQueryReplanningS::Start,
+                      },
+                    }),
+                  },
+                );
+                let action = ms_write.es.start(self);
+                self.handle_ms_write_es_action(statuses, perform_query.query_id, action);
+              }
+              Err(query_error) => {
+                // The MSQueryES couldn't be constructed.
                 self.ctx().send_query_error(
                   perform_query.sender_path,
                   perform_query.query_id,
-                  msg::QueryError::TimestampConflict,
-                );
-                return;
-              } else {
-                // This means that we can add an MSQueryES at the Timestamp
-                let ms_query_id = mk_qid(&mut self.rand);
-                statuses.ms_query_ess.insert(
-                  ms_query_id.clone(),
-                  MSQueryES {
-                    root_query_id: root_query_id.clone(),
-                    query_id: ms_query_id.clone(),
-                    timestamp: query.timestamp,
-                    update_views: Default::default(),
-                    pending_queries: Default::default(),
-                  },
-                );
-
-                // We also amend the `ms_root_query_map` to associate the root query.
-                self.ms_root_query_map.insert(root_query_id.clone(), ms_query_id.clone());
-
-                // Send a register message back to the root.
-                let register_query = msg::RegisterQuery {
-                  root_query_id: root_query_id.clone(),
-                  query_path: self.mk_query_path(ms_query_id.clone()),
-                };
-                let sid = perform_query.sender_path.slave_group_id.clone();
-                let eid = self.slave_address_config.get(&sid).unwrap();
-                self.network_output.send(
-                  eid,
-                  msg::NetworkMessage::Slave(msg::SlaveMessage::RegisterQuery(register_query)),
-                );
-
-                // Finally, add an empty VerifyingReadWriteRegion
-                self.verifying_writes.insert(
-                  timestamp,
-                  VerifyingReadWriteRegion {
-                    orig_p: OrigP::new(ms_query_id),
-                    m_waiting_read_protected: BTreeSet::new(),
-                    m_read_protected: BTreeSet::new(),
-                    m_write_protected: BTreeSet::new(),
-                  },
+                  query_error,
                 );
               }
             }
-
-            // Lookup the MSQuery and add the QueryId of the new Query into `pending_queries`.
-            let ms_query_id = self.ms_root_query_map.get(&root_query_id).unwrap().clone();
-            let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-            ms_query_es.pending_queries.insert(perform_query.query_id.clone());
-
-            // Create an MSWriteTableES in the QueryReplanning state, and add it to
-            // the MSQueryES.
-            let ms_write = map_insert(
-              &mut statuses.full_ms_table_write_ess,
-              &perform_query.query_id,
-              MSTableWriteESWrapper {
-                sender_path: perform_query.sender_path.clone(),
-                child_queries: vec![],
-                es: FullMSTableWriteES::QueryReplanning(MSWriteQueryReplanningES {
-                  root_query_path: perform_query.root_query_path,
-                  tier_map: perform_query.tier_map,
-                  ms_query_id,
-                  status: CommonQueryReplanningES {
-                    timestamp: query.timestamp,
-                    context: Rc::new(query.context),
-                    sql_view: query.sql_query,
-                    query_plan: query.query_plan,
-                    query_id: perform_query.query_id.clone(),
-                    state: CommonQueryReplanningS::Start,
-                  },
-                }),
-              },
-            );
-            let action = ms_write.es.start(self);
-            self.handle_ms_write_es_action(statuses, perform_query.query_id, action);
           }
         }
       }
@@ -718,46 +625,65 @@ impl<T: IOTypes> TabletContext<T> {
         self.handle_query_success(statuses, query_success);
       }
       msg::TabletMessage::Query2PCPrepare(prepare) => {
-        // Since the only way an MSQueryES can disappear is if the Slave does it, if it ends
-        // up sending a Prepare instead, then there is no way the MSQueryES is gone.
-        let ms_query_es = statuses.ms_query_ess.get_mut(&prepare.ms_query_id).unwrap();
-        assert!(ms_query_es.pending_queries.is_empty());
-        assert_eq!(prepare.sender_path.query_id, ms_query_es.root_query_id);
+        // Recall that an MSQueryES can randomly be aborted due to a DeadlockSafetyWriteAbort.
+        // If it's present, we send back Prepared, and if not, we send back Aborted.
+        if let Some(ms_query_es) = statuses.ms_query_ess.get_mut(&prepare.ms_query_id) {
+          assert!(ms_query_es.pending_queries.is_empty());
+          assert_eq!(prepare.sender_path.query_id, ms_query_es.root_query_id);
 
-        // The VerifyingReadWriteRegion must also exist, so we move it to prepared_*.
-        let verifying_write = self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
-        assert!(verifying_write.m_waiting_read_protected.is_empty());
-        self.prepared_writes.insert(
-          ms_query_es.timestamp,
-          ReadWriteRegion {
-            orig_p: verifying_write.orig_p,
-            m_read_protected: verifying_write.m_read_protected,
-            m_write_protected: verifying_write.m_write_protected,
-          },
-        );
+          // The VerifyingReadWriteRegion must also exist, so we move it to prepared_*.
+          let verifying_write = self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
+          assert!(verifying_write.m_waiting_read_protected.is_empty());
+          self.prepared_writes.insert(
+            ms_query_es.timestamp,
+            ReadWriteRegion {
+              orig_p: verifying_write.orig_p,
+              m_read_protected: verifying_write.m_read_protected,
+              m_write_protected: verifying_write.m_write_protected,
+            },
+          );
 
-        // Send back Prepared
-        let return_qid = prepare.sender_path.query_id.clone();
-        let rm_path = self.mk_query_path(prepare.ms_query_id);
-        self.ctx().core_ctx().send_to_slave(
-          prepare.sender_path.slave_group_id,
-          msg::SlaveMessage::Query2PCPrepared(msg::Query2PCPrepared { return_qid, rm_path }),
-        );
+          // Send back Prepared
+          let return_qid = prepare.sender_path.query_id.clone();
+          let rm_path = self.mk_query_path(prepare.ms_query_id);
+          self.ctx().core_ctx().send_to_slave(
+            prepare.sender_path.slave_group_id,
+            msg::SlaveMessage::Query2PCPrepared(msg::Query2PCPrepared { return_qid, rm_path }),
+          );
+        } else {
+          // Send back Aborted. The only reason for the MSQueryES to no longer exist must be
+          // because it was aborted due to a DeadlockSafetyWriteAbort. Thus, we respond to
+          // the Slave as such.
+          let return_qid = prepare.sender_path.query_id.clone();
+          let rm_path = self.mk_query_path(prepare.ms_query_id);
+          self.ctx().core_ctx().send_to_slave(
+            prepare.sender_path.slave_group_id,
+            msg::SlaveMessage::Query2PCAborted(msg::Query2PCAborted {
+              return_qid,
+              rm_path,
+              reason: msg::Query2PCAbortReason::DeadlockSafetyAbortion,
+            }),
+          );
+        }
       }
       msg::TabletMessage::Query2PCAbort(abort) => {
-        // Recall that in order to get a Query2PCAbort, the Slave must already have sent a
-        // Query2PCPrepare that we received (since the network is FIFO). Thus, we may simply
-        // remove the ReadWriteRegion from `pending_*`.
-        let ms_query_es = statuses.ms_query_ess.remove(&abort.ms_query_id).unwrap();
-        self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
+        if let Some(ms_query_es) = statuses.ms_query_ess.remove(&abort.ms_query_id) {
+          // Recall that in order to get a Query2PCAbort, the Slave must already have sent a
+          // Query2PCPrepare. Since the network is FIFO, we must have received it, and since
+          // the MSQueryES exists, we must have responded with Prepared. Recall that we cannot
+          // call `exit_and_clean_up` when MSQueryES is Prepared.
+          self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
+          self.ms_root_query_map.remove(&ms_query_es.root_query_id);
+        }
       }
       msg::TabletMessage::Query2PCCommit(commit) => {
-        // First, remove the MSQueryES
+        // Remove the MSQueryES. It must exist, since we had Prepared.
         let ms_query_es = statuses.ms_query_ess.remove(&commit.ms_query_id).unwrap();
 
-        // Move the ReadWriteRegion to Committed.
+        // Move the ReadWriteRegion to Committed, and cleanup `ms_root_query_map`.
         let read_write_region = self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
         self.committed_writes.insert(ms_query_es.timestamp.clone(), read_write_region);
+        self.ms_root_query_map.remove(&ms_query_es.root_query_id);
 
         // Apply the UpdateViews to the storage container.
         commit_to_storage(&mut self.storage, &ms_query_es.timestamp, &ms_query_es.update_views);
@@ -869,6 +795,69 @@ impl<T: IOTypes> TabletContext<T> {
     }
 
     self.run_main_loop(statuses);
+  }
+
+  /// Checks if the MSQueryES for `root_query_id` already exists, returning its
+  /// `QueryId` if so. If not, we create an MSQueryES (populating `verifying_writes`,
+  /// sending `RegisterQuery`, etc).
+  fn get_msquery_id(
+    &mut self,
+    statuses: &mut Statuses,
+    root_query_path: QueryPath,
+    timestamp: Timestamp,
+  ) -> Result<QueryId, msg::QueryError> {
+    let root_query_id = root_query_path.query_id;
+    if let Some(ms_query_id) = self.ms_root_query_map.get(&root_query_id) {
+      // Here, the MSQueryES already exists, so we just return it's QueryId.
+      Ok(ms_query_id.clone())
+    } else {
+      // Otherwise, we need to create one. First check whether the Timestamp is available or not.
+      if self.verifying_writes.contains_key(&timestamp)
+        || self.prepared_writes.contains_key(&timestamp)
+        || self.committed_writes.contains_key(&timestamp)
+      {
+        // This means the Timestamp is already in use, so we return an error.
+        Err(msg::QueryError::TimestampConflict)
+      } else {
+        // This means that we can add an MSQueryES at the Timestamp
+        let ms_query_id = mk_qid(&mut self.rand);
+        statuses.ms_query_ess.insert(
+          ms_query_id.clone(),
+          MSQueryES {
+            root_query_id: root_query_id.clone(),
+            query_id: ms_query_id.clone(),
+            timestamp: timestamp.clone(),
+            update_views: Default::default(),
+            pending_queries: Default::default(),
+          },
+        );
+
+        // We also amend the `ms_root_query_map` to associate the root query.
+        self.ms_root_query_map.insert(root_query_id.clone(), ms_query_id.clone());
+
+        // Send a register message back to the root.
+        let register_query = msg::RegisterQuery {
+          root_query_id: root_query_id.clone(),
+          query_path: self.mk_query_path(ms_query_id.clone()),
+        };
+        self.ctx().core_ctx().send_to_slave(
+          root_query_path.slave_group_id.clone(),
+          msg::SlaveMessage::RegisterQuery(register_query),
+        );
+
+        // Finally, add an empty VerifyingReadWriteRegion
+        self.verifying_writes.insert(
+          timestamp,
+          VerifyingReadWriteRegion {
+            orig_p: OrigP::new(ms_query_id.clone()),
+            m_waiting_read_protected: BTreeSet::new(),
+            m_read_protected: BTreeSet::new(),
+            m_write_protected: BTreeSet::new(),
+          },
+        );
+        Ok(ms_query_id)
+      }
+    }
   }
 
   /// Adds the following triple into `requested_locked_columns`, making sure to update
@@ -1226,17 +1215,8 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// We call this when a DeadlockSafetyWriteAbort happens for a `verifying_writes`.
-  fn deadlock_safety_write_abort(
-    &mut self,
-    statuses: &mut Statuses,
-    orig_p: OrigP,
-    timestamp: Timestamp,
-  ) {
-    // Remove the VerifyingReadWriteRegion.
-    self.verifying_writes.remove(&timestamp);
-
-    // Inform the originator.
+  /// Simply aborts the MSQueryES, which will clean up everything to do with it.
+  fn deadlock_safety_write_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP, _: Timestamp) {
     self.exit_ms_query_es(statuses, orig_p.query_id, msg::QueryError::DeadlockSafetyAbortion);
   }
 
@@ -1595,7 +1575,8 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// Cleans up the MSQueryES with QueryId of `query_id`.
+  /// Cleans up the MSQueryES with QueryId of `query_id`. This can only be called
+  /// if the MSQueryES hasn't Prepared yet.
   fn exit_ms_query_es(
     &mut self,
     statuses: &mut Statuses,
@@ -1823,13 +1804,21 @@ impl<T: IOTypes> TabletContext<T> {
         }
       }
     } else if let Some(ms_query_es) = statuses.ms_query_ess.get(&query_id) {
-      // We should only run this code when a CancelQuery comes in (from the Slave) for the
-      // MSQueryES. We shouldn't run this code in any other circumstance, since this sends a
-      // LateralError to the origiators of the MSTable*ESs, which we should only do if an
-      // ancestor is known already have exit (i..e the MSCoordES, in this case).
+      // MSQueryES.
       //
-      // This also does not handle the case of a Query2PCAbort properly, since we would have moved
-      // the ReadWriteRegion to `prepared_*` by this point.
+      // We should only run this code when a CancelQuery comes in (from the Slave) for
+      // the MSQueryES. We shouldn't run this code in any other circumstance (e.g.
+      // DeadlockSafetyAborted), since this only sends back `LateralError`s to the origiators
+      // of the MSTable*ESs, which we should only do if an ancestor is known already have exit
+      // (i..e the MSCoordES, in this case).
+      //
+      // The Slave should not send CancelQuery after it sends Prepare, since `exit_ms_query_es`
+      // can't handle Prepared MSQueryESs. As a corollary, this function should not be used when
+      // a Query2PCAbort comes in.
+      //
+      // TODO: In the spirit of getting local safety, we shouldn't have the above expection.
+      // Instead, we should give MSQueryES a state variable and have it react to CancelQuery
+      // accordingly (ignore it if we have prepared).
       self.exit_ms_query_es(statuses, ms_query_es.query_id.clone(), msg::QueryError::LateralError);
     } else if let Some(mut ms_write) = statuses.full_ms_table_write_ess.remove(&query_id) {
       // MSTableWriteES.

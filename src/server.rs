@@ -143,6 +143,11 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
 
   /// This function computes a minimum set of `TabletGroupId`s whose `TabletKeyRange`
   /// has a non-empty intersect with the KeyRegion we compute from the given `selection`.
+  ///
+  /// This function returns at least 1 TabletGroupId. This is because if even the `selection`
+  /// would be false for all keys, the GRQueryES or MSCoordES needs to know the schema of
+  /// the subtables. That can't be determined without contacting a relevant Tablet (who
+  /// will perform Column Locking as well to ensure idempotence).
   pub fn get_min_tablets(
     &self,
     table_path: &TablePath,
