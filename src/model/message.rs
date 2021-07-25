@@ -265,6 +265,7 @@ pub struct PerformExternalQuery {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CancelExternalQuery {
+  pub sender_eid: EndpointId,
   pub request_id: RequestId,
 }
 
@@ -292,7 +293,8 @@ pub enum ExternalAbortedData {
   /// understand that their query was invalid, but might become valid for the same timestamp
   /// later (i.e. the invalidity is not idempotent).
   QueryExecutionError,
-  /// This is sent back as a repsonse when a CancelExternalQuery comes in.
+  /// This is sent back as a response when a CancelExternalQuery comes in. If the
+  /// transaction still exists, we make sure to abort it.
   ConfirmCancel,
 }
 

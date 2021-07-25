@@ -2,11 +2,11 @@ use crate::col_usage::collect_top_level_cols;
 use crate::common::{
   map_insert, mk_qid, IOTypes, KeyBound, OrigP, QueryESResult, QueryPlan, TableRegion,
 };
-use crate::expression::{compress_row_region, is_true};
+use crate::expression::{compress_row_region, is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, ColName, ColValN, Context, ContextRow, Gen, PrimaryKey, QueryId, QueryPath, TableView,
-  TierMap, Timestamp, TransTableName,
+  proc, ColName, ColType, ColVal, ColValN, Context, ContextRow, Gen, PrimaryKey, QueryId,
+  QueryPath, TableView, TierMap, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use crate::ms_table_read_es::FullMSTableReadES;
@@ -247,14 +247,13 @@ impl FullMSTableWriteES {
   pub fn read_protected<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
-    ms_query_ess: &mut HashMap<QueryId, MSQueryES>,
+    ms_query_es: &mut MSQueryES,
     protect_query_id: QueryId,
   ) -> MSTableWriteAction {
     let es = cast!(FullMSTableWriteES::Executing, self).unwrap();
     match &mut es.state {
       MSWriteExecutionS::Start => panic!(),
       MSWriteExecutionS::Pending(pending) => {
-        let ms_query_es = ms_query_ess.get(&es.ms_query_id).unwrap();
         let gr_query_statuses = match compute_subqueries::<T, _, _>(
           GRQueryConstructorView {
             root_query_path: &es.root_query_path,
@@ -287,7 +286,7 @@ impl FullMSTableWriteES {
 
         if gr_query_statuses.is_empty() {
           // Since there are no subqueries, we can go straight to finishing the ES.
-          self.finish_ms_table_write_es(ctx, ms_query_ess)
+          self.finish_ms_table_write_es(ctx, ms_query_es)
         } else {
           // Here, we have to evaluate subqueries. Thus, we go to Executing and return
           // SendSubqueries to the parent server.
@@ -311,7 +310,6 @@ impl FullMSTableWriteES {
         }
       }
       MSWriteExecutionS::Executing(executing) => {
-        let ms_query_es = ms_query_ess.get(&es.ms_query_id).unwrap();
         let (_, gr_query_es) = match recompute_subquery::<T, _, _>(
           GRQueryConstructorView {
             root_query_path: &es.root_query_path,
@@ -396,11 +394,10 @@ impl FullMSTableWriteES {
   }
 
   /// Handles a Subquery completing.
-  /// TODO: see if we can just pass in MSQueryES
   pub fn handle_subquery_done<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
-    ms_query_ess: &mut HashMap<QueryId, MSQueryES>,
+    ms_query_es: &mut MSQueryES,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<QueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
@@ -424,7 +421,7 @@ impl FullMSTableWriteES {
     if executing_state.completed < executing_state.subqueries.len() {
       MSTableWriteAction::Wait
     } else {
-      self.finish_ms_table_write_es(ctx, ms_query_ess)
+      self.finish_ms_table_write_es(ctx, ms_query_es)
     }
   }
 
@@ -432,24 +429,29 @@ impl FullMSTableWriteES {
   pub fn finish_ms_table_write_es<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
-    ms_query_ess: &mut HashMap<QueryId, MSQueryES>,
+    ms_query_es: &mut MSQueryES,
   ) -> MSTableWriteAction {
     let es = cast!(FullMSTableWriteES::Executing, self).unwrap();
     let executing_state = cast!(MSWriteExecutionS::Executing, &mut es.state).unwrap();
 
     // Compute children.
     let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+    let mut subquery_results = Vec::<Vec<TableView>>::new();
     for single_status in &executing_state.subqueries {
       let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
       let context_schema = &result.context.context_schema;
       children
         .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
+      subquery_results.push(result.result.clone());
     }
 
     // Create the ContextConstructor.
-    let update_views = &ms_query_ess.get_mut(&es.ms_query_id).unwrap().update_views;
-    let storage_view =
-      MSStorageView::new(&ctx.storage, &ctx.table_schema, update_views, es.tier.clone() - 1);
+    let storage_view = MSStorageView::new(
+      &ctx.storage,
+      &ctx.table_schema,
+      &ms_query_es.update_views,
+      es.tier.clone() - 1,
+    );
     let context_constructor = ContextConstructor::new(
       es.context.context_schema.clone(),
       StorageLocalTable::new(
@@ -461,9 +463,9 @@ impl FullMSTableWriteES {
       children,
     );
 
-    // These are all of the `ColNames` we need to evaluate the Update. This consists of all
-    // Top-Level Columns for every expression, as well as all Key Columns (since they are
-    // included in the projected columns).
+    // These are all of the `ColNames` that we need in order to evaluate the Update.
+    // This consists of all Top-Level Columns for every expression, as well as all Key
+    // Columns (since they are included in the resulting table).
     let mut top_level_cols_set = HashSet::<ColName>::new();
     top_level_cols_set.extend(ctx.table_schema.get_key_cols());
     top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
@@ -492,12 +494,9 @@ impl FullMSTableWriteES {
 
         // First, we extract the subquery values using the child Context indices.
         let mut subquery_vals = Vec::<TableView>::new();
-        for index in 0..contexts.len() {
-          let (_, child_context_idx) = contexts.get(index).unwrap();
-          let executing_state = cast!(MSWriteExecutionS::Executing, &es.state).unwrap();
-          let single_status = executing_state.subqueries.get(index).unwrap();
-          let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-          subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
+        for (subquery_idx, (_, child_context_idx)) in contexts.iter().enumerate() {
+          let val = subquery_results.get(subquery_idx).unwrap().get(*child_context_idx).unwrap();
+          subquery_vals.push(val.clone());
         }
 
         // Now, we evaluate all expressions in the SQL query and amend the
@@ -523,7 +522,22 @@ impl FullMSTableWriteES {
 
           // Then, iterate through the assignment, updating `res_row` and `update_view`.
           for (col_name, col_val) in evaluated_update.assignment {
-            // TODO: make sure we do type checking here to avoid producing bad UpdateViews
+            // We need to check that the Type of `col_val` conforms to the Table Schema.
+            // Note that we only do this if `col_val` is non-NULL.
+            if let Some(val) = &col_val {
+              let col_type =
+                ctx.table_schema.val_cols.strong_static_read(&col_name, es.timestamp).unwrap();
+              let does_match = match (val, col_type) {
+                (ColVal::Bool(_), ColType::Bool) => true,
+                (ColVal::Int(_), ColType::Int) => true,
+                (ColVal::String(_), ColType::String) => true,
+                _ => false,
+              };
+              if !does_match {
+                return Err(EvalError::TypeError);
+              }
+            }
+            // Add in the `col_val`.
             res_row.push(col_val.clone());
             update_view.insert((primary_key.clone(), Some(col_name)), col_val);
           }
@@ -541,7 +555,6 @@ impl FullMSTableWriteES {
     }
 
     // Amend the `update_view` in the MSQueryES.
-    let ms_query_es = ms_query_ess.get_mut(&es.ms_query_id).unwrap();
     ms_query_es.update_views.insert(es.tier.clone(), update_view);
 
     // Signal Success and return the data.

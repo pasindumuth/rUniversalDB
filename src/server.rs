@@ -175,6 +175,15 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
       NodeGroupId::Slave(self.this_slave_group_id.clone())
     }
   }
+
+  /// Construct QueryPath for a given `query_id` that belongs to this Server.
+  pub fn mk_query_path(&self, query_id: QueryId) -> QueryPath {
+    QueryPath {
+      slave_group_id: self.this_slave_group_id.clone(),
+      maybe_tablet_group_id: self.maybe_this_tablet_group_id.cloned(),
+      query_id,
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -327,7 +336,7 @@ pub fn evaluate_update(
   col_vals: &Vec<ColValN>,
   raw_subquery_vals: &Vec<TableView>,
 ) -> Result<EvaluatedUpdate, EvalError> {
-  // We map all ColNames to their ColValNs using the Context and subtable.
+  // We map all ColNames to their ColValNs.
   let mut col_map = HashMap::<ColName, ColValN>::new();
   for i in 0..col_names.len() {
     col_map.insert(col_names.get(i).unwrap().clone(), col_vals.get(i).unwrap().clone());

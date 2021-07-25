@@ -177,20 +177,21 @@ impl<T: IOTypes> SlaveContext<T> {
       }
       msg::SlaveMessage::CancelExternalQuery(cancel) => {
         if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
-          // Recall that we need to respond with an ExternalQueryAborted
-          // to confirm the cancellation.
-          let ms_coord = statuses.ms_coord_ess.get(query_id).unwrap();
-          self.network_output.send(
-            &ms_coord.sender_eid,
-            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
-              msg::ExternalQueryAborted {
-                request_id: ms_coord.request_id.clone(),
-                payload: msg::ExternalAbortedData::ConfirmCancel,
-              },
-            )),
-          );
+          // ECU the transation if it exists.
           self.exit_and_clean_up(statuses, query_id.clone());
         }
+
+        // Recall that we need to respond with an ExternalQueryAborted
+        // to confirm the cancellation.
+        self.network_output.send(
+          &cancel.sender_eid,
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+            msg::ExternalQueryAborted {
+              request_id: cancel.request_id,
+              payload: msg::ExternalAbortedData::ConfirmCancel,
+            },
+          )),
+        );
       }
       msg::SlaveMessage::TabletMessage(tablet_group_id, tablet_msg) => {
         self.tablet_forward_output.forward(&tablet_group_id, tablet_msg);
@@ -198,8 +199,8 @@ impl<T: IOTypes> SlaveContext<T> {
       msg::SlaveMessage::PerformQuery(perform_query) => {
         match perform_query.query {
           msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
-            // First, we check if the GRQueryES still exists in the Statuses, continuing
-            // if so and aborting if not.
+            // First, we check if the MSCoordES or GRCoordES still exists in the Statuses,
+            // continuing if so and aborting if not.
             if let Some(ms_coord) = statuses.ms_coord_ess.get(&query.location_prefix.query_id) {
               let es = ms_coord.es.to_exec();
               // Construct and start the TransQueryReplanningES
@@ -768,7 +769,7 @@ impl<T: IOTypes> SlaveContext<T> {
 
   /// This function is used to initiate an Exit and Clean Up of ESs. This is needed to handle
   /// CancelQuery's, as well as when one ES wants to Exit and Clean Up another ES. Note that
-  /// We allow the ES at `query_id` to be in any state, and to not even exist.
+  /// we allow the ES at `query_id` to be in any state, and to not even exist.
   fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
     if let Some(mut ms_coord) = statuses.ms_coord_ess.remove(&query_id) {
       // MSCoordES

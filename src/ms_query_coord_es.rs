@@ -83,7 +83,7 @@ pub struct MSCoordES {
 
 impl TransTableSource for MSCoordES {
   fn get_instance(&self, trans_table_name: &TransTableName, idx: usize) -> &TableView {
-    assert_eq!(idx, 1);
+    assert_eq!(idx, 0);
     let (_, instance) = lookup(&self.trans_table_views, trans_table_name).unwrap();
     instance
   }

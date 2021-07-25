@@ -133,10 +133,10 @@ impl<'a> ColUsagePlanner<'a> {
     }
 
     let mut exprs = Vec::new();
-    exprs.push(update.selection.clone());
     for (_, expr) in &update.assignment {
       exprs.push(expr.clone());
     }
+    exprs.push(update.selection.clone());
 
     (
       projection,

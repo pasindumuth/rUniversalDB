@@ -402,17 +402,19 @@ impl FullTableReadES {
   }
 
   /// Handles a ES finishing with all subqueries results in.
-  pub fn finish_table_read_es<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
+  fn finish_table_read_es<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
     let es = cast!(FullTableReadES::Executing, self).unwrap();
     let executing_state = cast!(ExecutionS::Executing, &mut es.state).unwrap();
 
     // Compute children.
     let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+    let mut subquery_results = Vec::<Vec<TableView>>::new();
     for single_status in &executing_state.subqueries {
       let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
       let context_schema = &result.context.context_schema;
       children
         .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
+      subquery_results.push(result.result.clone());
     }
 
     // Create the ContextConstructor.
@@ -427,7 +429,7 @@ impl FullTableReadES {
       children,
     );
 
-    // These are all of the `ColNames` we need to evaluate things.
+    // These are all of the `ColNames` we need in order to evaluate the Select.
     let mut top_level_cols_set = HashSet::<ColName>::new();
     top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
     top_level_cols_set.extend(es.sql_query.projection.clone());
@@ -448,12 +450,9 @@ impl FullTableReadES {
             count: u64| {
         // First, we extract the subquery values using the child Context indices.
         let mut subquery_vals = Vec::<TableView>::new();
-        for index in 0..contexts.len() {
-          let (_, child_context_idx) = contexts.get(index).unwrap();
-          let executing_state = cast!(ExecutionS::Executing, &es.state).unwrap();
-          let single_status = executing_state.subqueries.get(index).unwrap();
-          let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-          subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
+        for (subquery_idx, (_, child_context_idx)) in contexts.iter().enumerate() {
+          let val = subquery_results.get(subquery_idx).unwrap().get(*child_context_idx).unwrap();
+          subquery_vals.push(val.clone());
         }
 
         // Now, we evaluate all expressions in the SQL query and amend the

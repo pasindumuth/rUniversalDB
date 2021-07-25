@@ -247,14 +247,13 @@ impl FullMSTableReadES {
   pub fn read_protected<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
-    ms_query_ess: &HashMap<QueryId, MSQueryES>,
+    ms_query_es: &MSQueryES,
     protect_query_id: QueryId,
   ) -> MSTableReadAction {
     let es = cast!(FullMSTableReadES::Executing, self).unwrap();
     match &mut es.state {
       MSReadExecutionS::Start => panic!(),
       MSReadExecutionS::Pending(pending) => {
-        let ms_query_es = ms_query_ess.get(&es.ms_query_id).unwrap();
         let gr_query_statuses = match compute_subqueries::<T, _, _>(
           GRQueryConstructorView {
             root_query_path: &es.root_query_path,
@@ -287,7 +286,7 @@ impl FullMSTableReadES {
 
         if gr_query_statuses.is_empty() {
           // Since there are no subqueries, we can go straight to finishing the ES.
-          self.finish_ms_table_read_es(ctx, ms_query_ess)
+          self.finish_ms_table_read_es(ctx, ms_query_es)
         } else {
           // Here, we have computed all GRQueryESs, and we can now add them to Executing.
           let mut subqueries = Vec::<SingleSubqueryStatus>::new();
@@ -310,7 +309,6 @@ impl FullMSTableReadES {
         }
       }
       MSReadExecutionS::Executing(executing) => {
-        let ms_query_es = ms_query_ess.get(&es.ms_query_id).unwrap();
         let (_, gr_query_es) = match recompute_subquery::<T, _, _>(
           GRQueryConstructorView {
             root_query_path: &es.root_query_path,
@@ -398,7 +396,7 @@ impl FullMSTableReadES {
   pub fn handle_subquery_done<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
-    ms_query_ess: &HashMap<QueryId, MSQueryES>,
+    ms_query_es: &MSQueryES,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<QueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
@@ -422,7 +420,7 @@ impl FullMSTableReadES {
     if executing_state.completed < executing_state.subqueries.len() {
       MSTableReadAction::Wait
     } else {
-      self.finish_ms_table_read_es(ctx, ms_query_ess)
+      self.finish_ms_table_read_es(ctx, ms_query_es)
     }
   }
 
@@ -430,24 +428,29 @@ impl FullMSTableReadES {
   pub fn finish_ms_table_read_es<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
-    ms_query_ess: &HashMap<QueryId, MSQueryES>,
+    ms_query_es: &MSQueryES,
   ) -> MSTableReadAction {
     let es = cast!(FullMSTableReadES::Executing, self).unwrap();
     let executing_state = cast!(MSReadExecutionS::Executing, &mut es.state).unwrap();
 
     // Compute children.
     let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+    let mut subquery_results = Vec::<Vec<TableView>>::new();
     for single_status in &executing_state.subqueries {
       let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
       let context_schema = &result.context.context_schema;
       children
         .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
+      subquery_results.push(result.result.clone());
     }
 
     // Create the ContextConstructor.
-    let update_views = &ms_query_ess.get(&es.ms_query_id).unwrap().update_views;
-    let storage_view =
-      MSStorageView::new(&ctx.storage, &ctx.table_schema, update_views, es.tier.clone() - 1);
+    let storage_view = MSStorageView::new(
+      &ctx.storage,
+      &ctx.table_schema,
+      &ms_query_es.update_views,
+      es.tier.clone() - 1,
+    );
     let context_constructor = ContextConstructor::new(
       es.context.context_schema.clone(),
       StorageLocalTable::new(
@@ -459,7 +462,7 @@ impl FullMSTableReadES {
       children,
     );
 
-    // These are all of the `ColNames` we need to evaluate things.
+    // These are all of the `ColNames` we need in order to evaluate the Select.
     let mut top_level_cols_set = HashSet::<ColName>::new();
     top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
     top_level_cols_set.extend(es.sql_query.projection.clone());
@@ -480,12 +483,9 @@ impl FullMSTableReadES {
             count: u64| {
         // First, we extract the subquery values using the child Context indices.
         let mut subquery_vals = Vec::<TableView>::new();
-        for index in 0..contexts.len() {
-          let (_, child_context_idx) = contexts.get(index).unwrap();
-          let executing_state = cast!(MSReadExecutionS::Executing, &es.state).unwrap();
-          let single_status = executing_state.subqueries.get(index).unwrap();
-          let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-          subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
+        for (subquery_idx, (_, child_context_idx)) in contexts.iter().enumerate() {
+          let val = subquery_results.get(subquery_idx).unwrap().get(*child_context_idx).unwrap();
+          subquery_vals.push(val.clone());
         }
 
         // Now, we evaluate all expressions in the SQL query and amend the

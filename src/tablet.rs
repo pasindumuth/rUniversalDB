@@ -1235,11 +1235,19 @@ impl<T: IOTypes> TabletContext<T> {
       self.handle_read_es_action(statuses, query_id, action);
     } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
       // MSTableWriteES
-      let action = ms_write.es.read_protected(self, &mut statuses.ms_query_ess, protect_query_id);
+      let action = ms_write.es.read_protected(
+        self,
+        statuses.ms_query_ess.get_mut(ms_write.es.ms_query_id()).unwrap(),
+        protect_query_id,
+      );
       self.handle_ms_write_es_action(statuses, query_id, action);
     } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
-      let action = ms_read.es.read_protected(self, &statuses.ms_query_ess, protect_query_id);
+      let action = ms_read.es.read_protected(
+        self,
+        statuses.ms_query_ess.get(ms_read.es.ms_query_id()).unwrap(),
+        protect_query_id,
+      );
       self.handle_ms_read_es_action(statuses, query_id, action);
     }
   }
@@ -1303,7 +1311,8 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// This function processes the result of a GRQueryES.
+  /// This function processes the result of a GRQueryES. Generally, it finds the ESWrapper
+  /// to route the results to, cleans up its `child_queries`, and forwards the result.
   fn handle_gr_query_done(
     &mut self,
     statuses: &mut Statuses,
@@ -1344,7 +1353,7 @@ impl<T: IOTypes> TabletContext<T> {
       remove_item(&mut ms_write.child_queries, &subquery_id);
       let action = ms_write.es.handle_subquery_done(
         self,
-        &mut statuses.ms_query_ess,
+        statuses.ms_query_ess.get_mut(ms_write.es.ms_query_id()).unwrap(),
         subquery_id,
         subquery_new_rms,
         (table_schema, table_views),
@@ -1355,7 +1364,7 @@ impl<T: IOTypes> TabletContext<T> {
       remove_item(&mut ms_read.child_queries, &subquery_id);
       let action = ms_read.es.handle_subquery_done(
         self,
-        &statuses.ms_query_ess,
+        statuses.ms_query_ess.get(ms_read.es.ms_query_id()).unwrap(),
         subquery_id,
         subquery_new_rms,
         (table_schema, table_views),
@@ -1987,16 +1996,16 @@ pub fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: Subque
   let child_contexts = compute_contexts(subquery_view.context, local_table, children)?;
 
   // We compute all GRQueryESs.
-  let mut gr_query_statuses = Vec::<GRQueryES>::new();
+  let mut gr_query_ess = Vec::<GRQueryES>::new();
   for (subquery_idx, child_context) in child_contexts.into_iter().enumerate() {
-    gr_query_statuses.push(subquery_view.mk_gr_query_es(
+    gr_query_ess.push(subquery_view.mk_gr_query_es(
       mk_qid(rand),
       Rc::new(child_context),
       subquery_idx,
     ));
   }
 
-  Ok(gr_query_statuses)
+  Ok(gr_query_ess)
 }
 
 /// This recomputes GRQueryESs that corresponds to `protect_query_id`.

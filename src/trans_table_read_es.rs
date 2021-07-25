@@ -211,7 +211,7 @@ impl FullTransTableReadES {
   }
 
   /// Constructs and returns subqueries.
-  pub fn start_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
+  fn start_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,
     trans_table_source: &SourceT,
@@ -228,7 +228,7 @@ impl FullTransTableReadES {
     }
 
     // Create the child context. Recall that we are able to unwrap `compute_contexts`
-    // for the case TransTables.
+    // for the case TransTables since there is no KeyBound Computation.
     let trans_table_name = &es.location_prefix.trans_table_name;
     let local_table = TransLocalTable::new(trans_table_source, trans_table_name);
     let child_contexts = compute_contexts(es.context.deref(), local_table, children).unwrap();
@@ -243,23 +243,23 @@ impl FullTransTableReadES {
       query_id: &es.query_id,
       context: &es.context,
     };
-    let mut gr_query_statuses = Vec::<GRQueryES>::new();
+    let mut gr_query_ess = Vec::<GRQueryES>::new();
     for (subquery_idx, child_context) in child_contexts.into_iter().enumerate() {
-      gr_query_statuses.push(subquery_view.mk_gr_query_es(
+      gr_query_ess.push(subquery_view.mk_gr_query_es(
         mk_qid(&mut ctx.rand),
         Rc::new(child_context),
         subquery_idx,
       ));
     }
 
-    if gr_query_statuses.is_empty() {
+    if gr_query_ess.is_empty() {
       // Since there are no subqueries, we can go straight to finishing the ES.
       self.finish_trans_table_read_es(ctx, trans_table_source)
     } else {
       // Here, we have computed all GRQueryESs, and we can now add them to
       // `subquery_status`.
       let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-      for gr_query_es in &gr_query_statuses {
+      for gr_query_es in &gr_query_ess {
         subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
           context: gr_query_es.context.clone(),
           query_id: gr_query_es.query_id.clone(),
@@ -274,7 +274,7 @@ impl FullTransTableReadES {
       });
 
       // Return the subqueries so that they can be driven from the parent Server.
-      TransTableAction::SendSubqueries(gr_query_statuses)
+      TransTableAction::SendSubqueries(gr_query_ess)
     }
   }
 
@@ -290,11 +290,6 @@ impl FullTransTableReadES {
     let executing = cast!(TransExecutionS::Executing, &mut es.state).unwrap();
     let trans_table_name = &es.location_prefix.trans_table_name;
     let trans_table_schema = trans_table_source.get_schema(trans_table_name);
-
-    // First, we need to see if the missing columns are in the context. If not, then
-    // we have to exit and clean up, and send an abort. If so, we need to lookup up
-    // the right subquery, create a new subqueryId, construct a new context with a
-    // recomputesubquery function, and then start executing it.
 
     // First, we check if all columns in `rem_cols` are at least present in the context.
     let mut missing_cols = Vec::<ColName>::new();
@@ -321,13 +316,11 @@ impl FullTransTableReadES {
       let context_schema = &pending_status.context.context_schema;
 
       // Create the child context.
+      let mut new_columns = context_schema.column_context_schema.clone();
+      new_columns.extend(rem_cols);
+      let children = vec![(new_columns, context_schema.trans_table_names())];
       let local_table = TransLocalTable::new(trans_table_source, trans_table_name);
-      let child_contexts = compute_contexts(
-        es.context.deref(),
-        local_table,
-        vec![(context_schema.column_context_schema.clone(), context_schema.trans_table_names())],
-      )
-      .unwrap();
+      let child_contexts = compute_contexts(es.context.deref(), local_table, children).unwrap();
       assert_eq!(child_contexts.len(), 1);
       let context = Rc::new(child_contexts.into_iter().next().unwrap());
 
@@ -400,9 +393,9 @@ impl FullTransTableReadES {
   }
 
   /// Handles a ES finishing with all subqueries results in.
-  pub fn finish_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
+  fn finish_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut ServerContext<T>,
+    _: &mut ServerContext<T>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     let es = cast!(Self::Executing, self).unwrap();
@@ -410,11 +403,13 @@ impl FullTransTableReadES {
 
     // Compute children.
     let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+    let mut subquery_results = Vec::<Vec<TableView>>::new();
     for single_status in &executing_state.subqueries {
       let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
       let context_schema = &result.context.context_schema;
       children
         .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
+      subquery_results.push(result.result.clone());
     }
 
     // Create the ContextConstructor.
@@ -424,7 +419,7 @@ impl FullTransTableReadES {
       children,
     );
 
-    // These are all of the `ColNames` we need to evaluate things.
+    // These are all of the `ColNames` we need in order to evaluate the Select.
     let mut top_level_cols_set = HashSet::<ColName>::new();
     top_level_cols_set.extend(collect_top_level_cols(&es.sql_query.selection));
     top_level_cols_set.extend(es.sql_query.projection.clone());
@@ -445,12 +440,9 @@ impl FullTransTableReadES {
             count: u64| {
         // First, we extract the subquery values using the child Context indices.
         let mut subquery_vals = Vec::<TableView>::new();
-        for index in 0..contexts.len() {
-          let (_, child_context_idx) = contexts.get(index).unwrap();
-          let executing_state = cast!(TransExecutionS::Executing, &es.state).unwrap();
-          let single_status = executing_state.subqueries.get(index).unwrap();
-          let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-          subquery_vals.push(result.result.get(*child_context_idx).unwrap().clone());
+        for (subquery_idx, (_, child_context_idx)) in contexts.iter().enumerate() {
+          let val = subquery_results.get(subquery_idx).unwrap().get(*child_context_idx).unwrap();
+          subquery_vals.push(val.clone());
         }
 
         // Now, we evaluate all expressions in the SQL query and amend the
@@ -608,11 +600,11 @@ impl TransQueryReplanningES {
       }
     }
 
-    // Next, we check the GossipGen of the QueryPlan.
+    // Next, we see if the ctx has a higher GossipGen. If so, we should compute a
+    // new QueryPlan (for system liveness reasons).
     if ctx.gossip.gossip_gen <= self.query_plan.gossip_gen {
-      // This means that the sender knew everything this Node knew and more when it made the
-      // QueryPlan, so we can use it directly. Note that since there is no column locking
-      // required, we can move to the Execting state immediately.
+      // We should use QueryPlan of the sender, so we return it. (Recall there is no
+      // Column Locking, etc, required).
       self.state = TransQueryReplanningS::Done;
       TransQueryReplanningAction::Success
     } else {
@@ -639,13 +631,7 @@ impl TransQueryReplanningES {
             &ctx.master_eid,
             msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
               msg::PerformMasterFrozenColUsage {
-                sender_path: QueryPath {
-                  slave_group_id: ctx.this_slave_group_id.clone(),
-                  maybe_tablet_group_id: ctx
-                    .maybe_this_tablet_group_id
-                    .map(|id| id.deref().clone()),
-                  query_id: self.query_id.clone(),
-                },
+                sender_path: ctx.mk_query_path(self.query_id.clone()),
                 query_id: master_query_id.clone(),
                 timestamp: self.timestamp,
                 trans_table_schemas: self.query_plan.trans_table_schemas.clone(),
@@ -671,7 +657,7 @@ impl TransQueryReplanningES {
   /// Handles the Query Plan constructed by the Master.
   pub fn handle_master_response<T: IOTypes>(
     &mut self,
-    ctx: &mut ServerContext<T>,
+    _: &mut ServerContext<T>,
     gossip_gen: Gen,
     tree: msg::FrozenColUsageTree,
   ) -> TransQueryReplanningAction {
