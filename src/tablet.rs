@@ -358,8 +358,8 @@ pub struct TabletContext<T: IOTypes> {
 
   // Schema Change and Locking
   pub alter_table_rm_state: HashMap<QueryId, (proc::AlterOp, Timestamp)>,
-  /// This is directly derived from the `alter_table_rm_state`, containing the `lat` of the
-  /// given `ColName`. We many not read > this timestamp for ColumnLocking.
+  /// This is directly derived from the `alter_table_rm_state`, containing the `lat`
+  /// of the given `ColName`. We may not read > this timestamp for ColumnLocking.
   pub prepared_scheme_change: HashMap<ColName, Timestamp>,
   /// This is used to help iterate requests in timestamp order.
   pub request_index: BTreeMap<Timestamp, BTreeSet<QueryId>>,
@@ -744,6 +744,7 @@ impl<T: IOTypes> TabletContext<T> {
         // Check a few guaranteed properties.
         let col_name = &prepare.alter_op.col_name;
         assert!(!self.prepared_scheme_change.contains_key(col_name));
+        assert!(!self.table_schema.key_cols.contains_key(col_name));
         let maybe_col_type = self.table_schema.val_cols.get_last_version(col_name);
         // Assert Column Validness of the incoming request.
         assert!(
@@ -870,9 +871,7 @@ impl<T: IOTypes> TabletContext<T> {
     cols: Vec<ColName>,
   ) -> QueryId {
     let locked_cols_qid = mk_qid(&mut self.rand);
-    // Add column locking
     self.requested_locked_columns.insert(locked_cols_qid.clone(), (orig_p, timestamp, cols));
-    // Update index
     btree_multimap_insert(&mut self.request_index, &timestamp, locked_cols_qid.clone());
     locked_cols_qid
   }
@@ -883,9 +882,7 @@ impl<T: IOTypes> TabletContext<T> {
     &mut self,
     query_id: QueryId,
   ) -> Option<(OrigP, Timestamp, Vec<ColName>)> {
-    // Remove if present
     if let Some((orig_p, timestamp, cols)) = self.requested_locked_columns.remove(&query_id) {
-      // Maintain the request_index.
       btree_multimap_remove(&mut self.request_index, &timestamp, &query_id);
       return Some((orig_p, timestamp, cols));
     }
@@ -987,21 +984,21 @@ impl<T: IOTypes> TabletContext<T> {
     for (_, query_set) in &self.request_index {
       for query_id in query_set {
         let (_, timestamp, cols) = self.requested_locked_columns.get(query_id).unwrap();
-        let mut not_preparing = true;
+        // We check whether any of the Columns in `cols` is undergoing an AlterOp, i.e. Preparing.
+        let mut preparing = false;
         for col in cols {
-          // Check if the `col` is being Prepared.
           if let Some(prep_timestamp) = self.prepared_scheme_change.get(col) {
             if timestamp > prep_timestamp {
-              not_preparing = false;
+              preparing = true;
               break;
             }
           }
         }
-        if not_preparing {
-          // This means that this task is done. We still need to enforce the lats
-          // to be high enough in `val_cols`.
+        if !preparing {
+          // This means that we can lock the Columns and inform the originator
+          // of the Locking Request.
           for col in cols {
-            if lookup_pos(&self.table_schema.key_cols, col).is_none() {
+            if lookup(&self.table_schema.key_cols, col).is_none() {
               self.table_schema.val_cols.update_lat(col, timestamp.clone());
             }
           }
@@ -1148,12 +1145,15 @@ impl<T: IOTypes> TabletContext<T> {
   ) {
     let query_id = orig_p.query_id;
     if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
+      // TableReadES
       let action = read.es.columns_locked(self, locked_cols_qid);
       self.handle_read_es_action(statuses, query_id, action);
     } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
+      // MSTableWriteES
       let action = ms_write.es.columns_locked(self, locked_cols_qid);
       self.handle_ms_write_es_action(statuses, query_id, action);
     } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+      // MSTableReadES
       let action = ms_read.es.columns_locked(self, locked_cols_qid);
       self.handle_ms_read_es_action(statuses, query_id, action);
     }

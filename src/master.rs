@@ -1,3 +1,4 @@
+use crate::alter_table_es::{AlterTableAction, AlterTableES, AlterTableS};
 use crate::col_usage::{ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   lookup, mk_qid, GossipData, GossipDataSer, IOTypes, NetworkOut, TableSchema, TableSchemaSer,
@@ -21,44 +22,13 @@ use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 
 // -----------------------------------------------------------------------------------------------
-//  AlterTableES
+//  Master State
 // -----------------------------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub struct Executing {
-  responded_count: usize,
-  tm_state: HashMap<TabletGroupId, Option<Timestamp>>,
-}
-
-#[derive(Debug)]
-pub enum AlterTableS {
-  Start,
-  Executing(Executing),
-}
-
-#[derive(Debug)]
-pub struct AlterTableES {
-  // Metadata copied from outside.
-  request_id: RequestId,
-  sender_eid: EndpointId,
-
-  // Core ES data
-  query_id: QueryId,
-  table_path: TablePath,
-  alter_op: proc::AlterOp,
-
-  // State
-  state: AlterTableS,
-}
 
 #[derive(Debug, Default)]
 pub struct Statuses {
   alter_table_ess: HashMap<QueryId, AlterTableES>,
 }
-
-// -----------------------------------------------------------------------------------------------
-//  Master State
-// -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct MasterState<T: IOTypes> {
@@ -71,7 +41,6 @@ impl<T: IOTypes> MasterState<T> {
     rand: T::RngCoreT,
     clock: T::ClockT,
     network_output: T::NetworkOutT,
-    tablet_forward_output: T::TabletForwardOutT,
     db_schema: HashMap<TablePath, TableSchema>,
     sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
@@ -82,7 +51,6 @@ impl<T: IOTypes> MasterState<T> {
         rand,
         clock,
         network_output,
-        tablet_forward_output,
         gen: Gen(0),
         db_schema,
         sharding_config,
@@ -102,22 +70,21 @@ impl<T: IOTypes> MasterState<T> {
 #[derive(Debug)]
 pub struct MasterContext<T: IOTypes> {
   /// IO Objects.
-  rand: T::RngCoreT,
-  clock: T::ClockT,
-  network_output: T::NetworkOutT,
-  tablet_forward_output: T::TabletForwardOutT,
+  pub rand: T::RngCoreT,
+  pub clock: T::ClockT,
+  pub network_output: T::NetworkOutT,
 
   /// Database Schema
-  gen: Gen,
-  db_schema: HashMap<TablePath, TableSchema>,
+  pub gen: Gen,
+  pub db_schema: HashMap<TablePath, TableSchema>,
 
   /// Distribution
-  sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-  tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
 
   /// Request Management
-  external_request_id_map: HashMap<RequestId, QueryId>,
+  pub external_request_id_map: HashMap<RequestId, QueryId>,
 }
 
 impl<T: IOTypes> MasterContext<T> {
@@ -167,9 +134,23 @@ impl<T: IOTypes> MasterContext<T> {
         if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
           self.exit_and_clean_up(statuses, query_id.clone())
         }
+        // Send off a cancellation confirmation to the External.
+        self.network_output.send(
+          &cancel.sender_eid,
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+            msg::ExternalDDLQueryAborted {
+              request_id: cancel.request_id,
+              payload: ExternalDDLQueryAbortData::ConfirmCancel,
+            },
+          )),
+        );
       }
       MasterMessage::AlterTablePrepared(prepared) => {
-        self.handle_alter_table_prepared(statuses, prepared);
+        let query_id = prepared.query_id.clone();
+        if let Some(es) = statuses.alter_table_ess.get_mut(&query_id) {
+          let action = es.handle_prepared(self, prepared);
+          self.handle_alter_table_es_action(statuses, query_id, action);
+        }
       }
       MasterMessage::AlterTableAborted(_) => {
         // The Tablets never send this.
@@ -218,8 +199,8 @@ impl<T: IOTypes> MasterContext<T> {
     self.run_main_loop(statuses);
   }
 
-  /// Validate the uniqueness of `RequestId`, parse the SQL, and do minor
-  /// validations on it before returning the parsed output.
+  /// Validate the uniqueness of `RequestId`, parse the SQL, ensure the `TablePath` exists, and
+  /// check that the column being modified is not a key column before returning the `AlterTable`.
   fn validate_ddl_query(
     &self,
     external_query: &msg::PerformExternalDDLQuery,
@@ -259,136 +240,30 @@ impl<T: IOTypes> MasterContext<T> {
   /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
   fn run_main_loop_once(&mut self, statuses: &mut Statuses) -> bool {
     // First, figure out which (TablePath, ColName)s are used by `alter_table_ess`.
-    let mut used_col_names = HashSet::<(&TablePath, &ColName)>::new();
+    let mut used_col_names = HashSet::<(TablePath, ColName)>::new();
     for (_, es) in &statuses.alter_table_ess {
-      used_col_names.insert((&es.table_path, &es.alter_op.col_name));
+      used_col_names.insert((es.table_path.clone(), es.alter_op.col_name.clone()));
     }
 
-    // Then, see if there is a `pending_alter_table_requests` that doesn't use the above.
-    for (query_id, es) in &statuses.alter_table_ess {
-      if !used_col_names.contains(&(&es.table_path, &es.alter_op.col_name)) {
-        // Remove the element from `pending_*`, construct an AlterTableES, and start it.
-        self.start_alter_table(statuses, query_id.clone());
-        return true;
+    // Then, see if there is AlterTableES that is still in the `Start` state that
+    // does not use the above, and start it if it exists.
+    for (query_id, es) in &mut statuses.alter_table_ess {
+      if matches!(es.state, AlterTableS::Start) {
+        if !used_col_names.contains(&(es.table_path.clone(), es.alter_op.col_name.clone())) {
+          let query_id = query_id.clone();
+          let action = es.start(self);
+          self.handle_alter_table_es_action(statuses, query_id, action);
+          return true;
+        }
       }
     }
 
     return false;
   }
 
-  /// Here, we start the AlterTable, sending out the Prepare messages.
-  fn start_alter_table(&mut self, statuses: &mut Statuses, query_id: QueryId) {
-    let es = statuses.alter_table_ess.get_mut(&query_id).unwrap();
-
-    // First, we compute if the `col_name` is currently present in the TableSchema of `table_path`.
-    let table_schema = self.db_schema.get(&es.table_path).unwrap();
-    let maybe_col_type = table_schema.val_cols.get_last_version(&es.alter_op.col_name);
-
-    // Next, we check if the current `alter_op` is Column Valid.
-    if (maybe_col_type.is_none() && es.alter_op.maybe_col_type.is_none())
-      || (maybe_col_type.is_some() && es.alter_op.maybe_col_type.is_some())
-    {
-      // This means the `alter_op` is not Column Valid. Thus, we can't service this request
-      // so we Exit and Clean Up, responding to the External.
-      self.network_output.send(
-        &es.sender_eid,
-        msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-          msg::ExternalDDLQueryAborted {
-            request_id: es.request_id.clone(),
-            payload: ExternalDDLQueryAbortData::InvalidAlterOp,
-          },
-        )),
-      );
-      self.exit_and_clean_up(statuses, query_id);
-    } else {
-      // Otherwise, we start the 2PC.
-
-      // Okay, so what now? move `state`, construct tm_state, send off altertableprepred.
-      let mut tm_state = HashMap::<TabletGroupId, Option<Timestamp>>::new();
-      for (_, tid) in self.sharding_config.get(&es.table_path).unwrap() {
-        tm_state.insert(tid.clone(), None);
-      }
-
-      // Send off AlterTablePrepare to the Tablets and move the `state` to Executing.
-      for tid in tm_state.keys() {
-        self.ctx().send_to_tablet(
-          tid.clone(),
-          msg::TabletMessage::AlterTablePrepare(msg::AlterTablePrepare {
-            query_id: query_id.clone(),
-            alter_op: es.alter_op.clone(),
-          }),
-        )
-      }
-
-      es.state = AlterTableS::Executing(Executing { responded_count: 0, tm_state });
-    }
-  }
-
-  /// Handle `AlterTablePrepared`
-  fn handle_alter_table_prepared(
-    &mut self,
-    statuses: &mut Statuses,
-    prepared: msg::AlterTablePrepared,
-  ) {
-    if let Some(es) = statuses.alter_table_ess.get_mut(&prepared.query_id) {
-      let executing = cast!(AlterTableS::Executing, &mut es.state).unwrap();
-      let rm_state = executing.tm_state.get_mut(&prepared.tablet_group_id).unwrap();
-      assert_eq!(rm_state, &None);
-      *rm_state = Some(prepared.timestamp.clone());
-      executing.responded_count += 1;
-
-      // Check if all RMs have responded and finish AlterTableES if so.
-      if executing.responded_count == executing.tm_state.len() {
-        // Compute the final timestamp to apply the `alter_op` at.
-        let table_schema = self.db_schema.get_mut(&es.table_path).unwrap();
-        let mut new_timestamp = table_schema.val_cols.get_lat(&es.alter_op.col_name);
-        for (_, rm_state) in &executing.tm_state {
-          new_timestamp = max(new_timestamp, rm_state.unwrap());
-        }
-        new_timestamp.0 += 1; // We add 1, since we can't actually modify a value at a `lat`.
-
-        // Apply the `alter_op`.
-        self.gen.0 += 1;
-        table_schema.val_cols.write(
-          &es.alter_op.col_name,
-          es.alter_op.maybe_col_type.clone(),
-          new_timestamp,
-        );
-
-        // Send off AlterTableCommit to the Tablets.
-        let gossip_data = GossipDataSer::from_gossip(GossipData {
-          gossip_gen: self.gen.clone(),
-          gossiped_db_schema: self.db_schema.clone(),
-        });
-        for tid in executing.tm_state.keys() {
-          self.ctx().send_to_tablet(
-            tid.clone(),
-            msg::TabletMessage::AlterTableCommit(msg::AlterTableCommit {
-              query_id: es.query_id.clone(),
-              timestamp: new_timestamp,
-              gossip_data: gossip_data.clone(),
-            }),
-          );
-        }
-
-        // Send off a success message to the External and ECU this ES.
-        self.network_output.send(
-          &es.sender_eid,
-          msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
-            msg::ExternalDDLQuerySuccess {
-              request_id: es.request_id.clone(),
-              timestamp: new_timestamp,
-            },
-          )),
-        );
-        let query_id = es.query_id.clone();
-        self.exit_and_clean_up(statuses, query_id);
-      }
-    }
-  }
-
   /// For each node in the `frozen_col_usage_tree`, we take the union of `safe_present_cols`
-  /// and `external_col`, and then increase their lat to the `timestamp`.
+  /// and `external_col`, and then increase their lat to the `timestamp`. This makes computing
+  /// a FrozelColUsageTree at this Timestamp idemptotent.
   fn freeze_schema(&mut self, frozen_col_usage_tree: &FrozenColUsageTree, timestamp: Timestamp) {
     fn freeze_schema_r(
       db_schema: &mut HashMap<TablePath, TableSchema>,
@@ -433,23 +308,51 @@ impl<T: IOTypes> MasterContext<T> {
     }
   }
 
+  /// Handles the actions specified by a AlterTableES.
+  fn handle_alter_table_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: AlterTableAction,
+  ) {
+    match action {
+      AlterTableAction::Wait => {}
+      AlterTableAction::Success(new_timestamp) => {
+        let es = statuses.alter_table_ess.remove(&query_id).unwrap();
+        self.external_request_id_map.remove(&es.request_id);
+        // Send off a success message to the Externa.
+        self.network_output.send(
+          &es.sender_eid,
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
+            msg::ExternalDDLQuerySuccess {
+              request_id: es.request_id.clone(),
+              timestamp: new_timestamp,
+            },
+          )),
+        );
+      }
+      AlterTableAction::ColumnInvalid => {
+        let es = statuses.alter_table_ess.remove(&query_id).unwrap();
+        self.external_request_id_map.remove(&es.request_id);
+        // Send off a failure message to the External.
+        self.network_output.send(
+          &es.sender_eid,
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+            msg::ExternalDDLQueryAborted {
+              request_id: es.request_id.clone(),
+              payload: ExternalDDLQueryAbortData::InvalidAlterOp,
+            },
+          )),
+        );
+      }
+    }
+  }
+
   /// Removes the `query_id` from the Master, cleaning up any remaining resources as well.
   fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
-    if let Some(es) = statuses.alter_table_ess.remove(&query_id) {
+    if let Some(mut es) = statuses.alter_table_ess.remove(&query_id) {
       self.external_request_id_map.remove(&es.request_id);
-      match es.state {
-        AlterTableS::Start => {}
-        AlterTableS::Executing(executing) => {
-          for (tid, _) in executing.tm_state {
-            self.ctx().send_to_tablet(
-              tid.clone(),
-              msg::TabletMessage::AlterTableAbort(msg::AlterTableAbort {
-                query_id: es.query_id.clone(),
-              }),
-            );
-          }
-        }
-      }
+      es.exit_and_clean_up(self);
     }
   }
 }

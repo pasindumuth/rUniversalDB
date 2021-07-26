@@ -397,6 +397,7 @@ pub struct PerformExternalDDLQuery {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CancelExternalDDLQuery {
+  pub sender_eid: EndpointId,
   pub request_id: RequestId,
 }
 
@@ -405,7 +406,7 @@ pub enum ExternalDDLQueryAbortData {
   NonUniqueRequestId,
   ParseError(String),
   InvalidAlterOp,
-  Cancelled,
+  ConfirmCancel,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

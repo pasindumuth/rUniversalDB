@@ -2,6 +2,7 @@
 
 #[macro_use]
 pub mod lang;
+pub mod alter_table_es;
 pub mod col_usage;
 pub mod common;
 pub mod experimental;
