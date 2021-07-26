@@ -308,7 +308,7 @@ impl FullMSCoordES {
     // First, we commit all RMs.
     for query_path in &es.all_rms {
       ctx.ctx().core_ctx().send_to_tablet(
-        query_path.maybe_tablet_group_id.clone().unwrap(),
+        query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
         msg::TabletMessage::Query2PCCommit(msg::Query2PCCommit {
           ms_query_id: query_path.query_id.clone(),
         }),
@@ -320,7 +320,7 @@ impl FullMSCoordES {
     for query_path in &es.registered_queries {
       if !es.all_rms.contains(query_path) {
         ctx.ctx().core_ctx().send_to_tablet(
-          query_path.maybe_tablet_group_id.clone().unwrap(),
+          query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
           msg::TabletMessage::CancelQuery(msg::CancelQuery {
             query_id: query_path.query_id.clone(),
           }),
@@ -356,7 +356,7 @@ impl FullMSCoordES {
         let sender_path = ctx.mk_query_path(es.query_id.clone());
         for query_path in &es.all_rms {
           ctx.ctx().core_ctx().send_to_tablet(
-            query_path.maybe_tablet_group_id.clone().unwrap(),
+            query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
             msg::TabletMessage::Query2PCPrepare(msg::Query2PCPrepare {
               sender_path: sender_path.clone(),
               ms_query_id: query_path.query_id.clone(),
@@ -411,9 +411,10 @@ impl FullMSCoordES {
 
     // Create Construct the TMStatus that's going to be used to coordinate this stage.
     let tm_qid = mk_qid(&mut ctx.rand);
+    let child_qid = mk_qid(&mut ctx.rand);
     let mut tm_status = TMStatus {
-      node_group_ids: Default::default(),
       query_id: tm_qid.clone(),
+      child_query_id: child_qid.clone(),
       new_rms: Default::default(),
       responded_count: 0,
       tm_state: Default::default(),
@@ -443,11 +444,10 @@ impl FullMSCoordES {
             // Having non-empty `tids` solves the TMStatus deadlock and determining the child schema.
             assert!(tids.len() > 0);
             for tid in tids {
-              let child_query_id = mk_qid(&mut ctx.rand);
               let perform_query = msg::PerformQuery {
                 root_query_path: root_query_path.clone(),
                 sender_path: sender_path.clone(),
-                query_id: child_query_id.clone(),
+                query_id: child_qid.clone(),
                 tier_map: es.all_tier_maps.get(trans_table_name).unwrap().clone(),
                 query: msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query.clone()),
               };
@@ -457,8 +457,7 @@ impl FullMSCoordES {
               ctx.ctx().send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
 
               // Add the TabletGroup into the TMStatus.
-              tm_status.node_group_ids.insert(nid, child_query_id.clone());
-              tm_status.tm_state.insert(child_query_id, None);
+              tm_status.tm_state.insert(ctx.ctx().core_ctx().mk_node_path(nid), None);
             }
           }
           proc::TableRef::TransTableName(trans_table_name) => {
@@ -473,11 +472,10 @@ impl FullMSCoordES {
 
             // Add in the Slave to `tm_state`, and send out the PerformQuery. Recall that
             // if we are doing a TransTableRead here, then the TransTable must be located here.
-            let child_query_id = mk_qid(&mut ctx.rand);
             let perform_query = msg::PerformQuery {
               root_query_path,
               sender_path,
-              query_id: child_query_id.clone(),
+              query_id: child_qid.clone(),
               tier_map: es.all_tier_maps.get(trans_table_name).unwrap().clone(),
               query: msg::GeneralQuery::SuperSimpleTransTableSelectQuery(
                 msg::SuperSimpleTransTableSelectQuery {
@@ -494,8 +492,7 @@ impl FullMSCoordES {
             ctx.ctx().send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
 
             // Add the TabletGroup into the TMStatus.
-            tm_status.node_group_ids.insert(nid, child_query_id.clone());
-            tm_status.tm_state.insert(child_query_id, None);
+            tm_status.tm_state.insert(ctx.ctx().core_ctx().mk_node_path(nid), None);
           }
         }
       }
@@ -513,11 +510,10 @@ impl FullMSCoordES {
         // Having non-empty `tids` solves the TMStatus deadlock and determining the child schema.
         assert!(tids.len() > 0);
         for tid in tids {
-          let child_query_id = mk_qid(&mut ctx.rand);
           let perform_query = msg::PerformQuery {
             root_query_path: root_query_path.clone(),
             sender_path: sender_path.clone(),
-            query_id: child_query_id.clone(),
+            query_id: child_qid.clone(),
             tier_map: es.all_tier_maps.get(trans_table_name).unwrap().clone(),
             query: msg::GeneralQuery::UpdateQuery(child_query.clone()),
           };
@@ -527,8 +523,7 @@ impl FullMSCoordES {
           ctx.ctx().send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
 
           // Add the TabletGroup into the TMStatus.
-          tm_status.node_group_ids.insert(nid, child_query_id.clone());
-          tm_status.tm_state.insert(child_query_id, None);
+          tm_status.tm_state.insert(ctx.ctx().core_ctx().mk_node_path(nid), None);
         }
       }
     };
@@ -563,7 +558,7 @@ impl FullMSCoordES {
             // `registered_queries` can be cancelled with CancelQuery.
             for query_path in &es.all_rms {
               ctx.ctx().core_ctx().send_to_tablet(
-                query_path.maybe_tablet_group_id.clone().unwrap(),
+                query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
                 msg::TabletMessage::Query2PCAbort(msg::Query2PCAbort {
                   ms_query_id: query_path.query_id.clone(),
                 }),
@@ -572,7 +567,7 @@ impl FullMSCoordES {
             for query_path in &es.registered_queries {
               if !es.all_rms.contains(query_path) {
                 ctx.ctx().core_ctx().send_to_tablet(
-                  query_path.maybe_tablet_group_id.clone().unwrap(),
+                  query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
                   msg::TabletMessage::CancelQuery(msg::CancelQuery {
                     query_id: query_path.query_id.clone(),
                   }),

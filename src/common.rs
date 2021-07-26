@@ -1,7 +1,7 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::model::common::{
-  ColName, ColType, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, TablePath, TableView,
-  TabletGroupId, Timestamp, TransTableName,
+  ColName, ColType, EndpointId, Gen, NodeGroupId, NodePath, QueryId, QueryPath, TablePath,
+  TableView, TabletGroupId, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
@@ -199,14 +199,15 @@ impl GossipDataSer {
 // These are used to perform PCSA over the network for reads and writes.
 #[derive(Debug)]
 pub struct TMStatus {
-  /// Maps every the `NodeGroupId` Server involved in the PCSA to the `QueryId` sent to it.
-  /// This is needed for cancelling.
-  pub node_group_ids: HashMap<NodeGroupId, QueryId>,
+  /// The QueryId of the TMStatus.
   pub query_id: QueryId,
+  /// This is the QueryId of the PerformQuery. We keep this distinct from the TMStatus'
+  /// QueryId, since one of the RMs might be this node.
+  pub child_query_id: QueryId,
   pub new_rms: HashSet<QueryPath>,
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   pub responded_count: usize,
-  pub tm_state: HashMap<QueryId, Option<(Vec<ColName>, Vec<TableView>)>>,
+  pub tm_state: HashMap<NodePath, Option<(Vec<ColName>, Vec<TableView>)>>,
   pub orig_p: OrigP,
 }
 

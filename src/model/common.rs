@@ -123,11 +123,17 @@ pub enum NodeGroupId {
   Slave(SlaveGroupId),
 }
 
+/// This is a generic struct that refers to a non-Master node in the system.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodePath {
+  pub slave_group_id: SlaveGroupId,
+  pub maybe_tablet_group_id: Option<TabletGroupId>,
+}
+
 /// This is a generic struct that refers to an ES in the system.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct QueryPath {
-  pub slave_group_id: SlaveGroupId,
-  pub maybe_tablet_group_id: Option<TabletGroupId>,
+  pub node_path: NodePath,
   pub query_id: QueryId,
 }
 
@@ -179,6 +185,16 @@ impl ContextSchema {
 impl Context {
   pub fn new(context_schema: ContextSchema) -> Context {
     Context { context_schema, context_rows: vec![] }
+  }
+}
+
+impl NodePath {
+  pub fn to_node_id(&self) -> NodeGroupId {
+    if let Some(tid) = &self.maybe_tablet_group_id {
+      NodeGroupId::Tablet(tid.clone())
+    } else {
+      NodeGroupId::Slave(self.slave_group_id.clone())
+    }
   }
 }
 

@@ -5,8 +5,8 @@ use crate::common::{
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
-  iast, proc, ColName, ColType, Context, ContextRow, Gen, NodeGroupId, QueryPath, SlaveGroupId,
-  TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
+  iast, proc, ColName, ColType, Context, ContextRow, Gen, NodeGroupId, NodePath, QueryPath,
+  SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
   TransTableLocationPrefix, TransTableName,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
@@ -377,7 +377,8 @@ impl<T: IOTypes> SlaveContext<T> {
     let tm_query_id = &query_success.return_qid;
     if let Some(tm_status) = statuses.tm_statuss.get_mut(tm_query_id) {
       // We just add the result of the `query_success` here.
-      tm_status.tm_state.insert(query_success.query_id, Some(query_success.result.clone()));
+      let node_path = query_success.responder_path.node_path;
+      tm_status.tm_state.insert(node_path, Some(query_success.result.clone()));
       tm_status.new_rms.extend(query_success.new_rms);
       tm_status.responded_count += 1;
       if tm_status.responded_count == tm_status.tm_state.len() {
@@ -426,17 +427,16 @@ impl<T: IOTypes> SlaveContext<T> {
 
   fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
     if let Some(tm_status) = statuses.tm_statuss.remove(&query_aborted.return_qid) {
-      // We Exit and Clean up this TMStatus (sending CancelQuery to all
-      // remaining participants) and send the QueryAborted back to the orig_p
-      for (node_group_id, child_query_id) in tm_status.node_group_ids {
-        if tm_status.tm_state.get(&child_query_id).unwrap() == &None
-          && child_query_id != query_aborted.query_id
-        {
-          // If the child Query hasn't responded yet, and isn't also the Query that
-          // just aborted, then we send it a CancelQuery
+      // We ECU this TMStatus by sending CancelQuery to all remaining participants.
+      // Then, we send the QueryAborted back to the orig_p.
+      for (rm_path, rm_result) in tm_status.tm_state {
+        if rm_result.is_none() && rm_path != query_aborted.responder_path.node_path {
+          // We avoid sending CancelQuery for the RM that just responded.
           self.ctx().send_to_node(
-            node_group_id,
-            CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
+            rm_path.to_node_id(),
+            CommonQuery::CancelQuery(msg::CancelQuery {
+              query_id: tm_status.child_query_id.clone(),
+            }),
           );
         }
       }
@@ -660,11 +660,12 @@ impl<T: IOTypes> SlaveContext<T> {
         // Remove the TableReadESWrapper and respond.
         let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             result: success.result,
             new_rms: success.new_rms,
           }),
@@ -674,11 +675,12 @@ impl<T: IOTypes> SlaveContext<T> {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             payload: msg::AbortedData::QueryError(query_error.clone()),
           }),
         );
@@ -688,11 +690,12 @@ impl<T: IOTypes> SlaveContext<T> {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             payload: msg::AbortedData::ColumnsDNE { missing_cols },
           }),
         );
@@ -754,7 +757,7 @@ impl<T: IOTypes> SlaveContext<T> {
       // cancel the MSQueryES immediately.
       let query_path = register.query_path;
       self.ctx().core_ctx().send_to_tablet(
-        query_path.maybe_tablet_group_id.clone().unwrap(),
+        query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
         msg::TabletMessage::CancelQuery(msg::CancelQuery { query_id: query_path.query_id.clone() }),
       );
     }
@@ -785,13 +788,14 @@ impl<T: IOTypes> SlaveContext<T> {
       trans_read.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(statuses, trans_read.child_queries);
     } else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
-      // We Exit and Clean up this TMStatus (sending CancelQuery to all remaining participants)
-      for (node_group_id, child_query_id) in tm_status.node_group_ids {
-        if tm_status.tm_state.get(&child_query_id).is_none() {
-          // If the child Query hasn't responded, then sent it a CancelQuery
+      // We ECU this TMStatus by sending CancelQuery to all remaining participants.
+      for (rm_path, rm_result) in tm_status.tm_state {
+        if rm_result.is_none() {
           self.ctx().send_to_node(
-            node_group_id,
-            CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
+            rm_path.to_node_id(),
+            CommonQuery::CancelQuery(msg::CancelQuery {
+              query_id: tm_status.child_query_id.clone(),
+            }),
           );
         }
       }
@@ -801,8 +805,10 @@ impl<T: IOTypes> SlaveContext<T> {
   /// Construct QueryPath for a given `query_id` that belongs to this Slave.
   pub fn mk_query_path(&self, query_id: QueryId) -> QueryPath {
     QueryPath {
-      slave_group_id: self.this_slave_group_id.clone(),
-      maybe_tablet_group_id: None,
+      node_path: NodePath {
+        slave_group_id: self.this_slave_group_id.clone(),
+        maybe_tablet_group_id: None,
+      },
       query_id,
     }
   }

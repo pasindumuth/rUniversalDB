@@ -4,8 +4,9 @@ use crate::col_usage::{
 };
 use crate::common::{lookup, lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
 use crate::model::common::{
-  proc, ColName, Context, ContextRow, ContextSchema, Gen, NodeGroupId, QueryId, QueryPath,
-  TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
+  proc, ColName, Context, ContextRow, ContextSchema, Gen, NodeGroupId, NodePath, QueryId,
+  QueryPath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::{CommonQuery, ServerContext};
@@ -217,7 +218,7 @@ impl GRQueryES {
   pub fn handle_tm_success<T: IOTypes>(
     &mut self,
     ctx: &mut ServerContext<T>,
-    tm_query_id: QueryId,
+    tm_qid: QueryId,
     new_rms: HashSet<QueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> GRQueryAction {
@@ -226,7 +227,7 @@ impl GRQueryES {
     // Extract the `context` from the SubqueryPending status and verify
     // that it corresponds to `table_views`.
     let pending_status = &read_stage.pending_status;
-    assert_eq!(pending_status.query_id, tm_query_id);
+    assert_eq!(pending_status.query_id, tm_qid);
     assert_eq!(table_views.len(), pending_status.context.context_rows.len());
 
     // For now, just assert that the schema that we get corresponds to that in the QueryPlan.
@@ -509,21 +510,17 @@ impl GRQueryES {
     };
 
     // Construct the TMStatus
-    let tm_query_id = mk_qid(ctx.rand);
+    let tm_qid = mk_qid(ctx.rand);
+    let child_qid = mk_qid(&mut ctx.rand);
     let mut tm_status = TMStatus {
-      node_group_ids: Default::default(),
-      query_id: tm_query_id.clone(),
+      query_id: tm_qid.clone(),
+      child_query_id: child_qid.clone(),
       new_rms: Default::default(),
       responded_count: 0,
       tm_state: Default::default(),
       orig_p: OrigP::new(self.query_id.clone()),
     };
-
-    let sender_path = QueryPath {
-      slave_group_id: ctx.this_slave_group_id.clone(),
-      maybe_tablet_group_id: ctx.maybe_this_tablet_group_id.map(|id| id.deref().clone()),
-      query_id: tm_query_id.clone(),
-    };
+    let sender_path = ctx.mk_query_path(tm_qid.clone());
 
     // Send out the PerformQuery and populate TMStatus accordingly.
     let (_, stage) = self.sql_query.trans_tables.get(stage_idx).unwrap();
@@ -544,22 +541,20 @@ impl GRQueryES {
         for tid in tids {
           // Construct PerformQuery
           let general_query = msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query.clone());
-          let child_query_id = mk_qid(ctx.rand);
           let perform_query = msg::PerformQuery {
             root_query_path: self.root_query_path.clone(),
             sender_path: sender_path.clone(),
-            query_id: child_query_id.clone(),
+            query_id: child_qid.clone(),
             tier_map: self.tier_map.clone(),
             query: general_query,
           };
 
-          // Send out PerformQuery. Recall that this could only be a a Tablet.
-          let node_group_id = NodeGroupId::Tablet(tid);
-          ctx.send_to_node(node_group_id.clone(), CommonQuery::PerformQuery(perform_query));
+          // Send out PerformQuery. Recall that this could only be a Tablet.
+          let nid = NodeGroupId::Tablet(tid);
+          ctx.send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
 
           // Add the TabletGroup into the TMStatus.
-          tm_status.node_group_ids.insert(node_group_id, child_query_id.clone());
-          tm_status.tm_state.insert(child_query_id, None);
+          tm_status.tm_state.insert(ctx.core_ctx().mk_node_path(nid), None);
         }
       }
       proc::TableRef::TransTableName(trans_table_name) => {
@@ -580,22 +575,20 @@ impl GRQueryES {
 
         // Construct PerformQuery
         let general_query = msg::GeneralQuery::SuperSimpleTransTableSelectQuery(child_query);
-        let child_query_id = mk_qid(ctx.rand);
         let perform_query = msg::PerformQuery {
           root_query_path: self.root_query_path.clone(),
           sender_path: sender_path.clone(),
-          query_id: child_query_id.clone(),
+          query_id: child_qid.clone(),
           tier_map: self.tier_map.clone(),
           query: general_query,
         };
 
         // Send out PerformQuery. Recall that this could be a Slave or a Tablet.
-        let node_group_id = location_prefix.source.clone();
-        ctx.send_to_node(node_group_id.clone(), CommonQuery::PerformQuery(perform_query));
+        let nid = location_prefix.source.clone();
+        ctx.send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
 
         // Add the TabletGroup into the TMStatus.
-        tm_status.node_group_ids.insert(node_group_id, child_query_id.clone());
-        tm_status.tm_state.insert(child_query_id, None);
+        tm_status.tm_state.insert(ctx.core_ctx().mk_node_path(nid), None);
       }
     };
 
@@ -603,7 +596,7 @@ impl GRQueryES {
     self.state = GRExecutionS::ReadStage(ReadStage {
       stage_idx,
       parent_context_map,
-      pending_status: SubqueryPending { context: Rc::new(context), query_id: tm_query_id.clone() },
+      pending_status: SubqueryPending { context: Rc::new(context), query_id: tm_qid.clone() },
     });
 
     // Return the TMStatus for the parent Server to execute.

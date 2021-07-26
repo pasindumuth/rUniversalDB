@@ -64,8 +64,6 @@ impl AlterTableES {
       AlterTableAction::ColumnInvalid
     } else {
       // Otherwise, we start the 2PC.
-      // TODO: make the change to Messages. the below is correct according to the new
-      // scheme, so we can make this change after auditing Master + AlterTable.
       let mut tm_state = HashMap::<TabletGroupId, Option<Timestamp>>::new();
       for (_, tid) in ctx.sharding_config.get(&self.table_path).unwrap() {
         tm_state.insert(tid.clone(), None);

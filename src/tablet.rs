@@ -17,8 +17,8 @@ use crate::gr_query_es::{
   SubqueryComputableSql,
 };
 use crate::model::common::{
-  proc, ColType, ColValN, Context, ContextRow, ContextSchema, Gen, NodeGroupId, QueryPath,
-  TableView, TierMap, TransTableLocationPrefix, TransTableName,
+  proc, ColType, ColValN, Context, ContextRow, ContextSchema, Gen, NodeGroupId, NodePath,
+  QueryPath, TableView, TierMap, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::common::{
   ColName, ColVal, EndpointId, PrimaryKey, QueryId, SlaveGroupId, TablePath, TabletGroupId,
@@ -647,7 +647,7 @@ impl<T: IOTypes> TabletContext<T> {
           let return_qid = prepare.sender_path.query_id.clone();
           let rm_path = self.mk_query_path(prepare.ms_query_id);
           self.ctx().core_ctx().send_to_slave(
-            prepare.sender_path.slave_group_id,
+            prepare.sender_path.node_path.slave_group_id,
             msg::SlaveMessage::Query2PCPrepared(msg::Query2PCPrepared { return_qid, rm_path }),
           );
         } else {
@@ -657,7 +657,7 @@ impl<T: IOTypes> TabletContext<T> {
           let return_qid = prepare.sender_path.query_id.clone();
           let rm_path = self.mk_query_path(prepare.ms_query_id);
           self.ctx().core_ctx().send_to_slave(
-            prepare.sender_path.slave_group_id,
+            prepare.sender_path.node_path.slave_group_id,
             msg::SlaveMessage::Query2PCAborted(msg::Query2PCAborted {
               return_qid,
               rm_path,
@@ -744,7 +744,7 @@ impl<T: IOTypes> TabletContext<T> {
         // Check a few guaranteed properties.
         let col_name = &prepare.alter_op.col_name;
         assert!(!self.prepared_scheme_change.contains_key(col_name));
-        assert!(!self.table_schema.key_cols.contains_key(col_name));
+        assert!(lookup(&self.table_schema.key_cols, col_name).is_none());
         let maybe_col_type = self.table_schema.val_cols.get_last_version(col_name);
         // Assert Column Validness of the incoming request.
         assert!(
@@ -842,7 +842,7 @@ impl<T: IOTypes> TabletContext<T> {
           query_path: self.mk_query_path(ms_query_id.clone()),
         };
         self.ctx().core_ctx().send_to_slave(
-          root_query_path.slave_group_id.clone(),
+          root_query_path.node_path.slave_group_id.clone(),
           msg::SlaveMessage::RegisterQuery(register_query),
         );
 
@@ -1202,11 +1202,12 @@ impl<T: IOTypes> TabletContext<T> {
     let query_id = protect_request.orig_p.query_id;
     if let Some(mut read) = statuses.full_table_read_ess.remove(&query_id) {
       let sender_path = read.sender_path;
+      let responder_path = self.mk_query_path(query_id);
       self.ctx().send_to_path(
         sender_path.clone(),
         CommonQuery::QueryAborted(msg::QueryAborted {
           return_qid: sender_path.query_id,
-          query_id,
+          responder_path,
           payload: msg::AbortedData::QueryError(msg::QueryError::DeadlockSafetyAbortion),
         }),
       );
@@ -1257,7 +1258,8 @@ impl<T: IOTypes> TabletContext<T> {
     let tm_query_id = &query_success.return_qid;
     if let Some(tm_status) = statuses.tm_statuss.get_mut(tm_query_id) {
       // We just add the result of the `query_success` here.
-      tm_status.tm_state.insert(query_success.query_id, Some(query_success.result.clone()));
+      let node_path = query_success.responder_path.node_path;
+      tm_status.tm_state.insert(node_path, Some(query_success.result.clone()));
       tm_status.new_rms.extend(query_success.new_rms);
       tm_status.responded_count += 1;
       if tm_status.responded_count == tm_status.tm_state.len() {
@@ -1287,22 +1289,21 @@ impl<T: IOTypes> TabletContext<T> {
   fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
     let tm_query_id = &query_aborted.return_qid;
     if let Some(tm_status) = statuses.tm_statuss.remove(tm_query_id) {
-      // We Exit and Clean up this TMStatus (sending CancelQuery to all
-      // remaining participants) and send the QueryAborted back to the orig_p
-      for (node_group_id, child_query_id) in tm_status.node_group_ids {
-        if tm_status.tm_state.get(&child_query_id).is_none()
-          && child_query_id != query_aborted.query_id
-        {
-          // If the child Query hasn't responded yet, and isn't also the Query that
-          // just aborted, then we send it a CancelQuery
+      // We ECU this TMStatus by sending CancelQuery to all remaining participants.
+      // Then, we send the QueryAborted back to the orig_p.
+      for (rm_path, rm_result) in tm_status.tm_state {
+        if rm_result.is_none() && rm_path != query_aborted.responder_path.node_path {
+          // We avoid sending CancelQuery for the RM that just responded.
           self.ctx().send_to_node(
-            node_group_id,
-            CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
+            rm_path.to_node_id(),
+            CommonQuery::CancelQuery(msg::CancelQuery {
+              query_id: tm_status.child_query_id.clone(),
+            }),
           );
         }
       }
 
-      // Finally, we propagate up the AbortData to the GRQueryES that owns this TMStatus
+      // Finally, we propagate tge AbortData to the GRQueryES that owns this TMStatus
       let gr_query_id = tm_status.orig_p.query_id;
       let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
       remove_item(&mut gr_query.child_queries, tm_query_id);
@@ -1486,11 +1487,12 @@ impl<T: IOTypes> TabletContext<T> {
         // Remove the TableReadESWrapper and respond.
         let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             result: success.result,
             new_rms: success.new_rms,
           }),
@@ -1500,11 +1502,12 @@ impl<T: IOTypes> TabletContext<T> {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             payload: msg::AbortedData::QueryError(query_error.clone()),
           }),
         );
@@ -1514,11 +1517,12 @@ impl<T: IOTypes> TabletContext<T> {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             payload: msg::AbortedData::ColumnsDNE { missing_cols },
           }),
         );
@@ -1543,11 +1547,12 @@ impl<T: IOTypes> TabletContext<T> {
         // Remove the TableReadESWrapper and respond.
         let read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             result: success.result,
             new_rms: success.new_rms,
           }),
@@ -1557,11 +1562,12 @@ impl<T: IOTypes> TabletContext<T> {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             payload: msg::AbortedData::QueryError(query_error.clone()),
           }),
         );
@@ -1571,11 +1577,12 @@ impl<T: IOTypes> TabletContext<T> {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             payload: msg::AbortedData::ColumnsDNE { missing_cols },
           }),
         );
@@ -1600,11 +1607,12 @@ impl<T: IOTypes> TabletContext<T> {
         // MSTableReadES
         ms_read.es.exit_and_clean_up(self);
         let sender_path = ms_read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             payload: msg::AbortedData::QueryError(query_error.clone()),
           }),
         );
@@ -1613,11 +1621,12 @@ impl<T: IOTypes> TabletContext<T> {
         // MSTableWriteES
         ms_write.es.exit_and_clean_up(self);
         let sender_path = ms_write.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             payload: msg::AbortedData::QueryError(query_error.clone()),
           }),
         );
@@ -1648,11 +1657,12 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_query_es = statuses.ms_query_ess.get_mut(ms_write.es.ms_query_id()).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_write.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             result: success.result,
             new_rms: success.new_rms,
           }),
@@ -1669,11 +1679,12 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_query_es = statuses.ms_query_ess.get_mut(ms_write.es.ms_query_id()).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_write.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             payload: msg::AbortedData::ColumnsDNE { missing_cols },
           }),
         );
@@ -1700,11 +1711,12 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_query_es = statuses.ms_query_ess.get_mut(ms_read.es.ms_query_id()).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             result: success.result,
             new_rms: success.new_rms,
           }),
@@ -1721,11 +1733,12 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_query_es = statuses.ms_query_ess.get_mut(ms_read.es.ms_query_id()).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
-            query_id,
+            responder_path,
             payload: msg::AbortedData::ColumnsDNE { missing_cols },
           }),
         );
@@ -1802,13 +1815,14 @@ impl<T: IOTypes> TabletContext<T> {
       trans_read.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(statuses, trans_read.child_queries);
     } else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
-      // We Exit and Clean up this TMStatus (sending CancelQuery to all remaining participants)
-      for (node_group_id, child_query_id) in tm_status.node_group_ids {
-        if tm_status.tm_state.get(&child_query_id).is_none() {
-          // If the child Query hasn't responded, then sent it a CancelQuery
+      // We ECU this TMStatus by sending CancelQuery to all remaining participants.
+      for (rm_path, rm_result) in tm_status.tm_state {
+        if rm_result.is_none() {
           self.ctx().send_to_node(
-            node_group_id,
-            CommonQuery::CancelQuery(msg::CancelQuery { query_id: child_query_id }),
+            rm_path.to_node_id(),
+            CommonQuery::CancelQuery(msg::CancelQuery {
+              query_id: tm_status.child_query_id.clone(),
+            }),
           );
         }
       }
@@ -1847,8 +1861,10 @@ impl<T: IOTypes> TabletContext<T> {
   /// Construct QueryPath for a given `query_id` that belongs to this Tablet.
   pub fn mk_query_path(&self, query_id: QueryId) -> QueryPath {
     QueryPath {
-      slave_group_id: self.this_slave_group_id.clone(),
-      maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
+      node_path: NodePath {
+        slave_group_id: self.this_slave_group_id.clone(),
+        maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
+      },
       query_id,
     }
   }

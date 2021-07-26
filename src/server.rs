@@ -3,8 +3,8 @@ use crate::common::{lookup_pos, GossipData, IOTypes, KeyBound, NetworkOut, OrigP
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
   proc, ColName, ColType, ColVal, ColValN, ContextRow, ContextSchema, EndpointId, NodeGroupId,
-  QueryId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, Timestamp,
-  TransTableName,
+  NodePath, QueryId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
+  Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use sqlparser::test_utils::table;
@@ -52,10 +52,10 @@ impl<'a, T: IOTypes> CoreServerContext<'a, T> {
   /// This function infers weather the CommonQuery is destined for a Slave or a Tablet
   /// by using the `sender_path`, and then acts accordingly.
   pub fn send_to_path(&mut self, sender_path: QueryPath, common_query: CommonQuery) {
-    if let Some(tablet_group_id) = sender_path.maybe_tablet_group_id {
+    if let Some(tablet_group_id) = sender_path.node_path.maybe_tablet_group_id {
       self.send_to_tablet(tablet_group_id, common_query.tablet_msg());
     } else {
-      self.send_to_slave(sender_path.slave_group_id, common_query.slave_msg());
+      self.send_to_slave(sender_path.node_path.slave_group_id, common_query.slave_msg());
     }
   }
 
@@ -69,6 +69,19 @@ impl<'a, T: IOTypes> CoreServerContext<'a, T> {
         self.send_to_slave(sid, common_query.slave_msg());
       }
     };
+  }
+
+  /// Construct a `NodePath` from a `NodeGroupId`.
+  pub fn mk_node_path(&mut self, node_group_id: NodeGroupId) -> NodePath {
+    match node_group_id {
+      NodeGroupId::Tablet(tid) => {
+        let sid = self.tablet_address_config.get(&tid).unwrap();
+        NodePath { slave_group_id: sid.clone(), maybe_tablet_group_id: Some(tid) }
+      }
+      NodeGroupId::Slave(sid) => {
+        NodePath { slave_group_id: sid.clone(), maybe_tablet_group_id: None }
+      }
+    }
   }
 }
 
@@ -124,7 +137,7 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
   ) {
     let aborted = msg::QueryAborted {
       return_qid: sender_path.query_id.clone(),
-      query_id: query_id.clone(),
+      responder_path: self.mk_query_path(query_id),
       payload: abort_data,
     };
     self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
@@ -179,8 +192,10 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
   /// Construct QueryPath for a given `query_id` that belongs to this Server.
   pub fn mk_query_path(&self, query_id: QueryId) -> QueryPath {
     QueryPath {
-      slave_group_id: self.this_slave_group_id.clone(),
-      maybe_tablet_group_id: self.maybe_this_tablet_group_id.cloned(),
+      node_path: NodePath {
+        slave_group_id: self.this_slave_group_id.clone(),
+        maybe_tablet_group_id: self.maybe_this_tablet_group_id.cloned(),
+      },
       query_id,
     }
   }
