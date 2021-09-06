@@ -264,7 +264,7 @@ pub fn merge_table_views(
 pub struct QueryPlan {
   pub tier_map: TierMap,
   pub query_leader_map: HashMap<SlaveGroupId, LeadershipId>,
-  pub table_location_map: HashMap<TablePath, u64>,
+  pub table_location_map: HashMap<TablePath, Gen>,
   /// These are additional required columns that the QueryPlan expects that these `TablePaths`
   /// to have. While a TP is happen is happening, we must must these `ColName` and verify
   /// their presence.

@@ -69,7 +69,7 @@ pub struct Timestamp(pub u128);
 
 /// A Type for the generation of a gossip message.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
-pub struct Gen(pub u32);
+pub struct Gen(pub u64);
 
 // -------------------------------------------------------------------------------------------------
 //  Transaction Data Structures
@@ -111,6 +111,10 @@ pub struct QueryId(pub [u8; 8]);
 /// A global identfier of a Slave.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SlaveGroupId(pub String);
+
+/// A global identfier of a Coord.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CoordGroupId(pub String);
 
 /// A request Id that globally identifies a request.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]

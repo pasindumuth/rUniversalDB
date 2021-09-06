@@ -74,7 +74,7 @@ pub struct GRQueryPlan {
   pub tier_map: TierMap,
   // TODO: add the current node's LeadershipId here when constructing from QueryPlan.
   pub query_leader_map: HashMap<SlaveGroupId, LeadershipId>,
-  pub table_location_map: HashMap<TablePath, u64>,
+  pub table_location_map: HashMap<TablePath, Gen>,
   pub extra_req_cols: HashMap<TablePath, Vec<ColName>>,
   pub col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 }
