@@ -36,9 +36,6 @@ pub enum GRQueryAction {
   /// This tells the parent Server that this GRQueryES has completed
   /// successfully (having already responded, etc).
   Success(GRQueryResult),
-  /// This indicates that the GRQueryES failed, where the Context was insufficient.
-  /// Here, the GRQueryES can just be trivially erased from the parent.
-  InternalColumnsDNE(Vec<ColName>),
   /// This indicates that the GRQueryES failed, where a child query responded with a QueryError.
   /// Here, the GRQueryES can just be trivially erased from the parent.
   QueryError(msg::QueryError),
@@ -251,41 +248,10 @@ impl GRQueryES {
   /// This is called when the TMStatus has completed unsuccessfully.
   pub fn handle_tm_aborted<T: IOTypes>(
     &mut self,
-    ctx: &mut ServerContext<T>,
+    _: &mut ServerContext<T>,
     aborted_data: msg::AbortedData,
   ) -> GRQueryAction {
-    let read_stage = cast!(GRExecutionS::ReadStage, &self.state).unwrap();
-    let pending_status = &read_stage.pending_status;
     match aborted_data {
-      msg::AbortedData::ColumnsDNE { missing_cols } => {
-        // First, assert that the missing columns are indeed not already a part of the Context.
-        for col in &missing_cols {
-          assert!(!pending_status.context.context_schema.column_context_schema.contains(col));
-        }
-
-        // Next, we compute the subset of `missing_cols` that are not in the Context here.
-        let mut rem_cols = Vec::<ColName>::new();
-        for col in &missing_cols {
-          if !self.context.context_schema.column_context_schema.contains(col) {
-            rem_cols.push(col.clone());
-          }
-        }
-
-        if !rem_cols.is_empty() {
-          // If the Context has the missing columns, propagate the error up.
-          self.state = GRExecutionS::Done;
-          GRQueryAction::InternalColumnsDNE(rem_cols)
-        } else {
-          // If the GRQueryES Context is sufficient, we simply amend the new columns
-          // to the Context and reprocess the ReadStage.
-          let context_schema = &pending_status.context.context_schema;
-          let mut context_cols = context_schema.column_context_schema.clone();
-          context_cols.extend(missing_cols);
-          let context_trans_tables = context_schema.trans_table_names();
-          let stage_idx = read_stage.stage_idx.clone();
-          self.process_gr_query_stage_simple(ctx, stage_idx, &context_cols, &context_trans_tables)
-        }
-      }
       msg::AbortedData::QueryError(query_error) => {
         // In the case of a QueryError, we just propagate it up.
         self.state = GRExecutionS::Done;

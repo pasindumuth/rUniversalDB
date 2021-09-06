@@ -1446,50 +1446,6 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// This function just routes the InternalColumnsDNE notification from the GRQueryES.
-  /// Recall that the originator must exist (since the GRQueryES had existed).
-  fn handle_internal_columns_dne(
-    &mut self,
-    statuses: &mut Statuses,
-    orig_p: OrigP,
-    subquery_id: QueryId,
-    rem_cols: Vec<ColName>,
-  ) {
-    // TODO: remove everything here.
-    // let query_id = orig_p.query_id;
-    // if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
-    //   // TableReadES
-    //   // remove_item(&mut read.child_queries, &subquery_id);
-    //   // let action = read.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
-    //   // self.handle_read_es_action(statuses, query_id, action);
-    // } else if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-    //   // TransTableReadES
-    //   let prefix = trans_read.es.location_prefix();
-    //   remove_item(&mut trans_read.child_queries, &subquery_id);
-    //   let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
-    //     trans_read.es.handle_internal_columns_dne(
-    //       &mut self.ctx(),
-    //       &gr_query.es,
-    //       subquery_id.clone(),
-    //       rem_cols,
-    //     )
-    //   } else {
-    //     trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-    //   };
-    //   self.handle_trans_read_es_action(statuses, query_id, action);
-    // } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
-    //   // MSTableWriteES
-    //   remove_item(&mut ms_write.child_queries, &subquery_id);
-    //   let action = ms_write.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
-    //   self.handle_ms_write_es_action(statuses, query_id, action);
-    // } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
-    //   // MSTableReadES
-    //   remove_item(&mut ms_read.child_queries, &subquery_id);
-    //   let action = ms_read.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
-    //   self.handle_ms_read_es_action(statuses, query_id, action);
-    // }
-  }
-
   /// This routes the QueryError propagated by a GRQueryES up to the appropriate top-level ES.
   fn handle_internal_query_error(
     &mut self,
@@ -1586,21 +1542,6 @@ impl<T: IOTypes> TabletContext<T> {
         );
         self.exit_all(statuses, trans_read.child_queries)
       }
-      TransTableAction::ColumnsDNE(missing_cols) => {
-        // Remove the TableReadESWrapper, abort subqueries, and respond.
-        let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
-        let sender_path = trans_read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
-          sender_path.clone(),
-          CommonQuery::QueryAborted(msg::QueryAborted {
-            return_qid: sender_path.query_id,
-            responder_path,
-            payload: msg::AbortedData::ColumnsDNE { missing_cols },
-          }),
-        );
-        self.exit_all(statuses, trans_read.child_queries)
-      }
     }
   }
 
@@ -1642,21 +1583,6 @@ impl<T: IOTypes> TabletContext<T> {
             return_qid: sender_path.query_id,
             responder_path,
             payload: msg::AbortedData::QueryError(query_error.clone()),
-          }),
-        );
-        self.exit_all(statuses, read.child_queries)
-      }
-      TableAction::ColumnsDNE(missing_cols) => {
-        // Remove the TableReadESWrapper, abort subqueries, and respond.
-        let read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
-        let sender_path = read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
-          sender_path.clone(),
-          CommonQuery::QueryAborted(msg::QueryAborted {
-            return_qid: sender_path.query_id,
-            responder_path,
-            payload: msg::AbortedData::ColumnsDNE { missing_cols },
           }),
         );
         self.exit_all(statuses, read.child_queries)
@@ -1745,24 +1671,6 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_write = statuses.full_ms_table_read_ess.get(&query_id).unwrap();
         self.exit_ms_query_es(statuses, ms_write.es.ms_query_id().clone(), query_error);
       }
-      MSTableWriteAction::ColumnsDNE(missing_cols) => {
-        // Remove the MSWriteESWrapper, remove it from the MSQueryES,
-        // abort the GRQUeryESs, and respond.
-        let ms_write = statuses.full_ms_table_read_ess.remove(&query_id).unwrap();
-        let ms_query_es = statuses.ms_query_ess.get_mut(ms_write.es.ms_query_id()).unwrap();
-        ms_query_es.pending_queries.remove(&query_id);
-        let sender_path = ms_write.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
-          sender_path.clone(),
-          CommonQuery::QueryAborted(msg::QueryAborted {
-            return_qid: sender_path.query_id,
-            responder_path,
-            payload: msg::AbortedData::ColumnsDNE { missing_cols },
-          }),
-        );
-        self.exit_all(statuses, ms_write.child_queries);
-      }
     }
   }
 
@@ -1799,24 +1707,6 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_read = statuses.full_ms_table_read_ess.get(&query_id).unwrap();
         self.exit_ms_query_es(statuses, ms_read.es.ms_query_id().clone(), query_error);
       }
-      MSTableReadAction::ColumnsDNE(missing_cols) => {
-        // Remove the MSWriteESWrapper, remove it from the MSQueryES,
-        // abort the GRQUeryESs, and respond.
-        let ms_read = statuses.full_ms_table_read_ess.remove(&query_id).unwrap();
-        let ms_query_es = statuses.ms_query_ess.get_mut(ms_read.es.ms_query_id()).unwrap();
-        ms_query_es.pending_queries.remove(&query_id);
-        let sender_path = ms_read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
-          sender_path.clone(),
-          CommonQuery::QueryAborted(msg::QueryAborted {
-            return_qid: sender_path.query_id,
-            responder_path,
-            payload: msg::AbortedData::ColumnsDNE { missing_cols },
-          }),
-        );
-        self.exit_all(statuses, ms_read.child_queries);
-      }
     }
   }
 
@@ -1841,15 +1731,6 @@ impl<T: IOTypes> TabletContext<T> {
           gr_query.es.query_id,
           res.new_rms,
           (res.schema, res.result),
-        );
-      }
-      GRQueryAction::InternalColumnsDNE(rem_cols) => {
-        let gr_query = statuses.gr_query_ess.remove(&query_id).unwrap();
-        self.handle_internal_columns_dne(
-          statuses,
-          gr_query.es.orig_p,
-          gr_query.es.query_id,
-          rem_cols,
         );
       }
       GRQueryAction::QueryError(query_error) => {

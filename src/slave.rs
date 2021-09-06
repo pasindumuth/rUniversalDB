@@ -506,41 +506,6 @@ impl<T: IOTypes> SlaveContext<T> {
   // in the lambda itself. The function would assume the `query_id` points to a valid
   // TransTableRead, so it may take in the whole `statuses`.
 
-  /// This function just routes the InternalColumnsDNE notification from the GRQueryES.
-  /// Recall that the originator can only be a TransTableReadES and it must exist (since
-  /// the GRQueryES had existed).
-  fn handle_internal_columns_dne(
-    &mut self,
-    statuses: &mut Statuses,
-    orig_p: OrigP,
-    subquery_id: QueryId,
-    rem_cols: Vec<ColName>,
-  ) {
-    // TODO: remove this thing
-    // let query_id = orig_p.query_id;
-    // let trans_read = statuses.full_trans_table_read_ess.get_mut(&query_id).unwrap();
-    // remove_item(&mut trans_read.child_queries, &subquery_id);
-    // let prefix = trans_read.es.location_prefix();
-    // let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
-    //   trans_read.es.handle_internal_columns_dne(
-    //     &mut self.ctx(),
-    //     &gr_query.es,
-    //     subquery_id,
-    //     rem_cols,
-    //   )
-    // } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.query_id) {
-    //   trans_read.es.handle_internal_columns_dne(
-    //     &mut self.ctx(),
-    //     ms_coord.es.to_exec(),
-    //     subquery_id,
-    //     rem_cols,
-    //   )
-    // } else {
-    //   trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-    // };
-    // self.handle_trans_read_es_action(statuses, query_id, action);
-  }
-
   /// Handles a `query_error` propagated up from a GRQueryES. Recall that the originator
   /// can only be a TransTableReadES and it must exist (since the GRQueryES had existed).
   fn handle_internal_query_error(
@@ -687,21 +652,6 @@ impl<T: IOTypes> SlaveContext<T> {
         );
         self.exit_all(statuses, trans_read.child_queries)
       }
-      TransTableAction::ColumnsDNE(missing_cols) => {
-        // Remove the TableReadESWrapper, abort subqueries, and respond.
-        let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
-        let sender_path = trans_read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
-          sender_path.clone(),
-          CommonQuery::QueryAborted(msg::QueryAborted {
-            return_qid: sender_path.query_id,
-            responder_path,
-            payload: msg::AbortedData::ColumnsDNE { missing_cols },
-          }),
-        );
-        self.exit_all(statuses, trans_read.child_queries)
-      }
     }
   }
 
@@ -726,15 +676,6 @@ impl<T: IOTypes> SlaveContext<T> {
           gr_query.es.query_id,
           res.new_rms,
           (res.schema, res.result),
-        );
-      }
-      GRQueryAction::InternalColumnsDNE(rem_cols) => {
-        let gr_query = statuses.gr_query_ess.remove(&query_id).unwrap();
-        self.handle_internal_columns_dne(
-          statuses,
-          gr_query.es.orig_p,
-          gr_query.es.query_id,
-          rem_cols,
         );
       }
       GRQueryAction::QueryError(query_error) => {

@@ -70,8 +70,6 @@ pub enum TransTableAction {
   Success(QueryESResult),
   /// Indicates the ES failed with a QueryError.
   QueryError(msg::QueryError),
-  /// Indicates the ES failed with insufficient columns in the Context.
-  ColumnsDNE(Vec<ColName>),
 }
 
 // -----------------------------------------------------------------------------------------------

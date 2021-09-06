@@ -234,10 +234,8 @@ impl FullMSCoordES {
   ) -> MSQueryCoordAction {
     // Interpret the `aborted_data`.
     match aborted_data {
-      msg::AbortedData::ColumnsDNE { .. }
-      | msg::AbortedData::QueryError(msg::QueryError::TypeError { .. })
-      | msg::AbortedData::QueryError(msg::QueryError::RuntimeError { .. })
-      | msg::AbortedData::QueryError(msg::QueryError::RequiredColumnsDNE { .. }) => {
+      msg::AbortedData::QueryError(msg::QueryError::TypeError { .. })
+      | msg::AbortedData::QueryError(msg::QueryError::RuntimeError { .. }) => {
         // This implies an unrecoverable error, since trying again at a higher timestamp won't
         // generally fix the issue. Thus we ECU and return accordingly.
         self.exit_and_clean_up(ctx);

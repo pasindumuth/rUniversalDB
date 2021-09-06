@@ -144,7 +144,6 @@ pub enum QueryError {
   // Fatal Query Errors to be propagated to the user.
   TypeError { msg: String },
   RuntimeError { msg: String },
-  RequiredColumnsDNE { msg: String },
 
   // Transient Errors that can be solved by retrying.
   WriteRegionConflictWithSubsequentRead,
@@ -160,7 +159,6 @@ pub enum QueryError {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum AbortedData {
-  ColumnsDNE { missing_cols: Vec<ColName> },
   QueryError(QueryError),
 }
 
