@@ -1,7 +1,8 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::model::common::{
   proc, ColName, ColType, EndpointId, Gen, LeadershipId, NodeGroupId, NodePath, QueryId, QueryPath,
-  SlaveGroupId, TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableName,
+  SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
@@ -157,38 +158,57 @@ impl TableSchemaSer {
 /// Holds Gossip Data in a node. It's accessible in both Tablets and Slaves.
 #[derive(Debug, Clone)]
 pub struct GossipData {
-  pub gossip_gen: Gen,
-  pub gossiped_db_schema: HashMap<TablePath, TableSchema>,
+  pub gen: Gen,
+  pub db_schema: HashMap<TablePath, TableSchema>,
+  pub table_generation: HashMap<TablePath, Gen>,
+
+  // TODO: Change the keys here to (TablePath, Gen)
+  /// Distribution
+  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
 }
 
 /// A Serializable version of `GossipData`. This is needed since it's
 /// not serializable automatically
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct GossipDataSer {
-  pub gossip_gen: Gen,
-  pub gossiped_db_schema: HashMap<TablePath, TableSchemaSer>,
+  pub gen: Gen,
+  pub db_schema: HashMap<TablePath, TableSchemaSer>,
+  pub table_generation: HashMap<TablePath, Gen>,
+  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
 }
 
 impl GossipDataSer {
   pub fn from_gossip(gossip: GossipData) -> GossipDataSer {
     GossipDataSer {
-      gossip_gen: gossip.gossip_gen,
-      gossiped_db_schema: gossip
-        .gossiped_db_schema
+      gen: gossip.gen,
+      db_schema: gossip
+        .db_schema
         .into_iter()
         .map(|(table_path, schema)| (table_path, TableSchemaSer::from_schema(schema)))
         .collect(),
+      table_generation: gossip.table_generation,
+      sharding_config: gossip.sharding_config,
+      tablet_address_config: gossip.tablet_address_config,
+      slave_address_config: gossip.slave_address_config,
     }
   }
 
   pub fn to_gossip(self) -> GossipData {
     GossipData {
-      gossip_gen: self.gossip_gen,
-      gossiped_db_schema: self
-        .gossiped_db_schema
+      gen: self.gen,
+      db_schema: self
+        .db_schema
         .into_iter()
         .map(|(table_path, schema)| (table_path, schema.to_schema()))
         .collect(),
+      table_generation: self.table_generation,
+      sharding_config: self.sharding_config,
+      tablet_address_config: self.tablet_address_config,
+      slave_address_config: self.slave_address_config,
     }
   }
 }

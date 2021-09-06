@@ -121,8 +121,12 @@ impl AlterTableES {
 
       // Send off AlterTableCommit to the Tablets and return Success.
       let gossip_data = GossipDataSer::from_gossip(GossipData {
-        gossip_gen: ctx.gen.clone(),
-        gossiped_db_schema: ctx.db_schema.clone(),
+        gen: ctx.gen.clone(),
+        db_schema: ctx.db_schema.clone(),
+        table_generation: ctx.table_generation.clone(),
+        sharding_config: ctx.sharding_config.clone(),
+        tablet_address_config: ctx.tablet_address_config.clone(),
+        slave_address_config: ctx.slave_address_config.clone(),
       });
       for tid in executing.tm_state.keys() {
         ctx.ctx().send_to_tablet(

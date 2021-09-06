@@ -27,9 +27,9 @@ pub struct CoreServerContext<'a, T: IOTypes> {
   pub network_output: &'a mut T::NetworkOutT,
 
   /// Distribution
-  pub sharding_config: &'a mut HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: &'a mut HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: &'a mut HashMap<SlaveGroupId, EndpointId>,
+  pub sharding_config: &'a HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: &'a HashMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: &'a HashMap<SlaveGroupId, EndpointId>,
 }
 
 impl<'a, T: IOTypes> CoreServerContext<'a, T> {
@@ -100,11 +100,6 @@ pub struct ServerContext<'a, T: IOTypes> {
 
   /// Gossip
   pub gossip: &'a mut Arc<GossipData>,
-
-  /// Distribution
-  pub sharding_config: &'a mut HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: &'a mut HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: &'a mut HashMap<SlaveGroupId, EndpointId>,
 }
 
 impl<'a, T: IOTypes> ServerContext<'a, T> {
@@ -113,9 +108,9 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
       rand: &mut self.rand,
       clock: &mut self.clock,
       network_output: &mut self.network_output,
-      sharding_config: &mut self.sharding_config,
-      tablet_address_config: &mut self.tablet_address_config,
-      slave_address_config: &mut self.slave_address_config,
+      sharding_config: &self.gossip.sharding_config,
+      tablet_address_config: &self.gossip.tablet_address_config,
+      slave_address_config: &self.gossip.slave_address_config,
     }
   }
 
@@ -168,8 +163,8 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
   ) -> Vec<TabletGroupId> {
     // Next, we try to reduce the number of TabletGroups we must contact by computing
     // the key_region of TablePath that we're going to be reading.
-    let tablet_groups = self.sharding_config.get(table_path).unwrap();
-    let key_cols = &self.gossip.gossiped_db_schema.get(table_path).unwrap().key_cols;
+    let tablet_groups = self.gossip.sharding_config.get(table_path).unwrap();
+    let key_cols = &self.gossip.db_schema.get(table_path).unwrap().key_cols;
     match &compute_key_region(selection, HashMap::new(), key_cols) {
       Ok(_) => {
         // We use a trivial implementation for now, where we just return all TabletGroupIds

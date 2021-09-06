@@ -67,7 +67,7 @@ pub struct TabletKeyRange {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub struct Timestamp(pub u128);
 
-/// A Type for the generation of a gossip message.
+/// A Type used to represent a generation.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub struct Gen(pub u64);
 
@@ -142,14 +142,21 @@ pub struct QueryPath {
 }
 
 // -------------------------------------------------------------------------------------------------
-//  Leadership
+//  Paxos
 // -------------------------------------------------------------------------------------------------
 
 /// Used to identify a Leadership in a given PaxosGroup.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LeadershipId {
-  pub gen: u64,
+  pub gen: Gen,
   pub eid: EndpointId,
+}
+
+/// Used to identify a PaxosGroup in the system.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PaxosGroupId {
+  Master,
+  Slave(SlaveGroupId),
 }
 
 // -------------------------------------------------------------------------------------------------

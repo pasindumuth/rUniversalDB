@@ -77,7 +77,14 @@ pub fn start_server(
   let clock = ProdClock {};
 
   // Create common Gossip
-  let gossip = Arc::new(GossipData { gossiped_db_schema: Default::default(), gossip_gen: Gen(0) });
+  let gossip = Arc::new(GossipData {
+    gen: Gen(0),
+    db_schema: Default::default(),
+    table_generation: Default::default(),
+    sharding_config: Default::default(),
+    tablet_address_config: Default::default(),
+    slave_address_config: Default::default(),
+  });
 
   // Create the Tablets
   let mut tablet_map = HashMap::<TabletGroupId, Sender<TabletMessage>>::new();
@@ -102,9 +109,6 @@ pub fn start_server(
         clock,
         network_output,
         gossip,
-        Default::default(),
-        Default::default(),
-        Default::default(),
         SlaveGroupId("".to_string()),
         TabletGroupId("".to_string()),
         EndpointId("".to_string()),
@@ -123,9 +127,6 @@ pub fn start_server(
     network_output,
     ProdTabletForwardOut { tablet_map },
     gossip.clone(),
-    Default::default(),
-    Default::default(),
-    Default::default(),
     SlaveGroupId("".to_string()),
     EndpointId("".to_string()),
   );

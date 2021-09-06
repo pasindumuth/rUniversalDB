@@ -78,11 +78,6 @@ pub struct SlaveContext<T: IOTypes> {
   /// Gossip
   pub gossip: Arc<GossipData>,
 
-  /// Distribution
-  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
-
   /// External Query Management
   pub external_request_id_map: HashMap<RequestId, QueryId>,
 }
@@ -94,9 +89,6 @@ impl<T: IOTypes> SlaveState<T> {
     network_output: T::NetworkOutT,
     tablet_forward_output: T::TabletForwardOutT,
     gossip: Arc<GossipData>,
-    sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-    tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-    slave_address_config: HashMap<SlaveGroupId, EndpointId>,
     this_slave_group_id: SlaveGroupId,
     master_eid: EndpointId,
   ) -> SlaveState<T> {
@@ -109,9 +101,6 @@ impl<T: IOTypes> SlaveState<T> {
         this_slave_group_id,
         master_eid,
         gossip,
-        sharding_config,
-        tablet_address_config,
-        slave_address_config,
         external_request_id_map: Default::default(),
       },
       statuses: Default::default(),
@@ -133,9 +122,6 @@ impl<T: IOTypes> SlaveContext<T> {
       maybe_this_tablet_group_id: None,
       master_eid: &self.master_eid,
       gossip: &mut self.gossip,
-      sharding_config: &mut self.sharding_config,
-      tablet_address_config: &mut self.tablet_address_config,
-      slave_address_config: &mut self.slave_address_config,
     }
   }
 
@@ -299,7 +285,7 @@ impl<T: IOTypes> SlaveContext<T> {
       msg::SlaveMessage::MasterFrozenColUsageSuccess(success) => {
         // Update the Gossip with incoming Gossip data.
         let gossip_data = success.gossip.clone().to_gossip();
-        if self.gossip.gossip_gen < gossip_data.gossip_gen {
+        if self.gossip.gen < gossip_data.gen {
           self.gossip = Arc::new(gossip_data);
         }
 
@@ -333,7 +319,7 @@ impl<T: IOTypes> SlaveContext<T> {
         } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
           let action = ms_coord.es.handle_master_response(
             self,
-            success.gossip.gossip_gen,
+            success.gossip.gen,
             success.frozen_col_usage_tree,
           );
           self.handle_ms_coord_es_action(statuses, query_id, action);
@@ -358,7 +344,7 @@ impl<T: IOTypes> SlaveContext<T> {
         Ok(parsed_ast) => {
           // Convert to MSQuery
           let internal_ast = convert_ast(&parsed_ast);
-          convert_to_msquery(&self.gossip.gossiped_db_schema, internal_ast)
+          convert_to_msquery(&self.gossip.db_schema, internal_ast)
         }
         Err(parse_error) => {
           // Extract error string

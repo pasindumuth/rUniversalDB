@@ -167,7 +167,14 @@ impl Simulation {
         from_eid: eid.clone(),
       };
       let clock = TestClock {};
-      let gossip = Arc::new(GossipData { gossip_gen: Gen(0), gossiped_db_schema: schema.clone() });
+      let gossip = Arc::new(GossipData {
+        gen: Gen(0),
+        db_schema: schema.clone(),
+        table_generation: Default::default(),
+        sharding_config: sharding_config.clone(),
+        tablet_address_config: tablet_address_config.clone(),
+        slave_address_config: slave_address_config.clone(),
+      });
       let mut seed = [0; 16];
       sim.rng.fill_bytes(&mut seed);
       sim.slave_states.borrow_mut().insert(
@@ -178,9 +185,6 @@ impl Simulation {
           network_out.clone(),
           TestTabletForwardOut { tablet_states: sim.tablet_states.clone(), from_eid: eid.clone() },
           gossip.clone(),
-          sharding_config.clone(),
-          tablet_address_config.clone(),
-          slave_address_config.clone(),
           sid.clone(),
           EndpointId("".to_string()),
         ),
@@ -196,9 +200,6 @@ impl Simulation {
             clock.clone(),
             network_out.clone(),
             gossip.clone(),
-            sharding_config.clone(),
-            tablet_address_config.clone(),
-            slave_address_config.clone(),
             sid.clone(),
             tid.clone(),
             EndpointId("".to_string()), // TODO: Implement Master properly.

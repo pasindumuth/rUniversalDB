@@ -48,7 +48,7 @@ impl FrozenColUsageNode {
 }
 
 pub struct ColUsagePlanner<'a> {
-  pub gossiped_db_schema: &'a HashMap<TablePath, TableSchema>,
+  pub db_schema: &'a HashMap<TablePath, TableSchema>,
   pub timestamp: Timestamp,
 }
 
@@ -102,7 +102,7 @@ impl<'a> ColUsagePlanner<'a> {
       }
       proc::TableRef::TablePath(table_path) => {
         // The Query converter should make sure that all TablePaths actually exist.
-        let table_schema = self.gossiped_db_schema.get(table_path).unwrap();
+        let table_schema = self.db_schema.get(table_path).unwrap();
         for col in all_cols {
           if weak_contains_col(&table_schema, &col, &self.timestamp) {
             node.safe_present_cols.push(col);
@@ -139,7 +139,7 @@ impl<'a> ColUsagePlanner<'a> {
     update: &proc::Update,
   ) -> (Vec<ColName>, FrozenColUsageNode) {
     let mut projection = Vec::new();
-    for (col, _) in &self.gossiped_db_schema.get(&update.table).unwrap().key_cols {
+    for (col, _) in &self.db_schema.get(&update.table).unwrap().key_cols {
       projection.push(col.clone());
     }
     for (col, _) in &update.assignment {
@@ -420,7 +420,7 @@ mod test {
       returning: mk_ttab("tt1"),
     };
 
-    let mut planner = ColUsagePlanner { gossiped_db_schema: &schema, timestamp: Timestamp(0) };
+    let mut planner = ColUsagePlanner { db_schema: &schema, timestamp: Timestamp(0) };
     let col_usage_nodes = planner.plan_ms_query(&ms_query);
 
     let exp_col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> = vec![

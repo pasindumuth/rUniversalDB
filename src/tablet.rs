@@ -400,12 +400,6 @@ pub struct TabletContext<T: IOTypes> {
   /// Gossip
   pub gossip: Arc<GossipData>,
 
-  /// Distribution
-  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub sharding_config2: HashMap<(TablePath, u32), Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
-
   // Storage
   pub storage: GenericMVTable,
   pub this_table_path: TablePath,
@@ -439,16 +433,13 @@ impl<T: IOTypes> TabletState<T> {
     clock: T::ClockT,
     network_output: T::NetworkOutT,
     gossip: Arc<GossipData>,
-    sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-    tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-    slave_address_config: HashMap<SlaveGroupId, EndpointId>,
     this_slave_group_id: SlaveGroupId,
     this_tablet_group_id: TabletGroupId,
     master_eid: EndpointId,
   ) -> TabletState<T> {
     let (this_table_path, this_table_key_range) = (|| {
       // Search the sharding config, which should contain this data.
-      for (path, shards) in &sharding_config {
+      for (path, shards) in &gossip.sharding_config {
         for (key_range, tid) in shards {
           if tid == &this_tablet_group_id {
             return (path.clone(), key_range.clone());
@@ -457,7 +448,7 @@ impl<T: IOTypes> TabletState<T> {
       }
       panic!();
     })();
-    let table_schema = gossip.gossiped_db_schema.get(&this_table_path).unwrap().clone();
+    let table_schema = gossip.db_schema.get(&this_table_path).unwrap().clone();
     TabletState {
       tablet_context: TabletContext::<T> {
         rand,
@@ -467,10 +458,6 @@ impl<T: IOTypes> TabletState<T> {
         this_tablet_group_id,
         master_eid,
         gossip,
-        sharding_config,
-        sharding_config2: Default::default(),
-        tablet_address_config,
-        slave_address_config,
         storage: GenericMVTable::new(),
         this_table_path,
         this_table_key_range,
@@ -505,9 +492,6 @@ impl<T: IOTypes> TabletContext<T> {
       maybe_this_tablet_group_id: Some(&self.this_tablet_group_id),
       master_eid: &self.master_eid,
       gossip: &mut self.gossip,
-      sharding_config: &mut self.sharding_config,
-      tablet_address_config: &mut self.tablet_address_config,
-      slave_address_config: &mut self.slave_address_config,
     }
   }
 
@@ -861,7 +845,7 @@ impl<T: IOTypes> TabletContext<T> {
         // TODO: When a Slave receives gossip_data, dispatch it to all tablets,
         // not just the target tablet
         let gossip_data = commit.gossip_data.to_gossip();
-        if self.gossip.gossip_gen < gossip_data.gossip_gen {
+        if self.gossip.gen < gossip_data.gen {
           self.gossip = Arc::new(gossip_data);
         }
       }

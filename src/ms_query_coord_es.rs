@@ -623,10 +623,8 @@ enum MSQueryCoordReplanningAction {
 impl MSQueryCoordReplanningES {
   fn start<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> MSQueryCoordReplanningAction {
     // First, we compute the ColUsageNode.
-    let mut planner = ColUsagePlanner {
-      gossiped_db_schema: &ctx.gossip.gossiped_db_schema,
-      timestamp: self.timestamp.clone(),
-    };
+    let mut planner =
+      ColUsagePlanner { db_schema: &ctx.gossip.db_schema, timestamp: self.timestamp.clone() };
     let col_usage_nodes = planner.plan_ms_query(&self.sql_query);
 
     for (_, (_, child)) in &col_usage_nodes {
@@ -655,7 +653,7 @@ impl MSQueryCoordReplanningES {
     // If we get here, the QueryPlan is valid, so we return it and go to Done.
     self.state = MSQueryCoordReplanningS::Done;
     MSQueryCoordReplanningAction::Success(CoordQueryPlan {
-      gossip_gen: ctx.gossip.gossip_gen,
+      gossip_gen: ctx.gossip.gen,
       col_usage_nodes,
     })
   }

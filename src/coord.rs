@@ -5,9 +5,9 @@ use crate::common::{
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
-  iast, proc, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, NodeGroupId, NodePath,
-  QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
-  TransTableLocationPrefix, TransTableName,
+  iast, proc, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, LeadershipId, NodeGroupId,
+  NodePath, PaxosGroupId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId,
+  TabletKeyRange, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
@@ -28,21 +28,6 @@ use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-
-// -----------------------------------------------------------------------------------------------
-//  Other
-// -----------------------------------------------------------------------------------------------
-
-#[derive(Debug)]
-struct CoordGossipData {
-  pub gen: Gen,
-  pub db_schema: HashMap<TablePath, TableSchema>,
-  pub table_generation: HashMap<TablePath, Gen>,
-
-  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
-}
 
 // -----------------------------------------------------------------------------------------------
 //  Coord Statuses
@@ -84,19 +69,17 @@ pub struct CoordContext<T: IOTypes> {
   pub rand: T::RngCoreT,
   pub clock: T::ClockT,
   pub network_output: T::NetworkOutT,
-  pub tablet_forward_output: T::TabletForwardOutT,
 
   /// Metadata
   pub this_slave_group_id: SlaveGroupId,
+  pub this_coord_group_id: CoordGroupId,
   pub master_eid: EndpointId,
 
   /// Gossip
   pub gossip: Arc<GossipData>,
 
-  /// Distribution
-  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+  /// Paxos
+  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
 
   /// External Query Management
   pub external_request_id_map: HashMap<RequestId, QueryId>,
@@ -107,26 +90,22 @@ impl<T: IOTypes> CoordState<T> {
     rand: T::RngCoreT,
     clock: T::ClockT,
     network_output: T::NetworkOutT,
-    tablet_forward_output: T::TabletForwardOutT,
-    gossip: Arc<GossipData>,
-    sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
-    tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-    slave_address_config: HashMap<SlaveGroupId, EndpointId>,
     this_slave_group_id: SlaveGroupId,
+    this_coord_group_id: CoordGroupId,
     master_eid: EndpointId,
+    gossip: Arc<GossipData>,
+    leader_map: HashMap<PaxosGroupId, LeadershipId>,
   ) -> CoordState<T> {
     CoordState {
       slave_context: CoordContext {
         rand,
         clock,
         network_output,
-        tablet_forward_output,
         this_slave_group_id,
+        this_coord_group_id,
         master_eid,
         gossip,
-        sharding_config,
-        tablet_address_config,
-        slave_address_config,
+        leader_map,
         external_request_id_map: Default::default(),
       },
       statuses: Default::default(),
@@ -148,9 +127,6 @@ impl<T: IOTypes> CoordContext<T> {
       maybe_this_tablet_group_id: None,
       master_eid: &self.master_eid,
       gossip: &mut self.gossip,
-      sharding_config: &mut self.sharding_config,
-      tablet_address_config: &mut self.tablet_address_config,
-      slave_address_config: &mut self.slave_address_config,
     }
   }
 
@@ -313,10 +289,10 @@ impl<T: IOTypes> CoordContext<T> {
       }
       msg::SlaveMessage::MasterFrozenColUsageSuccess(success) => {
         // Update the Gossip with incoming Gossip data.
-        let gossip_data = success.gossip.clone().to_gossip();
-        if self.gossip.gossip_gen < gossip_data.gossip_gen {
-          self.gossip = Arc::new(gossip_data);
-        }
+        // let gossip_data = success.gossip.clone().to_gossip();
+        // if self.gossip.gossip_gen < gossip_data.gossip_gen {
+        //   self.gossip = Arc::new(gossip_data);
+        // }
 
         // Route the response to the appropriate ES.
         let query_id = success.return_qid;
@@ -348,7 +324,7 @@ impl<T: IOTypes> CoordContext<T> {
         } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
           let action = ms_coord.es.handle_master_response(
             self,
-            success.gossip.gossip_gen,
+            success.gossip.gen,
             success.frozen_col_usage_tree,
           );
           self.handle_ms_coord_es_action(statuses, query_id, action);

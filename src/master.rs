@@ -53,6 +53,7 @@ impl<T: IOTypes> MasterState<T> {
         network_output,
         gen: Gen(0),
         db_schema,
+        table_generation: Default::default(),
         sharding_config,
         tablet_address_config,
         slave_address_config,
@@ -77,6 +78,8 @@ pub struct MasterContext<T: IOTypes> {
   /// Database Schema
   pub gen: Gen,
   pub db_schema: HashMap<TablePath, TableSchema>,
+  // TODO: make use of this.
+  pub table_generation: HashMap<TablePath, Gen>,
 
   /// Distribution
   pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
@@ -159,7 +162,7 @@ impl<T: IOTypes> MasterContext<T> {
       MasterMessage::PerformMasterFrozenColUsage(request) => {
         // Construct the FrozenColUsageTree with the current database schema in the Master.
         let timestamp = request.timestamp.clone();
-        let mut planner = ColUsagePlanner { gossiped_db_schema: &self.db_schema, timestamp };
+        let mut planner = ColUsagePlanner { db_schema: &self.db_schema, timestamp };
         let frozen_col_usage_tree = match request.col_usage_tree {
           ColUsageTree::MSQuery(ms_query) => {
             msg::FrozenColUsageTree::ColUsageNodes(planner.plan_ms_query(&ms_query))
@@ -187,8 +190,12 @@ impl<T: IOTypes> MasterContext<T> {
           return_qid: request.sender_path.query_id.clone(),
           frozen_col_usage_tree,
           gossip: GossipDataSer::from_gossip(GossipData {
-            gossip_gen: self.gen.clone(),
-            gossiped_db_schema: self.db_schema.clone(),
+            gen: self.gen.clone(),
+            db_schema: self.db_schema.clone(),
+            table_generation: self.table_generation.clone(),
+            sharding_config: self.sharding_config.clone(),
+            tablet_address_config: self.tablet_address_config.clone(),
+            slave_address_config: self.slave_address_config.clone(),
           }),
         });
         self.ctx().send_to_path(request.sender_path, response);
