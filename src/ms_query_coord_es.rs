@@ -1,5 +1,5 @@
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
-use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, QueryPlan2, TMStatus};
+use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
 use crate::model::common::{
   proc, ColName, Context, ContextRow, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, RequestId,
   TablePath, TableView, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
@@ -401,15 +401,13 @@ impl FullMSCoordES {
     context.context_rows.push(context_row);
 
     // Construct the QueryPlan
-    let mut trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
-    for trans_table_name in trans_table_names {
-      let (cols, _) = lookup(&es.trans_table_views, &trans_table_name).unwrap();
-      trans_table_schemas.insert(trans_table_name, cols.clone());
-    }
+    // TODO: do this properly
     let query_plan = QueryPlan {
-      gossip_gen: ctx.gossip.gossip_gen,
-      trans_table_schemas: trans_table_schemas.clone(),
+      tier_map: TierMap { map: Default::default() },
+      query_leader_map: Default::default(),
+      table_location_map: Default::default(),
       col_usage_node: col_usage_node.clone(),
+      extra_req_cols: Default::default(),
     };
 
     // Create Construct the TMStatus that's going to be used to coordinate this stage.
@@ -440,7 +438,6 @@ impl FullMSCoordES {
               context: context.clone(),
               sql_query: select_query.clone(),
               query_plan,
-              query_plan2: QueryPlan2::new(),
             };
 
             // Compute the TabletGroups involved.
@@ -487,7 +484,6 @@ impl FullMSCoordES {
                   context: context.clone(),
                   sql_query: select_query.clone(),
                   query_plan,
-                  query_plan2: QueryPlan2::new(),
                 },
               ),
             };
@@ -508,7 +504,6 @@ impl FullMSCoordES {
           context: context.clone(),
           sql_query: update_query.clone(),
           query_plan,
-          query_plan2: QueryPlan2::new(),
         };
 
         // Compute the TabletGroups involved.

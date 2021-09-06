@@ -2,13 +2,11 @@ use crate::col_usage::{
   collect_select_subqueries, collect_update_subqueries, node_external_trans_tables,
   nodes_external_trans_tables, FrozenColUsageNode,
 };
-use crate::common::{
-  lookup, lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, QueryPlan2, TMStatus,
-};
+use crate::common::{lookup, lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
 use crate::model::common::{
-  proc, ColName, Context, ContextRow, ContextSchema, Gen, NodeGroupId, NodePath, QueryId,
-  QueryPath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
-  TransTableName,
+  proc, ColName, Context, ContextRow, ContextSchema, Gen, LeadershipId, NodeGroupId, NodePath,
+  QueryId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TierMap, Timestamp,
+  TransTableLocationPrefix, TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::{CommonQuery, ServerContext};
@@ -76,9 +74,11 @@ pub enum GRExecutionS {
 // sql_query does that for us (thus, we can use HashMaps).
 #[derive(Debug)]
 pub struct GRQueryPlan {
-  pub gossip_gen: Gen,
-  /// This consists of a superset of the external `TransTableName`s used within `col_usage_nodes`.
-  pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,
+  pub tier_map: TierMap,
+  // TODO: add the current node's LeadershipId here when constructing from QueryPlan.
+  pub query_leader_map: HashMap<SlaveGroupId, LeadershipId>,
+  pub table_location_map: HashMap<TablePath, u64>,
+  pub extra_req_cols: HashMap<TablePath, Vec<ColName>>,
   pub col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 }
 
@@ -174,11 +174,6 @@ impl<'a, SqlQueryT: SubqueryComputableSql> GRQueryConstructorView<'a, SqlQueryT>
   ) -> GRQueryES {
     // Filter the TransTables in the QueryPlan based on the TransTables available for this subquery.
     let col_usage_nodes = self.query_plan.col_usage_node.children.get(subquery_idx).unwrap();
-    let mut trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
-    for trans_table_name in nodes_external_trans_tables(col_usage_nodes) {
-      let schema = self.query_plan.trans_table_schemas.get(&trans_table_name).unwrap().clone();
-      trans_table_schemas.insert(trans_table_name, schema);
-    }
     // Finally, construct the GRQueryES.
     GRQueryES {
       root_query_path: self.root_query_path.clone(),
@@ -189,8 +184,10 @@ impl<'a, SqlQueryT: SubqueryComputableSql> GRQueryConstructorView<'a, SqlQueryT>
       query_id: gr_query_id,
       sql_query: self.sql_query.collect_subqueries().remove(subquery_idx),
       query_plan: GRQueryPlan {
-        gossip_gen: self.query_plan.gossip_gen.clone(),
-        trans_table_schemas,
+        tier_map: self.query_plan.tier_map.clone(),
+        query_leader_map: self.query_plan.query_leader_map.clone(),
+        table_location_map: self.query_plan.table_location_map.clone(),
+        extra_req_cols: self.query_plan.extra_req_cols.clone(),
         col_usage_nodes: col_usage_nodes.clone(),
       },
       new_rms: Default::default(),
@@ -490,24 +487,12 @@ impl GRQueryES {
     let context = Context { context_schema: new_context_schema, context_rows: new_context_rows };
 
     // Construct the QueryPlan
-    let mut child_trans_table_schemas = HashMap::<TransTableName, Vec<ColName>>::new();
-    for trans_table_idx in &trans_table_name_indicies {
-      match trans_table_idx {
-        TransTableIdx::External(idx) => {
-          let prefix = self.context.context_schema.trans_table_context_schema.get(*idx).unwrap();
-          let schema = self.query_plan.trans_table_schemas.get(&prefix.trans_table_name).unwrap();
-          child_trans_table_schemas.insert(prefix.trans_table_name.clone(), schema.clone());
-        }
-        TransTableIdx::Local(idx) => {
-          let (trans_table_name, (schema, _)) = self.trans_table_views.get(*idx).unwrap();
-          child_trans_table_schemas.insert(trans_table_name.clone(), schema.clone());
-        }
-      }
-    }
     let (_, (_, child)) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
     let query_plan = QueryPlan {
-      gossip_gen: self.query_plan.gossip_gen.clone(),
-      trans_table_schemas: child_trans_table_schemas,
+      tier_map: self.query_plan.tier_map.clone(),
+      query_leader_map: self.query_plan.query_leader_map.clone(),
+      table_location_map: self.query_plan.table_location_map.clone(),
+      extra_req_cols: self.query_plan.extra_req_cols.clone(),
       col_usage_node: child.clone(),
     };
 
@@ -535,7 +520,6 @@ impl GRQueryES {
           context: context.clone(),
           sql_query: child_sql_query.clone(),
           query_plan,
-          query_plan2: QueryPlan2::new(),
         };
 
         let tids = ctx.get_min_tablets(table_path, &child_sql_query.selection);
@@ -574,7 +558,6 @@ impl GRQueryES {
           context: context.clone(),
           sql_query: child_sql_query.clone(),
           query_plan,
-          query_plan2: QueryPlan2::new(),
         };
 
         // Construct PerformQuery

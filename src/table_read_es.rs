@@ -1,7 +1,7 @@
 use crate::col_usage::{collect_top_level_cols, FrozenColUsageNode};
 use crate::common::{
   btree_multimap_insert, lookup, mk_qid, IOTypes, KeyBound, OrigP, QueryESResult, QueryPlan,
-  QueryPlan2, TableRegion,
+  TableRegion,
 };
 use crate::expression::{compress_row_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
@@ -50,7 +50,6 @@ pub struct FullTableReadES {
   // Query-related fields.
   pub sql_query: proc::SuperSimpleSelect,
   pub query_plan: QueryPlan,
-  pub query_plan2: QueryPlan2,
 
   // Dynamically evolving fields.
   pub new_rms: HashSet<QueryPath>,
@@ -80,11 +79,11 @@ impl FullTableReadES {
     assert!(matches!(self.state, ExecutionS::Start));
 
     let mut all_cols = HashSet::<ColName>::new();
-    all_cols.extend(self.query_plan2.col_usage_node.external_cols.clone());
-    all_cols.extend(self.query_plan2.col_usage_node.safe_present_cols.clone());
+    all_cols.extend(self.query_plan.col_usage_node.external_cols.clone());
+    all_cols.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
 
     // If there are extra required cols, we add them in.
-    if let Some(extra_cols) = self.query_plan2.extra_req_cols.get(self.sql_query.table()) {
+    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(self.sql_query.table()) {
       all_cols.extend(extra_cols.clone());
     }
 
@@ -102,7 +101,7 @@ impl FullTableReadES {
   /// Note: this does *not* required columns to be locked.
   fn does_query_plan_align<T: IOTypes>(&self, ctx: &TabletContext<T>) -> bool {
     // First, check that `external_cols are absent.
-    for col in &self.query_plan2.col_usage_node.external_cols {
+    for col in &self.query_plan.col_usage_node.external_cols {
       // Since the `key_cols` are static, no query plan should have one of
       // these as an External Column.
       assert!(lookup(&ctx.table_schema.key_cols, col).is_none());
@@ -112,14 +111,14 @@ impl FullTableReadES {
     }
 
     // Next, check that `safe_present_cols` are present.
-    for col in &self.query_plan2.col_usage_node.safe_present_cols {
+    for col in &self.query_plan.col_usage_node.safe_present_cols {
       if !weak_contains_col(&ctx.table_schema, col, &self.timestamp) {
         return false;
       }
     }
 
     // Next, check that `extra_req_cols` are present.
-    if let Some(extra_cols) = self.query_plan2.extra_req_cols.get(self.sql_query.table()) {
+    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(self.sql_query.table()) {
       for col in extra_cols {
         if !weak_contains_col(&ctx.table_schema, col, &self.timestamp) {
           return false;
@@ -399,7 +398,7 @@ impl FullTableReadES {
     // Compute the Column Region.
     let mut col_region = HashSet::<ColName>::new();
     col_region.extend(self.sql_query.projection.clone());
-    col_region.extend(self.query_plan2.col_usage_node.safe_present_cols.clone());
+    col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
 
     // Move the TableReadES to the Pending state with the given ReadRegion.
     let protect_qid = mk_qid(&mut ctx.rand);

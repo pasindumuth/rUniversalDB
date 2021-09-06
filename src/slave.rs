@@ -1,7 +1,7 @@
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, Clock, GossipData,
-  IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus, TabletForwardOut,
+  IOTypes, NetworkOut, OrigP, TMStatus, TabletForwardOut,
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
@@ -218,7 +218,6 @@ impl<T: IOTypes> SlaveContext<T> {
                     query_id: perform_query.query_id.clone(),
                     sql_query: query.sql_query,
                     query_plan: query.query_plan,
-                    query_plan2: query.query_plan2,
                     new_rms: Default::default(),
                     state: TransExecutionS::Start,
                     timestamp: es.timestamp.clone(),
@@ -247,7 +246,6 @@ impl<T: IOTypes> SlaveContext<T> {
                     query_id: perform_query.query_id.clone(),
                     sql_query: query.sql_query,
                     query_plan: query.query_plan,
-                    query_plan2: query.query_plan2,
                     new_rms: Default::default(),
                     state: TransExecutionS::Start,
                     timestamp: gr_query.es.timestamp.clone(),

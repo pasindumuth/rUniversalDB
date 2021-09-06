@@ -2,9 +2,7 @@ use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, nodes_external_cols,
   nodes_external_trans_tables, ColUsagePlanner,
 };
-use crate::common::{
-  lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryESResult, QueryPlan, QueryPlan2,
-};
+use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryESResult, QueryPlan};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRExecutionS, GRQueryConstructorView, GRQueryES, GRQueryPlan};
 use crate::model::common::{
@@ -54,7 +52,6 @@ pub struct FullTransTableReadES {
   // Query-related fields.
   pub sql_query: proc::SuperSimpleSelect,
   pub query_plan: QueryPlan,
-  pub query_plan2: QueryPlan2,
 
   // Dynamically evolving fields.
   pub new_rms: HashSet<QueryPath>,

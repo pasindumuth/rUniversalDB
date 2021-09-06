@@ -6,7 +6,7 @@ use crate::col_usage::{
 use crate::common::{
   btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
   mk_qid, remove_item, ColBound, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, PolyColBound,
-  QueryPlan, SingleBound, TMStatus, TableRegion, TableSchema,
+  SingleBound, TMStatus, TableRegion, TableSchema,
 };
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
@@ -535,7 +535,6 @@ impl<T: IOTypes> TabletContext<T> {
                     query_id: perform_query.query_id.clone(),
                     sql_query: query.sql_query,
                     query_plan: query.query_plan,
-                    query_plan2: query.query_plan2,
                     new_rms: Default::default(),
                     state: TransExecutionS::Start,
                     timestamp: gr_query.es.timestamp.clone(),
@@ -584,7 +583,6 @@ impl<T: IOTypes> TabletContext<T> {
                         query_id: perform_query.query_id.clone(),
                         sql_query: query.sql_query,
                         query_plan: query.query_plan,
-                        query_plan2: query.query_plan2,
                         ms_query_id,
                         new_rms: Default::default(),
                         state: MSReadExecutionS::Start,
@@ -619,7 +617,6 @@ impl<T: IOTypes> TabletContext<T> {
                     query_id: perform_query.query_id.clone(),
                     sql_query: query.sql_query,
                     query_plan: query.query_plan,
-                    query_plan2: query.query_plan2,
                     new_rms: Default::default(),
                     state: ExecutionS::Start,
                   },
@@ -668,7 +665,6 @@ impl<T: IOTypes> TabletContext<T> {
                       query_id: perform_query.query_id.clone(),
                       sql_query,
                       query_plan: query.query_plan,
-                      query_plan2: query.query_plan2,
                       ms_query_id,
                       new_rms: Default::default(),
                       state: MSWriteExecutionS::Start,
