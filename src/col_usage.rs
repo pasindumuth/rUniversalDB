@@ -14,17 +14,31 @@ use std::ops::Deref;
 // -----------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FrozenColUsageNode {
+  /// There are several uses of this.
+  /// 1. When the MSCoordES creates this using it's GossipData, things like `safe_present_cols`
+  ///    and `external_cols` should be considered expectations on what the schemas should be.
+  ///    The schemas should be checked and the Transaction aborted if the expections fail.
+  /// 2. After the MasterQueryReplanning, they will be hard facts that *will* be true for certain.
   pub table_ref: proc::TableRef,
+
+  /// These are the ColNames used within all ValExprs outside of `Subquery` nodes.
+  /// This is a convenience field used only in the ColUsagePlanner.
   pub requested_cols: Vec<ColName>,
+
+  /// Take the union of `requested_cols` and all `external_cols` of all `FrozenColUsageNodes`
+  /// in `children`. Call this all_cols.
+  ///
+  /// Below, `safe_present_cols` is the subset of all_cols that are present in the (Trans)Table
+  /// (according to the gossiped_db_schema). `external_cols` are the complement of that.
   pub children: Vec<Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>>,
   pub safe_present_cols: Vec<ColName>,
   pub external_cols: Vec<ColName>,
 }
 
 impl FrozenColUsageNode {
-  fn new(table_ref: proc::TableRef) -> FrozenColUsageNode {
+  pub fn new(table_ref: proc::TableRef) -> FrozenColUsageNode {
     FrozenColUsageNode {
-      table_ref: table_ref,
+      table_ref,
       requested_cols: vec![],
       children: vec![],
       safe_present_cols: vec![],

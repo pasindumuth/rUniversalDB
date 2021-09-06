@@ -26,25 +26,83 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::model::message::QueryError;
-use crate::ms_table_read_es::{FullMSTableReadES, MSReadQueryReplanningES, MSTableReadAction};
-use crate::ms_table_write_es::{FullMSTableWriteES, MSTableWriteAction, MSWriteQueryReplanningES};
+use crate::ms_table_read_es::{FullMSTableReadES, MSReadExecutionS, MSTableReadAction};
+use crate::ms_table_write_es::{FullMSTableWriteES, MSTableWriteAction, MSWriteExecutionS};
 use crate::multiversion_map::MVM;
-use crate::query_replanning_es::{CommonQueryReplanningES, CommonQueryReplanningS};
 use crate::server::{
   are_cols_locked, contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error,
   CommonQuery, ContextConstructor, LocalTable, ServerContext,
 };
 use crate::storage::{commit_to_storage, GenericMVTable, GenericTable, StorageView};
-use crate::table_read_es::{FullTableReadES, QueryReplanningES, TableAction, TableReadES};
+use crate::table_read_es::{ExecutionS, FullTableReadES, TableAction};
 use crate::trans_table_read_es::{
-  FullTransTableReadES, TransQueryReplanningES, TransQueryReplanningS, TransTableAction,
-  TransTableSource,
+  FullTransTableReadES, TransExecutionS, TransTableAction, TransTableSource,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::ops::{Add, Bound, Deref, Sub};
 use std::rc::Rc;
 use std::sync::Arc;
+
+// -----------------------------------------------------------------------------------------------
+//  QueryReplanningSqlView
+// -----------------------------------------------------------------------------------------------
+
+pub trait QueryReplanningSqlView {
+  /// Get the ColNames that must exist in the TableSchema (where it's not sufficient
+  /// for the Context to have these columns instead).
+  fn required_local_cols(&self) -> Vec<ColName>;
+  /// Get the TablePath that the query reads.
+  fn table(&self) -> &TablePath;
+  /// Get all expressions in the Query (in some deterministic order)
+  fn exprs(&self) -> Vec<proc::ValExpr>;
+  /// This converts the underlying SQL into an MSQueryStage, useful
+  /// for sending it out over the network.
+  fn ms_query_stage(&self) -> proc::MSQueryStage;
+}
+
+/// Implementation for `SuperSimpleSelect`.
+impl QueryReplanningSqlView for proc::SuperSimpleSelect {
+  fn required_local_cols(&self) -> Vec<ColName> {
+    return self.projection.clone();
+  }
+
+  fn table(&self) -> &TablePath {
+    cast!(proc::TableRef::TablePath, &self.from).unwrap()
+  }
+
+  fn exprs(&self) -> Vec<proc::ValExpr> {
+    vec![self.selection.clone()]
+  }
+
+  fn ms_query_stage(&self) -> proc::MSQueryStage {
+    proc::MSQueryStage::SuperSimpleSelect(self.clone())
+  }
+}
+
+/// Implementation for `Update`.
+impl QueryReplanningSqlView for proc::Update {
+  fn required_local_cols(&self) -> Vec<ColName> {
+    self.assignment.iter().map(|(col, _)| col.clone()).collect()
+  }
+
+  fn table(&self) -> &TablePath {
+    &self.table
+  }
+
+  fn exprs(&self) -> Vec<proc::ValExpr> {
+    let mut exprs = Vec::new();
+    exprs.push(self.selection.clone());
+    for (_, expr) in &self.assignment {
+      exprs.push(expr.clone());
+    }
+    exprs
+  }
+
+  fn ms_query_stage(&self) -> proc::MSQueryStage {
+    proc::MSQueryStage::Update(self.clone())
+  }
+}
 
 // -----------------------------------------------------------------------------------------------
 //  SubqueryStatus
@@ -100,6 +158,11 @@ pub enum SingleSubqueryStatus {
 // -----------------------------------------------------------------------------------------------
 //  Common Execution States
 // -----------------------------------------------------------------------------------------------
+#[derive(Debug)]
+pub struct ColumnsLocking {
+  pub locked_cols_qid: QueryId,
+}
+
 #[derive(Debug)]
 pub struct Pending {
   pub read_region: TableRegion,
@@ -339,6 +402,7 @@ pub struct TabletContext<T: IOTypes> {
 
   /// Distribution
   pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub sharding_config2: HashMap<(TablePath, u32), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
 
@@ -404,6 +468,7 @@ impl<T: IOTypes> TabletState<T> {
         master_eid,
         gossip,
         sharding_config,
+        sharding_config2: Default::default(),
         tablet_address_config,
         slave_address_config,
         storage: GenericMVTable::new(),
@@ -461,19 +526,20 @@ impl<T: IOTypes> TabletContext<T> {
                 TransTableReadESWrapper {
                   sender_path: perform_query.sender_path.clone(),
                   child_queries: vec![],
-                  es: FullTransTableReadES::QueryReplanning(TransQueryReplanningES {
+                  es: FullTransTableReadES {
                     root_query_path: perform_query.root_query_path,
                     tier_map: perform_query.tier_map,
-                    query_id: perform_query.query_id.clone(),
                     location_prefix: query.location_prefix,
                     context: Rc::new(query.context),
+                    sender_path: perform_query.sender_path,
+                    query_id: perform_query.query_id.clone(),
                     sql_query: query.sql_query,
                     query_plan: query.query_plan,
-                    sender_path: perform_query.sender_path,
-                    orig_p: OrigP::new(perform_query.query_id.clone()),
-                    state: TransQueryReplanningS::Start,
+                    query_plan2: query.query_plan2,
+                    new_rms: Default::default(),
+                    state: TransExecutionS::Start,
                     timestamp: gr_query.es.timestamp.clone(),
-                  }),
+                  },
                 },
               );
 
@@ -509,19 +575,20 @@ impl<T: IOTypes> TabletContext<T> {
                     MSTableReadESWrapper {
                       sender_path: perform_query.sender_path.clone(),
                       child_queries: vec![],
-                      es: FullMSTableReadES::QueryReplanning(MSReadQueryReplanningES {
+                      es: FullMSTableReadES {
                         root_query_path,
                         tier_map: perform_query.tier_map,
+                        timestamp: query.timestamp,
+                        tier: 0,
+                        context: Rc::new(query.context),
+                        query_id: perform_query.query_id.clone(),
+                        sql_query: query.sql_query,
+                        query_plan: query.query_plan,
+                        query_plan2: query.query_plan2,
                         ms_query_id,
-                        status: CommonQueryReplanningES {
-                          timestamp: query.timestamp,
-                          context: Rc::new(query.context),
-                          sql_view: query.sql_query,
-                          query_plan: query.query_plan,
-                          query_id: perform_query.query_id.clone(),
-                          state: CommonQueryReplanningS::Start,
-                        },
-                      }),
+                        new_rms: Default::default(),
+                        state: MSReadExecutionS::Start,
+                      },
                     },
                   );
                   let action = ms_read.es.start(self);
@@ -544,18 +611,18 @@ impl<T: IOTypes> TabletContext<T> {
                 TableReadESWrapper {
                   sender_path: perform_query.sender_path.clone(),
                   child_queries: vec![],
-                  es: FullTableReadES::QueryReplanning(QueryReplanningES {
+                  es: FullTableReadES {
                     root_query_path: perform_query.root_query_path,
                     tier_map: perform_query.tier_map,
-                    status: CommonQueryReplanningES {
-                      timestamp: query.timestamp,
-                      context: Rc::new(query.context),
-                      sql_view: query.sql_query,
-                      query_plan: query.query_plan,
-                      query_id: perform_query.query_id.clone(),
-                      state: CommonQueryReplanningS::Start,
-                    },
-                  }),
+                    timestamp: query.timestamp,
+                    context: Rc::new(query.context),
+                    query_id: perform_query.query_id.clone(),
+                    sql_query: query.sql_query,
+                    query_plan: query.query_plan,
+                    query_plan2: query.query_plan2,
+                    new_rms: Default::default(),
+                    state: ExecutionS::Start,
+                  },
                 },
               );
               let action = read.es.start(self);
@@ -577,6 +644,13 @@ impl<T: IOTypes> TabletContext<T> {
                 let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
                 ms_query_es.pending_queries.insert(perform_query.query_id.clone());
 
+                // First, we look up the `tier` of this Table being
+                // written, update the `tier_map`.
+                let sql_query = query.sql_query;
+                let mut tier_map = perform_query.tier_map;
+                let tier = tier_map.map.get(sql_query.table()).unwrap().clone();
+                *tier_map.map.get_mut(sql_query.table()).unwrap() += 1;
+
                 // Create an MSWriteTableES in the QueryReplanning state, and add it to
                 // the MSQueryES.
                 let ms_write = map_insert(
@@ -585,19 +659,20 @@ impl<T: IOTypes> TabletContext<T> {
                   MSTableWriteESWrapper {
                     sender_path: perform_query.sender_path.clone(),
                     child_queries: vec![],
-                    es: FullMSTableWriteES::QueryReplanning(MSWriteQueryReplanningES {
+                    es: FullMSTableWriteES {
                       root_query_path,
-                      tier_map: perform_query.tier_map,
+                      tier_map,
+                      timestamp: query.timestamp,
+                      tier,
+                      context: Rc::new(query.context),
+                      query_id: perform_query.query_id.clone(),
+                      sql_query,
+                      query_plan: query.query_plan,
+                      query_plan2: query.query_plan2,
                       ms_query_id,
-                      status: CommonQueryReplanningES {
-                        timestamp: query.timestamp,
-                        context: Rc::new(query.context),
-                        sql_view: query.sql_query,
-                        query_plan: query.query_plan,
-                        query_id: perform_query.query_id.clone(),
-                        state: CommonQueryReplanningS::Start,
-                      },
-                    }),
+                      new_rms: Default::default(),
+                      state: MSWriteExecutionS::Start,
+                    },
                   },
                 );
                 let action = ms_write.es.start(self);
@@ -690,55 +765,56 @@ impl<T: IOTypes> TabletContext<T> {
       }
       msg::TabletMessage::MasterFrozenColUsageAborted(_) => panic!(),
       msg::TabletMessage::MasterFrozenColUsageSuccess(success) => {
-        // Update the Gossip with incoming Gossip data.
-        let gossip_data = success.gossip.clone().to_gossip();
-        if self.gossip.gossip_gen < gossip_data.gossip_gen {
-          self.gossip = Arc::new(gossip_data);
-        }
-
-        // Route the response to the appropriate ES.
-        let query_id = success.return_qid;
-        if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
-          // TableReadES
-          let action = read.es.handle_master_response(
-            self,
-            success.gossip.gossip_gen,
-            success.frozen_col_usage_tree,
-          );
-          self.handle_read_es_action(statuses, query_id, action);
-        } else if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-          // TransTableReadES
-          let prefix = trans_read.es.location_prefix();
-          let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
-            trans_read.es.handle_master_response(
-              &mut self.ctx(),
-              &gr_query.es,
-              success.gossip.gossip_gen,
-              success.frozen_col_usage_tree,
-            )
-          } else {
-            trans_read
-              .es
-              .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-          };
-          self.handle_trans_read_es_action(statuses, query_id, action);
-        } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
-          // MSTableWriteES
-          let action = ms_write.es.handle_master_response(
-            self,
-            success.gossip.gossip_gen,
-            success.frozen_col_usage_tree,
-          );
-          self.handle_ms_write_es_action(statuses, query_id, action);
-        } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
-          // MSTableReadES
-          let action = ms_read.es.handle_master_response(
-            self,
-            success.gossip.gossip_gen,
-            success.frozen_col_usage_tree,
-          );
-          self.handle_ms_read_es_action(statuses, query_id, action);
-        }
+        // TODO: remove everything here.
+        // // Update the Gossip with incoming Gossip data.
+        // let gossip_data = success.gossip.clone().to_gossip();
+        // if self.gossip.gossip_gen < gossip_data.gossip_gen {
+        //   self.gossip = Arc::new(gossip_data);
+        // }
+        //
+        // // Route the response to the appropriate ES.
+        // let query_id = success.return_qid;
+        // if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
+        //   // TableReadES
+        //   // let action = read.es.handle_master_response(
+        //   //   self,
+        //   //   success.gossip.gossip_gen,
+        //   //   success.frozen_col_usage_tree,
+        //   // );
+        //   // self.handle_read_es_action(statuses, query_id, action);
+        // } else if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+        //   // TransTableReadES
+        //   let prefix = trans_read.es.location_prefix();
+        //   let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
+        //     trans_read.es.handle_master_response(
+        //       &mut self.ctx(),
+        //       &gr_query.es,
+        //       success.gossip.gossip_gen,
+        //       success.frozen_col_usage_tree,
+        //     )
+        //   } else {
+        //     trans_read
+        //       .es
+        //       .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+        //   };
+        //   self.handle_trans_read_es_action(statuses, query_id, action);
+        // } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
+        //   // MSTableWriteES
+        //   let action = ms_write.es.handle_master_response(
+        //     self,
+        //     success.gossip.gossip_gen,
+        //     success.frozen_col_usage_tree,
+        //   );
+        //   self.handle_ms_write_es_action(statuses, query_id, action);
+        // } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+        //   // MSTableReadES
+        //   let action = ms_read.es.handle_master_response(
+        //     self,
+        //     success.gossip.gossip_gen,
+        //     success.frozen_col_usage_tree,
+        //   );
+        //   self.handle_ms_read_es_action(statuses, query_id, action);
+        // }
       }
       msg::TabletMessage::AlterTablePrepare(prepare) => {
         // Check a few guaranteed properties.
@@ -1383,38 +1459,39 @@ impl<T: IOTypes> TabletContext<T> {
     subquery_id: QueryId,
     rem_cols: Vec<ColName>,
   ) {
-    let query_id = orig_p.query_id;
-    if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
-      // TableReadES
-      remove_item(&mut read.child_queries, &subquery_id);
-      let action = read.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
-      self.handle_read_es_action(statuses, query_id, action);
-    } else if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-      // TransTableReadES
-      let prefix = trans_read.es.location_prefix();
-      remove_item(&mut trans_read.child_queries, &subquery_id);
-      let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
-        trans_read.es.handle_internal_columns_dne(
-          &mut self.ctx(),
-          &gr_query.es,
-          subquery_id.clone(),
-          rem_cols,
-        )
-      } else {
-        trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-      };
-      self.handle_trans_read_es_action(statuses, query_id, action);
-    } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
-      // MSTableWriteES
-      remove_item(&mut ms_write.child_queries, &subquery_id);
-      let action = ms_write.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
-      self.handle_ms_write_es_action(statuses, query_id, action);
-    } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
-      // MSTableReadES
-      remove_item(&mut ms_read.child_queries, &subquery_id);
-      let action = ms_read.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
-      self.handle_ms_read_es_action(statuses, query_id, action);
-    }
+    // TODO: remove everything here.
+    // let query_id = orig_p.query_id;
+    // if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
+    //   // TableReadES
+    //   // remove_item(&mut read.child_queries, &subquery_id);
+    //   // let action = read.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
+    //   // self.handle_read_es_action(statuses, query_id, action);
+    // } else if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+    //   // TransTableReadES
+    //   let prefix = trans_read.es.location_prefix();
+    //   remove_item(&mut trans_read.child_queries, &subquery_id);
+    //   let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
+    //     trans_read.es.handle_internal_columns_dne(
+    //       &mut self.ctx(),
+    //       &gr_query.es,
+    //       subquery_id.clone(),
+    //       rem_cols,
+    //     )
+    //   } else {
+    //     trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+    //   };
+    //   self.handle_trans_read_es_action(statuses, query_id, action);
+    // } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
+    //   // MSTableWriteES
+    //   remove_item(&mut ms_write.child_queries, &subquery_id);
+    //   let action = ms_write.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
+    //   self.handle_ms_write_es_action(statuses, query_id, action);
+    // } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+    //   // MSTableReadES
+    //   remove_item(&mut ms_read.child_queries, &subquery_id);
+    //   let action = ms_read.es.handle_internal_columns_dne(self, subquery_id, rem_cols);
+    //   self.handle_ms_read_es_action(statuses, query_id, action);
+    // }
   }
 
   /// This routes the QueryError propagated by a GRQueryES up to the appropriate top-level ES.

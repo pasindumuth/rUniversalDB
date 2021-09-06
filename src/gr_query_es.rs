@@ -2,7 +2,9 @@ use crate::col_usage::{
   collect_select_subqueries, collect_update_subqueries, node_external_trans_tables,
   nodes_external_trans_tables, FrozenColUsageNode,
 };
-use crate::common::{lookup, lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
+use crate::common::{
+  lookup, lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, QueryPlan2, TMStatus,
+};
 use crate::model::common::{
   proc, ColName, Context, ContextRow, ContextSchema, Gen, NodeGroupId, NodePath, QueryId,
   QueryPath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
@@ -533,6 +535,7 @@ impl GRQueryES {
           context: context.clone(),
           sql_query: child_sql_query.clone(),
           query_plan,
+          query_plan2: QueryPlan2::new(),
         };
 
         let tids = ctx.get_min_tablets(table_path, &child_sql_query.selection);
@@ -571,6 +574,7 @@ impl GRQueryES {
           context: context.clone(),
           sql_query: child_sql_query.clone(),
           query_plan,
+          query_plan2: QueryPlan2::new(),
         };
 
         // Construct PerformQuery

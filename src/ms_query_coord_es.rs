@@ -1,11 +1,11 @@
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
-use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
+use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, QueryPlan2, TMStatus};
 use crate::model::common::{
   proc, ColName, Context, ContextRow, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, RequestId,
   TablePath, TableView, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::message as msg;
-use crate::model::message::{Query2PCAbortReason, Query2PCAborted};
+use crate::model::message::{AbortedData, Query2PCAbortReason, Query2PCAborted};
 use crate::server::CommonQuery;
 use crate::slave::SlaveContext;
 use crate::trans_table_read_es::TransTableSource;
@@ -252,6 +252,9 @@ impl FullMSCoordES {
       }
       // Recall that LateralErrors should never make it back to the MSCoordES.
       msg::AbortedData::QueryError(msg::QueryError::LateralError) => panic!(),
+      // TODO: do these
+      msg::AbortedData::QueryError(msg::QueryError::InvalidQueryPlan) => panic!(),
+      msg::AbortedData::QueryError(msg::QueryError::InvalidLeadershipId) => panic!(),
     }
   }
 
@@ -437,6 +440,7 @@ impl FullMSCoordES {
               context: context.clone(),
               sql_query: select_query.clone(),
               query_plan,
+              query_plan2: QueryPlan2::new(),
             };
 
             // Compute the TabletGroups involved.
@@ -483,6 +487,7 @@ impl FullMSCoordES {
                   context: context.clone(),
                   sql_query: select_query.clone(),
                   query_plan,
+                  query_plan2: QueryPlan2::new(),
                 },
               ),
             };
@@ -503,6 +508,7 @@ impl FullMSCoordES {
           context: context.clone(),
           sql_query: update_query.clone(),
           query_plan,
+          query_plan2: QueryPlan2::new(),
         };
 
         // Compute the TabletGroups involved.

@@ -20,8 +20,7 @@ use crate::server::{CommonQuery, ServerContext};
 use crate::sql_parser::convert_ast;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{
-  FullTransTableReadES, TransQueryReplanningES, TransQueryReplanningS, TransTableAction,
-  TransTableSource,
+  FullTransTableReadES, TransExecutionS, TransTableAction, TransTableSource,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -210,19 +209,20 @@ impl<T: IOTypes> SlaveContext<T> {
                 TransTableReadESWrapper {
                   sender_path: perform_query.sender_path.clone(),
                   child_queries: vec![],
-                  es: FullTransTableReadES::QueryReplanning(TransQueryReplanningES {
+                  es: FullTransTableReadES {
                     root_query_path: perform_query.root_query_path,
                     tier_map: perform_query.tier_map,
-                    query_id: perform_query.query_id.clone(),
                     location_prefix: query.location_prefix,
                     context: Rc::new(query.context),
+                    sender_path: perform_query.sender_path,
+                    query_id: perform_query.query_id.clone(),
                     sql_query: query.sql_query,
                     query_plan: query.query_plan,
-                    sender_path: perform_query.sender_path,
-                    orig_p: OrigP::new(perform_query.query_id.clone()),
-                    state: TransQueryReplanningS::Start,
+                    query_plan2: query.query_plan2,
+                    new_rms: Default::default(),
+                    state: TransExecutionS::Start,
                     timestamp: es.timestamp.clone(),
-                  }),
+                  },
                 },
               );
 
@@ -238,19 +238,20 @@ impl<T: IOTypes> SlaveContext<T> {
                 TransTableReadESWrapper {
                   sender_path: perform_query.sender_path.clone(),
                   child_queries: vec![],
-                  es: FullTransTableReadES::QueryReplanning(TransQueryReplanningES {
+                  es: FullTransTableReadES {
                     root_query_path: perform_query.root_query_path,
                     tier_map: perform_query.tier_map,
-                    query_id: perform_query.query_id.clone(),
                     location_prefix: query.location_prefix,
                     context: Rc::new(query.context),
+                    sender_path: perform_query.sender_path,
+                    query_id: perform_query.query_id.clone(),
                     sql_query: query.sql_query,
                     query_plan: query.query_plan,
-                    sender_path: perform_query.sender_path,
-                    orig_p: OrigP::new(perform_query.query_id.clone()),
-                    state: TransQueryReplanningS::Start,
+                    query_plan2: query.query_plan2,
+                    new_rms: Default::default(),
+                    state: TransExecutionS::Start,
                     timestamp: gr_query.es.timestamp.clone(),
-                  }),
+                  },
                 },
               );
 
@@ -307,29 +308,30 @@ impl<T: IOTypes> SlaveContext<T> {
         // Route the response to the appropriate ES.
         let query_id = success.return_qid;
         if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-          let prefix = trans_read.es.location_prefix();
-          let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
-            trans_read.es.handle_master_response(
-              &mut self.ctx(),
-              &gr_query.es,
-              success.gossip.gossip_gen,
-              success.frozen_col_usage_tree,
-            )
-          } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.query_id) {
-            trans_read.es.handle_master_response(
-              &mut self.ctx(),
-              ms_coord.es.to_exec(),
-              success.gossip.gossip_gen,
-              success.frozen_col_usage_tree,
-            )
-          } else {
-            // TODO: I'm not fully convinced it's a good practice to use
-            // handle_internal_query_error for this.
-            trans_read
-              .es
-              .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-          };
-          self.handle_trans_read_es_action(statuses, query_id, action);
+          // TODO: remove this section.
+          // let prefix = trans_read.es.location_prefix();
+          // let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
+          //   trans_read.es.handle_master_response(
+          //     &mut self.ctx(),
+          //     &gr_query.es,
+          //     success.gossip.gossip_gen,
+          //     success.frozen_col_usage_tree,
+          //   )
+          // } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.query_id) {
+          //   trans_read.es.handle_master_response(
+          //     &mut self.ctx(),
+          //     ms_coord.es.to_exec(),
+          //     success.gossip.gossip_gen,
+          //     success.frozen_col_usage_tree,
+          //   )
+          // } else {
+          //   // TODO: I'm not fully convinced it's a good practice to use
+          //   // handle_internal_query_error for this.
+          //   trans_read
+          //     .es
+          //     .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+          // };
+          // self.handle_trans_read_es_action(statuses, query_id, action);
         } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
           let action = ms_coord.es.handle_master_response(
             self,
@@ -516,28 +518,29 @@ impl<T: IOTypes> SlaveContext<T> {
     subquery_id: QueryId,
     rem_cols: Vec<ColName>,
   ) {
-    let query_id = orig_p.query_id;
-    let trans_read = statuses.full_trans_table_read_ess.get_mut(&query_id).unwrap();
-    remove_item(&mut trans_read.child_queries, &subquery_id);
-    let prefix = trans_read.es.location_prefix();
-    let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
-      trans_read.es.handle_internal_columns_dne(
-        &mut self.ctx(),
-        &gr_query.es,
-        subquery_id,
-        rem_cols,
-      )
-    } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.query_id) {
-      trans_read.es.handle_internal_columns_dne(
-        &mut self.ctx(),
-        ms_coord.es.to_exec(),
-        subquery_id,
-        rem_cols,
-      )
-    } else {
-      trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-    };
-    self.handle_trans_read_es_action(statuses, query_id, action);
+    // TODO: remove this thing
+    // let query_id = orig_p.query_id;
+    // let trans_read = statuses.full_trans_table_read_ess.get_mut(&query_id).unwrap();
+    // remove_item(&mut trans_read.child_queries, &subquery_id);
+    // let prefix = trans_read.es.location_prefix();
+    // let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
+    //   trans_read.es.handle_internal_columns_dne(
+    //     &mut self.ctx(),
+    //     &gr_query.es,
+    //     subquery_id,
+    //     rem_cols,
+    //   )
+    // } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.query_id) {
+    //   trans_read.es.handle_internal_columns_dne(
+    //     &mut self.ctx(),
+    //     ms_coord.es.to_exec(),
+    //     subquery_id,
+    //     rem_cols,
+    //   )
+    // } else {
+    //   trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+    // };
+    // self.handle_trans_read_es_action(statuses, query_id, action);
   }
 
   /// Handles a `query_error` propagated up from a GRQueryES. Recall that the originator

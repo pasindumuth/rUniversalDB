@@ -1,5 +1,5 @@
 use crate::col_usage::FrozenColUsageNode;
-use crate::common::{GossipDataSer, QueryPlan};
+use crate::common::{GossipDataSer, QueryPlan, QueryPlan2};
 use crate::model::common::{
   proc, ColName, ColType, Context, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, RequestId,
   SlaveGroupId, TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
@@ -152,6 +152,10 @@ pub enum QueryError {
   TimestampConflict,
 
   LateralError,
+
+  // Query Validation Errors
+  InvalidLeadershipId,
+  InvalidQueryPlan,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -185,6 +189,7 @@ pub struct SuperSimpleTransTableSelectQuery {
   pub context: Context,
   pub sql_query: proc::SuperSimpleSelect,
   pub query_plan: QueryPlan,
+  pub query_plan2: QueryPlan2,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -193,6 +198,7 @@ pub struct SuperSimpleTableSelectQuery {
   pub context: Context,
   pub sql_query: proc::SuperSimpleSelect,
   pub query_plan: QueryPlan,
+  pub query_plan2: QueryPlan2,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -201,6 +207,7 @@ pub struct UpdateQuery {
   pub context: Context,
   pub sql_query: proc::Update,
   pub query_plan: QueryPlan,
+  pub query_plan2: QueryPlan2,
 }
 
 // -------------------------------------------------------------------------------------------------

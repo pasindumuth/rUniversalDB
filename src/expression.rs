@@ -1,9 +1,14 @@
 use crate::common::{ColBound, KeyBound, PolyColBound, SingleBound, TableRegion};
 use crate::model::common::proc::ValExpr;
 use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
+use std::cmp::{max, min};
 use std::collections::{BTreeSet, HashMap};
 use std::iter::FromIterator;
 use std::ops::Deref;
+
+// -----------------------------------------------------------------------------------------------
+//  Expression Evaluation
+// -----------------------------------------------------------------------------------------------
 
 /// These primarily exist for testing the expression evaluation code. It's not used
 /// by the system for decision making.
@@ -250,7 +255,7 @@ pub fn evaluate_kb_expr(kb_expr: &KBExpr) -> Result<Option<ColValN>, EvalError> 
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Utility functions
+//  Expression Evaluation Utilities
 // -----------------------------------------------------------------------------------------------
 
 /// This function simply deduces if the given `ColValN` sould be interpreted as true
@@ -303,26 +308,6 @@ impl BoundType for String {
       None
     }
   }
-}
-
-/// This function computes the complement of this `bounds`.
-pub fn intersection_col_bounds<T>(
-  left_bounds: Vec<ColBound<T>>,
-  right_bounds: Vec<ColBound<T>>,
-) -> Vec<ColBound<T>> {
-  unimplemented!()
-}
-
-/// This function computes the complement of this `bounds`.
-pub fn invert_col_bounds<T>(bounds: Vec<ColBound<T>>) -> Vec<ColBound<T>> {
-  // Here, we must sort the bounds, compress them to make them disjoint, and then
-  // construct the complement.
-  unimplemented!()
-}
-
-/// A convenience function for concisely computing a full ColBound.
-fn full_bound<T>() -> ColBound<T> {
-  ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Unbounded)
 }
 
 /// This is used to help determine a ColBound for <, <=, =, <=>, >=, > operators,
@@ -392,7 +377,7 @@ pub fn boolean_leaf_constraint<T: BoundType + Clone>(
 /// `UnknownValue`s). It then computes a `Vec<ColBound>` such that any `ColValN`
 /// outside of these bounds for the `col_name` can't possibly result in `kb_expr`
 /// evaluating to true.
-fn compute_col_bounds<T: BoundType + Clone>(
+fn compute_col_bounds<T: Ord + BoundType + Clone>(
   kb_expr: &KBExpr,
   col_name: &ColName,
 ) -> Result<Vec<ColBound<T>>, EvalError> {
@@ -492,7 +477,7 @@ fn compute_col_bounds<T: BoundType + Clone>(
         iast::BinaryOp::And => {
           let left_bounds = compute_col_bounds(left.deref(), col_name)?;
           let right_bounds = compute_col_bounds(right.deref(), col_name)?;
-          Ok(intersection_col_bounds(left_bounds, right_bounds))
+          Ok(col_bounds_intersect(left_bounds, right_bounds))
         }
         iast::BinaryOp::Or => {
           let mut left_bounds = compute_col_bounds(left.deref(), col_name)?;
@@ -524,11 +509,6 @@ fn compute_col_bounds<T: BoundType + Clone>(
     }
   }
 }
-
-/*
-Optimizations:
-- We can pre-evaluate constant expressions before evaluating them with the `col_context`.
-*/
 
 /// Same as above, but uses the `col_type` and wraps each `ColBound` into a `PolyColBound`.
 pub fn compute_poly_col_bounds(
@@ -586,7 +566,214 @@ pub fn compute_key_region(
   Ok(key_bounds)
 }
 
-/// Computes if `region` and intersects with any TableRegion in `regions`.
-pub fn does_intersect(region: &TableRegion, regions: &BTreeSet<TableRegion>) -> bool {
-  unimplemented!()
+// -----------------------------------------------------------------------------------------------
+//  Region Intersection Utilities
+// -----------------------------------------------------------------------------------------------
+
+/// Essentially computes the intersection of 2 `ColBound`s, returning a pair
+/// of `SingleBound`. Note that the first element can be greater than the second.
+pub fn col_bound_intersect_interval<'a, T: Ord>(
+  left: &'a ColBound<T>,
+  right: &'a ColBound<T>,
+) -> (&'a SingleBound<T>, &'a SingleBound<T>) {
+  let lower = match (&left.start, &right.start) {
+    (SingleBound::Unbounded, _) => &right.start,
+    (_, SingleBound::Unbounded) => &left.start,
+    (SingleBound::Included(b1), SingleBound::Included(b2))
+    | (SingleBound::Excluded(b1), SingleBound::Excluded(b2))
+    | (SingleBound::Included(b1), SingleBound::Excluded(b2)) => {
+      if b1 > b2 {
+        &left.start
+      } else {
+        &right.start
+      }
+    }
+    (SingleBound::Excluded(b1), SingleBound::Included(b2)) => {
+      if b1 >= b2 {
+        &left.start
+      } else {
+        &right.start
+      }
+    }
+  };
+  let upper = match (&left.end, &right.end) {
+    (SingleBound::Unbounded, _) => &right.end,
+    (_, SingleBound::Unbounded) => &left.end,
+    (SingleBound::Included(b1), SingleBound::Included(b2))
+    | (SingleBound::Excluded(b1), SingleBound::Excluded(b2))
+    | (SingleBound::Included(b1), SingleBound::Excluded(b2)) => {
+      if b1 >= b2 {
+        &right.end
+      } else {
+        &left.end
+      }
+    }
+    (SingleBound::Excluded(b1), SingleBound::Included(b2)) => {
+      if b1 > b2 {
+        &right.end
+      } else {
+        &left.end
+      }
+    }
+  };
+  (lower, upper)
+}
+
+/// Checks if the given interval (where the first element can generally be greater
+/// than the second) is non-empty.
+pub fn is_interval_empty<T: Ord>(interval: (&SingleBound<T>, &SingleBound<T>)) -> bool {
+  match interval {
+    (SingleBound::Unbounded, _) => false,
+    (_, SingleBound::Unbounded) => false,
+    (SingleBound::Included(b1), SingleBound::Included(b2)) => b1 > b2,
+    (SingleBound::Excluded(b1), SingleBound::Excluded(b2))
+    | (SingleBound::Included(b1), SingleBound::Excluded(b2))
+    | (SingleBound::Excluded(b1), SingleBound::Included(b2)) => b1 >= b2,
+  }
+}
+
+/// This computes the intersection of 2 sets of `ColBound`s
+pub fn col_bounds_intersect<T: Ord + Clone>(
+  left_bounds: Vec<ColBound<T>>,
+  right_bounds: Vec<ColBound<T>>,
+) -> Vec<ColBound<T>> {
+  let mut intersection = Vec::<ColBound<T>>::new();
+  for left_bound in &left_bounds {
+    for right_bound in &right_bounds {
+      let (lower, upper) = col_bound_intersect_interval(left_bound, right_bound);
+      if !is_interval_empty((lower, upper)) {
+        intersection.push(ColBound { start: lower.clone(), end: upper.clone() })
+      }
+    }
+  }
+  intersection
+}
+
+/// Take the complement of a `ColBound`.
+fn invert_col_bound<T: Ord>(bound: ColBound<T>) -> Vec<ColBound<T>> {
+  let intervals = match (bound.start, bound.end) {
+    (SingleBound::Unbounded, SingleBound::Unbounded) => vec![],
+    (SingleBound::Unbounded, SingleBound::Included(b)) => {
+      vec![(SingleBound::Excluded(b), SingleBound::Unbounded)]
+    }
+    (SingleBound::Unbounded, SingleBound::Excluded(b)) => {
+      vec![(SingleBound::Included(b), SingleBound::Unbounded)]
+    }
+    (SingleBound::Included(b), SingleBound::Unbounded) => {
+      vec![(SingleBound::Unbounded, SingleBound::Excluded(b))]
+    }
+    (SingleBound::Included(b1), SingleBound::Included(b2)) => {
+      if b1 > b2 {
+        vec![(SingleBound::Unbounded, SingleBound::Unbounded)]
+      } else {
+        vec![
+          (SingleBound::Unbounded, SingleBound::Excluded(b1)),
+          (SingleBound::Excluded(b2), SingleBound::Unbounded),
+        ]
+      }
+    }
+    (SingleBound::Included(b1), SingleBound::Excluded(b2)) => {
+      if b1 >= b2 {
+        vec![(SingleBound::Unbounded, SingleBound::Unbounded)]
+      } else {
+        vec![
+          (SingleBound::Unbounded, SingleBound::Excluded(b1)),
+          (SingleBound::Included(b2), SingleBound::Unbounded),
+        ]
+      }
+    }
+    (SingleBound::Excluded(b), SingleBound::Unbounded) => {
+      vec![(SingleBound::Unbounded, SingleBound::Included(b))]
+    }
+    (SingleBound::Excluded(b1), SingleBound::Included(b2)) => {
+      if b1 >= b2 {
+        vec![(SingleBound::Unbounded, SingleBound::Unbounded)]
+      } else {
+        vec![
+          (SingleBound::Unbounded, SingleBound::Included(b1)),
+          (SingleBound::Excluded(b2), SingleBound::Unbounded),
+        ]
+      }
+    }
+    (SingleBound::Excluded(b1), SingleBound::Excluded(b2)) => {
+      if b1 >= b2 {
+        vec![(SingleBound::Unbounded, SingleBound::Unbounded)]
+      } else {
+        vec![
+          (SingleBound::Unbounded, SingleBound::Included(b1)),
+          (SingleBound::Included(b2), SingleBound::Unbounded),
+        ]
+      }
+    }
+  };
+  intervals.into_iter().map(|(start, end)| ColBound { start, end }).collect()
+}
+
+/// This function computes the complement of this `bounds`.
+pub fn invert_col_bounds<T: Ord + Clone>(bounds: Vec<ColBound<T>>) -> Vec<ColBound<T>> {
+  // Recall that the complement of a union is the intersect of the complements.
+  let mut cum = vec![full_bound::<T>()];
+  for bound in bounds {
+    cum = col_bounds_intersect(cum, invert_col_bound(bound));
+  }
+  cum
+}
+
+/// A convenience function for concisely computing a full ColBound.
+fn full_bound<T>() -> ColBound<T> {
+  ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Unbounded)
+}
+
+/// Computes if `single_region` and intersects with any TableRegion in `regions`.
+/// The schemas of the KeyBounds should match, i.e. they should all be the same length
+/// and every element must have corresponding types.
+pub fn does_intersect(single_region: &TableRegion, regions: &BTreeSet<TableRegion>) -> bool {
+  fn does_col_regions_intersect(col_region1: &Vec<ColName>, col_region2: &Vec<ColName>) -> bool {
+    for col in col_region1 {
+      if col_region2.contains(col) {
+        return true;
+      }
+    }
+    false
+  }
+
+  fn does_col_intersect<T: Ord>(bound1: &ColBound<T>, bound2: &ColBound<T>) -> bool {
+    let interval = col_bound_intersect_interval(bound1, bound2);
+    is_interval_empty(interval)
+  }
+
+  fn does_key_bound_intersect(key_bound1: &KeyBound, key_bound2: &KeyBound) -> bool {
+    assert_eq!(key_bound1.col_bounds.len(), key_bound2.col_bounds.len());
+    for (pc1, pc2) in key_bound1.col_bounds.iter().zip(key_bound2.col_bounds.iter()) {
+      let does_col_bound_intersect = match (pc1, pc2) {
+        (PolyColBound::Int(c1), PolyColBound::Int(c2)) => does_col_intersect(c1, c2),
+        (PolyColBound::Bool(c1), PolyColBound::Bool(c2)) => does_col_intersect(c1, c2),
+        (PolyColBound::String(c1), PolyColBound::String(c2)) => does_col_intersect(c1, c2),
+        _ => panic!(),
+      };
+      if !does_col_bound_intersect {
+        return false;
+      }
+    }
+    true
+  }
+
+  fn does_key_region_intersect(key_region1: &Vec<KeyBound>, key_region2: &Vec<KeyBound>) -> bool {
+    for key_bound1 in key_region1 {
+      for key_bound2 in key_region2 {
+        if does_key_bound_intersect(key_bound1, key_bound2) {
+          return true;
+        }
+      }
+    }
+    false
+  }
+  for region in regions {
+    if does_col_regions_intersect(&region.col_region, &single_region.col_region)
+      && does_key_region_intersect(&region.row_region, &single_region.row_region)
+    {
+      return true;
+    }
+  }
+  false
 }

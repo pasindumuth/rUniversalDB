@@ -1,7 +1,7 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::model::common::{
-  ColName, ColType, EndpointId, Gen, NodeGroupId, NodePath, QueryId, QueryPath, TablePath,
-  TableView, TabletGroupId, Timestamp, TransTableName,
+  proc, ColName, ColType, EndpointId, Gen, LeadershipId, NodeGroupId, NodePath, QueryId, QueryPath,
+  SlaveGroupId, TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
@@ -259,6 +259,33 @@ pub fn merge_table_views(
 // -----------------------------------------------------------------------------------------------
 //  Query Plan
 // -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct QueryPlan2 {
+  pub tier_map: TierMap,
+  pub query_leader_map: HashMap<SlaveGroupId, LeadershipId>,
+  pub table_location_map: HashMap<TablePath, u64>,
+  /// These are additional required columns that the QueryPlan expects that these `TablePaths`
+  /// to have. While a TP is happen is happening, we must must these `ColName` and verify
+  /// their presence.
+  ///
+  /// Note: not all `TablePaths` used in the MSQuery needs to be here.
+  pub extra_req_cols: HashMap<TablePath, Vec<ColName>>,
+  pub col_usage_node: FrozenColUsageNode,
+}
+
+// TODO remove this later
+impl QueryPlan2 {
+  pub fn new() -> QueryPlan2 {
+    QueryPlan2 {
+      tier_map: TierMap { map: Default::default() },
+      query_leader_map: Default::default(),
+      table_location_map: Default::default(),
+      extra_req_cols: Default::default(),
+      col_usage_node: FrozenColUsageNode::new(proc::TableRef::TablePath(TablePath("".to_string()))),
+    }
+  }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QueryPlan {

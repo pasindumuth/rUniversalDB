@@ -16,7 +16,6 @@ pub mod ms_table_write_es;
 pub mod multiversion_map;
 pub mod net;
 pub mod query_converter;
-pub mod query_replanning_es;
 pub mod server;
 pub mod slave;
 pub mod sql_parser;
