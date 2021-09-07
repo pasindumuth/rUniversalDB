@@ -61,34 +61,6 @@ pub enum MasterMessage {
 //  SlaveMessage
 // -------------------------------------------------------------------------------------------------
 
-// TODO: Update
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum SlaveMessage {
-  // Transaction Processing messages
-  PerformQuery(PerformQuery),
-  CancelQuery(CancelQuery),
-  QueryAborted(QueryAborted),
-  QuerySuccess(QuerySuccess),
-
-  // External Messages
-  PerformExternalQuery(PerformExternalQuery),
-  CancelExternalQuery(CancelExternalQuery),
-
-  // Tablet forwarding message
-  TabletMessage(TabletGroupId, TabletMessage),
-
-  // Register message
-  RegisterQuery(RegisterQuery),
-
-  // 2PC backward messages
-  Query2PCPrepared(Query2PCPrepared),
-  Query2PCAborted(Query2PCAborted),
-
-  // Master Responses
-  MasterFrozenColUsageAborted(MasterFrozenColUsageAborted),
-  MasterFrozenColUsageSuccess(MasterFrozenColUsageSuccess),
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveExternalReq {
   PerformExternalQuery(PerformExternalQuery),
@@ -96,7 +68,7 @@ pub enum SlaveExternalReq {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum SlaveMessage2 {
+pub enum SlaveMessage {
   ExternalMessage(SlaveExternalReq),
   RemoteMessage(RemoteMessage<SlaveRemotePayload>),
   PaxosMessage(PaxosMessage),

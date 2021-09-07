@@ -6,7 +6,7 @@ use runiversal::common::{
 use runiversal::model::common::{
   EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
-use runiversal::model::message::{NetworkMessage, SlaveMessage, TabletMessage};
+use runiversal::model::message as msg;
 use runiversal::slave::SlaveState;
 use runiversal::tablet::TabletState;
 use std::cell::RefCell;
@@ -29,13 +29,13 @@ impl Clock for TestClock {
 /// in `queues`.
 #[derive(Clone)]
 struct TestNetworkOut {
-  queues: Rc<RefCell<HashMap<EndpointId, HashMap<EndpointId, VecDeque<NetworkMessage>>>>>,
+  queues: Rc<RefCell<HashMap<EndpointId, HashMap<EndpointId, VecDeque<msg::NetworkMessage>>>>>,
   nonempty_queues: Rc<RefCell<Vec<(EndpointId, EndpointId)>>>,
   from_eid: EndpointId,
 }
 
 impl NetworkOut for TestNetworkOut {
-  fn send(&mut self, to_eid: &EndpointId, msg: NetworkMessage) {
+  fn send(&mut self, to_eid: &EndpointId, msg: msg::NetworkMessage) {
     add_msg(&mut self.queues, &mut self.nonempty_queues, msg, &self.from_eid, to_eid);
   }
 }
@@ -54,7 +54,7 @@ struct TestTabletForwardOut {
 }
 
 impl TabletForwardOut for TestTabletForwardOut {
-  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletMessage) {
+  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: msg::TabletMessage) {
     self
       .tablet_states
       .borrow_mut()
@@ -99,7 +99,7 @@ pub struct Simulation {
   client_eids: Vec<EndpointId>,
   /// Message queues between nodes. This field contains contains 2 queues (in for
   /// each direction) for every pair of client EndpointIds and slave Endpoints.
-  queues: Rc<RefCell<HashMap<EndpointId, HashMap<EndpointId, VecDeque<NetworkMessage>>>>>,
+  queues: Rc<RefCell<HashMap<EndpointId, HashMap<EndpointId, VecDeque<msg::NetworkMessage>>>>>,
   /// We use pairs of endpoints as identifiers of a queue.
   /// This field contain all queue IDs where the queue is non-empty
   nonempty_queues: Rc<RefCell<Vec<(EndpointId, EndpointId)>>>,
@@ -109,7 +109,7 @@ pub struct Simulation {
   next_int: i32,
   true_timestamp: i64,
   /// Accumulated client responses for each client.
-  client_msgs_received: HashMap<EndpointId, Vec<NetworkMessage>>,
+  client_msgs_received: HashMap<EndpointId, Vec<msg::NetworkMessage>>,
 }
 
 impl Simulation {
@@ -219,7 +219,7 @@ impl Simulation {
   //  Const getters
   // -----------------------------------------------------------------------------------------------
 
-  pub fn get_responses(&self) -> &HashMap<EndpointId, Vec<NetworkMessage>> {
+  pub fn get_responses(&self) -> &HashMap<EndpointId, Vec<msg::NetworkMessage>> {
     return &self.client_msgs_received;
   }
 
@@ -236,12 +236,16 @@ impl Simulation {
   // -----------------------------------------------------------------------------------------------
 
   /// Add a message between two nodes in the network.
-  pub fn add_msg(&mut self, msg: NetworkMessage, from_eid: &EndpointId, to_eid: &EndpointId) {
+  pub fn add_msg(&mut self, msg: msg::NetworkMessage, from_eid: &EndpointId, to_eid: &EndpointId) {
     add_msg(&mut self.queues, &mut self.nonempty_queues, msg, from_eid, to_eid);
   }
 
   /// Poll a message between two nodes in the network.
-  pub fn poll_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) -> Option<NetworkMessage> {
+  pub fn poll_msg(
+    &mut self,
+    from_eid: &EndpointId,
+    to_eid: &EndpointId,
+  ) -> Option<msg::NetworkMessage> {
     let mut queues = self.queues.borrow_mut();
     let queue = queues.get_mut(from_eid).unwrap().get_mut(to_eid).unwrap();
     if queue.len() == 1 {
@@ -260,7 +264,7 @@ impl Simulation {
   /// `queues`. This function will run the Slave on the `to_eid` end, which
   /// might have any number of side effects, including adding new messages into
   /// `queues`.
-  pub fn run_slave_message(&mut self, _: &EndpointId, to_eid: &EndpointId, msg: SlaveMessage) {
+  pub fn run_slave_message(&mut self, _: &EndpointId, to_eid: &EndpointId, msg: msg::SlaveMessage) {
     self.slave_states.borrow_mut().get_mut(&to_eid).unwrap().handle_incoming_message(msg);
   }
 
@@ -272,7 +276,9 @@ impl Simulation {
     if let Some(msg) = self.poll_msg(from_eid, to_eid) {
       if self.slave_states.borrow_mut().contains_key(to_eid) {
         match msg {
-          NetworkMessage::Slave(slave_msg) => self.run_slave_message(from_eid, to_eid, slave_msg),
+          msg::NetworkMessage::Slave(slave_msg) => {
+            self.run_slave_message(from_eid, to_eid, slave_msg)
+          }
           _ => {
             panic!("Endpoint {:?} is a Slave but received a non-SlaveMessage {:?} ", to_eid, msg)
           }
@@ -349,9 +355,9 @@ pub fn client_eid(i: &i32) -> EndpointId {
 
 /// Add a message between two nodes in the network.
 fn add_msg(
-  queues: &Rc<RefCell<HashMap<EndpointId, HashMap<EndpointId, VecDeque<NetworkMessage>>>>>,
+  queues: &Rc<RefCell<HashMap<EndpointId, HashMap<EndpointId, VecDeque<msg::NetworkMessage>>>>>,
   nonempty_queues: &Rc<RefCell<Vec<(EndpointId, EndpointId)>>>,
-  msg: NetworkMessage,
+  msg: msg::NetworkMessage,
   from_eid: &EndpointId,
   to_eid: &EndpointId,
 ) {

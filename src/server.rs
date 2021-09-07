@@ -37,28 +37,35 @@ pub struct CoreServerContext<'a, T: IOTypes> {
 impl<'a, T: IOTypes> CoreServerContext<'a, T> {
   /// Send a message to the Tablet `tid`
   pub fn send_to_tablet(&mut self, tablet_group_id: TabletGroupId, query: msg::TabletMessage) {
-    let sid = self.tablet_address_config.get(&tablet_group_id).unwrap();
-    let eid = self.slave_address_config.get(sid).unwrap();
-    self.network_output.send(
-      eid,
-      msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(tablet_group_id, query)),
-    );
+    // TODO: fix
+    // let sid = self.tablet_address_config.get(&tablet_group_id).unwrap();
+    // let eid = self.slave_address_config.get(sid).unwrap();
+    // self.network_output.send(
+    //   eid,
+    //   msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(tablet_group_id, query)),
+    // );
   }
 
   /// Send a message to the Slave `sid`
   pub fn send_to_slave(&mut self, sid: SlaveGroupId, query: msg::SlaveMessage) {
-    let eid = self.slave_address_config.get(&sid).unwrap();
-    self.network_output.send(eid, msg::NetworkMessage::Slave(query));
+    // let eid = self.slave_address_config.get(&sid).unwrap();
+    // self.network_output.send(eid, msg::NetworkMessage::Slave(query));
+  }
+
+  // TODO: this is totoally wrong, just a place holder.
+  pub fn send_to_coord(&mut self, sender_path: QueryPath, query: msg::CoordMessage) {
+    // let eid = self.slave_address_config.get(&sid).unwrap();
+    // self.network_output.send(eid, msg::NetworkMessage::Slave(query));
   }
 
   /// This function infers weather the CommonQuery is destined for a Slave or a Tablet
   /// by using the `sender_path`, and then acts accordingly.
   pub fn send_to_path(&mut self, sender_path: QueryPath, common_query: CommonQuery) {
-    if let Some(tablet_group_id) = sender_path.node_path.maybe_tablet_group_id {
-      self.send_to_tablet(tablet_group_id, common_query.tablet_msg());
-    } else {
-      self.send_to_slave(sender_path.node_path.slave_group_id, common_query.slave_msg());
-    }
+    // if let Some(tablet_group_id) = sender_path.node_path.maybe_tablet_group_id {
+    //   self.send_to_tablet(tablet_group_id, common_query.tablet_msg());
+    // } else {
+    //   self.send_to_slave(sender_path.node_path.slave_group_id, common_query.slave_msg());
+    // }
   }
 
   /// This is similar to the above, except uses a `node_group_id`.
@@ -213,21 +220,23 @@ pub enum CommonQuery {
 
 impl CommonQuery {
   pub fn tablet_msg(self) -> msg::TabletMessage {
-    match self {
-      CommonQuery::PerformQuery(query) => msg::TabletMessage::PerformQuery(query),
-      CommonQuery::CancelQuery(query) => msg::TabletMessage::CancelQuery(query),
-      CommonQuery::QueryAborted(query) => msg::TabletMessage::QueryAborted(query),
-      CommonQuery::QuerySuccess(query) => msg::TabletMessage::QuerySuccess(query),
-    }
+    unimplemented!()
+    // match self {
+    //   CommonQuery::PerformQuery(query) => msg::TabletMessage::PerformQuery(query),
+    //   CommonQuery::CancelQuery(query) => msg::TabletMessage::CancelQuery(query),
+    //   CommonQuery::QueryAborted(query) => msg::TabletMessage::QueryAborted(query),
+    //   CommonQuery::QuerySuccess(query) => msg::TabletMessage::QuerySuccess(query),
+    // }
   }
 
   pub fn slave_msg(self) -> msg::SlaveMessage {
-    match self {
-      CommonQuery::PerformQuery(query) => msg::SlaveMessage::PerformQuery(query),
-      CommonQuery::CancelQuery(query) => msg::SlaveMessage::CancelQuery(query),
-      CommonQuery::QueryAborted(query) => msg::SlaveMessage::QueryAborted(query),
-      CommonQuery::QuerySuccess(query) => msg::SlaveMessage::QuerySuccess(query),
-    }
+    unimplemented!()
+    // match self {
+    //   CommonQuery::PerformQuery(query) => msg::SlaveMessage::PerformQuery(query),
+    //   CommonQuery::CancelQuery(query) => msg::SlaveMessage::CancelQuery(query),
+    //   CommonQuery::QueryAborted(query) => msg::SlaveMessage::QueryAborted(query),
+    //   CommonQuery::QuerySuccess(query) => msg::SlaveMessage::QuerySuccess(query),
+    // }
   }
 }
 

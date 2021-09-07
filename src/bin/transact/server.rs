@@ -2,7 +2,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{Clock, GossipData, IOTypes, NetworkOut, TabletForwardOut};
 use runiversal::model::common::{EndpointId, Gen, SlaveGroupId, TabletGroupId, Timestamp};
-use runiversal::model::message::{NetworkMessage, SlaveMessage, TabletMessage};
+use runiversal::model::message as msg;
 use runiversal::slave::SlaveState;
 use runiversal::tablet::TabletState;
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ struct ProdNetworkOut {
 }
 
 impl NetworkOut for ProdNetworkOut {
-  fn send(&mut self, eid: &EndpointId, msg: NetworkMessage) {
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     let net_conn_map = self.net_conn_map.lock().unwrap();
     let sender = net_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
@@ -40,11 +40,11 @@ impl NetworkOut for ProdNetworkOut {
 /// A simple interface for pushing messages from the Slave to
 /// the Tablets.
 struct ProdTabletForwardOut {
-  tablet_map: HashMap<TabletGroupId, Sender<TabletMessage>>,
+  tablet_map: HashMap<TabletGroupId, Sender<msg::TabletMessage>>,
 }
 
 impl TabletForwardOut for ProdTabletForwardOut {
-  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletMessage) {
+  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: msg::TabletMessage) {
     self.tablet_map.get(tablet_group_id).unwrap().send(msg).unwrap();
   }
 }
@@ -87,7 +87,7 @@ pub fn start_server(
   });
 
   // Create the Tablets
-  let mut tablet_map = HashMap::<TabletGroupId, Sender<TabletMessage>>::new();
+  let mut tablet_map = HashMap::<TabletGroupId, Sender<msg::TabletMessage>>::new();
   for tablet_group_id in vec!["t1", "t2", "t3"] {
     // Create the seed for the Tablet's RNG. We use the Slave's
     // RNG to create a random seed.
@@ -134,7 +134,7 @@ pub fn start_server(
     // Receive data from the `to_server_receiver` and update the SlaveState accordingly.
     // This is the steady state that the slaves enters.
     let (_, data) = to_server_receiver.recv().unwrap();
-    let slave_msg: SlaveMessage = rmp_serde::from_read_ref(&data).unwrap();
+    let slave_msg: msg::SlaveMessage = rmp_serde::from_read_ref(&data).unwrap();
     slave.handle_incoming_message(slave_msg);
   }
 }

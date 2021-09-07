@@ -6,8 +6,7 @@ use runiversal::model::common::{
   ColName, ColType, ColVal, EndpointId, PrimaryKey, RequestId, SlaveGroupId, TablePath,
   TabletGroupId, TabletKeyRange,
 };
-use runiversal::model::message::{NetworkMessage};
-use runiversal::model::message::{PerformExternalQuery, SlaveMessage};
+use runiversal::model::message as msg;
 use runiversal::test_utils::{cn, cvi, cvs, mk_sid, mk_tab, mk_tid};
 use std::collections::HashMap;
 
@@ -164,11 +163,13 @@ fn main() {
     ORDER BY a DESC, b";
 
   sim.add_msg(
-    NetworkMessage::Slave(SlaveMessage::PerformExternalQuery(PerformExternalQuery {
-      sender_eid: client_eid(&0),
-      request_id: RequestId("rid".to_string()),
-      query: query.to_string(),
-    })),
+    msg::NetworkMessage::Slave(msg::SlaveMessage::ExternalMessage(
+      msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
+        sender_eid: client_eid(&0),
+        request_id: RequestId("rid".to_string()),
+        query: query.to_string(),
+      }),
+    )),
     &client_eid(&2),
     &slave_eid(&2),
   );

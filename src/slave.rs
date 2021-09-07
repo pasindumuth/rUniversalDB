@@ -11,7 +11,7 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::{GeneralQuery, QueryError, SlaveMessage2};
+use crate::model::message::{GeneralQuery, QueryError, SlaveMessage};
 use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, MSQueryCoordReplanningES, MSQueryCoordReplanningS,
 };
@@ -126,11 +126,11 @@ impl<T: IOTypes> SlaveContext<T> {
   }
 
   /// Handles all messages, coming from Tablets, the Master, External, etc.
-  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::SlaveMessage2) {
+  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::SlaveMessage) {
     match message {
-      SlaveMessage2::ExternalMessage(_) => {}
-      SlaveMessage2::RemoteMessage(_) => {}
-      SlaveMessage2::PaxosMessage(_) => {}
+      SlaveMessage::ExternalMessage(_) => {}
+      SlaveMessage::RemoteMessage(_) => {}
+      SlaveMessage::PaxosMessage(_) => {}
     }
   }
 }

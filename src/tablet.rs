@@ -728,9 +728,9 @@ impl<T: IOTypes> TabletContext<T> {
               // Send back Prepared
               let return_qid = prepare.sender_path.query_id.clone();
               let rm_path = self.mk_query_path(prepare.ms_query_id);
-              self.ctx().core_ctx().send_to_slave(
-                prepare.sender_path.node_path.slave_group_id,
-                msg::SlaveMessage::Query2PCPrepared(msg::Query2PCPrepared { return_qid, rm_path }),
+              self.ctx().core_ctx().send_to_coord(
+                prepare.sender_path,
+                msg::CoordMessage::Query2PCPrepared(msg::Query2PCPrepared { return_qid, rm_path }),
               );
             } else {
               // Send back Aborted. The only reason for the MSQueryES to no longer exist must be
@@ -738,9 +738,9 @@ impl<T: IOTypes> TabletContext<T> {
               // the Slave as such.
               let return_qid = prepare.sender_path.query_id.clone();
               let rm_path = self.mk_query_path(prepare.ms_query_id);
-              self.ctx().core_ctx().send_to_slave(
-                prepare.sender_path.node_path.slave_group_id,
-                msg::SlaveMessage::Query2PCAborted(msg::Query2PCAborted {
+              self.ctx().core_ctx().send_to_coord(
+                prepare.sender_path,
+                msg::CoordMessage::Query2PCAborted(msg::Query2PCAborted {
                   return_qid,
                   rm_path,
                   reason: msg::Query2PCAbortReason::DeadlockSafetyAbortion,
@@ -849,7 +849,7 @@ impl<T: IOTypes> TabletContext<T> {
     root_query_path: QueryPath,
     timestamp: Timestamp,
   ) -> Result<QueryId, msg::QueryError> {
-    let root_query_id = root_query_path.query_id;
+    let root_query_id = root_query_path.query_id.clone();
     if let Some(ms_query_id) = self.ms_root_query_map.get(&root_query_id) {
       // Here, the MSQueryES already exists, so we just return it's QueryId.
       Ok(ms_query_id.clone())
@@ -883,10 +883,10 @@ impl<T: IOTypes> TabletContext<T> {
           root_query_id: root_query_id.clone(),
           query_path: self.mk_query_path(ms_query_id.clone()),
         };
-        self.ctx().core_ctx().send_to_slave(
-          root_query_path.node_path.slave_group_id.clone(),
-          msg::SlaveMessage::RegisterQuery(register_query),
-        );
+        self
+          .ctx()
+          .core_ctx()
+          .send_to_coord(root_query_path, msg::CoordMessage::RegisterQuery(register_query));
 
         // Finally, add an empty VerifyingReadWriteRegion
         self.verifying_writes.insert(
