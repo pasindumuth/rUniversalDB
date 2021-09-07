@@ -25,10 +25,11 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::model::message::QueryError;
+use crate::model::message::{QueryError, TabletMessage};
 use crate::ms_table_read_es::{FullMSTableReadES, MSReadExecutionS, MSTableReadAction};
 use crate::ms_table_write_es::{FullMSTableWriteES, MSTableWriteAction, MSWriteExecutionS};
 use crate::multiversion_map::MVM;
+use crate::paxos::LeaderChanged;
 use crate::server::{
   are_cols_locked, contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error,
   CommonQuery, ContextConstructor, LocalTable, ServerContext,
@@ -376,6 +377,24 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
 }
 
 // -----------------------------------------------------------------------------------------------
+//  TabletBundle
+// -----------------------------------------------------------------------------------------------
+
+pub enum TabletBundle {}
+
+// -----------------------------------------------------------------------------------------------
+//  TabletForwardMsg
+// -----------------------------------------------------------------------------------------------
+
+pub enum TabletForwardMsg {
+  TabletBundle(TabletBundle),
+  TabletMessage(msg::TabletMessage),
+  GossipData(Arc<GossipData>),
+  RemoteLeaderChanged(msg::RemoteLeaderChanged),
+  LeaderChanged(LeaderChanged),
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Tablet State
 // -----------------------------------------------------------------------------------------------
 
@@ -477,8 +496,13 @@ impl<T: IOTypes> TabletState<T> {
     }
   }
 
+  pub fn handle_input(&mut self, coord_input: TabletForwardMsg) {
+    self.tablet_context.handle_input(&mut self.statuses, coord_input);
+  }
+
+  // TODO: remove
   pub fn handle_incoming_message(&mut self, message: msg::TabletMessage) {
-    self.tablet_context.handle_incoming_message(&mut self.statuses, message);
+    // self.tablet_context.handle_incoming_message(&mut self.statuses, message);
   }
 }
 
@@ -495,363 +519,325 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::TabletMessage) {
-    match message {
-      msg::TabletMessage::PerformQuery(perform_query) => {
-        match perform_query.query {
-          msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
-            // First, we check if the GRQueryES still exists in the Statuses, continuing
-            // if so and aborting if not.
-            if let Some(gr_query) = statuses.gr_query_ess.get(&query.location_prefix.query_id) {
-              // Construct and start the TransQueryReplanningES
-              let full_trans_table = map_insert(
-                &mut statuses.full_trans_table_read_ess,
-                &perform_query.query_id,
-                TransTableReadESWrapper {
-                  sender_path: perform_query.sender_path.clone(),
-                  child_queries: vec![],
-                  es: FullTransTableReadES {
-                    root_query_path: perform_query.root_query_path,
-                    tier_map: perform_query.tier_map,
-                    location_prefix: query.location_prefix,
-                    context: Rc::new(query.context),
-                    sender_path: perform_query.sender_path,
-                    query_id: perform_query.query_id.clone(),
-                    sql_query: query.sql_query,
-                    query_plan: query.query_plan,
-                    new_rms: Default::default(),
-                    state: TransExecutionS::Start,
-                    timestamp: gr_query.es.timestamp.clone(),
-                  },
-                },
-              );
-
-              let action = full_trans_table.es.start(&mut self.ctx(), &gr_query.es);
-              self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
-            } else {
-              // This means that the target GRQueryES was deleted, so we send back
-              // an Abort with LateralError.
-              self.ctx().send_query_error(
-                perform_query.sender_path,
-                perform_query.query_id,
-                msg::QueryError::LateralError,
-              );
-              return;
-            }
-          }
-          msg::GeneralQuery::SuperSimpleTableSelectQuery(query) => {
-            // We inspect the TierMap to see what kind of ES to create
-            let table_path = cast!(proc::TableRef::TablePath, &query.sql_query.from).unwrap();
-            if perform_query.tier_map.map.contains_key(table_path) {
-              // Here, we create an MSTableReadES.
-              let root_query_path = perform_query.root_query_path;
-              match self.get_msquery_id(statuses, root_query_path.clone(), query.timestamp) {
-                Ok(ms_query_id) => {
-                  // Lookup the MSQueryES and add the new Query into `pending_queries`.
-                  let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-                  ms_query_es.pending_queries.insert(perform_query.query_id.clone());
-
-                  // Create an MSReadTableES in the QueryReplanning state, and start it.
-                  let ms_read = map_insert(
-                    &mut statuses.full_ms_table_read_ess,
+  fn handle_input(&mut self, statuses: &mut Statuses, tablet_input: TabletForwardMsg) {
+    match tablet_input {
+      TabletForwardMsg::TabletBundle(_) => panic!(),
+      TabletForwardMsg::TabletMessage(message) => {
+        match message {
+          msg::TabletMessage::PerformQuery(perform_query) => {
+            match perform_query.query {
+              msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
+                // First, we check if the GRQueryES still exists in the Statuses, continuing
+                // if so and aborting if not.
+                if let Some(gr_query) = statuses.gr_query_ess.get(&query.location_prefix.query_id) {
+                  // Construct and start the TransQueryReplanningES
+                  let full_trans_table = map_insert(
+                    &mut statuses.full_trans_table_read_ess,
                     &perform_query.query_id,
-                    MSTableReadESWrapper {
+                    TransTableReadESWrapper {
                       sender_path: perform_query.sender_path.clone(),
                       child_queries: vec![],
-                      es: FullMSTableReadES {
-                        root_query_path,
+                      es: FullTransTableReadES {
+                        root_query_path: perform_query.root_query_path,
+                        tier_map: perform_query.tier_map,
+                        location_prefix: query.location_prefix,
+                        context: Rc::new(query.context),
+                        sender_path: perform_query.sender_path,
+                        query_id: perform_query.query_id.clone(),
+                        sql_query: query.sql_query,
+                        query_plan: query.query_plan,
+                        new_rms: Default::default(),
+                        state: TransExecutionS::Start,
+                        timestamp: gr_query.es.timestamp.clone(),
+                      },
+                    },
+                  );
+
+                  let action = full_trans_table.es.start(&mut self.ctx(), &gr_query.es);
+                  self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
+                } else {
+                  // This means that the target GRQueryES was deleted, so we send back
+                  // an Abort with LateralError.
+                  self.ctx().send_query_error(
+                    perform_query.sender_path,
+                    perform_query.query_id,
+                    msg::QueryError::LateralError,
+                  );
+                  return;
+                }
+              }
+              msg::GeneralQuery::SuperSimpleTableSelectQuery(query) => {
+                // We inspect the TierMap to see what kind of ES to create
+                let table_path = cast!(proc::TableRef::TablePath, &query.sql_query.from).unwrap();
+                if perform_query.tier_map.map.contains_key(table_path) {
+                  // Here, we create an MSTableReadES.
+                  let root_query_path = perform_query.root_query_path;
+                  match self.get_msquery_id(statuses, root_query_path.clone(), query.timestamp) {
+                    Ok(ms_query_id) => {
+                      // Lookup the MSQueryES and add the new Query into `pending_queries`.
+                      let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+                      ms_query_es.pending_queries.insert(perform_query.query_id.clone());
+
+                      // Create an MSReadTableES in the QueryReplanning state, and start it.
+                      let ms_read = map_insert(
+                        &mut statuses.full_ms_table_read_ess,
+                        &perform_query.query_id,
+                        MSTableReadESWrapper {
+                          sender_path: perform_query.sender_path.clone(),
+                          child_queries: vec![],
+                          es: FullMSTableReadES {
+                            root_query_path,
+                            tier_map: perform_query.tier_map,
+                            timestamp: query.timestamp,
+                            tier: 0,
+                            context: Rc::new(query.context),
+                            query_id: perform_query.query_id.clone(),
+                            sql_query: query.sql_query,
+                            query_plan: query.query_plan,
+                            ms_query_id,
+                            new_rms: Default::default(),
+                            state: MSReadExecutionS::Start,
+                          },
+                        },
+                      );
+                      let action = ms_read.es.start(self);
+                      self.handle_ms_read_es_action(statuses, perform_query.query_id, action);
+                    }
+                    Err(query_error) => {
+                      // The MSQueryES couldn't be constructed.
+                      self.ctx().send_query_error(
+                        perform_query.sender_path,
+                        perform_query.query_id,
+                        query_error,
+                      );
+                    }
+                  }
+                } else {
+                  // Here, we create a standard TableReadES.
+                  let read = map_insert(
+                    &mut statuses.full_table_read_ess,
+                    &perform_query.query_id,
+                    TableReadESWrapper {
+                      sender_path: perform_query.sender_path.clone(),
+                      child_queries: vec![],
+                      es: FullTableReadES {
+                        root_query_path: perform_query.root_query_path,
                         tier_map: perform_query.tier_map,
                         timestamp: query.timestamp,
-                        tier: 0,
                         context: Rc::new(query.context),
                         query_id: perform_query.query_id.clone(),
                         sql_query: query.sql_query,
                         query_plan: query.query_plan,
-                        ms_query_id,
                         new_rms: Default::default(),
-                        state: MSReadExecutionS::Start,
+                        state: ExecutionS::Start,
                       },
                     },
                   );
-                  let action = ms_read.es.start(self);
-                  self.handle_ms_read_es_action(statuses, perform_query.query_id, action);
-                }
-                Err(query_error) => {
-                  // The MSQueryES couldn't be constructed.
-                  self.ctx().send_query_error(
-                    perform_query.sender_path,
-                    perform_query.query_id,
-                    query_error,
-                  );
+                  let action = read.es.start(self);
+                  self.handle_read_es_action(statuses, perform_query.query_id, action);
                 }
               }
-            } else {
-              // Here, we create a standard TableReadES.
-              let read = map_insert(
-                &mut statuses.full_table_read_ess,
-                &perform_query.query_id,
-                TableReadESWrapper {
-                  sender_path: perform_query.sender_path.clone(),
-                  child_queries: vec![],
-                  es: FullTableReadES {
-                    root_query_path: perform_query.root_query_path,
-                    tier_map: perform_query.tier_map,
-                    timestamp: query.timestamp,
-                    context: Rc::new(query.context),
-                    query_id: perform_query.query_id.clone(),
-                    sql_query: query.sql_query,
-                    query_plan: query.query_plan,
-                    new_rms: Default::default(),
-                    state: ExecutionS::Start,
-                  },
+              msg::GeneralQuery::UpdateQuery(query) => {
+                // We first do some basic verification of the SQL query, namely assert that the
+                // assigned columns aren't key columns. (Recall this should be enforced by the Slave.)
+                for (col, _) in &query.sql_query.assignment {
+                  assert!(lookup(&self.table_schema.key_cols, col).is_none())
+                }
+
+                // Here, we create an MSTableWriteES.
+                let root_query_path = perform_query.root_query_path;
+                match self.get_msquery_id(statuses, root_query_path.clone(), query.timestamp) {
+                  Ok(ms_query_id) => {
+                    // Lookup the MSQueryES and add the new Query into `pending_queries`.
+                    let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+                    ms_query_es.pending_queries.insert(perform_query.query_id.clone());
+
+                    // First, we look up the `tier` of this Table being
+                    // written, update the `tier_map`.
+                    let sql_query = query.sql_query;
+                    let mut tier_map = perform_query.tier_map;
+                    let tier = tier_map.map.get(sql_query.table()).unwrap().clone();
+                    *tier_map.map.get_mut(sql_query.table()).unwrap() += 1;
+
+                    // Create an MSWriteTableES in the QueryReplanning state, and add it to
+                    // the MSQueryES.
+                    let ms_write = map_insert(
+                      &mut statuses.full_ms_table_write_ess,
+                      &perform_query.query_id,
+                      MSTableWriteESWrapper {
+                        sender_path: perform_query.sender_path.clone(),
+                        child_queries: vec![],
+                        es: FullMSTableWriteES {
+                          root_query_path,
+                          tier_map,
+                          timestamp: query.timestamp,
+                          tier,
+                          context: Rc::new(query.context),
+                          query_id: perform_query.query_id.clone(),
+                          sql_query,
+                          query_plan: query.query_plan,
+                          ms_query_id,
+                          new_rms: Default::default(),
+                          state: MSWriteExecutionS::Start,
+                        },
+                      },
+                    );
+                    let action = ms_write.es.start(self);
+                    self.handle_ms_write_es_action(statuses, perform_query.query_id, action);
+                  }
+                  Err(query_error) => {
+                    // The MSQueryES couldn't be constructed.
+                    self.ctx().send_query_error(
+                      perform_query.sender_path,
+                      perform_query.query_id,
+                      query_error,
+                    );
+                  }
+                }
+              }
+            }
+          }
+          msg::TabletMessage::CancelQuery(cancel_query) => {
+            self.exit_and_clean_up(statuses, cancel_query.query_id);
+          }
+          msg::TabletMessage::QueryAborted(query_aborted) => {
+            self.handle_query_aborted(statuses, query_aborted);
+          }
+          msg::TabletMessage::QuerySuccess(query_success) => {
+            self.handle_query_success(statuses, query_success);
+          }
+          msg::TabletMessage::Query2PCPrepare(prepare) => {
+            // Recall that an MSQueryES can randomly be aborted due to a DeadlockSafetyWriteAbort.
+            // If it's present, we send back Prepared, and if not, we send back Aborted.
+            if let Some(ms_query_es) = statuses.ms_query_ess.get_mut(&prepare.ms_query_id) {
+              assert!(ms_query_es.pending_queries.is_empty());
+              assert_eq!(prepare.sender_path.query_id, ms_query_es.root_query_id);
+
+              // The VerifyingReadWriteRegion must also exist, so we move it to prepared_*.
+              let verifying_write = self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
+              assert!(verifying_write.m_waiting_read_protected.is_empty());
+              self.prepared_writes.insert(
+                ms_query_es.timestamp,
+                ReadWriteRegion {
+                  orig_p: verifying_write.orig_p,
+                  m_read_protected: verifying_write.m_read_protected,
+                  m_write_protected: verifying_write.m_write_protected,
                 },
               );
-              let action = read.es.start(self);
-              self.handle_read_es_action(statuses, perform_query.query_id, action);
+
+              // Send back Prepared
+              let return_qid = prepare.sender_path.query_id.clone();
+              let rm_path = self.mk_query_path(prepare.ms_query_id);
+              self.ctx().core_ctx().send_to_slave(
+                prepare.sender_path.node_path.slave_group_id,
+                msg::SlaveMessage::Query2PCPrepared(msg::Query2PCPrepared { return_qid, rm_path }),
+              );
+            } else {
+              // Send back Aborted. The only reason for the MSQueryES to no longer exist must be
+              // because it was aborted due to a DeadlockSafetyWriteAbort. Thus, we respond to
+              // the Slave as such.
+              let return_qid = prepare.sender_path.query_id.clone();
+              let rm_path = self.mk_query_path(prepare.ms_query_id);
+              self.ctx().core_ctx().send_to_slave(
+                prepare.sender_path.node_path.slave_group_id,
+                msg::SlaveMessage::Query2PCAborted(msg::Query2PCAborted {
+                  return_qid,
+                  rm_path,
+                  reason: msg::Query2PCAbortReason::DeadlockSafetyAbortion,
+                }),
+              );
             }
           }
-          msg::GeneralQuery::UpdateQuery(query) => {
-            // We first do some basic verification of the SQL query, namely assert that the
-            // assigned columns aren't key columns. (Recall this should be enforced by the Slave.)
-            for (col, _) in &query.sql_query.assignment {
-              assert!(lookup(&self.table_schema.key_cols, col).is_none())
-            }
-
-            // Here, we create an MSTableWriteES.
-            let root_query_path = perform_query.root_query_path;
-            match self.get_msquery_id(statuses, root_query_path.clone(), query.timestamp) {
-              Ok(ms_query_id) => {
-                // Lookup the MSQueryES and add the new Query into `pending_queries`.
-                let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-                ms_query_es.pending_queries.insert(perform_query.query_id.clone());
-
-                // First, we look up the `tier` of this Table being
-                // written, update the `tier_map`.
-                let sql_query = query.sql_query;
-                let mut tier_map = perform_query.tier_map;
-                let tier = tier_map.map.get(sql_query.table()).unwrap().clone();
-                *tier_map.map.get_mut(sql_query.table()).unwrap() += 1;
-
-                // Create an MSWriteTableES in the QueryReplanning state, and add it to
-                // the MSQueryES.
-                let ms_write = map_insert(
-                  &mut statuses.full_ms_table_write_ess,
-                  &perform_query.query_id,
-                  MSTableWriteESWrapper {
-                    sender_path: perform_query.sender_path.clone(),
-                    child_queries: vec![],
-                    es: FullMSTableWriteES {
-                      root_query_path,
-                      tier_map,
-                      timestamp: query.timestamp,
-                      tier,
-                      context: Rc::new(query.context),
-                      query_id: perform_query.query_id.clone(),
-                      sql_query,
-                      query_plan: query.query_plan,
-                      ms_query_id,
-                      new_rms: Default::default(),
-                      state: MSWriteExecutionS::Start,
-                    },
-                  },
-                );
-                let action = ms_write.es.start(self);
-                self.handle_ms_write_es_action(statuses, perform_query.query_id, action);
-              }
-              Err(query_error) => {
-                // The MSQueryES couldn't be constructed.
-                self.ctx().send_query_error(
-                  perform_query.sender_path,
-                  perform_query.query_id,
-                  query_error,
-                );
-              }
+          msg::TabletMessage::Query2PCAbort(abort) => {
+            if let Some(ms_query_es) = statuses.ms_query_ess.remove(&abort.ms_query_id) {
+              // Recall that in order to get a Query2PCAbort, the Slave must already have sent a
+              // Query2PCPrepare. Since the network is FIFO, we must have received it, and since
+              // the MSQueryES exists, we must have responded with Prepared. Recall that we cannot
+              // call `exit_and_clean_up` when MSQueryES is Prepared.
+              self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
+              self.ms_root_query_map.remove(&ms_query_es.root_query_id);
             }
           }
+          msg::TabletMessage::Query2PCCommit(commit) => {
+            // Remove the MSQueryES. It must exist, since we had Prepared.
+            let ms_query_es = statuses.ms_query_ess.remove(&commit.ms_query_id).unwrap();
+
+            // Move the ReadWriteRegion to Committed, and cleanup `ms_root_query_map`.
+            let read_write_region = self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
+            self.committed_writes.insert(ms_query_es.timestamp.clone(), read_write_region);
+            self.ms_root_query_map.remove(&ms_query_es.root_query_id);
+
+            // Apply the UpdateViews to the storage container.
+            commit_to_storage(&mut self.storage, &ms_query_es.timestamp, &ms_query_es.update_views);
+          }
+          msg::TabletMessage::AlterTablePrepare(prepare) => {
+            // Check a few guaranteed properties.
+            let col_name = &prepare.alter_op.col_name;
+            assert!(!self.prepared_scheme_change.contains_key(col_name));
+            assert!(lookup(&self.table_schema.key_cols, col_name).is_none());
+            let maybe_col_type = self.table_schema.val_cols.get_last_version(col_name);
+            // Assert Column Validness of the incoming request.
+            assert!(
+              (maybe_col_type.is_some() && prepare.alter_op.maybe_col_type.is_none())
+                || (maybe_col_type.is_none() && prepare.alter_op.maybe_col_type.is_some())
+            );
+
+            // Populate `alter_table_rm_state`, update `prepared_scheme_change`,
+            let lat = self.table_schema.val_cols.get_lat(col_name);
+            self
+              .alter_table_rm_state
+              .insert(prepare.query_id.clone(), (prepare.alter_op.clone(), lat));
+            self.prepared_scheme_change.insert(col_name.clone(), lat);
+
+            // Send back a `Prepared`
+            self.network_output.send(
+              &self.master_eid,
+              msg::NetworkMessage::Master(msg::MasterMessage::AlterTablePrepared(
+                msg::AlterTablePrepared {
+                  query_id: prepare.query_id,
+                  tablet_group_id: self.this_tablet_group_id.clone(),
+                  timestamp: lat,
+                },
+              )),
+            );
+          }
+          msg::TabletMessage::AlterTableAbort(abort) => {
+            // Recall that the `alter_table_rm_state` element must exist for this QueryId, since
+            // Tablets never remove these on their own until a Commit or Abort.
+            let (alter_op, _) = self.alter_table_rm_state.remove(&abort.query_id).unwrap();
+            self.prepared_scheme_change.remove(&alter_op.col_name).unwrap();
+          }
+          msg::TabletMessage::AlterTableCommit(commit) => {
+            // Update the TableSchema according to `alter_op`.
+            let (alter_op, _) = self.alter_table_rm_state.remove(&commit.query_id).unwrap();
+            self.prepared_scheme_change.remove(&alter_op.col_name).unwrap();
+            self.table_schema.val_cols.write(
+              &alter_op.col_name,
+              alter_op.maybe_col_type,
+              commit.timestamp,
+            );
+
+            // Use the GossipData sent by the Master to upate the local GossipData.
+            // TODO: When a Slave receives gossip_data, dispatch it to all tablets,
+            // not just the target tablet
+            let gossip_data = commit.gossip_data.to_gossip();
+            if self.gossip.gen < gossip_data.gen {
+              self.gossip = Arc::new(gossip_data);
+            }
+          }
+          TabletMessage::Query2PCCheckPrepared(_) => panic!(),
+          TabletMessage::AlterTableCheckPrepared(_) => panic!(),
+          TabletMessage::DropTablePrepare(_) => panic!(),
+          TabletMessage::DropTableAbort(_) => panic!(),
+          TabletMessage::DropTableCommit(_) => panic!(),
+          TabletMessage::DropTableCheckPrepared(_) => panic!(),
         }
+        self.run_main_loop(statuses);
       }
-      msg::TabletMessage::CancelQuery(cancel_query) => {
-        self.exit_and_clean_up(statuses, cancel_query.query_id);
-      }
-      msg::TabletMessage::QueryAborted(query_aborted) => {
-        self.handle_query_aborted(statuses, query_aborted);
-      }
-      msg::TabletMessage::QuerySuccess(query_success) => {
-        self.handle_query_success(statuses, query_success);
-      }
-      msg::TabletMessage::Query2PCPrepare(prepare) => {
-        // Recall that an MSQueryES can randomly be aborted due to a DeadlockSafetyWriteAbort.
-        // If it's present, we send back Prepared, and if not, we send back Aborted.
-        if let Some(ms_query_es) = statuses.ms_query_ess.get_mut(&prepare.ms_query_id) {
-          assert!(ms_query_es.pending_queries.is_empty());
-          assert_eq!(prepare.sender_path.query_id, ms_query_es.root_query_id);
-
-          // The VerifyingReadWriteRegion must also exist, so we move it to prepared_*.
-          let verifying_write = self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
-          assert!(verifying_write.m_waiting_read_protected.is_empty());
-          self.prepared_writes.insert(
-            ms_query_es.timestamp,
-            ReadWriteRegion {
-              orig_p: verifying_write.orig_p,
-              m_read_protected: verifying_write.m_read_protected,
-              m_write_protected: verifying_write.m_write_protected,
-            },
-          );
-
-          // Send back Prepared
-          let return_qid = prepare.sender_path.query_id.clone();
-          let rm_path = self.mk_query_path(prepare.ms_query_id);
-          self.ctx().core_ctx().send_to_slave(
-            prepare.sender_path.node_path.slave_group_id,
-            msg::SlaveMessage::Query2PCPrepared(msg::Query2PCPrepared { return_qid, rm_path }),
-          );
-        } else {
-          // Send back Aborted. The only reason for the MSQueryES to no longer exist must be
-          // because it was aborted due to a DeadlockSafetyWriteAbort. Thus, we respond to
-          // the Slave as such.
-          let return_qid = prepare.sender_path.query_id.clone();
-          let rm_path = self.mk_query_path(prepare.ms_query_id);
-          self.ctx().core_ctx().send_to_slave(
-            prepare.sender_path.node_path.slave_group_id,
-            msg::SlaveMessage::Query2PCAborted(msg::Query2PCAborted {
-              return_qid,
-              rm_path,
-              reason: msg::Query2PCAbortReason::DeadlockSafetyAbortion,
-            }),
-          );
-        }
-      }
-      msg::TabletMessage::Query2PCAbort(abort) => {
-        if let Some(ms_query_es) = statuses.ms_query_ess.remove(&abort.ms_query_id) {
-          // Recall that in order to get a Query2PCAbort, the Slave must already have sent a
-          // Query2PCPrepare. Since the network is FIFO, we must have received it, and since
-          // the MSQueryES exists, we must have responded with Prepared. Recall that we cannot
-          // call `exit_and_clean_up` when MSQueryES is Prepared.
-          self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
-          self.ms_root_query_map.remove(&ms_query_es.root_query_id);
-        }
-      }
-      msg::TabletMessage::Query2PCCommit(commit) => {
-        // Remove the MSQueryES. It must exist, since we had Prepared.
-        let ms_query_es = statuses.ms_query_ess.remove(&commit.ms_query_id).unwrap();
-
-        // Move the ReadWriteRegion to Committed, and cleanup `ms_root_query_map`.
-        let read_write_region = self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
-        self.committed_writes.insert(ms_query_es.timestamp.clone(), read_write_region);
-        self.ms_root_query_map.remove(&ms_query_es.root_query_id);
-
-        // Apply the UpdateViews to the storage container.
-        commit_to_storage(&mut self.storage, &ms_query_es.timestamp, &ms_query_es.update_views);
-      }
-      msg::TabletMessage::MasterFrozenColUsageAborted(_) => panic!(),
-      msg::TabletMessage::MasterFrozenColUsageSuccess(success) => {
-        // TODO: remove everything here.
-        // // Update the Gossip with incoming Gossip data.
-        // let gossip_data = success.gossip.clone().to_gossip();
-        // if self.gossip.gossip_gen < gossip_data.gossip_gen {
-        //   self.gossip = Arc::new(gossip_data);
-        // }
-        //
-        // // Route the response to the appropriate ES.
-        // let query_id = success.return_qid;
-        // if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
-        //   // TableReadES
-        //   // let action = read.es.handle_master_response(
-        //   //   self,
-        //   //   success.gossip.gossip_gen,
-        //   //   success.frozen_col_usage_tree,
-        //   // );
-        //   // self.handle_read_es_action(statuses, query_id, action);
-        // } else if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-        //   // TransTableReadES
-        //   let prefix = trans_read.es.location_prefix();
-        //   let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
-        //     trans_read.es.handle_master_response(
-        //       &mut self.ctx(),
-        //       &gr_query.es,
-        //       success.gossip.gossip_gen,
-        //       success.frozen_col_usage_tree,
-        //     )
-        //   } else {
-        //     trans_read
-        //       .es
-        //       .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-        //   };
-        //   self.handle_trans_read_es_action(statuses, query_id, action);
-        // } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
-        //   // MSTableWriteES
-        //   let action = ms_write.es.handle_master_response(
-        //     self,
-        //     success.gossip.gossip_gen,
-        //     success.frozen_col_usage_tree,
-        //   );
-        //   self.handle_ms_write_es_action(statuses, query_id, action);
-        // } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
-        //   // MSTableReadES
-        //   let action = ms_read.es.handle_master_response(
-        //     self,
-        //     success.gossip.gossip_gen,
-        //     success.frozen_col_usage_tree,
-        //   );
-        //   self.handle_ms_read_es_action(statuses, query_id, action);
-        // }
-      }
-      msg::TabletMessage::AlterTablePrepare(prepare) => {
-        // Check a few guaranteed properties.
-        let col_name = &prepare.alter_op.col_name;
-        assert!(!self.prepared_scheme_change.contains_key(col_name));
-        assert!(lookup(&self.table_schema.key_cols, col_name).is_none());
-        let maybe_col_type = self.table_schema.val_cols.get_last_version(col_name);
-        // Assert Column Validness of the incoming request.
-        assert!(
-          (maybe_col_type.is_some() && prepare.alter_op.maybe_col_type.is_none())
-            || (maybe_col_type.is_none() && prepare.alter_op.maybe_col_type.is_some())
-        );
-
-        // Populate `alter_table_rm_state`, update `prepared_scheme_change`,
-        let lat = self.table_schema.val_cols.get_lat(col_name);
-        self.alter_table_rm_state.insert(prepare.query_id.clone(), (prepare.alter_op.clone(), lat));
-        self.prepared_scheme_change.insert(col_name.clone(), lat);
-
-        // Send back a `Prepared`
-        self.network_output.send(
-          &self.master_eid,
-          msg::NetworkMessage::Master(msg::MasterMessage::AlterTablePrepared(
-            msg::AlterTablePrepared {
-              query_id: prepare.query_id,
-              tablet_group_id: self.this_tablet_group_id.clone(),
-              timestamp: lat,
-            },
-          )),
-        );
-      }
-      msg::TabletMessage::AlterTableAbort(abort) => {
-        // Recall that the `alter_table_rm_state` element must exist for this QueryId, since
-        // Tablets never remove these on their own until a Commit or Abort.
-        let (alter_op, _) = self.alter_table_rm_state.remove(&abort.query_id).unwrap();
-        self.prepared_scheme_change.remove(&alter_op.col_name).unwrap();
-      }
-      msg::TabletMessage::AlterTableCommit(commit) => {
-        // Update the TableSchema according to `alter_op`.
-        let (alter_op, _) = self.alter_table_rm_state.remove(&commit.query_id).unwrap();
-        self.prepared_scheme_change.remove(&alter_op.col_name).unwrap();
-        self.table_schema.val_cols.write(
-          &alter_op.col_name,
-          alter_op.maybe_col_type,
-          commit.timestamp,
-        );
-
-        // Use the GossipData sent by the Master to upate the local GossipData.
-        // TODO: When a Slave receives gossip_data, dispatch it to all tablets,
-        // not just the target tablet
-        let gossip_data = commit.gossip_data.to_gossip();
-        if self.gossip.gen < gossip_data.gen {
-          self.gossip = Arc::new(gossip_data);
-        }
-      }
+      TabletForwardMsg::GossipData(_) => panic!(),
+      TabletForwardMsg::RemoteLeaderChanged(_) => panic!(),
+      TabletForwardMsg::LeaderChanged(_) => panic!(),
     }
-
-    self.run_main_loop(statuses);
   }
 
   /// Checks if the MSQueryES for `root_query_id` already exists, returning its

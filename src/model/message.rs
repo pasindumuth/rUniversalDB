@@ -23,20 +23,38 @@ pub enum NetworkMessage {
 //  MasterMessage
 // -------------------------------------------------------------------------------------------------
 
-// TODO: Update
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterMessage {
   // External AlterTable Messages
   PerformExternalDDLQuery(PerformExternalDDLQuery),
   CancelExternalDDLQuery(CancelExternalDDLQuery),
 
-  // Internal AlterTable Messages
-  AlterTablePrepared(AlterTablePrepared),
-  AlterTableAborted(AlterTableAborted),
-
   // Master FrozenColUsageAlgorithm
   PerformMasterFrozenColUsage(PerformMasterFrozenColUsage),
   CancelMasterFrozenColUsage(CancelMasterFrozenColUsage),
+
+  // CreateTable TM Messages
+  CreateTablePrepared(CreateTablePrepared),
+  CreateTableAborted(CreateTableAborted),
+  CreateTableInformPrepared(CreateTableInformPrepared),
+  CreateTableWait(CreateTableWait),
+
+  // AlterTable TM Messages
+  AlterTablePrepared(AlterTablePrepared),
+  AlterTableAborted(AlterTableAborted),
+  AlterTableInformPrepared(AlterTableInformPrepared),
+  AlterTableWait(AlterTableWait),
+
+  // DropTable TM Messages
+  DropTablePrepared(DropTablePrepared),
+  DropTableAborted(DropTableAborted),
+  DropTableInformPrepared(DropTableInformPrepared),
+  DropTableWait(DropTableWait),
+
+  // Close Confirmations
+  CreateTableCloseConfirm(CreateTableCloseConfirm),
+  AlterTableCloseConfirm(AlterTableCloseConfirm),
+  DropTableCloseConfirm(DropTableCloseConfirm),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -170,7 +188,6 @@ pub enum SlaveRemotePayload {
   CoordMessage(CoordGroupId, CoordMessage),
 }
 
-// TODO: update this to what it's supposed to be
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletMessage {
   PerformQuery(PerformQuery),
@@ -178,19 +195,23 @@ pub enum TabletMessage {
   QueryAborted(QueryAborted),
   QuerySuccess(QuerySuccess),
 
-  // 2PC forward messages
+  // Query2PC RM Messages
   Query2PCPrepare(Query2PCPrepare),
   Query2PCAbort(Query2PCAbort),
   Query2PCCommit(Query2PCCommit),
+  Query2PCCheckPrepared(Query2PCCheckPrepared),
 
-  // Internal AlterTable Messages
+  // AlterTable RM Messages
   AlterTablePrepare(AlterTablePrepare),
   AlterTableAbort(AlterTableAbort),
   AlterTableCommit(AlterTableCommit),
+  AlterTableCheckPrepared(AlterTableCheckPrepared),
 
-  // Master Responses
-  MasterFrozenColUsageAborted(MasterFrozenColUsageAborted),
-  MasterFrozenColUsageSuccess(MasterFrozenColUsageSuccess),
+  // DropTable RM Messages
+  DropTablePrepare(DropTablePrepare),
+  DropTableAbort(DropTableAbort),
+  DropTableCommit(DropTableCommit),
+  DropTableCheckPrepared(DropTableCheckPrepared),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

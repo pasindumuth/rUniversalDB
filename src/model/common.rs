@@ -127,6 +127,12 @@ pub enum NodeGroupId {
   Slave(SlaveGroupId),
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SubNodePath {
+  Tablet(TabletGroupId),
+  Coord(CoordGroupId),
+}
+
 /// This is a generic struct that refers to a non-Master node in the system.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodePath {

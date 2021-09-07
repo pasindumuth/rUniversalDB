@@ -16,6 +16,7 @@ pub mod ms_table_read_es;
 pub mod ms_table_write_es;
 pub mod multiversion_map;
 pub mod net;
+pub mod paxos;
 pub mod query_converter;
 pub mod server;
 pub mod slave;

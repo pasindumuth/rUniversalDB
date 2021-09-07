@@ -15,6 +15,7 @@ use crate::model::message::{CoordMessage, GeneralQuery, QueryError};
 use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, MSQueryCoordReplanningES, MSQueryCoordReplanningS,
 };
+use crate::paxos::LeaderChanged;
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContext};
 use crate::sql_parser::convert_ast;
@@ -32,9 +33,6 @@ use std::sync::Arc;
 // -----------------------------------------------------------------------------------------------
 //  CoordForwardMsg
 // -----------------------------------------------------------------------------------------------
-
-// TODO: Move to paxos
-pub struct LeaderChanged {}
 
 pub enum CoordForwardMsg {
   ExternalMessage(msg::SlaveExternalReq),
@@ -73,7 +71,7 @@ pub struct Statuses {
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct CoordState<T: IOTypes> {
-  slave_context: CoordContext<T>,
+  coord_context: CoordContext<T>,
   statuses: Statuses,
 }
 
@@ -112,7 +110,7 @@ impl<T: IOTypes> CoordState<T> {
     leader_map: HashMap<PaxosGroupId, LeadershipId>,
   ) -> CoordState<T> {
     CoordState {
-      slave_context: CoordContext {
+      coord_context: CoordContext {
         rand,
         clock,
         network_output,
@@ -128,7 +126,7 @@ impl<T: IOTypes> CoordState<T> {
   }
 
   pub fn handle_input(&mut self, coord_input: CoordForwardMsg) {
-    self.slave_context.handle_input(&mut self.statuses, coord_input);
+    self.coord_context.handle_input(&mut self.statuses, coord_input);
   }
 }
 

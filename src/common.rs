@@ -167,6 +167,8 @@ pub struct GossipData {
   pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+  // TODO: we should not need coord_address_config; any responder should remember
+  //  the full sender_path
 }
 
 /// A Serializable version of `GossipData`. This is needed since it's

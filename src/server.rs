@@ -2,9 +2,9 @@ use crate::col_usage::{collect_top_level_cols, nodes_external_trans_tables, Froz
 use crate::common::{lookup_pos, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, TableSchema};
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
-  proc, ColName, ColType, ColVal, ColValN, ContextRow, ContextSchema, EndpointId, NodeGroupId,
-  NodePath, QueryId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
-  Timestamp, TransTableName,
+  proc, ColName, ColType, ColVal, ColValN, ContextRow, ContextSchema, CoordGroupId, EndpointId,
+  NodeGroupId, NodePath, QueryId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId,
+  TabletKeyRange, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use sqlparser::test_utils::table;
@@ -30,6 +30,8 @@ pub struct CoreServerContext<'a, T: IOTypes> {
   pub sharding_config: &'a HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: &'a HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: &'a HashMap<SlaveGroupId, EndpointId>,
+  // TODO: we should not need coord_address_config; any responder should remember
+  //  the full sender_path
 }
 
 impl<'a, T: IOTypes> CoreServerContext<'a, T> {
@@ -207,8 +209,6 @@ pub enum CommonQuery {
   CancelQuery(msg::CancelQuery),
   QueryAborted(msg::QueryAborted),
   QuerySuccess(msg::QuerySuccess),
-  MasterFrozenColUsageSuccess(msg::MasterFrozenColUsageSuccess),
-  MasterFrozenColUsageAborted(msg::MasterFrozenColUsageAborted),
 }
 
 impl CommonQuery {
@@ -218,12 +218,6 @@ impl CommonQuery {
       CommonQuery::CancelQuery(query) => msg::TabletMessage::CancelQuery(query),
       CommonQuery::QueryAborted(query) => msg::TabletMessage::QueryAborted(query),
       CommonQuery::QuerySuccess(query) => msg::TabletMessage::QuerySuccess(query),
-      CommonQuery::MasterFrozenColUsageSuccess(query) => {
-        msg::TabletMessage::MasterFrozenColUsageSuccess(query)
-      }
-      CommonQuery::MasterFrozenColUsageAborted(query) => {
-        msg::TabletMessage::MasterFrozenColUsageAborted(query)
-      }
     }
   }
 
@@ -233,12 +227,6 @@ impl CommonQuery {
       CommonQuery::CancelQuery(query) => msg::SlaveMessage::CancelQuery(query),
       CommonQuery::QueryAborted(query) => msg::SlaveMessage::QueryAborted(query),
       CommonQuery::QuerySuccess(query) => msg::SlaveMessage::QuerySuccess(query),
-      CommonQuery::MasterFrozenColUsageSuccess(query) => {
-        msg::SlaveMessage::MasterFrozenColUsageSuccess(query)
-      }
-      CommonQuery::MasterFrozenColUsageAborted(query) => {
-        msg::SlaveMessage::MasterFrozenColUsageAborted(query)
-      }
     }
   }
 }

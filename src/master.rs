@@ -186,21 +186,35 @@ impl<T: IOTypes> MasterContext<T> {
         self.freeze_schema(&frozen_col_usage_tree, timestamp);
 
         // Send the response to the originator.
-        let response = CommonQuery::MasterFrozenColUsageSuccess(msg::MasterFrozenColUsageSuccess {
-          return_qid: request.sender_path.query_id.clone(),
-          frozen_col_usage_tree,
-          gossip: GossipDataSer::from_gossip(GossipData {
-            gen: self.gen.clone(),
-            db_schema: self.db_schema.clone(),
-            table_generation: self.table_generation.clone(),
-            sharding_config: self.sharding_config.clone(),
-            tablet_address_config: self.tablet_address_config.clone(),
-            slave_address_config: self.slave_address_config.clone(),
-          }),
-        });
-        self.ctx().send_to_path(request.sender_path, response);
+        // TODO: send this to the coord properly
+        // let response = CommonQuery::MasterFrozenColUsageSuccess(msg::MasterFrozenColUsageSuccess {
+        //   return_qid: request.sender_path.query_id.clone(),
+        //   frozen_col_usage_tree,
+        //   gossip: GossipDataSer::from_gossip(GossipData {
+        //     gen: self.gen.clone(),
+        //     db_schema: self.db_schema.clone(),
+        //     table_generation: self.table_generation.clone(),
+        //     sharding_config: self.sharding_config.clone(),
+        //     tablet_address_config: self.tablet_address_config.clone(),
+        //     slave_address_config: self.slave_address_config.clone(),
+        //   }),
+        // });
+        // self.ctx().send_to_path(request.sender_path, response);
       }
-      MasterMessage::CancelMasterFrozenColUsage(_) => {}
+      MasterMessage::CancelMasterFrozenColUsage(_) => panic!(),
+      MasterMessage::CreateTablePrepared(_) => panic!(),
+      MasterMessage::CreateTableAborted(_) => panic!(),
+      MasterMessage::CreateTableInformPrepared(_) => panic!(),
+      MasterMessage::CreateTableWait(_) => panic!(),
+      MasterMessage::AlterTableInformPrepared(_) => panic!(),
+      MasterMessage::AlterTableWait(_) => panic!(),
+      MasterMessage::DropTablePrepared(_) => panic!(),
+      MasterMessage::DropTableAborted(_) => panic!(),
+      MasterMessage::DropTableInformPrepared(_) => panic!(),
+      MasterMessage::DropTableWait(_) => panic!(),
+      MasterMessage::CreateTableCloseConfirm(_) => panic!(),
+      MasterMessage::AlterTableCloseConfirm(_) => panic!(),
+      MasterMessage::DropTableCloseConfirm(_) => panic!(),
     }
 
     self.run_main_loop(statuses);
