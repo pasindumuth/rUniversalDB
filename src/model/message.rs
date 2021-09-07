@@ -167,11 +167,11 @@ pub enum TabletMessage {
   QueryAborted(QueryAborted),
   QuerySuccess(QuerySuccess),
 
-  // Query2PC RM Messages
-  Query2PCPrepare(Query2PCPrepare),
-  Query2PCAbort(Query2PCAbort),
-  Query2PCCommit(Query2PCCommit),
-  Query2PCCheckPrepared(Query2PCCheckPrepared),
+  // FinishQuery RM Messages
+  FinishQueryPrepare(FinishQueryPrepare),
+  FinishQueryAbort(FinishQueryAbort),
+  FinishQueryCommit(FinishQueryCommit),
+  FinishQueryCheckPrepared(FinishQueryCheckPrepared),
 
   // AlterTable RM Messages
   AlterTablePrepare(AlterTablePrepare),
@@ -198,11 +198,11 @@ pub enum CoordMessage {
   QueryAborted(QueryAborted),
   QuerySuccess(QuerySuccess),
 
-  // Query2PC TM Messages
-  Query2PCPrepared(Query2PCPrepared),
-  Query2PCAborted(Query2PCAborted),
-  Query2PCInformPrepared(Query2PCInformPrepared),
-  Query2PCWait(Query2PCWait),
+  // FinishQuery TM Messages
+  FinishQueryPrepared(FinishQueryPrepared),
+  FinishQueryAborted(FinishQueryAborted),
+  FinishQueryInformPrepared(FinishQueryInformPrepared),
+  FinishQueryWait(FinishQueryWait),
 
   // Register message
   RegisterQuery(RegisterQuery),
@@ -223,7 +223,6 @@ pub struct PerformQuery {
   pub root_query_path: QueryPath,
   pub sender_path: QueryPath,
   pub query_id: QueryId,
-  pub tier_map: TierMap,
   pub query: GeneralQuery,
 }
 
@@ -326,51 +325,51 @@ pub struct RegisterQuery {
 // TODO: rename to FinishQuery and fix the message structures.
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Query2PCPrepare {
+pub struct FinishQueryPrepare {
   pub sender_path: QueryPath,
   pub ms_query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Query2PCPrepared {
+pub struct FinishQueryPrepared {
   pub return_qid: QueryId,
   pub rm_path: QueryPath,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum Query2PCAbortReason {
+pub enum FinishQueryAbortReason {
   /// The MSQueryES in the Tablet couldn't respond with Prepared because it was removed
   /// due to a DeadlockSafetyWriteAbort.
   DeadlockSafetyAbortion,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Query2PCAborted {
+pub struct FinishQueryAborted {
   pub return_qid: QueryId,
   pub rm_path: QueryPath,
-  pub reason: Query2PCAbortReason,
+  pub reason: FinishQueryAbortReason,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Query2PCAbort {
+pub struct FinishQueryAbort {
   pub ms_query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Query2PCCommit {
+pub struct FinishQueryCommit {
   pub ms_query_id: QueryId,
 }
 
 // Other Paxos2PC messages
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Query2PCCheckPrepared {}
+pub struct FinishQueryCheckPrepared {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Query2PCInformPrepared {}
+pub struct FinishQueryInformPrepared {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Query2PCWait {}
+pub struct FinishQueryWait {}
 
 // -------------------------------------------------------------------------------------------------
 //  Transaction Processing External Messages

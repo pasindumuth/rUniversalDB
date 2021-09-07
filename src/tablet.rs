@@ -25,7 +25,6 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::model::message::{QueryError, TabletMessage};
 use crate::ms_table_read_es::{FullMSTableReadES, MSReadExecutionS, MSTableReadAction};
 use crate::ms_table_write_es::{FullMSTableWriteES, MSTableWriteAction, MSWriteExecutionS};
 use crate::multiversion_map::MVM;
@@ -39,6 +38,7 @@ use crate::table_read_es::{ExecutionS, FullTableReadES, TableAction};
 use crate::trans_table_read_es::{
   FullTransTableReadES, TransExecutionS, TransTableAction, TransTableSource,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::ops::{Add, Bound, Deref, Sub};
@@ -380,7 +380,58 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
 //  TabletBundle
 // -----------------------------------------------------------------------------------------------
 
-pub enum TabletBundle {}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTablePrepared {
+  query_id: QueryId,
+  alter_op: proc::AlterOp,
+  timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableCommitted {
+  query_id: QueryId,
+  timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAborted {
+  query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTablePrepared {
+  query_id: QueryId,
+  timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableCommitted {
+  query_id: QueryId,
+  timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableAborted {
+  query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LockedCols {
+  query_id: QueryId,
+  timestamp: Timestamp,
+  cols: Vec<ColName>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum TabletBundle {
+  AlterTablePrepared(AlterTablePrepared),
+  AlterTableCommitted(AlterTableCommitted),
+  AlterTableAborted(AlterTableAborted),
+  DropTablePrepared(DropTablePrepared),
+  DropTableCommitted(DropTableCommitted),
+  DropTableAborted(DropTableAborted),
+  LockedCols(LockedCols),
+}
 
 // -----------------------------------------------------------------------------------------------
 //  TabletForwardMsg
@@ -521,7 +572,15 @@ impl<T: IOTypes> TabletContext<T> {
 
   fn handle_input(&mut self, statuses: &mut Statuses, tablet_input: TabletForwardMsg) {
     match tablet_input {
-      TabletForwardMsg::TabletBundle(_) => panic!(),
+      TabletForwardMsg::TabletBundle(bundle) => match bundle {
+        TabletBundle::AlterTablePrepared(_) => panic!(),
+        TabletBundle::AlterTableCommitted(_) => panic!(),
+        TabletBundle::AlterTableAborted(_) => panic!(),
+        TabletBundle::DropTablePrepared(_) => panic!(),
+        TabletBundle::DropTableCommitted(_) => panic!(),
+        TabletBundle::DropTableAborted(_) => panic!(),
+        TabletBundle::LockedCols(_) => panic!(),
+      },
       TabletForwardMsg::TabletMessage(message) => {
         match message {
           msg::TabletMessage::PerformQuery(perform_query) => {
@@ -539,7 +598,6 @@ impl<T: IOTypes> TabletContext<T> {
                       child_queries: vec![],
                       es: FullTransTableReadES {
                         root_query_path: perform_query.root_query_path,
-                        tier_map: perform_query.tier_map,
                         location_prefix: query.location_prefix,
                         context: Rc::new(query.context),
                         sender_path: perform_query.sender_path,
@@ -569,7 +627,7 @@ impl<T: IOTypes> TabletContext<T> {
               msg::GeneralQuery::SuperSimpleTableSelectQuery(query) => {
                 // We inspect the TierMap to see what kind of ES to create
                 let table_path = cast!(proc::TableRef::TablePath, &query.sql_query.from).unwrap();
-                if perform_query.tier_map.map.contains_key(table_path) {
+                if query.query_plan.tier_map.map.contains_key(table_path) {
                   // Here, we create an MSTableReadES.
                   let root_query_path = perform_query.root_query_path;
                   match self.get_msquery_id(statuses, root_query_path.clone(), query.timestamp) {
@@ -587,7 +645,6 @@ impl<T: IOTypes> TabletContext<T> {
                           child_queries: vec![],
                           es: FullMSTableReadES {
                             root_query_path,
-                            tier_map: perform_query.tier_map,
                             timestamp: query.timestamp,
                             tier: 0,
                             context: Rc::new(query.context),
@@ -622,7 +679,6 @@ impl<T: IOTypes> TabletContext<T> {
                       child_queries: vec![],
                       es: FullTableReadES {
                         root_query_path: perform_query.root_query_path,
-                        tier_map: perform_query.tier_map,
                         timestamp: query.timestamp,
                         context: Rc::new(query.context),
                         query_id: perform_query.query_id.clone(),
@@ -655,9 +711,9 @@ impl<T: IOTypes> TabletContext<T> {
                     // First, we look up the `tier` of this Table being
                     // written, update the `tier_map`.
                     let sql_query = query.sql_query;
-                    let mut tier_map = perform_query.tier_map;
-                    let tier = tier_map.map.get(sql_query.table()).unwrap().clone();
-                    *tier_map.map.get_mut(sql_query.table()).unwrap() += 1;
+                    let mut query_plan = query.query_plan;
+                    let tier = query_plan.tier_map.map.get(sql_query.table()).unwrap().clone();
+                    *query_plan.tier_map.map.get_mut(sql_query.table()).unwrap() += 1;
 
                     // Create an MSWriteTableES in the QueryReplanning state, and add it to
                     // the MSQueryES.
@@ -669,13 +725,12 @@ impl<T: IOTypes> TabletContext<T> {
                         child_queries: vec![],
                         es: FullMSTableWriteES {
                           root_query_path,
-                          tier_map,
                           timestamp: query.timestamp,
                           tier,
                           context: Rc::new(query.context),
                           query_id: perform_query.query_id.clone(),
                           sql_query,
-                          query_plan: query.query_plan,
+                          query_plan,
                           ms_query_id,
                           new_rms: Default::default(),
                           state: MSWriteExecutionS::Start,
@@ -706,7 +761,7 @@ impl<T: IOTypes> TabletContext<T> {
           msg::TabletMessage::QuerySuccess(query_success) => {
             self.handle_query_success(statuses, query_success);
           }
-          msg::TabletMessage::Query2PCPrepare(prepare) => {
+          msg::TabletMessage::FinishQueryPrepare(prepare) => {
             // Recall that an MSQueryES can randomly be aborted due to a DeadlockSafetyWriteAbort.
             // If it's present, we send back Prepared, and if not, we send back Aborted.
             if let Some(ms_query_es) = statuses.ms_query_ess.get_mut(&prepare.ms_query_id) {
@@ -730,7 +785,10 @@ impl<T: IOTypes> TabletContext<T> {
               let rm_path = self.mk_query_path(prepare.ms_query_id);
               self.ctx().core_ctx().send_to_coord(
                 prepare.sender_path,
-                msg::CoordMessage::Query2PCPrepared(msg::Query2PCPrepared { return_qid, rm_path }),
+                msg::CoordMessage::FinishQueryPrepared(msg::FinishQueryPrepared {
+                  return_qid,
+                  rm_path,
+                }),
               );
             } else {
               // Send back Aborted. The only reason for the MSQueryES to no longer exist must be
@@ -740,25 +798,25 @@ impl<T: IOTypes> TabletContext<T> {
               let rm_path = self.mk_query_path(prepare.ms_query_id);
               self.ctx().core_ctx().send_to_coord(
                 prepare.sender_path,
-                msg::CoordMessage::Query2PCAborted(msg::Query2PCAborted {
+                msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
                   return_qid,
                   rm_path,
-                  reason: msg::Query2PCAbortReason::DeadlockSafetyAbortion,
+                  reason: msg::FinishQueryAbortReason::DeadlockSafetyAbortion,
                 }),
               );
             }
           }
-          msg::TabletMessage::Query2PCAbort(abort) => {
+          msg::TabletMessage::FinishQueryAbort(abort) => {
             if let Some(ms_query_es) = statuses.ms_query_ess.remove(&abort.ms_query_id) {
-              // Recall that in order to get a Query2PCAbort, the Slave must already have sent a
-              // Query2PCPrepare. Since the network is FIFO, we must have received it, and since
+              // Recall that in order to get a FinishQueryAbort, the Slave must already have sent a
+              // FinishQueryPrepare. Since the network is FIFO, we must have received it, and since
               // the MSQueryES exists, we must have responded with Prepared. Recall that we cannot
               // call `exit_and_clean_up` when MSQueryES is Prepared.
               self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
               self.ms_root_query_map.remove(&ms_query_es.root_query_id);
             }
           }
-          msg::TabletMessage::Query2PCCommit(commit) => {
+          msg::TabletMessage::FinishQueryCommit(commit) => {
             // Remove the MSQueryES. It must exist, since we had Prepared.
             let ms_query_es = statuses.ms_query_ess.remove(&commit.ms_query_id).unwrap();
 
@@ -825,12 +883,12 @@ impl<T: IOTypes> TabletContext<T> {
               self.gossip = Arc::new(gossip_data);
             }
           }
-          TabletMessage::Query2PCCheckPrepared(_) => panic!(),
-          TabletMessage::AlterTableCheckPrepared(_) => panic!(),
-          TabletMessage::DropTablePrepare(_) => panic!(),
-          TabletMessage::DropTableAbort(_) => panic!(),
-          TabletMessage::DropTableCommit(_) => panic!(),
-          TabletMessage::DropTableCheckPrepared(_) => panic!(),
+          msg::TabletMessage::FinishQueryCheckPrepared(_) => panic!(),
+          msg::TabletMessage::AlterTableCheckPrepared(_) => panic!(),
+          msg::TabletMessage::DropTablePrepare(_) => panic!(),
+          msg::TabletMessage::DropTableAbort(_) => panic!(),
+          msg::TabletMessage::DropTableCommit(_) => panic!(),
+          msg::TabletMessage::DropTableCheckPrepared(_) => panic!(),
         }
         self.run_main_loop(statuses);
       }
@@ -1761,7 +1819,7 @@ impl<T: IOTypes> TabletContext<T> {
       //
       // The Slave should not send CancelQuery after it sends Prepare, since `exit_ms_query_es`
       // can't handle Prepared MSQueryESs. As a corollary, this function should not be used when
-      // a Query2PCAbort comes in.
+      // a FinishQueryAbort comes in.
       //
       // TODO: In the spirit of getting local safety, we shouldn't have the above expection.
       // Instead, we should give MSQueryES a state variable and have it react to CancelQuery

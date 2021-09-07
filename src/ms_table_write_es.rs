@@ -40,7 +40,6 @@ pub enum MSWriteExecutionS {
 #[derive(Debug)]
 pub struct FullMSTableWriteES {
   pub root_query_path: QueryPath,
-  pub tier_map: TierMap,
   pub timestamp: Timestamp,
   pub tier: u32,
   pub context: Rc<Context>,
@@ -159,7 +158,6 @@ impl FullMSTableWriteES {
     let gr_query_statuses = match compute_subqueries::<T, _, _>(
       GRQueryConstructorView {
         root_query_path: &self.root_query_path,
-        tier_map: &self.tier_map,
         timestamp: &self.timestamp,
         sql_query: &self.sql_query,
         query_plan: &self.query_plan,

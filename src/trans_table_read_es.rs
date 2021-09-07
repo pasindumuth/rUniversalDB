@@ -41,7 +41,6 @@ pub enum TransExecutionS {
 #[derive(Debug)]
 pub struct FullTransTableReadES {
   pub root_query_path: QueryPath,
-  pub tier_map: TierMap,
   pub location_prefix: TransTableLocationPrefix,
   pub context: Rc<Context>,
 
@@ -172,7 +171,6 @@ impl FullTransTableReadES {
     // Finally, compute the GRQueryESs.
     let subquery_view = GRQueryConstructorView {
       root_query_path: &self.root_query_path,
-      tier_map: &self.tier_map,
       timestamp: &self.timestamp,
       sql_query: &self.sql_query,
       query_plan: &self.query_plan,

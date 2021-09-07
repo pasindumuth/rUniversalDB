@@ -6,7 +6,6 @@ use crate::model::common::{
   TablePath, TableView, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::message as msg;
-use crate::model::message::{AbortedData, Query2PCAbortReason, Query2PCAborted};
 use crate::server::CommonQuery;
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{HashMap, HashSet};
@@ -266,7 +265,7 @@ impl FullMSCoordES {
   pub fn handle_prepared<T: IOTypes>(
     &mut self,
     ctx: &mut CoordContext<T>,
-    prepared: msg::Query2PCPrepared,
+    prepared: msg::FinishQueryPrepared,
   ) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
     let preparing = cast!(CoordState::Preparing, &mut es.state).unwrap();
@@ -287,13 +286,13 @@ impl FullMSCoordES {
   pub fn handle_aborted<T: IOTypes>(
     &mut self,
     ctx: &mut CoordContext<T>,
-    aborted: msg::Query2PCAborted,
+    aborted: msg::FinishQueryAborted,
   ) -> MSQueryCoordAction {
     // Recall that although ECU will send Abort to the RM that just responded,
     // this is not incorrect. We ignore this for simplicity.
     self.exit_and_clean_up(ctx);
     match aborted.reason {
-      Query2PCAbortReason::DeadlockSafetyAbortion => {
+      msg::FinishQueryAbortReason::DeadlockSafetyAbortion => {
         // Since this error is an anomaly that usually does not happen, we may try again the
         // transaction again at a higher timestamp. Thus, we signal that the failure is non-fatal.
         MSQueryCoordAction::NonFatalFailure
@@ -310,7 +309,7 @@ impl FullMSCoordES {
     for query_path in &es.all_rms {
       ctx.ctx().core_ctx().send_to_tablet(
         query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
-        msg::TabletMessage::Query2PCCommit(msg::Query2PCCommit {
+        msg::TabletMessage::FinishQueryCommit(msg::FinishQueryCommit {
           ms_query_id: query_path.query_id.clone(),
         }),
       );
@@ -358,7 +357,7 @@ impl FullMSCoordES {
         for query_path in &es.all_rms {
           ctx.ctx().core_ctx().send_to_tablet(
             query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
-            msg::TabletMessage::Query2PCPrepare(msg::Query2PCPrepare {
+            msg::TabletMessage::FinishQueryPrepare(msg::FinishQueryPrepare {
               sender_path: sender_path.clone(),
               ms_query_id: query_path.query_id.clone(),
             }),
@@ -401,7 +400,7 @@ impl FullMSCoordES {
     // Construct the QueryPlan
     // TODO: do this properly
     let query_plan = QueryPlan {
-      tier_map: TierMap { map: Default::default() },
+      tier_map: es.all_tier_maps.get(trans_table_name).unwrap().clone(),
       query_leader_map: Default::default(),
       table_location_map: Default::default(),
       col_usage_node: col_usage_node.clone(),
@@ -447,7 +446,6 @@ impl FullMSCoordES {
                 root_query_path: root_query_path.clone(),
                 sender_path: sender_path.clone(),
                 query_id: child_qid.clone(),
-                tier_map: es.all_tier_maps.get(trans_table_name).unwrap().clone(),
                 query: msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query.clone()),
               };
 
@@ -459,13 +457,13 @@ impl FullMSCoordES {
               tm_status.tm_state.insert(ctx.ctx().core_ctx().mk_node_path(nid), None);
             }
           }
-          proc::TableRef::TransTableName(trans_table_name) => {
+          proc::TableRef::TransTableName(sub_trans_table_name) => {
             // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
             let location_prefix = context
               .context_schema
               .trans_table_context_schema
               .iter()
-              .find(|prefix| &prefix.trans_table_name == trans_table_name)
+              .find(|prefix| &prefix.trans_table_name == sub_trans_table_name)
               .unwrap()
               .clone();
 
@@ -475,7 +473,6 @@ impl FullMSCoordES {
               root_query_path,
               sender_path,
               query_id: child_qid.clone(),
-              tier_map: es.all_tier_maps.get(trans_table_name).unwrap().clone(),
               query: msg::GeneralQuery::SuperSimpleTransTableSelectQuery(
                 msg::SuperSimpleTransTableSelectQuery {
                   location_prefix: location_prefix.clone(),
@@ -513,7 +510,6 @@ impl FullMSCoordES {
             root_query_path: root_query_path.clone(),
             sender_path: sender_path.clone(),
             query_id: child_qid.clone(),
-            tier_map: es.all_tier_maps.get(trans_table_name).unwrap().clone(),
             query: msg::GeneralQuery::UpdateQuery(child_query.clone()),
           };
 
@@ -553,12 +549,12 @@ impl FullMSCoordES {
           }
           CoordState::Preparing(_) => {
             // Recall that by now, Prepare should have been sent to all RMs. They need to be
-            // cancelled with Query2PCAbort (they don't react to CancelQuery). The remaining
+            // cancelled with FinishQueryAbort (they don't react to CancelQuery). The remaining
             // `registered_queries` can be cancelled with CancelQuery.
             for query_path in &es.all_rms {
               ctx.ctx().core_ctx().send_to_tablet(
                 query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
-                msg::TabletMessage::Query2PCAbort(msg::Query2PCAbort {
+                msg::TabletMessage::FinishQueryAbort(msg::FinishQueryAbort {
                   ms_query_id: query_path.query_id.clone(),
                 }),
               );

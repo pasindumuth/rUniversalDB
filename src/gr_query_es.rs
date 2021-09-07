@@ -84,7 +84,6 @@ pub struct GRQueryES {
   /// This is only here so it can be forwarded to child queries.
   pub root_query_path: QueryPath,
   /// This is only here so it can be forwarded to child queries.
-  pub tier_map: TierMap,
   pub timestamp: Timestamp,
   pub context: Rc<Context>,
 
@@ -150,7 +149,6 @@ impl SubqueryComputableSql for proc::Update {
 
 pub struct GRQueryConstructorView<'a, SqlQueryT: SubqueryComputableSql> {
   pub root_query_path: &'a QueryPath,
-  pub tier_map: &'a TierMap,
   pub timestamp: &'a Timestamp,
   /// SQL query containing by the parent ES.
   pub sql_query: &'a SqlQueryT,
@@ -174,7 +172,6 @@ impl<'a, SqlQueryT: SubqueryComputableSql> GRQueryConstructorView<'a, SqlQueryT>
     // Finally, construct the GRQueryES.
     GRQueryES {
       root_query_path: self.root_query_path.clone(),
-      tier_map: self.tier_map.clone(),
       timestamp: self.timestamp.clone(),
       context,
       new_trans_table_context: vec![],
@@ -498,7 +495,6 @@ impl GRQueryES {
             root_query_path: self.root_query_path.clone(),
             sender_path: sender_path.clone(),
             query_id: child_qid.clone(),
-            tier_map: self.tier_map.clone(),
             query: general_query,
           };
 
@@ -532,7 +528,6 @@ impl GRQueryES {
           root_query_path: self.root_query_path.clone(),
           sender_path: sender_path.clone(),
           query_id: child_qid.clone(),
-          tier_map: self.tier_map.clone(),
           query: general_query,
         };
 

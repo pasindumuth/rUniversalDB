@@ -11,7 +11,6 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::{CoordMessage, GeneralQuery, QueryError};
 use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, MSQueryCoordReplanningES, MSQueryCoordReplanningS,
 };
@@ -217,7 +216,6 @@ impl<T: IOTypes> CoordContext<T> {
                       child_queries: vec![],
                       es: FullTransTableReadES {
                         root_query_path: perform_query.root_query_path,
-                        tier_map: perform_query.tier_map,
                         location_prefix: query.location_prefix,
                         context: Rc::new(query.context),
                         sender_path: perform_query.sender_path,
@@ -245,7 +243,6 @@ impl<T: IOTypes> CoordContext<T> {
                       child_queries: vec![],
                       es: FullTransTableReadES {
                         root_query_path: perform_query.root_query_path,
-                        tier_map: perform_query.tier_map,
                         location_prefix: query.location_prefix,
                         context: Rc::new(query.context),
                         sender_path: perform_query.sender_path,
@@ -272,8 +269,8 @@ impl<T: IOTypes> CoordContext<T> {
                   return;
                 }
               }
-              GeneralQuery::SuperSimpleTableSelectQuery(_) => panic!(),
-              GeneralQuery::UpdateQuery(_) => panic!(),
+              msg::GeneralQuery::SuperSimpleTableSelectQuery(_) => panic!(),
+              msg::GeneralQuery::UpdateQuery(_) => panic!(),
             }
           }
           msg::CoordMessage::CancelQuery(cancel_query) => {
@@ -285,14 +282,14 @@ impl<T: IOTypes> CoordContext<T> {
           msg::CoordMessage::QueryAborted(query_aborted) => {
             self.handle_query_aborted(statuses, query_aborted);
           }
-          msg::CoordMessage::Query2PCPrepared(prepared) => {
+          msg::CoordMessage::FinishQueryPrepared(prepared) => {
             let query_id = prepared.return_qid.clone();
             if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
               let action = ms_coord.es.handle_prepared(self, prepared);
               self.handle_ms_coord_es_action(statuses, query_id, action);
             }
           }
-          msg::CoordMessage::Query2PCAborted(aborted) => {
+          msg::CoordMessage::FinishQueryAborted(aborted) => {
             let query_id = aborted.return_qid.clone();
             if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
               let action = ms_coord.es.handle_aborted(self, aborted);
@@ -348,8 +345,8 @@ impl<T: IOTypes> CoordContext<T> {
           msg::CoordMessage::RegisterQuery(register) => {
             self.handle_register_query(statuses, register)
           }
-          CoordMessage::Query2PCInformPrepared(_) => panic!(),
-          CoordMessage::Query2PCWait(_) => panic!(),
+          msg::CoordMessage::FinishQueryInformPrepared(_) => panic!(),
+          msg::CoordMessage::FinishQueryWait(_) => panic!(),
         }
       }
       CoordForwardMsg::GossipData(_) => panic!(),
