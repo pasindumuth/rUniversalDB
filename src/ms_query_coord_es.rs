@@ -1,5 +1,6 @@
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
+use crate::coord::CoordContext;
 use crate::model::common::{
   proc, ColName, Context, ContextRow, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, RequestId,
   TablePath, TableView, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
@@ -7,7 +8,6 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::model::message::{AbortedData, Query2PCAbortReason, Query2PCAborted};
 use crate::server::CommonQuery;
-use crate::slave::SlaveContext;
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{HashMap, HashSet};
 
@@ -121,7 +121,7 @@ pub enum MSQueryCoordAction {
 
 impl FullMSCoordES {
   /// Start the FullMSCoordES
-  pub fn start<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> MSQueryCoordAction {
+  pub fn start<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordAction {
     let plan_es = cast!(Self::QueryReplanning, self).unwrap();
     let action = plan_es.start(ctx);
     self.handle_replanning_action(ctx, action)
@@ -130,7 +130,7 @@ impl FullMSCoordES {
   /// Handle Master Response, routing it to the QueryReplanning.
   pub fn handle_master_response<T: IOTypes>(
     &mut self,
-    ctx: &mut SlaveContext<T>,
+    ctx: &mut CoordContext<T>,
     gossip_gen: Gen,
     tree: msg::FrozenColUsageTree,
   ) -> MSQueryCoordAction {
@@ -142,7 +142,7 @@ impl FullMSCoordES {
   /// Handle the `action` sent back by the `MSQueryCoordReplanningES`.
   fn handle_replanning_action<T: IOTypes>(
     &mut self,
-    ctx: &mut SlaveContext<T>,
+    ctx: &mut CoordContext<T>,
     action: MSQueryCoordReplanningAction,
   ) -> MSQueryCoordAction {
     match action {
@@ -201,7 +201,7 @@ impl FullMSCoordES {
   /// This is called when the TMStatus has completed successfully.
   pub fn handle_tm_success<T: IOTypes>(
     &mut self,
-    ctx: &mut SlaveContext<T>,
+    ctx: &mut CoordContext<T>,
     tm_qid: QueryId,
     new_rms: HashSet<QueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
@@ -229,7 +229,7 @@ impl FullMSCoordES {
   /// This is called when the TMStatus has aborted.
   pub fn handle_tm_aborted<T: IOTypes>(
     &mut self,
-    ctx: &mut SlaveContext<T>,
+    ctx: &mut CoordContext<T>,
     aborted_data: msg::AbortedData,
   ) -> MSQueryCoordAction {
     // Interpret the `aborted_data`.
@@ -265,7 +265,7 @@ impl FullMSCoordES {
   /// Handle a Prepared message sent to an MSCoordES.
   pub fn handle_prepared<T: IOTypes>(
     &mut self,
-    ctx: &mut SlaveContext<T>,
+    ctx: &mut CoordContext<T>,
     prepared: msg::Query2PCPrepared,
   ) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
@@ -286,7 +286,7 @@ impl FullMSCoordES {
   /// Handle a Aborted message sent to an MSCoordES.
   pub fn handle_aborted<T: IOTypes>(
     &mut self,
-    ctx: &mut SlaveContext<T>,
+    ctx: &mut CoordContext<T>,
     aborted: msg::Query2PCAborted,
   ) -> MSQueryCoordAction {
     // Recall that although ECU will send Abort to the RM that just responded,
@@ -303,7 +303,7 @@ impl FullMSCoordES {
 
   /// By now, all Prepared must have come on. Thus, we send out Commit, abort the
   /// RegisteredQueries, and return the results.
-  fn finish_ms_coord<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> MSQueryCoordAction {
+  fn finish_ms_coord<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
 
     // First, we commit all RMs.
@@ -341,7 +341,7 @@ impl FullMSCoordES {
 
   /// This function accepts the results for the subquery, and then decides either
   /// to move onto the next stage, or start 2PC to commit the change.
-  fn advance<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> MSQueryCoordAction {
+  fn advance<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordAction {
     // Compute the next stage
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
     let next_stage_idx = es.state.stage_idx().unwrap() + 1;
@@ -375,7 +375,7 @@ impl FullMSCoordES {
   /// `Stage` with index `stage_idx`.
   fn process_ms_query_stage<T: IOTypes>(
     &mut self,
-    ctx: &mut SlaveContext<T>,
+    ctx: &mut CoordContext<T>,
     stage_idx: usize,
   ) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
@@ -533,7 +533,7 @@ impl FullMSCoordES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) {
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) {
     match self {
       FullMSCoordES::QueryReplanning(plan_es) => plan_es.exit_and_clean_up(ctx),
       FullMSCoordES::Executing(es) => {
@@ -621,7 +621,7 @@ enum MSQueryCoordReplanningAction {
 }
 
 impl MSQueryCoordReplanningES {
-  fn start<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> MSQueryCoordReplanningAction {
+  fn start<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordReplanningAction {
     // First, we compute the ColUsageNode.
     let mut planner =
       ColUsagePlanner { db_schema: &ctx.gossip.db_schema, timestamp: self.timestamp.clone() };
@@ -682,7 +682,7 @@ impl MSQueryCoordReplanningES {
   }
 
   /// This Exits and Cleans up this QueryReplanningES
-  fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) {
+  fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) {
     match &self.state {
       MSQueryCoordReplanningS::Start => {}
       MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id } => {

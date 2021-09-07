@@ -11,7 +11,7 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::{GeneralQuery, QueryError};
+use crate::model::message::{CoordMessage, GeneralQuery, QueryError};
 use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, MSQueryCoordReplanningES, MSQueryCoordReplanningS,
 };
@@ -28,6 +28,21 @@ use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+
+// -----------------------------------------------------------------------------------------------
+//  CoordForwardMsg
+// -----------------------------------------------------------------------------------------------
+
+// TODO: Move to paxos
+pub struct LeaderChanged {}
+
+pub enum CoordForwardMsg {
+  ExternalMessage(msg::SlaveExternalReq),
+  CoordMessage(msg::CoordMessage),
+  GossipData(Arc<GossipData>),
+  RemoteLeaderChanged(msg::RemoteLeaderChanged),
+  LeaderChanged(LeaderChanged),
+}
 
 // -----------------------------------------------------------------------------------------------
 //  Coord Statuses
@@ -112,8 +127,8 @@ impl<T: IOTypes> CoordState<T> {
     }
   }
 
-  pub fn handle_incoming_message(&mut self, message: msg::SlaveMessage) {
-    self.slave_context.handle_incoming_message(&mut self.statuses, message);
+  pub fn handle_input(&mut self, coord_input: CoordForwardMsg) {
+    self.slave_context.handle_input(&mut self.statuses, coord_input);
   }
 }
 
@@ -130,207 +145,218 @@ impl<T: IOTypes> CoordContext<T> {
     }
   }
 
-  /// Handles all messages, coming from Tablets, the Master, External, etc.
-  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::SlaveMessage) {
-    match message {
-      msg::SlaveMessage::PerformExternalQuery(external_query) => {
-        match self.init_request(&external_query) {
-          Ok(ms_query) => {
-            let query_id = mk_qid(&mut self.rand);
-            let request_id = &external_query.request_id;
-            self.external_request_id_map.insert(request_id.clone(), query_id.clone());
-            let ms_coord = map_insert(
-              &mut statuses.ms_coord_ess,
-              &query_id,
-              MSCoordESWrapper {
-                request_id: external_query.request_id,
-                sender_eid: external_query.sender_eid,
-                child_queries: vec![],
-                es: FullMSCoordES::QueryReplanning(MSQueryCoordReplanningES {
-                  timestamp: self.clock.now(),
-                  sql_query: ms_query,
-                  query_id: query_id.clone(),
-                  state: MSQueryCoordReplanningS::Start,
-                }),
-              },
-            );
-            let action = ms_coord.es.start(self);
-            self.handle_ms_coord_es_action(statuses, query_id, action);
-          }
-          Err(payload) => self.network_output.send(
-            &external_query.sender_eid,
-            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
-              msg::ExternalQueryAborted { request_id: external_query.request_id, payload },
-            )),
-          ),
-        }
-      }
-      msg::SlaveMessage::CancelExternalQuery(cancel) => {
-        if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
-          // ECU the transation if it exists.
-          self.exit_and_clean_up(statuses, query_id.clone());
-        }
-
-        // Recall that we need to respond with an ExternalQueryAborted
-        // to confirm the cancellation.
-        self.network_output.send(
-          &cancel.sender_eid,
-          msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
-            msg::ExternalQueryAborted {
-              request_id: cancel.request_id,
-              payload: msg::ExternalAbortedData::ConfirmCancel,
-            },
-          )),
-        );
-      }
-      msg::SlaveMessage::TabletMessage(tablet_group_id, tablet_msg) => {
-        self.tablet_forward_output.forward(&tablet_group_id, tablet_msg);
-      }
-      msg::SlaveMessage::PerformQuery(perform_query) => {
-        match perform_query.query {
-          msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
-            // First, we check if the MSCoordES or GRCoordES still exists in the Statuses,
-            // continuing if so and aborting if not.
-            if let Some(ms_coord) = statuses.ms_coord_ess.get(&query.location_prefix.query_id) {
-              let es = ms_coord.es.to_exec();
-              // Construct and start the TransQueryReplanningES
-              let full_trans_table = map_insert(
-                &mut statuses.full_trans_table_read_ess,
-                &perform_query.query_id,
-                TransTableReadESWrapper {
-                  sender_path: perform_query.sender_path.clone(),
-                  child_queries: vec![],
-                  es: FullTransTableReadES {
-                    root_query_path: perform_query.root_query_path,
-                    tier_map: perform_query.tier_map,
-                    location_prefix: query.location_prefix,
-                    context: Rc::new(query.context),
-                    sender_path: perform_query.sender_path,
-                    query_id: perform_query.query_id.clone(),
-                    sql_query: query.sql_query,
-                    query_plan: query.query_plan,
-                    new_rms: Default::default(),
-                    state: TransExecutionS::Start,
-                    timestamp: es.timestamp.clone(),
+  pub fn handle_input(&mut self, statuses: &mut Statuses, coord_input: CoordForwardMsg) {
+    match coord_input {
+      CoordForwardMsg::ExternalMessage(message) => {
+        match message {
+          msg::SlaveExternalReq::PerformExternalQuery(external_query) => {
+            match self.init_request(&external_query) {
+              Ok(ms_query) => {
+                let query_id = mk_qid(&mut self.rand);
+                let request_id = &external_query.request_id;
+                self.external_request_id_map.insert(request_id.clone(), query_id.clone());
+                let ms_coord = map_insert(
+                  &mut statuses.ms_coord_ess,
+                  &query_id,
+                  MSCoordESWrapper {
+                    request_id: external_query.request_id,
+                    sender_eid: external_query.sender_eid,
+                    child_queries: vec![],
+                    es: FullMSCoordES::QueryReplanning(MSQueryCoordReplanningES {
+                      timestamp: self.clock.now(),
+                      sql_query: ms_query,
+                      query_id: query_id.clone(),
+                      state: MSQueryCoordReplanningS::Start,
+                    }),
                   },
-                },
-              );
-
-              let action = full_trans_table.es.start(&mut self.ctx(), es);
-              self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
-            } else if let Some(gr_query) =
-              statuses.gr_query_ess.get(&query.location_prefix.query_id)
-            {
-              // Construct and start the TransQueryReplanningES
-              let full_trans_table = map_insert(
-                &mut statuses.full_trans_table_read_ess,
-                &perform_query.query_id,
-                TransTableReadESWrapper {
-                  sender_path: perform_query.sender_path.clone(),
-                  child_queries: vec![],
-                  es: FullTransTableReadES {
-                    root_query_path: perform_query.root_query_path,
-                    tier_map: perform_query.tier_map,
-                    location_prefix: query.location_prefix,
-                    context: Rc::new(query.context),
-                    sender_path: perform_query.sender_path,
-                    query_id: perform_query.query_id.clone(),
-                    sql_query: query.sql_query,
-                    query_plan: query.query_plan,
-                    new_rms: Default::default(),
-                    state: TransExecutionS::Start,
-                    timestamp: gr_query.es.timestamp.clone(),
-                  },
-                },
-              );
-
-              let action = full_trans_table.es.start(&mut self.ctx(), &gr_query.es);
-              self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
-            } else {
-              // This means that the target GRQueryES was deleted. We can send back an
-              // Abort with LateralError. Exit and Clean Up will be done later.
-              self.ctx().send_query_error(
-                perform_query.sender_path,
-                perform_query.query_id,
-                msg::QueryError::LateralError,
-              );
-              return;
+                );
+                let action = ms_coord.es.start(self);
+                self.handle_ms_coord_es_action(statuses, query_id, action);
+              }
+              Err(payload) => self.network_output.send(
+                &external_query.sender_eid,
+                msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+                  msg::ExternalQueryAborted { request_id: external_query.request_id, payload },
+                )),
+              ),
             }
           }
-          GeneralQuery::SuperSimpleTableSelectQuery(_) => panic!(),
-          GeneralQuery::UpdateQuery(_) => panic!(),
-        }
-      }
-      msg::SlaveMessage::CancelQuery(cancel_query) => {
-        self.exit_and_clean_up(statuses, cancel_query.query_id);
-      }
-      msg::SlaveMessage::QuerySuccess(query_success) => {
-        self.handle_query_success(statuses, query_success);
-      }
-      msg::SlaveMessage::QueryAborted(query_aborted) => {
-        self.handle_query_aborted(statuses, query_aborted);
-      }
-      msg::SlaveMessage::Query2PCPrepared(prepared) => {
-        let query_id = prepared.return_qid.clone();
-        if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
-          let action = ms_coord.es.handle_prepared(self, prepared);
-          self.handle_ms_coord_es_action(statuses, query_id, action);
-        }
-      }
-      msg::SlaveMessage::Query2PCAborted(aborted) => {
-        let query_id = aborted.return_qid.clone();
-        if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
-          let action = ms_coord.es.handle_aborted(self, aborted);
-          self.handle_ms_coord_es_action(statuses, query_id, action);
-        }
-      }
-      msg::SlaveMessage::MasterFrozenColUsageAborted(_) => {
-        panic!(); // In practice, this is never received.
-      }
-      msg::SlaveMessage::MasterFrozenColUsageSuccess(success) => {
-        // Update the Gossip with incoming Gossip data.
-        // let gossip_data = success.gossip.clone().to_gossip();
-        // if self.gossip.gossip_gen < gossip_data.gossip_gen {
-        //   self.gossip = Arc::new(gossip_data);
-        // }
+          msg::SlaveExternalReq::CancelExternalQuery(cancel) => {
+            if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
+              // ECU the transation if it exists.
+              self.exit_and_clean_up(statuses, query_id.clone());
+            }
 
-        // Route the response to the appropriate ES.
-        let query_id = success.return_qid;
-        if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
-          // TODO: remove this section.
-          // let prefix = trans_read.es.location_prefix();
-          // let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
-          //   trans_read.es.handle_master_response(
-          //     &mut self.ctx(),
-          //     &gr_query.es,
-          //     success.gossip.gossip_gen,
-          //     success.frozen_col_usage_tree,
-          //   )
-          // } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.query_id) {
-          //   trans_read.es.handle_master_response(
-          //     &mut self.ctx(),
-          //     ms_coord.es.to_exec(),
-          //     success.gossip.gossip_gen,
-          //     success.frozen_col_usage_tree,
-          //   )
-          // } else {
-          //   // TODO: I'm not fully convinced it's a good practice to use
-          //   // handle_internal_query_error for this.
-          //   trans_read
-          //     .es
-          //     .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-          // };
-          // self.handle_trans_read_es_action(statuses, query_id, action);
-        } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
-          let action = ms_coord.es.handle_master_response(
-            self,
-            success.gossip.gen,
-            success.frozen_col_usage_tree,
-          );
-          self.handle_ms_coord_es_action(statuses, query_id, action);
+            // Recall that we need to respond with an ExternalQueryAborted
+            // to confirm the cancellation.
+            self.network_output.send(
+              &cancel.sender_eid,
+              msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+                msg::ExternalQueryAborted {
+                  request_id: cancel.request_id,
+                  payload: msg::ExternalAbortedData::ConfirmCancel,
+                },
+              )),
+            );
+          }
         }
       }
-      msg::SlaveMessage::RegisterQuery(register) => self.handle_register_query(statuses, register),
+      CoordForwardMsg::CoordMessage(message) => {
+        match message {
+          msg::CoordMessage::PerformQuery(perform_query) => {
+            match perform_query.query {
+              msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
+                // First, we check if the MSCoordES or GRCoordES still exists in the Statuses,
+                // continuing if so and aborting if not.
+                if let Some(ms_coord) = statuses.ms_coord_ess.get(&query.location_prefix.query_id) {
+                  let es = ms_coord.es.to_exec();
+                  // Construct and start the TransQueryReplanningES
+                  let full_trans_table = map_insert(
+                    &mut statuses.full_trans_table_read_ess,
+                    &perform_query.query_id,
+                    TransTableReadESWrapper {
+                      sender_path: perform_query.sender_path.clone(),
+                      child_queries: vec![],
+                      es: FullTransTableReadES {
+                        root_query_path: perform_query.root_query_path,
+                        tier_map: perform_query.tier_map,
+                        location_prefix: query.location_prefix,
+                        context: Rc::new(query.context),
+                        sender_path: perform_query.sender_path,
+                        query_id: perform_query.query_id.clone(),
+                        sql_query: query.sql_query,
+                        query_plan: query.query_plan,
+                        new_rms: Default::default(),
+                        state: TransExecutionS::Start,
+                        timestamp: es.timestamp.clone(),
+                      },
+                    },
+                  );
+
+                  let action = full_trans_table.es.start(&mut self.ctx(), es);
+                  self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
+                } else if let Some(gr_query) =
+                  statuses.gr_query_ess.get(&query.location_prefix.query_id)
+                {
+                  // Construct and start the TransQueryReplanningES
+                  let full_trans_table = map_insert(
+                    &mut statuses.full_trans_table_read_ess,
+                    &perform_query.query_id,
+                    TransTableReadESWrapper {
+                      sender_path: perform_query.sender_path.clone(),
+                      child_queries: vec![],
+                      es: FullTransTableReadES {
+                        root_query_path: perform_query.root_query_path,
+                        tier_map: perform_query.tier_map,
+                        location_prefix: query.location_prefix,
+                        context: Rc::new(query.context),
+                        sender_path: perform_query.sender_path,
+                        query_id: perform_query.query_id.clone(),
+                        sql_query: query.sql_query,
+                        query_plan: query.query_plan,
+                        new_rms: Default::default(),
+                        state: TransExecutionS::Start,
+                        timestamp: gr_query.es.timestamp.clone(),
+                      },
+                    },
+                  );
+
+                  let action = full_trans_table.es.start(&mut self.ctx(), &gr_query.es);
+                  self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
+                } else {
+                  // This means that the target GRQueryES was deleted. We can send back an
+                  // Abort with LateralError. Exit and Clean Up will be done later.
+                  self.ctx().send_query_error(
+                    perform_query.sender_path,
+                    perform_query.query_id,
+                    msg::QueryError::LateralError,
+                  );
+                  return;
+                }
+              }
+              GeneralQuery::SuperSimpleTableSelectQuery(_) => panic!(),
+              GeneralQuery::UpdateQuery(_) => panic!(),
+            }
+          }
+          msg::CoordMessage::CancelQuery(cancel_query) => {
+            self.exit_and_clean_up(statuses, cancel_query.query_id);
+          }
+          msg::CoordMessage::QuerySuccess(query_success) => {
+            self.handle_query_success(statuses, query_success);
+          }
+          msg::CoordMessage::QueryAborted(query_aborted) => {
+            self.handle_query_aborted(statuses, query_aborted);
+          }
+          msg::CoordMessage::Query2PCPrepared(prepared) => {
+            let query_id = prepared.return_qid.clone();
+            if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
+              let action = ms_coord.es.handle_prepared(self, prepared);
+              self.handle_ms_coord_es_action(statuses, query_id, action);
+            }
+          }
+          msg::CoordMessage::Query2PCAborted(aborted) => {
+            let query_id = aborted.return_qid.clone();
+            if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
+              let action = ms_coord.es.handle_aborted(self, aborted);
+              self.handle_ms_coord_es_action(statuses, query_id, action);
+            }
+          }
+          msg::CoordMessage::MasterFrozenColUsageAborted(_) => {
+            panic!(); // In practice, this is never received.
+          }
+          msg::CoordMessage::MasterFrozenColUsageSuccess(success) => {
+            // Update the Gossip with incoming Gossip data.
+            // let gossip_data = success.gossip.clone().to_gossip();
+            // if self.gossip.gossip_gen < gossip_data.gossip_gen {
+            //   self.gossip = Arc::new(gossip_data);
+            // }
+
+            // Route the response to the appropriate ES.
+            let query_id = success.return_qid;
+            if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+              // TODO: remove this section.
+              // let prefix = trans_read.es.location_prefix();
+              // let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
+              //   trans_read.es.handle_master_response(
+              //     &mut self.ctx(),
+              //     &gr_query.es,
+              //     success.gossip.gossip_gen,
+              //     success.frozen_col_usage_tree,
+              //   )
+              // } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.query_id) {
+              //   trans_read.es.handle_master_response(
+              //     &mut self.ctx(),
+              //     ms_coord.es.to_exec(),
+              //     success.gossip.gossip_gen,
+              //     success.frozen_col_usage_tree,
+              //   )
+              // } else {
+              //   // TODO: I'm not fully convinced it's a good practice to use
+              //   // handle_internal_query_error for this.
+              //   trans_read
+              //     .es
+              //     .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+              // };
+              // self.handle_trans_read_es_action(statuses, query_id, action);
+            } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
+              let action = ms_coord.es.handle_master_response(
+                self,
+                success.gossip.gen,
+                success.frozen_col_usage_tree,
+              );
+              self.handle_ms_coord_es_action(statuses, query_id, action);
+            }
+          }
+          msg::CoordMessage::RegisterQuery(register) => {
+            self.handle_register_query(statuses, register)
+          }
+          CoordMessage::Query2PCInformPrepared(_) => panic!(),
+          CoordMessage::Query2PCWait(_) => panic!(),
+        }
+      }
+      CoordForwardMsg::GossipData(_) => panic!(),
+      CoordForwardMsg::RemoteLeaderChanged(_) => panic!(),
+      CoordForwardMsg::LeaderChanged(_) => panic!(),
     }
   }
 
@@ -349,7 +375,7 @@ impl<T: IOTypes> CoordContext<T> {
         Ok(parsed_ast) => {
           // Convert to MSQuery
           let internal_ast = convert_ast(&parsed_ast);
-          convert_to_msquery(&self.gossip.gossiped_db_schema, internal_ast)
+          convert_to_msquery(&self.gossip.db_schema, internal_ast)
         }
         Err(parse_error) => {
           // Extract error string

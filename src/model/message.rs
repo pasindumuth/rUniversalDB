@@ -1,31 +1,49 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::common::{GossipDataSer, QueryPlan};
 use crate::model::common::{
-  proc, ColName, ColType, Context, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, RequestId,
-  SlaveGroupId, TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
-  TransTableName,
+  proc, ColName, ColType, Context, CoordGroupId, EndpointId, Gen, LeadershipId, NodeGroupId,
+  PaxosGroupId, QueryId, QueryPath, RequestId, SlaveGroupId, TablePath, TableView, TabletGroupId,
+  TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // -------------------------------------------------------------------------------------------------
-// The External Thread Message
+//  NetworkMessage
 // -------------------------------------------------------------------------------------------------
 
-/// External Message
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ExternalMessage {
-  ExternalQuerySuccess(ExternalQuerySuccess),
-  ExternalQueryAborted(ExternalQueryAborted),
-  ExternalDDLQuerySuccess(ExternalDDLQuerySuccess),
-  ExternalDDLQueryAborted(ExternalDDLQueryAborted),
+pub enum NetworkMessage {
+  External(ExternalMessage),
+  Slave(SlaveMessage),
+  Master(MasterMessage),
 }
 
 // -------------------------------------------------------------------------------------------------
-//  Slave Thread Message
+//  MasterMessage
 // -------------------------------------------------------------------------------------------------
 
-/// Message that go into the Slave's handler
+// TODO: Update
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum MasterMessage {
+  // External AlterTable Messages
+  PerformExternalDDLQuery(PerformExternalDDLQuery),
+  CancelExternalDDLQuery(CancelExternalDDLQuery),
+
+  // Internal AlterTable Messages
+  AlterTablePrepared(AlterTablePrepared),
+  AlterTableAborted(AlterTableAborted),
+
+  // Master FrozenColUsageAlgorithm
+  PerformMasterFrozenColUsage(PerformMasterFrozenColUsage),
+  CancelMasterFrozenColUsage(CancelMasterFrozenColUsage),
+}
+
+// -------------------------------------------------------------------------------------------------
+//  SlaveMessage
+// -------------------------------------------------------------------------------------------------
+
+// TODO: Update
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveMessage {
   // Transaction Processing messages
@@ -53,10 +71,106 @@ pub enum SlaveMessage {
   MasterFrozenColUsageSuccess(MasterFrozenColUsageSuccess),
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum SlaveExternalReq {
+  PerformExternalQuery(PerformExternalQuery),
+  CancelExternalQuery(CancelExternalQuery),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum SlaveMessage2 {
+  ExternalMessage(SlaveExternalReq),
+  RemoteMessage(RemoteMessage<SlaveRemotePayload>),
+  PaxosMessage(PaxosMessage),
+}
+
 // -------------------------------------------------------------------------------------------------
-//  Tablet Thread Message
+// ExternalMessage
 // -------------------------------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ExternalMessage {
+  ExternalQuerySuccess(ExternalQuerySuccess),
+  ExternalQueryAborted(ExternalQueryAborted),
+  ExternalDDLQuerySuccess(ExternalDDLQuerySuccess),
+  ExternalDDLQueryAborted(ExternalDDLQueryAborted),
+}
+
+// -------------------------------------------------------------------------------------------------
+//  RemoteMessage
+// -------------------------------------------------------------------------------------------------
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RemoteMessage<PayloadT> {
+  pub payload: PayloadT,
+  pub from_lid: LeadershipId,
+  pub from_gid: PaxosGroupId,
+  pub to_lid: LeadershipId,
+  pub to_gid: PaxosGroupId,
+}
+
+// -------------------------------------------------------------------------------------------------
+// PaxosMessage
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum PaxosMessage {}
+
+// -------------------------------------------------------------------------------------------------
+//  MasterRemotePayload
+// -------------------------------------------------------------------------------------------------
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum MasterRemotePayload {
+  RemoteLeaderChanged(RemoteLeaderChanged),
+
+  // Master FrozenColUsageAlgorithm
+  PerformMasterFrozenColUsage(PerformMasterFrozenColUsage),
+  CancelMasterFrozenColUsage(CancelMasterFrozenColUsage),
+
+  // CreateTable TM Messages
+  CreateTablePrepared(CreateTablePrepared),
+  CreateTableAborted(CreateTableAborted),
+  CreateTableInformPrepared(CreateTableInformPrepared),
+  CreateTableWait(CreateTableWait),
+
+  // AlterTable TM Messages
+  AlterTablePrepared(AlterTablePrepared),
+  AlterTableAborted(AlterTableAborted),
+  AlterTableInformPrepared(AlterTableInformPrepared),
+  AlterTableWait(AlterTableWait),
+
+  // DropTable TM Messages
+  DropTablePrepared(DropTablePrepared),
+  DropTableAborted(DropTableAborted),
+  DropTableInformPrepared(DropTableInformPrepared),
+  DropTableWait(DropTableWait),
+
+  // Close Confirmation
+  CreateTableCloseConfirm(CreateTableCloseConfirm),
+  AlterTableCloseConfirm(AlterTableCloseConfirm),
+  DropTableCloseConfirm(DropTableCloseConfirm),
+}
+
+// -------------------------------------------------------------------------------------------------
+//  SlaveRemotePayload
+// -------------------------------------------------------------------------------------------------
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum SlaveRemotePayload {
+  RemoteLeaderChanged(RemoteLeaderChanged),
+
+  // CreateTable RM Messages
+  CreateTablePrepare(CreateTablePrepare),
+  CreateTableCommit(CreateTableCommit),
+  CreateTableAbort(CreateTableAbort),
+  CreateTableCheckPrepared(CreateTableCheckPrepared),
+
+  MasterGossip(MasterGossip),
+
+  // Forwarding Messages
+  TabletMessage(TabletGroupId, TabletMessage),
+  CoordMessage(CoordGroupId, CoordMessage),
+}
+
+// TODO: update this to what it's supposed to be
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletMessage {
   PerformQuery(PerformQuery),
@@ -79,36 +193,34 @@ pub enum TabletMessage {
   MasterFrozenColUsageSuccess(MasterFrozenColUsageSuccess),
 }
 
-// -------------------------------------------------------------------------------------------------
-//  Master Thread Message
-// -------------------------------------------------------------------------------------------------
-
-/// Message that go into the Master
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum MasterMessage {
-  // External AlterTable Messages
-  PerformExternalDDLQuery(PerformExternalDDLQuery),
-  CancelExternalDDLQuery(CancelExternalDDLQuery),
+pub enum CoordMessage {
+  // Master Responses
+  MasterFrozenColUsageAborted(MasterFrozenColUsageAborted),
+  MasterFrozenColUsageSuccess(MasterFrozenColUsageSuccess),
 
-  // Internal AlterTable Messages
-  AlterTablePrepared(AlterTablePrepared),
-  AlterTableAborted(AlterTableAborted),
+  // PCSA
+  PerformQuery(PerformQuery),
+  CancelQuery(CancelQuery),
+  QueryAborted(QueryAborted),
+  QuerySuccess(QuerySuccess),
 
-  // Master FrozenColUsageAlgorithm
-  PerformMasterFrozenColUsage(PerformMasterFrozenColUsage),
-  CancelMasterFrozenColUsage(CancelMasterFrozenColUsage),
+  // Query2PC TM Messages
+  Query2PCPrepared(Query2PCPrepared),
+  Query2PCAborted(Query2PCAborted),
+  Query2PCInformPrepared(Query2PCInformPrepared),
+  Query2PCWait(Query2PCWait),
+
+  // Register message
+  RegisterQuery(RegisterQuery),
 }
 
 // -------------------------------------------------------------------------------------------------
-//  Network Thread Message
+//  RemoteLeaderChanged
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum NetworkMessage {
-  External(ExternalMessage),
-  Slave(SlaveMessage),
-  Master(MasterMessage),
-}
+pub struct RemoteLeaderChanged {}
 
 // -------------------------------------------------------------------------------------------------
 //  Transaction PCSA Messages
@@ -218,6 +330,7 @@ pub struct RegisterQuery {
 // -------------------------------------------------------------------------------------------------
 //  2PC messages
 // -------------------------------------------------------------------------------------------------
+// TODO: rename to FinishQuery and fix the message structures.
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Query2PCPrepare {
@@ -254,6 +367,17 @@ pub struct Query2PCAbort {
 pub struct Query2PCCommit {
   pub ms_query_id: QueryId,
 }
+
+// Other Paxos2PC messages
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Query2PCCheckPrepared {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Query2PCInformPrepared {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Query2PCWait {}
 
 // -------------------------------------------------------------------------------------------------
 //  Transaction Processing External Messages
@@ -350,13 +474,14 @@ pub struct MasterFrozenColUsageAborted {
 pub struct MasterFrozenColUsageSuccess {
   pub return_qid: QueryId,
   pub frozen_col_usage_tree: FrozenColUsageTree,
-  pub gossip: GossipDataSer,
+  pub gossip: GossipDataSer, // TODO: see if we cannot need GossipDataSer; MVM should be serializable.
 }
 
 // -------------------------------------------------------------------------------------------------
 //  AlterTable Messages
 // -------------------------------------------------------------------------------------------------
 
+// TODO: revamp these 5 message when its time.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTablePrepare {
   pub query_id: QueryId,
@@ -384,6 +509,182 @@ pub struct AlterTableAbort {
 pub struct AlterTableCommit {
   pub query_id: QueryId,
   pub timestamp: Timestamp,
+  pub gossip_data: GossipDataSer,
+}
+
+// Other Paxos2PC messages
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableCheckPrepared {
+  pub query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableInformPrepared {
+  pub query_id: QueryId,
+  /// The responding Tablet
+  pub tablet_group_id: TabletGroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableWait {
+  pub query_id: QueryId,
+  /// The responding Tablet
+  pub tablet_group_id: TabletGroupId,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  CreateTable Messages
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTablePrepare {
+  pub query_id: QueryId,
+
+  /// Randomly generated by the Master for use by the new Tablet.
+  pub tablet_group_id: TabletGroupId,
+  /// The `TablePath` of the new Tablet
+  pub table_path: TablePath,
+  /// The `Gen` of the new Table.
+  pub gen: Gen,
+
+  /// The initial schema of the Table.
+  pub key_cols: Vec<(ColName, ColType)>,
+  pub val_cols: Vec<(ColName, ColType)>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTablePrepared {
+  pub query_id: QueryId,
+  /// The responding Slave
+  pub slave_group_id: SlaveGroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableAborted {
+  pub query_id: QueryId,
+  /// The responding Slave
+  pub slave_group_id: SlaveGroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableAbort {
+  pub query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableCommit {
+  pub query_id: QueryId,
+}
+
+// Other Paxos2PC messages
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableCheckPrepared {
+  pub query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableInformPrepared {
+  pub query_id: QueryId,
+  /// The responding Slave
+  pub slave_group_id: SlaveGroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableWait {
+  pub query_id: QueryId,
+  /// The responding Slave
+  pub slave_group_id: SlaveGroupId,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  DropTable Messages
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTablePrepare {
+  pub query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTablePrepared {
+  pub query_id: QueryId,
+  /// The responding Tablet
+  pub tablet_group_id: TabletGroupId,
+  pub timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableAborted {
+  pub query_id: QueryId,
+  /// The responding Tablet
+  pub tablet_group_id: TabletGroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableAbort {
+  pub query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableCommit {
+  pub query_id: QueryId,
+  pub timestamp: Timestamp,
+}
+
+// Other Paxos2PC messages
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableCheckPrepared {
+  pub query_id: QueryId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableInformPrepared {
+  pub query_id: QueryId,
+  /// The responding Tablet
+  pub tablet_group_id: TabletGroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableWait {
+  pub query_id: QueryId,
+  /// The responding Tablet
+  pub tablet_group_id: TabletGroupId,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Close Confirmation
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableCloseConfirm {
+  pub query_id: QueryId,
+  /// The responding Slave
+  pub slave_group_id: SlaveGroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableCloseConfirm {
+  pub query_id: QueryId,
+  /// The responding Tablet
+  pub tablet_group_id: TabletGroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableCloseConfirm {
+  pub query_id: QueryId,
+  /// The responding Tablet
+  pub tablet_group_id: TabletGroupId,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Master Gossip
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MasterGossip {
   pub gossip_data: GossipDataSer,
 }
 
