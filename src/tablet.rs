@@ -25,8 +25,8 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::ms_table_read_es::{FullMSTableReadES, MSReadExecutionS, MSTableReadAction};
-use crate::ms_table_write_es::{FullMSTableWriteES, MSTableWriteAction, MSWriteExecutionS};
+use crate::ms_table_read_es::{MSReadExecutionS, MSTableReadAction, MSTableReadES};
+use crate::ms_table_write_es::{MSTableWriteAction, MSTableWriteES, MSWriteExecutionS};
 use crate::multiversion_map::MVM;
 use crate::paxos::LeaderChanged;
 use crate::server::{
@@ -34,9 +34,9 @@ use crate::server::{
   CommonQuery, ContextConstructor, LocalTable, ServerContext,
 };
 use crate::storage::{commit_to_storage, GenericMVTable, GenericTable, StorageView};
-use crate::table_read_es::{ExecutionS, FullTableReadES, TableAction};
+use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{
-  FullTransTableReadES, TransExecutionS, TransTableAction, TransTableSource,
+  TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -220,28 +220,28 @@ pub struct MSQueryES {
 struct TableReadESWrapper {
   sender_path: QueryPath,
   child_queries: Vec<QueryId>,
-  es: FullTableReadES,
+  es: TableReadES,
 }
 
 #[derive(Debug)]
 pub struct TransTableReadESWrapper {
   pub sender_path: QueryPath,
   pub child_queries: Vec<QueryId>,
-  pub es: FullTransTableReadES,
+  pub es: TransTableReadES,
 }
 
 #[derive(Debug)]
 struct MSTableReadESWrapper {
   sender_path: QueryPath,
   child_queries: Vec<QueryId>,
-  es: FullMSTableReadES,
+  es: MSTableReadES,
 }
 
 #[derive(Debug)]
 struct MSTableWriteESWrapper {
   sender_path: QueryPath,
   child_queries: Vec<QueryId>,
-  es: FullMSTableWriteES,
+  es: MSTableWriteES,
 }
 
 #[derive(Debug)]
@@ -596,7 +596,7 @@ impl<T: IOTypes> TabletContext<T> {
                     TransTableReadESWrapper {
                       sender_path: perform_query.sender_path.clone(),
                       child_queries: vec![],
-                      es: FullTransTableReadES {
+                      es: TransTableReadES {
                         root_query_path: perform_query.root_query_path,
                         location_prefix: query.location_prefix,
                         context: Rc::new(query.context),
@@ -643,7 +643,7 @@ impl<T: IOTypes> TabletContext<T> {
                         MSTableReadESWrapper {
                           sender_path: perform_query.sender_path.clone(),
                           child_queries: vec![],
-                          es: FullMSTableReadES {
+                          es: MSTableReadES {
                             root_query_path,
                             timestamp: query.timestamp,
                             tier: 0,
@@ -677,7 +677,7 @@ impl<T: IOTypes> TabletContext<T> {
                     TableReadESWrapper {
                       sender_path: perform_query.sender_path.clone(),
                       child_queries: vec![],
-                      es: FullTableReadES {
+                      es: TableReadES {
                         root_query_path: perform_query.root_query_path,
                         timestamp: query.timestamp,
                         context: Rc::new(query.context),
@@ -723,7 +723,7 @@ impl<T: IOTypes> TabletContext<T> {
                       MSTableWriteESWrapper {
                         sender_path: perform_query.sender_path.clone(),
                         child_queries: vec![],
-                        es: FullMSTableWriteES {
+                        es: MSTableWriteES {
                           root_query_path,
                           timestamp: query.timestamp,
                           tier,

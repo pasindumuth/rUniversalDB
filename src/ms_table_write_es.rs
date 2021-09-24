@@ -9,7 +9,7 @@ use crate::model::common::{
   QueryPath, TableView, TierMap, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
-use crate::ms_table_read_es::FullMSTableReadES;
+use crate::ms_table_read_es::MSTableReadES;
 use crate::server::{
   contains_col, evaluate_update, mk_eval_error, weak_contains_col, CommonQuery, ContextConstructor,
 };
@@ -38,7 +38,7 @@ pub enum MSWriteExecutionS {
 }
 
 #[derive(Debug)]
-pub struct FullMSTableWriteES {
+pub struct MSTableWriteES {
   pub root_query_path: QueryPath,
   pub timestamp: Timestamp,
   pub tier: u32,
@@ -73,7 +73,7 @@ pub enum MSTableWriteAction {
 //  Implementation
 // -----------------------------------------------------------------------------------------------
 
-impl FullMSTableWriteES {
+impl MSTableWriteES {
   pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> MSTableWriteAction {
     // First, we lock the columns that the QueryPlan requires certain properties of.
     assert!(matches!(self.state, MSWriteExecutionS::Start));
@@ -144,6 +144,74 @@ impl FullMSTableWriteES {
     } else {
       // If it aligns, we start locking the regions.
       self.start_ms_table_write_es(ctx)
+    }
+  }
+
+  /// Starts the Execution state
+  fn start_ms_table_write_es<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+  ) -> MSTableWriteAction {
+    // Setup ability to compute a tight Keybound for every ContextRow.
+    let keybound_computer = ContextKeyboundComputer::new(
+      &self.sql_query.selection,
+      &ctx.table_schema,
+      &self.timestamp,
+      &self.context.context_schema,
+    );
+
+    // Compute the Row Region by taking the union across all ContextRows
+    let mut row_region = Vec::<KeyBound>::new();
+    for context_row in &self.context.context_rows {
+      match keybound_computer.compute_keybounds(&context_row) {
+        Ok(key_bounds) => {
+          for key_bound in key_bounds {
+            row_region.push(key_bound);
+          }
+        }
+        Err(eval_error) => {
+          self.state = MSWriteExecutionS::Done;
+          return MSTableWriteAction::QueryError(mk_eval_error(eval_error));
+        }
+      }
+    }
+    row_region = compress_row_region(row_region);
+
+    // Compute the Write Column Region.
+    let mut col_region = HashSet::<ColName>::new();
+    col_region.extend(self.sql_query.assignment.iter().map(|(col, _)| col.clone()));
+
+    // Compute the Write Region
+    let col_region = Vec::from_iter(col_region.into_iter());
+    let write_region = TableRegion { col_region, row_region: row_region.clone() };
+
+    // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
+    // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
+    if !ctx.check_write_region_isolation(&write_region, &self.timestamp) {
+      self.state = MSWriteExecutionS::Done;
+      MSTableWriteAction::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
+    } else {
+      // Compute the Read Column Region.
+      let col_region = self.query_plan.col_usage_node.safe_present_cols.clone();
+      let read_region = TableRegion { col_region, row_region };
+
+      // Move the MSTableWriteES to the Pending state with the given ReadRegion.
+      let protect_qid = mk_qid(&mut ctx.rand);
+      self.state = MSWriteExecutionS::Pending(Pending {
+        read_region: read_region.clone(),
+        query_id: protect_qid.clone(),
+      });
+
+      // Add a ReadRegion to the `m_waiting_read_protected` and the
+      // WriteRegion into `m_write_protected`.
+      let verifying = ctx.verifying_writes.get_mut(&self.timestamp).unwrap();
+      verifying.m_waiting_read_protected.insert(ProtectRequest {
+        orig_p: OrigP::new(self.query_id.clone()),
+        protect_qid,
+        read_region,
+      });
+      verifying.m_write_protected.insert(write_region);
+      MSTableWriteAction::Wait
     }
   }
 
@@ -426,74 +494,6 @@ impl FullMSTableWriteES {
       MSWriteExecutionS::Done => {}
     }
     self.state = MSWriteExecutionS::Done;
-  }
-
-  /// Starts the Execution state
-  fn start_ms_table_write_es<T: IOTypes>(
-    &mut self,
-    ctx: &mut TabletContext<T>,
-  ) -> MSTableWriteAction {
-    // Setup ability to compute a tight Keybound for every ContextRow.
-    let keybound_computer = ContextKeyboundComputer::new(
-      &self.sql_query.selection,
-      &ctx.table_schema,
-      &self.timestamp,
-      &self.context.context_schema,
-    );
-
-    // Compute the Row Region by taking the union across all ContextRows
-    let mut row_region = Vec::<KeyBound>::new();
-    for context_row in &self.context.context_rows {
-      match keybound_computer.compute_keybounds(&context_row) {
-        Ok(key_bounds) => {
-          for key_bound in key_bounds {
-            row_region.push(key_bound);
-          }
-        }
-        Err(eval_error) => {
-          self.state = MSWriteExecutionS::Done;
-          return MSTableWriteAction::QueryError(mk_eval_error(eval_error));
-        }
-      }
-    }
-    row_region = compress_row_region(row_region);
-
-    // Compute the Write Column Region.
-    let mut col_region = HashSet::<ColName>::new();
-    col_region.extend(self.sql_query.assignment.iter().map(|(col, _)| col.clone()));
-
-    // Compute the Write Region
-    let col_region = Vec::from_iter(col_region.into_iter());
-    let write_region = TableRegion { col_region, row_region: row_region.clone() };
-
-    // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
-    // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
-    if !ctx.check_write_region_isolation(&write_region, &self.timestamp) {
-      self.state = MSWriteExecutionS::Done;
-      MSTableWriteAction::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
-    } else {
-      // Compute the Read Column Region.
-      let col_region = self.query_plan.col_usage_node.safe_present_cols.clone();
-      let read_region = TableRegion { col_region, row_region };
-
-      // Move the MSTableWriteES to the Pending state with the given ReadRegion.
-      let protect_qid = mk_qid(&mut ctx.rand);
-      self.state = MSWriteExecutionS::Pending(Pending {
-        read_region: read_region.clone(),
-        query_id: protect_qid.clone(),
-      });
-
-      // Add a ReadRegion to the `m_waiting_read_protected` and the
-      // WriteRegion into `m_write_protected`.
-      let verifying = ctx.verifying_writes.get_mut(&self.timestamp).unwrap();
-      verifying.m_waiting_read_protected.insert(ProtectRequest {
-        orig_p: OrigP::new(self.query_id.clone()),
-        protect_qid,
-        read_region,
-      });
-      verifying.m_write_protected.insert(write_region);
-      MSTableWriteAction::Wait
-    }
   }
 
   /// Get the `QueryId` of the owning originating MSQueryES.

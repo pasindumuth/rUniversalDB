@@ -40,11 +40,11 @@ fn sql() {
   //          WHERE a > b AND b < 100 \
   //          ORDER BY a DESC, b";
 
-  let sql = "ALTER TABLE Table ADD COLUMN col STRING;";
+  let sql = "ALTER TABLE t ADD CONSTRAINT K FOREIGN KEY (c) REFERENCES t(a);";
 
   let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
 
-  let ast = Parser::parse_sql(&dialect, sql).unwrap();
+  let ast = Parser::parse_sql(&dialect, sql);
 
   println!("AST: {:#?}", ast);
 }

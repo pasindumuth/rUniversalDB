@@ -39,7 +39,7 @@ pub enum ExecutionS {
 }
 
 #[derive(Debug)]
-pub struct FullTableReadES {
+pub struct TableReadES {
   pub root_query_path: QueryPath,
   pub timestamp: Timestamp,
   pub context: Rc<Context>,
@@ -70,7 +70,7 @@ pub enum TableAction {
 //  Implementation
 // -----------------------------------------------------------------------------------------------
 
-impl FullTableReadES {
+impl TableReadES {
   pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
     // First, we lock the columns that the QueryPlan requires certain properties of.
     assert!(matches!(self.state, ExecutionS::Start));
@@ -142,6 +142,57 @@ impl FullTableReadES {
       // If it aligns, we start locking the regions.
       self.start_table_read_es(ctx)
     }
+  }
+
+  /// Processes the Start state of TableReadES.
+  fn start_table_read_es<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
+    // Setup ability to compute a tight Keybound for every ContextRow.
+    let keybound_computer = ContextKeyboundComputer::new(
+      &self.sql_query.selection,
+      &ctx.table_schema,
+      &self.timestamp,
+      &self.context.context_schema,
+    );
+
+    // Compute the Row Region by taking the union across all ContextRows
+    let mut row_region = Vec::<KeyBound>::new();
+    for context_row in &self.context.context_rows {
+      match keybound_computer.compute_keybounds(&context_row) {
+        Ok(key_bounds) => {
+          for key_bound in key_bounds {
+            row_region.push(key_bound);
+          }
+        }
+        Err(eval_error) => {
+          self.state = ExecutionS::Done;
+          return TableAction::QueryError(mk_eval_error(eval_error));
+        }
+      }
+    }
+    row_region = compress_row_region(row_region);
+
+    // Compute the Column Region.
+    let mut col_region = HashSet::<ColName>::new();
+    col_region.extend(self.sql_query.projection.clone());
+    col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
+
+    // Move the TableReadES to the Pending state with the given ReadRegion.
+    let protect_qid = mk_qid(&mut ctx.rand);
+    let col_region = Vec::from_iter(col_region.into_iter());
+    let read_region = TableRegion { col_region, row_region };
+    self.state = ExecutionS::Pending(Pending {
+      read_region: read_region.clone(),
+      query_id: protect_qid.clone(),
+    });
+
+    // Add a read protection requested
+    btree_multimap_insert(
+      &mut ctx.waiting_read_protected,
+      &self.timestamp,
+      ProtectRequest { orig_p: OrigP::new(self.query_id.clone()), protect_qid, read_region },
+    );
+
+    TableAction::Wait
   }
 
   /// Handle ReadRegion protection
@@ -362,57 +413,6 @@ impl FullTableReadES {
       ExecutionS::Done => {}
     }
     self.state = ExecutionS::Done;
-  }
-
-  /// Processes the Start state of TableReadES.
-  fn start_table_read_es<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
-    // Setup ability to compute a tight Keybound for every ContextRow.
-    let keybound_computer = ContextKeyboundComputer::new(
-      &self.sql_query.selection,
-      &ctx.table_schema,
-      &self.timestamp,
-      &self.context.context_schema,
-    );
-
-    // Compute the Row Region by taking the union across all ContextRows
-    let mut row_region = Vec::<KeyBound>::new();
-    for context_row in &self.context.context_rows {
-      match keybound_computer.compute_keybounds(&context_row) {
-        Ok(key_bounds) => {
-          for key_bound in key_bounds {
-            row_region.push(key_bound);
-          }
-        }
-        Err(eval_error) => {
-          self.state = ExecutionS::Done;
-          return TableAction::QueryError(mk_eval_error(eval_error));
-        }
-      }
-    }
-    row_region = compress_row_region(row_region);
-
-    // Compute the Column Region.
-    let mut col_region = HashSet::<ColName>::new();
-    col_region.extend(self.sql_query.projection.clone());
-    col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
-
-    // Move the TableReadES to the Pending state with the given ReadRegion.
-    let protect_qid = mk_qid(&mut ctx.rand);
-    let col_region = Vec::from_iter(col_region.into_iter());
-    let read_region = TableRegion { col_region, row_region };
-    self.state = ExecutionS::Pending(Pending {
-      read_region: read_region.clone(),
-      query_id: protect_qid.clone(),
-    });
-
-    // Add a read protection requested
-    btree_multimap_insert(
-      &mut ctx.waiting_read_protected,
-      &self.timestamp,
-      ProtectRequest { orig_p: OrigP::new(self.query_id.clone()), protect_qid, read_region },
-    );
-
-    TableAction::Wait
   }
 
   /// Get the `QueryId` of the sender of this ES.

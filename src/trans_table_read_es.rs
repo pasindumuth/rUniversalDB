@@ -39,7 +39,7 @@ pub enum TransExecutionS {
 }
 
 #[derive(Debug)]
-pub struct FullTransTableReadES {
+pub struct TransTableReadES {
   pub root_query_path: QueryPath,
   pub location_prefix: TransTableLocationPrefix,
   pub context: Rc<Context>,
@@ -137,7 +137,7 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
 //  Implementation
 // -----------------------------------------------------------------------------------------------
 
-impl FullTransTableReadES {
+impl TransTableReadES {
   pub fn start<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
     ctx: &mut ServerContext<T>,

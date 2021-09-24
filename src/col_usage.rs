@@ -12,13 +12,21 @@ use std::ops::Deref;
 // -----------------------------------------------------------------------------------------------
 //  ColUsagePlanner
 // -----------------------------------------------------------------------------------------------
+
+/// There are several uses of this.
+/// 1. The purpose of the `FrozenColUsageNode` is for a parent ES to be able to compute
+///    the `Context` that it should send a child ES. That is why `requested_cols` only contains
+///    `ColumnRef`s that can reference an ancestral `TableRef` if its query's table's schema
+///    does not have it. (Hence why we do not include projected columns in SELECT queries,
+///    or assigned columns in UPDATE queries.)
+/// 2. When the MSCoordES creates this using it's GossipData, things like `safe_present_cols`
+///    and `external_cols` should be considered expectations on what the schemas should be.
+///    The schemas should be checked and the Transaction aborted if the expections fail.
+/// 3. Instead, if this is sent back with a MasterQueryPlanning, it will be hard facts that
+///    `safe_resent_cols` and `external_cols` *will* align with the table schemas.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FrozenColUsageNode {
-  /// There are several uses of this.
-  /// 1. When the MSCoordES creates this using it's GossipData, things like `safe_present_cols`
-  ///    and `external_cols` should be considered expectations on what the schemas should be.
-  ///    The schemas should be checked and the Transaction aborted if the expections fail.
-  /// 2. After the MasterQueryReplanning, they will be hard facts that *will* be true for certain.
+  /// The (Trans)Table used in the `GeneralQuery` corresponding to this node.
   pub table_ref: proc::TableRef,
 
   /// These are the ColNames used within all ValExprs outside of `Subquery` nodes.

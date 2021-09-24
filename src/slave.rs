@@ -20,7 +20,7 @@ use crate::server::{CommonQuery, ServerContext};
 use crate::sql_parser::convert_ast;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{
-  FullTransTableReadES, TransExecutionS, TransTableAction, TransTableSource,
+  TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;

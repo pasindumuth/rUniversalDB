@@ -288,8 +288,9 @@ pub struct QueryPlan {
   pub query_leader_map: HashMap<SlaveGroupId, LeadershipId>,
   pub table_location_map: HashMap<TablePath, Gen>,
   /// These are additional required columns that the QueryPlan expects that these `TablePaths`
-  /// to have. While a TP is happen is happening, we must must these `ColName` and verify
-  /// their presence.
+  /// to have. These are columns that are not already present in the `col_usage_node`, such as
+  /// projected columns in SELECT queries or assigned columns in UPDATE queries. While a TP is
+  /// happen is happening, we must verify the presence of these `ColName`.
   ///
   /// Note: not all `TablePaths` used in the MSQuery needs to be here.
   pub extra_req_cols: HashMap<TablePath, Vec<ColName>>,

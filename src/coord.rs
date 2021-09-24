@@ -20,7 +20,7 @@ use crate::server::{CommonQuery, ServerContext};
 use crate::sql_parser::convert_ast;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{
-  FullTransTableReadES, TransExecutionS, TransTableAction, TransTableSource,
+  TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -214,7 +214,7 @@ impl<T: IOTypes> CoordContext<T> {
                     TransTableReadESWrapper {
                       sender_path: perform_query.sender_path.clone(),
                       child_queries: vec![],
-                      es: FullTransTableReadES {
+                      es: TransTableReadES {
                         root_query_path: perform_query.root_query_path,
                         location_prefix: query.location_prefix,
                         context: Rc::new(query.context),
@@ -241,7 +241,7 @@ impl<T: IOTypes> CoordContext<T> {
                     TransTableReadESWrapper {
                       sender_path: perform_query.sender_path.clone(),
                       child_queries: vec![],
-                      es: FullTransTableReadES {
+                      es: TransTableReadES {
                         root_query_path: perform_query.root_query_path,
                         location_prefix: query.location_prefix,
                         context: Rc::new(query.context),
