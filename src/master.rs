@@ -1,4 +1,4 @@
-use crate::alter_table_es::{AlterTableAction, AlterTableES, AlterTableS};
+use crate::alter_table_tm_es::{AlterTableAction, AlterTableES, AlterTableS};
 use crate::col_usage::{ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   lookup, mk_qid, GossipData, GossipDataSer, IOTypes, NetworkOut, TableSchema, TableSchemaSer,
@@ -204,15 +204,9 @@ impl<T: IOTypes> MasterContext<T> {
       MasterMessage::CancelMasterFrozenColUsage(_) => panic!(),
       MasterMessage::CreateTablePrepared(_) => panic!(),
       MasterMessage::CreateTableAborted(_) => panic!(),
-      MasterMessage::CreateTableInformPrepared(_) => panic!(),
-      MasterMessage::CreateTableWait(_) => panic!(),
-      MasterMessage::AlterTableInformPrepared(_) => panic!(),
-      MasterMessage::AlterTableWait(_) => panic!(),
+      MasterMessage::CreateTableCloseConfirm(_) => panic!(),
       MasterMessage::DropTablePrepared(_) => panic!(),
       MasterMessage::DropTableAborted(_) => panic!(),
-      MasterMessage::DropTableInformPrepared(_) => panic!(),
-      MasterMessage::DropTableWait(_) => panic!(),
-      MasterMessage::CreateTableCloseConfirm(_) => panic!(),
       MasterMessage::AlterTableCloseConfirm(_) => panic!(),
       MasterMessage::DropTableCloseConfirm(_) => panic!(),
     }

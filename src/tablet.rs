@@ -1,3 +1,4 @@
+use crate::alter_table_es::{AlterTableES, State};
 use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, collect_update_subqueries,
   node_external_trans_tables, nodes_external_cols, nodes_external_trans_tables, ColUsagePlanner,
@@ -5,9 +6,11 @@ use crate::col_usage::{
 };
 use crate::common::{
   btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
-  mk_qid, remove_item, ColBound, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, PolyColBound,
-  SingleBound, TMStatus, TableRegion, TableSchema,
+  mk_qid, remove_item, Clock, ColBound, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
+  PolyColBound, SingleBound, TMStatus, TableRegion, TableSchema,
 };
+use crate::drop_table_es::DropExecuting;
+use crate::drop_table_es::DropTableES;
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
   construct_kb_expr, does_intersect, evaluate_c_expr, is_true, CExpr, EvalError,
@@ -39,6 +42,7 @@ use crate::trans_table_read_es::{
   TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
 };
 use serde::{Deserialize, Serialize};
+use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::ops::{Add, Bound, Deref, Sub};
@@ -264,6 +268,9 @@ pub struct Statuses {
   ms_query_ess: HashMap<QueryId, MSQueryES>,
   ms_table_read_ess: HashMap<QueryId, MSTableReadESWrapper>,
   ms_table_write_ess: HashMap<QueryId, MSTableWriteESWrapper>,
+
+  // DDL ESs
+  ddl_es: Option<(QueryId, DDLES)>,
 }
 
 impl Statuses {
@@ -293,6 +300,12 @@ impl Statuses {
   }
 }
 
+#[derive(Debug)]
+pub enum DDLES {
+  Alter(AlterTableES),
+  Drop(DropTableES),
+}
+
 // -----------------------------------------------------------------------------------------------
 //  Region Isolation Algorithm
 // -----------------------------------------------------------------------------------------------
@@ -317,6 +330,18 @@ pub struct ReadWriteRegion {
   pub orig_p: OrigP,
   pub m_read_protected: BTreeSet<TableRegion>,
   pub m_write_protected: BTreeSet<TableRegion>,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Schema Change and Locking
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct RequestedLockedCols {
+  query_id: QueryId,
+  timestamp: Timestamp,
+  cols: Vec<ColName>,
+  orig_p: OrigP,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -422,7 +447,7 @@ pub struct LockedCols {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum TabletBundle {
+pub enum TabletPLm {
   AlterTablePrepared(AlterTablePrepared),
   AlterTableCommitted(AlterTableCommitted),
   AlterTableAborted(AlterTableAborted),
@@ -437,7 +462,7 @@ pub enum TabletBundle {
 // -----------------------------------------------------------------------------------------------
 
 pub enum TabletForwardMsg {
-  TabletBundle(TabletBundle),
+  TabletBundle(Vec<TabletPLm>),
   TabletMessage(msg::TabletMessage),
   GossipData(Arc<GossipData>),
   RemoteLeaderChanged(msg::RemoteLeaderChanged),
@@ -484,19 +509,15 @@ pub struct TabletContext<T: IOTypes> {
   pub read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
 
   // Schema Change and Locking
-  pub alter_table_rm_state: HashMap<QueryId, (proc::AlterOp, Timestamp)>,
-  /// This is directly derived from the `alter_table_rm_state`, containing the `lat`
-  /// of the given `ColName`. We may not read > this timestamp for ColumnLocking.
-  pub prepared_scheme_change: HashMap<ColName, Timestamp>,
-  /// This is used to help iterate requests in timestamp order.
-  pub request_index: BTreeMap<Timestamp, BTreeSet<QueryId>>,
-  pub requested_locked_columns: HashMap<QueryId, (OrigP, Timestamp, Vec<ColName>)>,
+  pub waiting_locked_cols: HashMap<QueryId, RequestedLockedCols>,
+  pub inserting_locked_cols: HashMap<QueryId, RequestedLockedCols>,
 
-  /// Child Queries
-
-  /// For every `MSQueryES`, this maps its corresponding `root_query_id`
-  /// to its `query_id`.
+  // Child Queries
+  /// For every `MSQueryES`, this maps its corresponding `root_query_id` to its `query_id`.
   pub ms_root_query_map: HashMap<QueryId, QueryId>,
+
+  // Paxos
+  pub tablet_bundle: Vec<TabletPLm>,
 }
 
 impl<T: IOTypes> TabletState<T> {
@@ -539,11 +560,10 @@ impl<T: IOTypes> TabletState<T> {
         committed_writes: Default::default(),
         waiting_read_protected: Default::default(),
         read_protected: Default::default(),
-        alter_table_rm_state: Default::default(),
-        prepared_scheme_change: Default::default(),
-        request_index: Default::default(),
-        requested_locked_columns: Default::default(),
+        waiting_locked_cols: Default::default(),
+        inserting_locked_cols: Default::default(),
         ms_root_query_map: Default::default(),
+        tablet_bundle: vec![],
       },
       statuses: Default::default(),
     }
@@ -574,15 +594,30 @@ impl<T: IOTypes> TabletContext<T> {
 
   fn handle_input(&mut self, statuses: &mut Statuses, tablet_input: TabletForwardMsg) {
     match tablet_input {
-      TabletForwardMsg::TabletBundle(bundle) => match bundle {
-        TabletBundle::AlterTablePrepared(_) => panic!(),
-        TabletBundle::AlterTableCommitted(_) => panic!(),
-        TabletBundle::AlterTableAborted(_) => panic!(),
-        TabletBundle::DropTablePrepared(_) => panic!(),
-        TabletBundle::DropTableCommitted(_) => panic!(),
-        TabletBundle::DropTableAborted(_) => panic!(),
-        TabletBundle::LockedCols(_) => panic!(),
-      },
+      TabletForwardMsg::TabletBundle(bundle) => {
+        for plm in bundle {
+          match plm {
+            TabletPLm::AlterTablePrepared(_) => panic!(),
+            TabletPLm::AlterTableCommitted(_) => panic!(),
+            TabletPLm::AlterTableAborted(_) => panic!(),
+            TabletPLm::DropTablePrepared(_) => panic!(),
+            TabletPLm::DropTableCommitted(_) => panic!(),
+            TabletPLm::DropTableAborted(_) => panic!(),
+            TabletPLm::LockedCols(locked_cols) => {
+              // Increase TableSchema LATs
+              for col_name in &locked_cols.cols {
+                if lookup(&self.table_schema.key_cols, col_name).is_none() {
+                  self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp);
+                }
+              }
+
+              // Remove RequestedLockedCols and grant GlobalLockedCols
+              let req = self.inserting_locked_cols.remove(&locked_cols.query_id).unwrap();
+              self.grant_global_locked_cols(statuses, req.orig_p, req.query_id);
+            }
+          }
+        }
+      }
       TabletForwardMsg::TabletMessage(message) => {
         match message {
           msg::TabletMessage::PerformQuery(perform_query) => {
@@ -818,6 +853,7 @@ impl<T: IOTypes> TabletContext<T> {
               self.ms_root_query_map.remove(&ms_query_es.root_query_id);
             }
           }
+          msg::TabletMessage::FinishQueryCheckPrepared(_) => panic!(),
           msg::TabletMessage::FinishQueryCommit(commit) => {
             // Remove the MSQueryES. It must exist, since we had Prepared.
             let ms_query_es = statuses.ms_query_ess.remove(&commit.ms_query_id).unwrap();
@@ -831,66 +867,131 @@ impl<T: IOTypes> TabletContext<T> {
             commit_to_storage(&mut self.storage, &ms_query_es.timestamp, &ms_query_es.update_views);
           }
           msg::TabletMessage::AlterTablePrepare(prepare) => {
-            // Check a few guaranteed properties.
-            let col_name = &prepare.alter_op.col_name;
-            assert!(!self.prepared_scheme_change.contains_key(col_name));
-            assert!(lookup(&self.table_schema.key_cols, col_name).is_none());
-            let maybe_col_type = self.table_schema.val_cols.get_last_version(col_name);
-            // Assert Column Validness of the incoming request.
-            assert!(
-              (maybe_col_type.is_some() && prepare.alter_op.maybe_col_type.is_none())
-                || (maybe_col_type.is_none() && prepare.alter_op.maybe_col_type.is_some())
-            );
+            if let Some((_, es)) = &mut statuses.ddl_es {
+              let alter_table_es = cast!(DDLES::Alter, es).unwrap();
+              alter_table_es.handle_prepare(prepare, self);
+            } else {
+              // Construct the `preparing_timestamp`
+              let mut timestamp = self.clock.now().0;
+              timestamp =
+                max(timestamp, self.table_schema.val_cols.get_lat(&prepare.alter_op.col_name).0);
+              for (_, req) in
+                self.waiting_locked_cols.iter().chain(self.inserting_locked_cols.iter())
+              {
+                if req.cols.contains(&prepare.alter_op.col_name) {
+                  timestamp = max(timestamp, req.timestamp.0);
+                }
+              }
+              timestamp += 1;
 
-            // Populate `alter_table_rm_state`, update `prepared_scheme_change`,
-            let lat = self.table_schema.val_cols.get_lat(col_name);
-            self
-              .alter_table_rm_state
-              .insert(prepare.query_id.clone(), (prepare.alter_op.clone(), lat));
-            self.prepared_scheme_change.insert(col_name.clone(), lat);
-
-            // Send back a `Prepared`
-            self.network_output.send(
-              &self.master_eid,
-              msg::NetworkMessage::Master(msg::MasterMessage::AlterTablePrepared(
-                msg::AlterTablePrepared {
-                  query_id: prepare.query_id,
-                  tablet_group_id: self.this_tablet_group_id.clone(),
-                  timestamp: lat,
-                },
-              )),
-            );
-          }
-          msg::TabletMessage::AlterTableAbort(abort) => {
-            // Recall that the `alter_table_rm_state` element must exist for this QueryId, since
-            // Tablets never remove these on their own until a Commit or Abort.
-            let (alter_op, _) = self.alter_table_rm_state.remove(&abort.query_id).unwrap();
-            self.prepared_scheme_change.remove(&alter_op.col_name).unwrap();
-          }
-          msg::TabletMessage::AlterTableCommit(commit) => {
-            // Update the TableSchema according to `alter_op`.
-            let (alter_op, _) = self.alter_table_rm_state.remove(&commit.query_id).unwrap();
-            self.prepared_scheme_change.remove(&alter_op.col_name).unwrap();
-            self.table_schema.val_cols.write(
-              &alter_op.col_name,
-              alter_op.maybe_col_type,
-              commit.timestamp,
-            );
-
-            // Use the GossipData sent by the Master to upate the local GossipData.
-            // TODO: When a Slave receives gossip_data, dispatch it to all tablets,
-            // not just the target tablet
-            let gossip_data = commit.gossip_data.to_gossip();
-            if self.gossip.gen < gossip_data.gen {
-              self.gossip = Arc::new(gossip_data);
+              // Construct an AlterTableES set it to `ddl_es`.
+              let query_id = prepare.query_id;
+              statuses.ddl_es = Some((
+                query_id.clone(),
+                DDLES::Alter(AlterTableES {
+                  query_id,
+                  alter_op: prepare.alter_op,
+                  prepare_timestamp: Timestamp(timestamp),
+                  state: State::WaitingInsertingPrepared,
+                }),
+              ));
             }
           }
-          msg::TabletMessage::FinishQueryCheckPrepared(_) => panic!(),
-          msg::TabletMessage::AlterTableCheckPrepared(_) => panic!(),
-          msg::TabletMessage::DropTablePrepare(_) => panic!(),
-          msg::TabletMessage::DropTableAbort(_) => panic!(),
-          msg::TabletMessage::DropTableCommit(_) => panic!(),
-          msg::TabletMessage::DropTableCheckPrepared(_) => panic!(),
+          msg::TabletMessage::AlterTableAbort(abort) => {
+            if let Some((_, es)) = &mut statuses.ddl_es {
+              let alter_table_es = cast!(DDLES::Alter, es).unwrap();
+              alter_table_es.handle_abort(abort, self);
+            } else {
+              // Send back a `CloseConfirm` to the Master.
+              self.network_output.send(
+                &self.master_eid,
+                msg::NetworkMessage::Master(msg::MasterMessage::AlterTableCloseConfirm(
+                  msg::AlterTableCloseConfirm {
+                    query_id: abort.query_id,
+                    tablet_group_id: self.this_tablet_group_id.clone(),
+                  },
+                )),
+              );
+            }
+          }
+          msg::TabletMessage::AlterTableCommit(commit) => {
+            if let Some((_, es)) = &mut statuses.ddl_es {
+              let alter_table_es = cast!(DDLES::Alter, es).unwrap();
+              alter_table_es.handle_commit(commit, self);
+            } else {
+              // Send back a `CloseConfirm` to the Master.
+              self.network_output.send(
+                &self.master_eid,
+                msg::NetworkMessage::Master(msg::MasterMessage::AlterTableCloseConfirm(
+                  msg::AlterTableCloseConfirm {
+                    query_id: commit.query_id,
+                    tablet_group_id: self.this_tablet_group_id.clone(),
+                  },
+                )),
+              );
+            }
+          }
+          msg::TabletMessage::DropTablePrepare(prepare) => {
+            if let Some((_, es)) = &mut statuses.ddl_es {
+              let drop_table_es = cast!(DDLES::Drop, es).unwrap();
+              drop_table_es.handle_prepare(prepare, self);
+            } else {
+              // Construct the `preparing_timestamp`
+              let mut timestamp = self.clock.now().0;
+              timestamp = max(timestamp, self.table_schema.val_cols.get_latest_lat().0);
+              for (_, req) in
+                self.waiting_locked_cols.iter().chain(self.inserting_locked_cols.iter())
+              {
+                timestamp = max(timestamp, req.timestamp.0);
+              }
+              timestamp += 1;
+
+              // Construct an DropTableES set it to `ddl_es`.
+              let query_id = prepare.query_id;
+              statuses.ddl_es = Some((
+                query_id.clone(),
+                DDLES::Drop(DropTableES::DropExecuting(DropExecuting {
+                  query_id,
+                  prepare_timestamp: Timestamp(timestamp),
+                  state: State::WaitingInsertingPrepared,
+                })),
+              ));
+            }
+          }
+          msg::TabletMessage::DropTableAbort(abort) => {
+            if let Some((_, es)) = &mut statuses.ddl_es {
+              let drop_table_es = cast!(DDLES::Drop, es).unwrap();
+              drop_table_es.handle_abort(abort, self);
+            } else {
+              // Send back a `CloseConfirm` to the Master.
+              self.network_output.send(
+                &self.master_eid,
+                msg::NetworkMessage::Master(msg::MasterMessage::DropTableCloseConfirm(
+                  msg::DropTableCloseConfirm {
+                    query_id: abort.query_id,
+                    tablet_group_id: self.this_tablet_group_id.clone(),
+                  },
+                )),
+              );
+            }
+          }
+          msg::TabletMessage::DropTableCommit(commit) => {
+            if let Some((_, es)) = &mut statuses.ddl_es {
+              let drop_table_es = cast!(DDLES::Drop, es).unwrap();
+              drop_table_es.handle_commit(commit, self);
+            } else {
+              // Send back a `CloseConfirm` to the Master.
+              self.network_output.send(
+                &self.master_eid,
+                msg::NetworkMessage::Master(msg::MasterMessage::DropTableCloseConfirm(
+                  msg::DropTableCloseConfirm {
+                    query_id: commit.query_id,
+                    tablet_group_id: self.this_tablet_group_id.clone(),
+                  },
+                )),
+              );
+            }
+          }
         }
         self.run_main_loop(statuses);
       }
@@ -963,9 +1064,8 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// Adds the following triple into `requested_locked_columns`, making sure to update
-  /// `request_index` as well. Here, `orig_p` is the origiator who should get the locking
-  /// result.
+  /// Adds the following triple into `waiting_locked_cols`. Here, `orig_p` is the origiator
+  /// who should get the locking result.
   pub fn add_requested_locked_columns(
     &mut self,
     orig_p: OrigP,
@@ -973,22 +1073,11 @@ impl<T: IOTypes> TabletContext<T> {
     cols: Vec<ColName>,
   ) -> QueryId {
     let locked_cols_qid = mk_qid(&mut self.rand);
-    self.requested_locked_columns.insert(locked_cols_qid.clone(), (orig_p, timestamp, cols));
-    btree_multimap_insert(&mut self.request_index, &timestamp, locked_cols_qid.clone());
+    self.waiting_locked_cols.insert(
+      locked_cols_qid.clone(),
+      RequestedLockedCols { query_id: locked_cols_qid.clone(), timestamp, cols, orig_p },
+    );
     locked_cols_qid
-  }
-
-  /// This removes elements from `requested_locked_columns`, maintaining
-  /// `request_index` as well, if the request is present.
-  pub fn remove_col_locking_request(
-    &mut self,
-    query_id: QueryId,
-  ) -> Option<(OrigP, Timestamp, Vec<ColName>)> {
-    if let Some((orig_p, timestamp, cols)) = self.requested_locked_columns.remove(&query_id) {
-      btree_multimap_remove(&mut self.request_index, &timestamp, &query_id);
-      return Some((orig_p, timestamp, cols));
-    }
-    return None;
   }
 
   /// This removes the Read Protection request from `waiting_read_protected` with the given
@@ -1075,43 +1164,84 @@ impl<T: IOTypes> TabletContext<T> {
 
   // The Main Loop
   fn run_main_loop(&mut self, statuses: &mut Statuses) {
-    while !self.run_main_loop_once(statuses) {}
+    while !self.run_main_loop_iteration(statuses) {}
   }
 
   /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
-  fn run_main_loop_once(&mut self, statuses: &mut Statuses) -> bool {
+  fn run_main_loop_iteration(&mut self, statuses: &mut Statuses) -> bool {
     // First, we see if we can satisfy Column Locking
 
-    // Iterate through every `request_locked_columns` and see if that can be satisfied.
-    for (_, query_set) in &self.request_index {
-      for query_id in query_set {
-        let (_, timestamp, cols) = self.requested_locked_columns.get(query_id).unwrap();
-        // We check whether any of the Columns in `cols` is undergoing an AlterOp, i.e. Preparing.
-        let mut preparing = false;
-        for col in cols {
-          if let Some(prep_timestamp) = self.prepared_scheme_change.get(col) {
-            if timestamp > prep_timestamp {
-              preparing = true;
-              break;
-            }
+    // Process `waiting_locked_cols`
+    for (_, req) in &self.waiting_locked_cols {
+      // First, we see if we can grant GlobalLockedCols immediately.
+      let mut global_locked = true;
+      for col_name in &req.cols {
+        if lookup(&self.table_schema.key_cols, col_name).is_none() {
+          if self.table_schema.val_cols.get_lat(col_name) < req.timestamp {
+            global_locked = false;
+            break;
           }
         }
-        if !preparing {
-          // This means that we can lock the Columns and inform the originator
-          // of the Locking Request.
-          for col in cols {
-            if lookup(&self.table_schema.key_cols, col).is_none() {
-              self.table_schema.val_cols.update_lat(col, timestamp.clone());
-            }
-          }
+      }
 
-          // Remove the column locking request.
-          let query_id = query_id.clone();
-          let (orig_p, _, _) = self.remove_col_locking_request(query_id.clone()).unwrap();
+      if global_locked {
+        let orig_p = req.orig_p.clone();
+        let query_id = req.query_id.clone();
+        self.waiting_locked_cols.remove(&query_id);
+        self.grant_global_locked_cols(statuses, orig_p, query_id);
+        return true;
+      }
 
-          // Process
-          self.columns_locked_for_query(statuses, orig_p, query_id);
+      // Next, we see if we can grant LocalLockedCols.
+      match &statuses.ddl_es {
+        None => {
+          // Here, there is no DDL; we can always grant LocalLockedCols.
+          let query_id = req.query_id.clone();
+          self.grant_local_locked_cols(statuses, query_id);
           return true;
+        }
+        Some((_, ddl_es)) => {
+          // When a DDL ES is present, we must verify the `req` does not conflict.
+          match ddl_es {
+            DDLES::Alter(es) => {
+              let mut conflicts = false;
+              for col_name in &req.cols {
+                if &es.alter_op.col_name == col_name && req.timestamp >= es.prepare_timestamp {
+                  conflicts = true;
+                }
+              }
+              if !conflicts {
+                // Grant LocalLockedCols
+                let query_id = req.query_id.clone();
+                self.grant_local_locked_cols(statuses, query_id);
+                return true;
+              }
+            }
+            DDLES::Drop(es) => match es {
+              DropTableES::Committed(dropped_timestamp) => {
+                if &req.timestamp < dropped_timestamp {
+                  // Grant LocalLockedCols
+                  let query_id = req.query_id.clone();
+                  self.grant_local_locked_cols(statuses, query_id);
+                } else {
+                  // Grant TableDropped
+                  let orig_p = req.orig_p.clone();
+                  let query_id = req.query_id.clone();
+                  self.waiting_locked_cols.remove(&query_id);
+                  self.grant_table_dropped(statuses, orig_p);
+                }
+                return true;
+              }
+              DropTableES::DropExecuting(exec) => {
+                if req.timestamp < exec.prepare_timestamp {
+                  // Grant LocalLockedCols
+                  let query_id = req.query_id.clone();
+                  self.grant_local_locked_cols(statuses, query_id);
+                  return true;
+                }
+              }
+            },
+          }
         }
       }
     }
@@ -1238,8 +1368,37 @@ impl<T: IOTypes> TabletContext<T> {
     return false;
   }
 
+  /// Route the column locking to the appropriate ES. Here, `query_id` is that of
+  /// the `waiting_locked_cols` that can be moved forward.
+  fn grant_local_locked_cols(&mut self, statuses: &mut Statuses, locked_cols_qid: QueryId) {
+    // Move the RequestedLockedCols to `inserting_*`
+    let req = self.waiting_locked_cols.remove(&locked_cols_qid).unwrap();
+    self.inserting_locked_cols.insert(locked_cols_qid.clone(), req.clone());
+    self.tablet_bundle.push(TabletPLm::LockedCols(LockedCols {
+      query_id: req.query_id.clone(),
+      timestamp: req.timestamp,
+      cols: req.cols,
+    }));
+
+    // Inform the ES.
+    let query_id = req.orig_p.query_id;
+    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
+      // TableReadES
+      let action = read.es.local_locked_cols(self, locked_cols_qid);
+      self.handle_read_es_action(statuses, query_id, action);
+    } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
+      // MSTableWriteES
+      let action = ms_write.es.local_locked_cols(self, locked_cols_qid);
+      self.handle_ms_write_es_action(statuses, query_id, action);
+    } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
+      // MSTableReadES
+      let action = ms_read.es.local_locked_cols(self, locked_cols_qid);
+      self.handle_ms_read_es_action(statuses, query_id, action);
+    }
+  }
+
   /// Route the column locking to the appropriate ES.
-  fn columns_locked_for_query(
+  fn grant_global_locked_cols(
     &mut self,
     statuses: &mut Statuses,
     orig_p: OrigP,
@@ -1248,17 +1407,14 @@ impl<T: IOTypes> TabletContext<T> {
     let query_id = orig_p.query_id;
     if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
-      let action = read.es.columns_locked(self, locked_cols_qid);
+      let action = read.es.global_locked_cols(self, locked_cols_qid);
       self.handle_read_es_action(statuses, query_id, action);
-    } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
-      // MSTableWriteES
-      let action = ms_write.es.columns_locked(self, locked_cols_qid);
-      self.handle_ms_write_es_action(statuses, query_id, action);
-    } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
-      // MSTableReadES
-      let action = ms_read.es.columns_locked(self, locked_cols_qid);
-      self.handle_ms_read_es_action(statuses, query_id, action);
     }
+  }
+
+  /// Route the column locking to the appropriate ES.
+  fn grant_table_dropped(&mut self, statuses: &mut Statuses, orig_p: OrigP) {
+    // TODO: do
   }
 
   /// Move the ProtectRequest in `waiting_read_protected` forward.

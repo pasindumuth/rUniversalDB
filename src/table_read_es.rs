@@ -126,7 +126,7 @@ impl TableReadES {
   }
 
   /// Handle Columns being locked
-  pub fn columns_locked<T: IOTypes>(
+  pub fn local_locked_cols<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
     locked_cols_qid: QueryId,
@@ -141,6 +141,15 @@ impl TableReadES {
       // If it aligns, we start locking the regions.
       self.start_table_read_es(ctx)
     }
+  }
+
+  /// TODO: do
+  pub fn global_locked_cols<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+    locked_cols_qid: QueryId,
+  ) -> TableAction {
+    return TableAction::Wait;
   }
 
   /// Processes the Start state of TableReadES.
@@ -384,9 +393,7 @@ impl TableReadES {
   pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
     match &self.state {
       ExecutionS::Start => {}
-      ExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid }) => {
-        ctx.remove_col_locking_request(locked_cols_qid.clone());
-      }
+      ExecutionS::ColumnsLocking(_) => {}
       ExecutionS::GossipDataWaiting => {}
       ExecutionS::Pending(pending) => {
         // Here, we remove the ReadRegion from `waiting_read_protected`, if it still exists.

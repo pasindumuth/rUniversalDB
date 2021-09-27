@@ -36,24 +36,16 @@ pub enum MasterMessage {
   // CreateTable TM Messages
   CreateTablePrepared(CreateTablePrepared),
   CreateTableAborted(CreateTableAborted),
-  CreateTableInformPrepared(CreateTableInformPrepared),
-  CreateTableWait(CreateTableWait),
+  CreateTableCloseConfirm(CreateTableCloseConfirm),
 
   // AlterTable TM Messages
   AlterTablePrepared(AlterTablePrepared),
   AlterTableAborted(AlterTableAborted),
-  AlterTableInformPrepared(AlterTableInformPrepared),
-  AlterTableWait(AlterTableWait),
+  AlterTableCloseConfirm(AlterTableCloseConfirm),
 
   // DropTable TM Messages
   DropTablePrepared(DropTablePrepared),
   DropTableAborted(DropTableAborted),
-  DropTableInformPrepared(DropTableInformPrepared),
-  DropTableWait(DropTableWait),
-
-  // Close Confirmations
-  CreateTableCloseConfirm(CreateTableCloseConfirm),
-  AlterTableCloseConfirm(AlterTableCloseConfirm),
   DropTableCloseConfirm(DropTableCloseConfirm),
 }
 
@@ -119,24 +111,16 @@ pub enum MasterRemotePayload {
   // CreateTable TM Messages
   CreateTablePrepared(CreateTablePrepared),
   CreateTableAborted(CreateTableAborted),
-  CreateTableInformPrepared(CreateTableInformPrepared),
-  CreateTableWait(CreateTableWait),
+  CreateTableCloseConfirm(CreateTableCloseConfirm),
 
   // AlterTable TM Messages
   AlterTablePrepared(AlterTablePrepared),
   AlterTableAborted(AlterTableAborted),
-  AlterTableInformPrepared(AlterTableInformPrepared),
-  AlterTableWait(AlterTableWait),
+  AlterTableCloseConfirm(AlterTableCloseConfirm),
 
   // DropTable TM Messages
   DropTablePrepared(DropTablePrepared),
   DropTableAborted(DropTableAborted),
-  DropTableInformPrepared(DropTableInformPrepared),
-  DropTableWait(DropTableWait),
-
-  // Close Confirmation
-  CreateTableCloseConfirm(CreateTableCloseConfirm),
-  AlterTableCloseConfirm(AlterTableCloseConfirm),
   DropTableCloseConfirm(DropTableCloseConfirm),
 }
 
@@ -151,7 +135,6 @@ pub enum SlaveRemotePayload {
   CreateTablePrepare(CreateTablePrepare),
   CreateTableCommit(CreateTableCommit),
   CreateTableAbort(CreateTableAbort),
-  CreateTableCheckPrepared(CreateTableCheckPrepared),
 
   MasterGossip(MasterGossip),
 
@@ -177,13 +160,11 @@ pub enum TabletMessage {
   AlterTablePrepare(AlterTablePrepare),
   AlterTableAbort(AlterTableAbort),
   AlterTableCommit(AlterTableCommit),
-  AlterTableCheckPrepared(AlterTableCheckPrepared),
 
   // DropTable RM Messages
   DropTablePrepare(DropTablePrepare),
   DropTableAbort(DropTableAbort),
   DropTableCommit(DropTableCommit),
-  DropTableCheckPrepared(DropTableCheckPrepared),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -473,7 +454,6 @@ pub struct MasterFrozenColUsageSuccess {
 //  AlterTable Messages
 // -------------------------------------------------------------------------------------------------
 
-// TODO: revamp these 5 message when its time.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTablePrepare {
   pub query_id: QueryId,
@@ -501,25 +481,12 @@ pub struct AlterTableAbort {
 pub struct AlterTableCommit {
   pub query_id: QueryId,
   pub timestamp: Timestamp,
-  pub gossip_data: GossipDataSer,
 }
 
 // Other Paxos2PC messages
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableCheckPrepared {
-  pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableInformPrepared {
-  pub query_id: QueryId,
-  /// The responding Tablet
-  pub tablet_group_id: TabletGroupId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableWait {
+pub struct AlterTableCloseConfirm {
   pub query_id: QueryId,
   /// The responding Tablet
   pub tablet_group_id: TabletGroupId,
@@ -572,19 +539,7 @@ pub struct CreateTableCommit {
 // Other Paxos2PC messages
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CreateTableCheckPrepared {
-  pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CreateTableInformPrepared {
-  pub query_id: QueryId,
-  /// The responding Slave
-  pub slave_group_id: SlaveGroupId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CreateTableWait {
+pub struct CreateTableCloseConfirm {
   pub query_id: QueryId,
   /// The responding Slave
   pub slave_group_id: SlaveGroupId,
@@ -626,43 +581,6 @@ pub struct DropTableCommit {
 }
 
 // Other Paxos2PC messages
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableCheckPrepared {
-  pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableInformPrepared {
-  pub query_id: QueryId,
-  /// The responding Tablet
-  pub tablet_group_id: TabletGroupId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableWait {
-  pub query_id: QueryId,
-  /// The responding Tablet
-  pub tablet_group_id: TabletGroupId,
-}
-
-// -------------------------------------------------------------------------------------------------
-//  Close Confirmation
-// -------------------------------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CreateTableCloseConfirm {
-  pub query_id: QueryId,
-  /// The responding Slave
-  pub slave_group_id: SlaveGroupId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableCloseConfirm {
-  pub query_id: QueryId,
-  /// The responding Tablet
-  pub tablet_group_id: TabletGroupId,
-}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DropTableCloseConfirm {

@@ -132,7 +132,7 @@ impl MSTableReadES {
   }
 
   /// Handle Columns being locked
-  pub fn columns_locked<T: IOTypes>(
+  pub fn local_locked_cols<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
     locked_cols_qid: QueryId,
@@ -407,9 +407,7 @@ impl MSTableReadES {
   pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
     match &self.state {
       MSReadExecutionS::Start => {}
-      MSReadExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid }) => {
-        ctx.remove_col_locking_request(locked_cols_qid.clone());
-      }
+      MSReadExecutionS::ColumnsLocking(_) => {}
       MSReadExecutionS::GossipDataWaiting => {}
       MSReadExecutionS::Pending(pending) => {
         // Here, we remove the ReadRegion from `m_waiting_read_protected`, if it still

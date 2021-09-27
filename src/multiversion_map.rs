@@ -107,6 +107,15 @@ where
       Timestamp(0)
     }
   }
+
+  /// Get the highest LAT of any key-value pair in the MVM.
+  pub fn get_latest_lat(&self) -> Timestamp {
+    let mut latest_lat = 0;
+    for (_, (lat, _)) in &self.map {
+      latest_lat = max(latest_lat, lat.0);
+    }
+    Timestamp(latest_lat)
+  }
 }
 
 pub fn find_version<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> Option<&V> {
