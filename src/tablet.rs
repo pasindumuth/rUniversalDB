@@ -150,8 +150,6 @@ pub struct SubqueryFinished {
 
 #[derive(Debug)]
 pub enum SingleSubqueryStatus {
-  LockingSchemas(SubqueryLockingSchemas),
-  PendingReadRegion(SubqueryPendingReadRegion),
   Pending(SubqueryPending),
   Finished(SubqueryFinished),
 }
@@ -185,9 +183,7 @@ impl Executing {
   pub fn find_subquery(&self, qid: &QueryId) -> Option<usize> {
     for (i, single_status) in self.subqueries.iter().enumerate() {
       match single_status {
-        SingleSubqueryStatus::LockingSchemas(SubqueryLockingSchemas { query_id, .. })
-        | SingleSubqueryStatus::PendingReadRegion(SubqueryPendingReadRegion { query_id, .. })
-        | SingleSubqueryStatus::Pending(SubqueryPending { query_id, .. }) => {
+        SingleSubqueryStatus::Pending(SubqueryPending { query_id, .. }) => {
           if query_id == qid {
             return Some(i);
           }
@@ -203,12 +199,15 @@ impl Executing {
 //  MSQueryES
 // -----------------------------------------------------------------------------------------------
 
+/// When this exists, there will be a corresponding `VerifyingReadWriteRegion`.
 #[derive(Debug)]
 pub struct MSQueryES {
   pub root_query_id: QueryId,
   pub query_id: QueryId,
   pub timestamp: Timestamp,
   pub update_views: BTreeMap<u32, GenericTable>,
+  /// This holds all `MSTable*ES`s that belong to this MSQueryES. We make sure
+  /// that every ES reference here exist.
   pub pending_queries: HashSet<QueryId>,
 }
 
@@ -259,12 +258,12 @@ pub struct GRQueryESWrapper {
 #[derive(Debug, Default)]
 pub struct Statuses {
   gr_query_ess: HashMap<QueryId, GRQueryESWrapper>,
-  full_table_read_ess: HashMap<QueryId, TableReadESWrapper>,
-  full_trans_table_read_ess: HashMap<QueryId, TransTableReadESWrapper>,
+  table_read_ess: HashMap<QueryId, TableReadESWrapper>,
+  trans_table_read_ess: HashMap<QueryId, TransTableReadESWrapper>,
   tm_statuss: HashMap<QueryId, TMStatus>,
   ms_query_ess: HashMap<QueryId, MSQueryES>,
-  full_ms_table_read_ess: HashMap<QueryId, MSTableReadESWrapper>,
-  full_ms_table_write_ess: HashMap<QueryId, MSTableWriteESWrapper>,
+  ms_table_read_ess: HashMap<QueryId, MSTableReadESWrapper>,
+  ms_table_write_ess: HashMap<QueryId, MSTableWriteESWrapper>,
 }
 
 impl Statuses {
@@ -273,10 +272,10 @@ impl Statuses {
     if self.gr_query_ess.remove(query_id).is_some() {
       return;
     };
-    if self.full_table_read_ess.remove(query_id).is_some() {
+    if self.table_read_ess.remove(query_id).is_some() {
       return;
     };
-    if self.full_trans_table_read_ess.remove(query_id).is_some() {
+    if self.trans_table_read_ess.remove(query_id).is_some() {
       return;
     };
     if self.tm_statuss.remove(query_id).is_some() {
@@ -285,10 +284,10 @@ impl Statuses {
     if self.ms_query_ess.remove(query_id).is_some() {
       return;
     };
-    if self.full_ms_table_read_ess.remove(query_id).is_some() {
+    if self.ms_table_read_ess.remove(query_id).is_some() {
       return;
     };
-    if self.full_ms_table_write_ess.remove(query_id).is_some() {
+    if self.ms_table_write_ess.remove(query_id).is_some() {
       return;
     };
   }
@@ -494,6 +493,9 @@ pub struct TabletContext<T: IOTypes> {
   pub requested_locked_columns: HashMap<QueryId, (OrigP, Timestamp, Vec<ColName>)>,
 
   /// Child Queries
+
+  /// For every `MSQueryES`, this maps its corresponding `root_query_id`
+  /// to its `query_id`.
   pub ms_root_query_map: HashMap<QueryId, QueryId>,
 }
 
@@ -590,8 +592,8 @@ impl<T: IOTypes> TabletContext<T> {
                 // if so and aborting if not.
                 if let Some(gr_query) = statuses.gr_query_ess.get(&query.location_prefix.query_id) {
                   // Construct and start the TransQueryReplanningES
-                  let full_trans_table = map_insert(
-                    &mut statuses.full_trans_table_read_ess,
+                  let trans_table = map_insert(
+                    &mut statuses.trans_table_read_ess,
                     &perform_query.query_id,
                     TransTableReadESWrapper {
                       sender_path: perform_query.sender_path.clone(),
@@ -611,7 +613,7 @@ impl<T: IOTypes> TabletContext<T> {
                     },
                   );
 
-                  let action = full_trans_table.es.start(&mut self.ctx(), &gr_query.es);
+                  let action = trans_table.es.start(&mut self.ctx(), &gr_query.es);
                   self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
                 } else {
                   // This means that the target GRQueryES was deleted, so we send back
@@ -638,7 +640,7 @@ impl<T: IOTypes> TabletContext<T> {
 
                       // Create an MSReadTableES in the QueryReplanning state, and start it.
                       let ms_read = map_insert(
-                        &mut statuses.full_ms_table_read_ess,
+                        &mut statuses.ms_table_read_ess,
                         &perform_query.query_id,
                         MSTableReadESWrapper {
                           sender_path: perform_query.sender_path.clone(),
@@ -672,7 +674,7 @@ impl<T: IOTypes> TabletContext<T> {
                 } else {
                   // Here, we create a standard TableReadES.
                   let read = map_insert(
-                    &mut statuses.full_table_read_ess,
+                    &mut statuses.table_read_ess,
                     &perform_query.query_id,
                     TableReadESWrapper {
                       sender_path: perform_query.sender_path.clone(),
@@ -718,7 +720,7 @@ impl<T: IOTypes> TabletContext<T> {
                     // Create an MSWriteTableES in the QueryReplanning state, and add it to
                     // the MSQueryES.
                     let ms_write = map_insert(
-                      &mut statuses.full_ms_table_write_ess,
+                      &mut statuses.ms_table_write_ess,
                       &perform_query.query_id,
                       MSTableWriteESWrapper {
                         sender_path: perform_query.sender_path.clone(),
@@ -1244,15 +1246,15 @@ impl<T: IOTypes> TabletContext<T> {
     locked_cols_qid: QueryId,
   ) {
     let query_id = orig_p.query_id;
-    if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
+    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
       let action = read.es.columns_locked(self, locked_cols_qid);
       self.handle_read_es_action(statuses, query_id, action);
-    } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
+    } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
       // MSTableWriteES
       let action = ms_write.es.columns_locked(self, locked_cols_qid);
       self.handle_ms_write_es_action(statuses, query_id, action);
-    } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+    } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       let action = ms_read.es.columns_locked(self, locked_cols_qid);
       self.handle_ms_read_es_action(statuses, query_id, action);
@@ -1300,7 +1302,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Send back Aborted and ECU.
     let query_id = protect_request.orig_p.query_id;
-    if let Some(mut read) = statuses.full_table_read_ess.remove(&query_id) {
+    if let Some(mut read) = statuses.table_read_ess.remove(&query_id) {
       let sender_path = read.sender_path;
       let responder_path = self.mk_query_path(query_id);
       self.ctx().send_to_path(
@@ -1330,23 +1332,23 @@ impl<T: IOTypes> TabletContext<T> {
     protect_query_id: QueryId,
   ) {
     let query_id = orig_p.query_id;
-    if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
+    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
       let action = read.es.read_protected(self, protect_query_id);
       self.handle_read_es_action(statuses, query_id, action);
-    } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
+    } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
       // MSTableWriteES
       let action = ms_write.es.read_protected(
         self,
-        statuses.ms_query_ess.get_mut(ms_write.es.ms_query_id()).unwrap(),
+        statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap(),
         protect_query_id,
       );
       self.handle_ms_write_es_action(statuses, query_id, action);
-    } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+    } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       let action = ms_read.es.read_protected(
         self,
-        statuses.ms_query_ess.get(ms_read.es.ms_query_id()).unwrap(),
+        statuses.ms_query_ess.get(&ms_read.es.ms_query_id).unwrap(),
         protect_query_id,
       );
       self.handle_ms_read_es_action(statuses, query_id, action);
@@ -1423,7 +1425,7 @@ impl<T: IOTypes> TabletContext<T> {
     (table_schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
-    if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
+    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
       remove_item(&mut read.child_queries, &subquery_id);
       let action = read.es.handle_subquery_done(
@@ -1433,7 +1435,7 @@ impl<T: IOTypes> TabletContext<T> {
         (table_schema, table_views),
       );
       self.handle_read_es_action(statuses, query_id, action);
-    } else if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+    } else if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
       // TransTableReadES
       let prefix = trans_read.es.location_prefix();
       remove_item(&mut trans_read.child_queries, &subquery_id);
@@ -1449,23 +1451,23 @@ impl<T: IOTypes> TabletContext<T> {
         trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
       };
       self.handle_trans_read_es_action(statuses, query_id, action);
-    } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
+    } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
       // MSTableWriteES
       remove_item(&mut ms_write.child_queries, &subquery_id);
       let action = ms_write.es.handle_subquery_done(
         self,
-        statuses.ms_query_ess.get_mut(ms_write.es.ms_query_id()).unwrap(),
+        statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap(),
         subquery_id,
         subquery_new_rms,
         (table_schema, table_views),
       );
       self.handle_ms_write_es_action(statuses, query_id, action);
-    } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+    } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       remove_item(&mut ms_read.child_queries, &subquery_id);
       let action = ms_read.es.handle_subquery_done(
         self,
-        statuses.ms_query_ess.get(ms_read.es.ms_query_id()).unwrap(),
+        statuses.ms_query_ess.get(&ms_read.es.ms_query_id).unwrap(),
         subquery_id,
         subquery_new_rms,
         (table_schema, table_views),
@@ -1483,22 +1485,22 @@ impl<T: IOTypes> TabletContext<T> {
     query_error: msg::QueryError,
   ) {
     let query_id = orig_p.query_id;
-    if let Some(read) = statuses.full_table_read_ess.get_mut(&query_id) {
+    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
       remove_item(&mut read.child_queries, &subquery_id);
       let action = read.es.handle_internal_query_error(self, query_error);
       self.handle_read_es_action(statuses, query_id, action);
-    } else if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+    } else if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
       // TransTableReadES
       remove_item(&mut trans_read.child_queries, &subquery_id);
       let action = trans_read.es.handle_internal_query_error(&mut self.ctx(), query_error);
       self.handle_trans_read_es_action(statuses, query_id, action);
-    } else if let Some(ms_write) = statuses.full_ms_table_write_ess.get_mut(&query_id) {
+    } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
       // MSTableWriteES
       remove_item(&mut ms_write.child_queries, &subquery_id);
       let action = ms_write.es.handle_internal_query_error(self, query_error);
       self.handle_ms_write_es_action(statuses, query_id, action);
-    } else if let Some(ms_read) = statuses.full_ms_table_read_ess.get_mut(&query_id) {
+    } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       remove_item(&mut ms_read.child_queries, &subquery_id);
       let action = ms_read.es.handle_internal_query_error(self, query_error);
@@ -1542,7 +1544,7 @@ impl<T: IOTypes> TabletContext<T> {
       }
       TransTableAction::Success(success) => {
         // Remove the TableReadESWrapper and respond.
-        let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
+        let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
@@ -1557,7 +1559,7 @@ impl<T: IOTypes> TabletContext<T> {
       }
       TransTableAction::QueryError(query_error) => {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
-        let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
+        let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
@@ -1587,7 +1589,7 @@ impl<T: IOTypes> TabletContext<T> {
       }
       TableAction::Success(success) => {
         // Remove the TableReadESWrapper and respond.
-        let read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
+        let read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = read.sender_path;
         let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
@@ -1602,7 +1604,7 @@ impl<T: IOTypes> TabletContext<T> {
       }
       TableAction::QueryError(query_error) => {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
-        let read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
+        let read = statuses.table_read_ess.remove(&query_id).unwrap();
         let sender_path = read.sender_path;
         let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
@@ -1630,7 +1632,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Then, we ECU all ESs in `pending_queries`, and respond with an Abort.
     for query_id in ms_query_es.pending_queries {
-      if let Some(mut ms_read) = statuses.full_ms_table_read_ess.remove(&query_id) {
+      if let Some(mut ms_read) = statuses.ms_table_read_ess.remove(&query_id) {
         // MSTableReadES
         ms_read.es.exit_and_clean_up(self);
         let sender_path = ms_read.sender_path;
@@ -1644,7 +1646,7 @@ impl<T: IOTypes> TabletContext<T> {
           }),
         );
         self.exit_all(statuses, ms_read.child_queries);
-      } else if let Some(mut ms_write) = statuses.full_ms_table_write_ess.remove(&query_id) {
+      } else if let Some(mut ms_write) = statuses.ms_table_write_ess.remove(&query_id) {
         // MSTableWriteES
         ms_write.es.exit_and_clean_up(self);
         let sender_path = ms_write.sender_path;
@@ -1666,7 +1668,7 @@ impl<T: IOTypes> TabletContext<T> {
     self.ms_root_query_map.remove(&ms_query_es.root_query_id);
   }
 
-  /// Handles the actions specified by a MSTableWriteES.
+  /// Handles the actions specified by an MSTableWriteES.
   fn handle_ms_write_es_action(
     &mut self,
     statuses: &mut Statuses,
@@ -1680,8 +1682,8 @@ impl<T: IOTypes> TabletContext<T> {
       }
       MSTableWriteAction::Success(success) => {
         // Remove the MSWriteESWrapper, removing it from the MSQueryES, and respond.
-        let ms_write = statuses.full_ms_table_read_ess.remove(&query_id).unwrap();
-        let ms_query_es = statuses.ms_query_ess.get_mut(ms_write.es.ms_query_id()).unwrap();
+        let ms_write = statuses.ms_table_write_ess.remove(&query_id).unwrap();
+        let ms_query_es = statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_write.sender_path;
         let responder_path = self.mk_query_path(query_id);
@@ -1696,13 +1698,25 @@ impl<T: IOTypes> TabletContext<T> {
         )
       }
       MSTableWriteAction::QueryError(query_error) => {
-        let ms_write = statuses.full_ms_table_read_ess.get(&query_id).unwrap();
-        self.exit_ms_query_es(statuses, ms_write.es.ms_query_id().clone(), query_error);
+        // Remove the MSWriteESWrapper, removing it from the MSQueryES, and respond.
+        let ms_write = statuses.ms_table_write_ess.remove(&query_id).unwrap();
+        let ms_query_es = statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap();
+        ms_query_es.pending_queries.remove(&query_id);
+        let sender_path = ms_write.sender_path;
+        let responder_path = self.mk_query_path(query_id);
+        self.ctx().send_to_path(
+          sender_path.clone(),
+          CommonQuery::QueryAborted(msg::QueryAborted {
+            return_qid: sender_path.query_id,
+            responder_path,
+            payload: msg::AbortedData::QueryError(query_error.clone()),
+          }),
+        );
       }
     }
   }
 
-  /// Handles the actions specified by a MSTableReadES.
+  /// Handles the actions specified by an MSTableReadES.
   fn handle_ms_read_es_action(
     &mut self,
     statuses: &mut Statuses,
@@ -1715,9 +1729,9 @@ impl<T: IOTypes> TabletContext<T> {
         self.launch_subqueries(statuses, gr_query_ess);
       }
       MSTableReadAction::Success(success) => {
-        // Remove the MSWriteESWrapper, removing it from the MSQueryES, and respond.
-        let ms_read = statuses.full_ms_table_read_ess.remove(&query_id).unwrap();
-        let ms_query_es = statuses.ms_query_ess.get_mut(ms_read.es.ms_query_id()).unwrap();
+        // Remove the MSReadESWrapper, removing it from the MSQueryES, and respond.
+        let ms_read = statuses.ms_table_read_ess.remove(&query_id).unwrap();
+        let ms_query_es = statuses.ms_query_ess.get_mut(&ms_read.es.ms_query_id).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_read.sender_path;
         let responder_path = self.mk_query_path(query_id);
@@ -1732,8 +1746,19 @@ impl<T: IOTypes> TabletContext<T> {
         )
       }
       MSTableReadAction::QueryError(query_error) => {
-        let ms_read = statuses.full_ms_table_read_ess.get(&query_id).unwrap();
-        self.exit_ms_query_es(statuses, ms_read.es.ms_query_id().clone(), query_error);
+        let ms_read = statuses.ms_table_read_ess.remove(&query_id).unwrap();
+        let ms_query_es = statuses.ms_query_ess.get_mut(&ms_read.es.ms_query_id).unwrap();
+        ms_query_es.pending_queries.remove(&query_id);
+        let sender_path = ms_read.sender_path;
+        let responder_path = self.mk_query_path(query_id);
+        self.ctx().send_to_path(
+          sender_path.clone(),
+          CommonQuery::QueryAborted(msg::QueryAborted {
+            return_qid: sender_path.query_id,
+            responder_path,
+            payload: msg::AbortedData::QueryError(query_error.clone()),
+          }),
+        )
       }
     }
   }
@@ -1788,11 +1813,11 @@ impl<T: IOTypes> TabletContext<T> {
       // GRQueryES
       gr_query.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(statuses, gr_query.child_queries);
-    } else if let Some(mut read) = statuses.full_table_read_ess.remove(&query_id) {
+    } else if let Some(mut read) = statuses.table_read_ess.remove(&query_id) {
       // TableReadES
       read.es.exit_and_clean_up(self);
       self.exit_all(statuses, read.child_queries);
-    } else if let Some(mut trans_read) = statuses.full_trans_table_read_ess.remove(&query_id) {
+    } else if let Some(mut trans_read) = statuses.trans_table_read_ess.remove(&query_id) {
       // TransTableReadES
       trans_read.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(statuses, trans_read.child_queries);
@@ -1825,15 +1850,15 @@ impl<T: IOTypes> TabletContext<T> {
       // Instead, we should give MSQueryES a state variable and have it react to CancelQuery
       // accordingly (ignore it if we have prepared).
       self.exit_ms_query_es(statuses, ms_query_es.query_id.clone(), msg::QueryError::LateralError);
-    } else if let Some(mut ms_write) = statuses.full_ms_table_write_ess.remove(&query_id) {
+    } else if let Some(mut ms_write) = statuses.ms_table_write_ess.remove(&query_id) {
       // MSTableWriteES.
-      let ms_query_es = statuses.ms_query_ess.get_mut(ms_write.es.ms_query_id()).unwrap();
+      let ms_query_es = statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap();
       ms_query_es.pending_queries.remove(&query_id);
       ms_write.es.exit_and_clean_up(self);
       self.exit_all(statuses, ms_write.child_queries);
-    } else if let Some(mut ms_read) = statuses.full_ms_table_read_ess.remove(&query_id) {
+    } else if let Some(mut ms_read) = statuses.ms_table_read_ess.remove(&query_id) {
       // MSTableReadES.
-      let ms_query_es = statuses.ms_query_ess.get_mut(ms_read.es.ms_query_id()).unwrap();
+      let ms_query_es = statuses.ms_query_ess.get_mut(&ms_read.es.ms_query_id).unwrap();
       ms_query_es.pending_queries.remove(&query_id);
       ms_read.es.exit_and_clean_up(self);
       self.exit_all(statuses, ms_read.child_queries);
@@ -2004,39 +2029,4 @@ pub fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: Subque
   }
 
   Ok(gr_query_ess)
-}
-
-/// This recomputes GRQueryESs that corresponds to `protect_query_id`.
-pub fn recompute_subquery<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryComputableSql>(
-  subquery_view: GRQueryConstructorView<SqlQueryT>,
-  rand: &mut T::RngCoreT,
-  local_table: LocalTableT,
-  executing: &mut Executing,
-  protect_query_id: &QueryId,
-) -> Result<(QueryId, GRQueryES), EvalError> {
-  // Find the subquery that this `protect_query_id` is referring to. There should
-  // always be such a Subquery.
-  let subquery_idx = executing.find_subquery(protect_query_id).unwrap();
-  let single_status = executing.subqueries.get_mut(subquery_idx).unwrap();
-  let protect_status = cast!(SingleSubqueryStatus::PendingReadRegion, single_status).unwrap();
-
-  // Create the child context.
-  let child_contexts = compute_contexts(
-    subquery_view.context,
-    local_table,
-    vec![(protect_status.new_columns.clone(), protect_status.trans_table_names.clone())],
-  )?;
-  assert_eq!(child_contexts.len(), 1);
-
-  // Construct the GRQueryES
-  let context = Rc::new(child_contexts.into_iter().next().unwrap());
-  let gr_query_id = mk_qid(rand);
-  let gr_query_es =
-    subquery_view.mk_gr_query_es(gr_query_id.clone(), context.clone(), subquery_idx);
-
-  // Advance the SingleSubqueryStatus.
-  *single_status =
-    SingleSubqueryStatus::Pending(SubqueryPending { context, query_id: gr_query_id.clone() });
-
-  Ok((gr_query_id, gr_query_es))
 }

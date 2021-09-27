@@ -61,7 +61,7 @@ struct MSCoordESWrapper {
 pub struct Statuses {
   ms_coord_ess: HashMap<QueryId, MSCoordESWrapper>,
   gr_query_ess: HashMap<QueryId, GRQueryESWrapper>,
-  full_trans_table_read_ess: HashMap<QueryId, TransTableReadESWrapper>,
+  trans_table_read_ess: HashMap<QueryId, TransTableReadESWrapper>,
   tm_statuss: HashMap<QueryId, TMStatus>,
 }
 
@@ -180,7 +180,7 @@ impl<T: IOTypes> CoordContext<T> {
           }
           msg::SlaveExternalReq::CancelExternalQuery(cancel) => {
             if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
-              // ECU the transation if it exists.
+              // ECU the transaction if it exists.
               self.exit_and_clean_up(statuses, query_id.clone());
             }
 
@@ -208,8 +208,8 @@ impl<T: IOTypes> CoordContext<T> {
                 if let Some(ms_coord) = statuses.ms_coord_ess.get(&query.location_prefix.query_id) {
                   let es = ms_coord.es.to_exec();
                   // Construct and start the TransQueryReplanningES
-                  let full_trans_table = map_insert(
-                    &mut statuses.full_trans_table_read_ess,
+                  let trans_table = map_insert(
+                    &mut statuses.trans_table_read_ess,
                     &perform_query.query_id,
                     TransTableReadESWrapper {
                       sender_path: perform_query.sender_path.clone(),
@@ -229,14 +229,14 @@ impl<T: IOTypes> CoordContext<T> {
                     },
                   );
 
-                  let action = full_trans_table.es.start(&mut self.ctx(), es);
+                  let action = trans_table.es.start(&mut self.ctx(), es);
                   self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
                 } else if let Some(gr_query) =
                   statuses.gr_query_ess.get(&query.location_prefix.query_id)
                 {
                   // Construct and start the TransQueryReplanningES
-                  let full_trans_table = map_insert(
-                    &mut statuses.full_trans_table_read_ess,
+                  let trans_table = map_insert(
+                    &mut statuses.trans_table_read_ess,
                     &perform_query.query_id,
                     TransTableReadESWrapper {
                       sender_path: perform_query.sender_path.clone(),
@@ -256,7 +256,7 @@ impl<T: IOTypes> CoordContext<T> {
                     },
                   );
 
-                  let action = full_trans_table.es.start(&mut self.ctx(), &gr_query.es);
+                  let action = trans_table.es.start(&mut self.ctx(), &gr_query.es);
                   self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
                 } else {
                   // This means that the target GRQueryES was deleted. We can send back an
@@ -308,7 +308,7 @@ impl<T: IOTypes> CoordContext<T> {
 
             // Route the response to the appropriate ES.
             let query_id = success.return_qid;
-            if let Some(trans_read) = statuses.full_trans_table_read_ess.get_mut(&query_id) {
+            if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
               // TODO: remove this section.
               // let prefix = trans_read.es.location_prefix();
               // let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
@@ -488,7 +488,7 @@ impl<T: IOTypes> CoordContext<T> {
     (table_schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
-    let trans_read = statuses.full_trans_table_read_ess.get_mut(&query_id).unwrap();
+    let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
     remove_item(&mut trans_read.child_queries, &subquery_id);
     let prefix = trans_read.es.location_prefix();
     let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
@@ -528,7 +528,7 @@ impl<T: IOTypes> CoordContext<T> {
     query_error: msg::QueryError,
   ) {
     let query_id = orig_p.query_id;
-    let trans_read = statuses.full_trans_table_read_ess.get_mut(&query_id).unwrap();
+    let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
     remove_item(&mut trans_read.child_queries, &subquery_id);
     let action = trans_read.es.handle_internal_query_error(&mut self.ctx(), query_error);
     self.handle_trans_read_es_action(statuses, query_id, action);
@@ -636,7 +636,7 @@ impl<T: IOTypes> CoordContext<T> {
       }
       TransTableAction::Success(success) => {
         // Remove the TableReadESWrapper and respond.
-        let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
+        let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
@@ -651,7 +651,7 @@ impl<T: IOTypes> CoordContext<T> {
       }
       TransTableAction::QueryError(query_error) => {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
-        let trans_read = statuses.full_trans_table_read_ess.remove(&query_id).unwrap();
+        let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id);
         self.ctx().send_to_path(
@@ -737,7 +737,7 @@ impl<T: IOTypes> CoordContext<T> {
       // GRQueryES
       gr_query.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(statuses, gr_query.child_queries);
-    } else if let Some(mut trans_read) = statuses.full_trans_table_read_ess.remove(&query_id) {
+    } else if let Some(mut trans_read) = statuses.trans_table_read_ess.remove(&query_id) {
       // TransTableReadES
       trans_read.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(statuses, trans_read.child_queries);

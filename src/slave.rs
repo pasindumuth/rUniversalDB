@@ -30,36 +30,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
-//  Slave Statuses
-// -----------------------------------------------------------------------------------------------
-
-/// A wrapper around MSCoordES that keeps track of the child queries it created. We
-/// we use this for resource management
-#[derive(Debug)]
-struct MSCoordESWrapper {
-  request_id: RequestId,
-  sender_eid: EndpointId,
-  child_queries: Vec<QueryId>,
-  es: FullMSCoordES,
-}
-
-/// This contains every TabletStatus. Every QueryId here is unique across all
-/// other members here.
-#[derive(Debug, Default)]
-pub struct Statuses {
-  ms_coord_ess: HashMap<QueryId, MSCoordESWrapper>,
-  gr_query_ess: HashMap<QueryId, GRQueryESWrapper>,
-  full_trans_table_read_ess: HashMap<QueryId, TransTableReadESWrapper>,
-  tm_statuss: HashMap<QueryId, TMStatus>,
-}
-
-// -----------------------------------------------------------------------------------------------
 //  Slave State
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct SlaveState<T: IOTypes> {
   slave_context: SlaveContext<T>,
-  statuses: Statuses,
 }
 
 /// The SlaveState that holds all the state of the Slave
@@ -103,7 +78,6 @@ impl<T: IOTypes> SlaveState<T> {
         gossip,
         external_request_id_map: Default::default(),
       },
-      statuses: Default::default(),
     }
   }
 
@@ -126,7 +100,7 @@ impl<T: IOTypes> SlaveContext<T> {
   }
 
   /// Handles all messages, coming from Tablets, the Master, External, etc.
-  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::SlaveMessage) {
+  pub fn handle_incoming_message(&mut self, message: msg::SlaveMessage) {
     match message {
       SlaveMessage::ExternalMessage(_) => {}
       SlaveMessage::RemoteMessage(_) => {}

@@ -55,6 +55,9 @@ impl FrozenColUsageNode {
   }
 }
 
+/// This algorithm will assume that all projected columns in `SELECT` queries and all
+/// SET columns in `UPDATE` queries exist in the `db_schema`. Users of this algorithm must
+/// verify this fact first.
 pub struct ColUsagePlanner<'a> {
   pub db_schema: &'a HashMap<TablePath, TableSchema>,
   pub timestamp: Timestamp,

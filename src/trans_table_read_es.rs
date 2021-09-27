@@ -344,7 +344,7 @@ impl TransTableReadES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut ServerContext<T>) {
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, _: &mut ServerContext<T>) {
     match &self.state {
       TransExecutionS::Start => {}
       TransExecutionS::GossipDataWaiting => {}
@@ -352,8 +352,6 @@ impl TransTableReadES {
         // Here, we need to cancel every Subquery.
         for single_status in &executing.subqueries {
           match single_status {
-            SingleSubqueryStatus::LockingSchemas(_) => panic!(),
-            SingleSubqueryStatus::PendingReadRegion(_) => panic!(),
             SingleSubqueryStatus::Pending(_) => {}
             SingleSubqueryStatus::Finished(_) => {}
           }

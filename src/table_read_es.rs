@@ -16,10 +16,9 @@ use crate::server::{
 };
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
-  compute_subqueries, recompute_subquery, ColumnsLocking, ContextKeyboundComputer, Executing,
-  Pending, ProtectRequest, QueryReplanningSqlView, SingleSubqueryStatus, StorageLocalTable,
-  SubqueryFinished, SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion,
-  TabletContext,
+  compute_subqueries, ColumnsLocking, ContextKeyboundComputer, Executing, Pending, ProtectRequest,
+  QueryReplanningSqlView, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
+  SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion, TabletContext,
 };
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
@@ -399,12 +398,6 @@ impl TableReadES {
         // request or the ReadRegion from read protection.
         for single_status in &executing.subqueries {
           match single_status {
-            SingleSubqueryStatus::LockingSchemas(locking_status) => {
-              ctx.remove_col_locking_request(locking_status.query_id.clone());
-            }
-            SingleSubqueryStatus::PendingReadRegion(protect_status) => {
-              ctx.remove_read_protected_request(&self.timestamp, &protect_status.query_id);
-            }
             SingleSubqueryStatus::Pending(_) => {}
             SingleSubqueryStatus::Finished(_) => {}
           }

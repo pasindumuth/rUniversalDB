@@ -15,10 +15,10 @@ use crate::server::{
 };
 use crate::storage::{GenericTable, MSStorageView};
 use crate::tablet::{
-  compute_subqueries, recompute_subquery, ColumnsLocking, ContextKeyboundComputer, Executing,
-  MSQueryES, Pending, ProtectRequest, QueryReplanningSqlView, SingleSubqueryStatus,
-  StorageLocalTable, SubqueryFinished, SubqueryLockingSchemas, SubqueryPending,
-  SubqueryPendingReadRegion, TabletContext,
+  compute_subqueries, ColumnsLocking, ContextKeyboundComputer, Executing, MSQueryES, Pending,
+  ProtectRequest, QueryReplanningSqlView, SingleSubqueryStatus, StorageLocalTable,
+  SubqueryFinished, SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion,
+  TabletContext,
 };
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
@@ -50,7 +50,8 @@ pub struct MSTableWriteES {
   pub sql_query: proc::Update,
   pub query_plan: QueryPlan,
 
-  // MSQuery fields
+  /// The `QueryId` of the `MSQueryES` that this ES belongs to.
+  /// We make sure that it exists as long as this ES exists.
   pub ms_query_id: QueryId,
 
   // Dynamically evolving fields.
@@ -480,12 +481,6 @@ impl MSTableWriteES {
         // since they are inconvenient to change (since they don't have `query_id`).
         for single_status in &executing.subqueries {
           match single_status {
-            SingleSubqueryStatus::LockingSchemas(locking_status) => {
-              ctx.remove_col_locking_request(locking_status.query_id.clone());
-            }
-            SingleSubqueryStatus::PendingReadRegion(protect_status) => {
-              ctx.remove_m_read_protected_request(&self.timestamp, &protect_status.query_id);
-            }
             SingleSubqueryStatus::Pending(_) => {}
             SingleSubqueryStatus::Finished(_) => {}
           }
@@ -494,10 +489,5 @@ impl MSTableWriteES {
       MSWriteExecutionS::Done => {}
     }
     self.state = MSWriteExecutionS::Done;
-  }
-
-  /// Get the `QueryId` of the owning originating MSQueryES.
-  pub fn ms_query_id(&self) -> &QueryId {
-    &self.query_id
   }
 }
