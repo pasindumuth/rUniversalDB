@@ -16,9 +16,10 @@ use crate::server::{
 };
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
-  compute_subqueries, ColumnsLocking, ContextKeyboundComputer, Executing, Pending, ProtectRequest,
-  QueryReplanningSqlView, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
-  SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion, TabletContext,
+  compute_subqueries, ColumnsLocking, ContextKeyboundComputer, Executing, Pending,
+  QueryReplanningSqlView, RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable,
+  SubqueryFinished, SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion,
+  TabletContext,
 };
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
@@ -34,6 +35,7 @@ pub enum ExecutionS {
   GossipDataWaiting,
   Pending(Pending),
   Executing(Executing),
+  WaitingGlobalLockedCols(Executing),
   Done,
 }
 
@@ -51,6 +53,7 @@ pub struct TableReadES {
 
   // Dynamically evolving fields.
   pub new_rms: HashSet<QueryPath>,
+  pub waiting_global_locks: HashSet<QueryId>,
   pub state: ExecutionS,
 }
 
@@ -152,6 +155,11 @@ impl TableReadES {
     return TableAction::Wait;
   }
 
+  /// TODO: do
+  pub fn table_dropped<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> TableAction {
+    return TableAction::Wait;
+  }
+
   /// Processes the Start state of TableReadES.
   fn start_table_read_es<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
     // Setup ability to compute a tight Keybound for every ContextRow.
@@ -197,14 +205,18 @@ impl TableReadES {
     btree_multimap_insert(
       &mut ctx.waiting_read_protected,
       &self.timestamp,
-      ProtectRequest { orig_p: OrigP::new(self.query_id.clone()), protect_qid, read_region },
+      RequestedReadProtected {
+        orig_p: OrigP::new(self.query_id.clone()),
+        query_id: protect_qid,
+        read_region,
+      },
     );
 
     TableAction::Wait
   }
 
   /// Handle ReadRegion protection
-  pub fn read_protected<T: IOTypes>(
+  pub fn local_read_protected<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
     _: QueryId,
@@ -257,6 +269,11 @@ impl TableReadES {
       // Return the subqueries
       TableAction::SendSubqueries(gr_query_statuses)
     }
+  }
+
+  /// TODO: do
+  pub fn global_read_protected<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> TableAction {
+    return TableAction::Wait;
   }
 
   /// This is called if a subquery fails. This simply responds to the sender
@@ -410,6 +427,7 @@ impl TableReadES {
           }
         }
       }
+      ExecutionS::WaitingGlobalLockedCols(_) => {}
       ExecutionS::Done => {}
     }
     self.state = ExecutionS::Done;

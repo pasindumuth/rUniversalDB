@@ -302,7 +302,7 @@ pub struct QueryPlan {
 // -------------------------------------------------------------------------------------------------
 
 // Generic single-side bound for an orderable value.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SingleBound<T> {
   Included(T),
   Excluded(T),
@@ -310,7 +310,7 @@ pub enum SingleBound<T> {
 }
 
 // A Generic double-sided bound for an orderable value.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ColBound<T> {
   pub start: SingleBound<T>,
   pub end: SingleBound<T>,
@@ -323,7 +323,7 @@ impl<T> ColBound<T> {
 }
 
 // There is a Variant here for every ColType.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PolyColBound {
   Int(ColBound<i32>),
   String(ColBound<String>),
@@ -331,13 +331,13 @@ pub enum PolyColBound {
 }
 
 /// A full Boundary for a `PrimaryKey`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyBound {
   pub col_bounds: Vec<PolyColBound>,
 }
 
 /// TableRegion, used to represent both ReadRegions and WriteRegions.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TableRegion {
   pub col_region: Vec<ColName>,
   pub row_region: Vec<KeyBound>,

@@ -311,16 +311,16 @@ pub enum DDLES {
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProtectRequest {
-  pub orig_p: OrigP,
-  pub protect_qid: QueryId,
+pub struct RequestedReadProtected {
+  pub query_id: QueryId,
   pub read_region: TableRegion,
+  pub orig_p: OrigP,
 }
 
 #[derive(Debug, Clone)]
 pub struct VerifyingReadWriteRegion {
   pub orig_p: OrigP,
-  pub m_waiting_read_protected: BTreeSet<ProtectRequest>,
+  pub m_waiting_read_protected: BTreeSet<RequestedReadProtected>,
   pub m_read_protected: BTreeSet<TableRegion>,
   pub m_write_protected: BTreeSet<TableRegion>,
 }
@@ -447,6 +447,13 @@ pub struct LockedCols {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ReadProtected {
+  query_id: QueryId,
+  timestamp: Timestamp,
+  region: TableRegion,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletPLm {
   AlterTablePrepared(AlterTablePrepared),
   AlterTableCommitted(AlterTableCommitted),
@@ -455,6 +462,7 @@ pub enum TabletPLm {
   DropTableCommitted(DropTableCommitted),
   DropTableAborted(DropTableAborted),
   LockedCols(LockedCols),
+  ReadProtected(ReadProtected),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -502,10 +510,12 @@ pub struct TabletContext<T: IOTypes> {
 
   // Region Isolation Algorithm
   pub verifying_writes: BTreeMap<Timestamp, VerifyingReadWriteRegion>,
+  pub inserting_prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
   pub prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
   pub committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
 
-  pub waiting_read_protected: BTreeMap<Timestamp, BTreeSet<ProtectRequest>>,
+  pub waiting_read_protected: BTreeMap<Timestamp, BTreeSet<RequestedReadProtected>>,
+  pub inserting_read_protected: BTreeMap<Timestamp, BTreeSet<RequestedReadProtected>>,
   pub read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
 
   // Schema Change and Locking
@@ -556,9 +566,11 @@ impl<T: IOTypes> TabletState<T> {
         this_table_key_range,
         table_schema,
         verifying_writes: Default::default(),
+        inserting_prepared_writes: Default::default(),
         prepared_writes: Default::default(),
         committed_writes: Default::default(),
         waiting_read_protected: Default::default(),
+        inserting_read_protected: Default::default(),
         read_protected: Default::default(),
         waiting_locked_cols: Default::default(),
         inserting_locked_cols: Default::default(),
@@ -596,6 +608,7 @@ impl<T: IOTypes> TabletContext<T> {
     match tablet_input {
       TabletForwardMsg::TabletBundle(bundle) => {
         for plm in bundle {
+          // TODO: This code is only if this is the leader
           match plm {
             TabletPLm::AlterTablePrepared(_) => panic!(),
             TabletPLm::AlterTableCommitted(_) => panic!(),
@@ -614,6 +627,27 @@ impl<T: IOTypes> TabletContext<T> {
               // Remove RequestedLockedCols and grant GlobalLockedCols
               let req = self.inserting_locked_cols.remove(&locked_cols.query_id).unwrap();
               self.grant_global_locked_cols(statuses, req.orig_p, req.query_id);
+            }
+            TabletPLm::ReadProtected(read_protected) => {
+              let req = self
+                .remove_inserting_read_protected_request(
+                  &read_protected.timestamp,
+                  &read_protected.query_id,
+                )
+                .unwrap();
+              btree_multimap_insert(
+                &mut self.read_protected,
+                &read_protected.timestamp,
+                read_protected.region,
+              );
+
+              // Inform the originator.
+              let query_id = req.orig_p.query_id;
+              if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
+                // TableReadES
+                let action = read.es.global_read_protected(self);
+                self.handle_read_es_action(statuses, query_id, action);
+              }
             }
           }
         }
@@ -722,6 +756,7 @@ impl<T: IOTypes> TabletContext<T> {
                         sql_query: query.sql_query,
                         query_plan: query.query_plan,
                         new_rms: Default::default(),
+                        waiting_global_locks: Default::default(),
                         state: ExecutionS::Start,
                       },
                     },
@@ -1086,15 +1121,38 @@ impl<T: IOTypes> TabletContext<T> {
     &mut self,
     timestamp: &Timestamp,
     query_id: &QueryId,
-  ) -> Option<ProtectRequest> {
+  ) -> Option<RequestedReadProtected> {
     if let Some(waiting) = self.waiting_read_protected.get_mut(&timestamp) {
       for protect_request in waiting.iter() {
-        if &protect_request.protect_qid == query_id {
+        if &protect_request.query_id == query_id {
           // Here, we found a request with matching QueryId, so we remove it.
           let protect_request = protect_request.clone();
           waiting.remove(&protect_request);
           if waiting.is_empty() {
             self.waiting_read_protected.remove(&timestamp);
+          }
+          return Some(protect_request);
+        }
+      }
+    }
+    return None;
+  }
+
+  /// This removes the Read Protection request from `inserting_read_protected` with the given
+  /// `query_id` at the given `timestamp`, if it exists, and returns it.
+  pub fn remove_inserting_read_protected_request(
+    &mut self,
+    timestamp: &Timestamp,
+    query_id: &QueryId,
+  ) -> Option<RequestedReadProtected> {
+    if let Some(inserting) = self.inserting_read_protected.get_mut(&timestamp) {
+      for protect_request in inserting.iter() {
+        if &protect_request.query_id == query_id {
+          // Here, we found a request with matching QueryId, so we remove it.
+          let protect_request = protect_request.clone();
+          inserting.remove(&protect_request);
+          if inserting.is_empty() {
+            self.inserting_read_protected.remove(&timestamp);
           }
           return Some(protect_request);
         }
@@ -1109,10 +1167,10 @@ impl<T: IOTypes> TabletContext<T> {
     &mut self,
     timestamp: &Timestamp,
     query_id: &QueryId,
-  ) -> Option<ProtectRequest> {
+  ) -> Option<RequestedReadProtected> {
     if let Some(verifying_write) = self.verifying_writes.get_mut(timestamp) {
       for protect_request in verifying_write.m_waiting_read_protected.iter() {
-        if &protect_request.protect_qid == query_id {
+        if &protect_request.query_id == query_id {
           // Here, we found a request with matching QueryId, so we remove it.
           let protect_request = protect_request.clone();
           verifying_write.m_waiting_read_protected.remove(&protect_request);
@@ -1144,6 +1202,11 @@ impl<T: IOTypes> TabletContext<T> {
         return false;
       }
     }
+    for (_, inserting_prepared_write) in self.inserting_prepared_writes.range(bound) {
+      if does_intersect(write_region, &inserting_prepared_write.m_read_protected) {
+        return false;
+      }
+    }
     for (_, committed_write) in self.committed_writes.range(bound) {
       if does_intersect(write_region, &committed_write.m_read_protected) {
         return false;
@@ -1154,6 +1217,15 @@ impl<T: IOTypes> TabletContext<T> {
     let bound = (Bound::Included(timestamp), Bound::Unbounded);
     for (_, read_regions) in self.read_protected.range(bound) {
       if does_intersect(write_region, read_regions) {
+        return false;
+      }
+    }
+    for (_, inserting_read_regions) in self.inserting_read_protected.range(bound) {
+      let mut read_regions = BTreeSet::<TableRegion>::new();
+      for req in inserting_read_regions {
+        read_regions.insert(req.read_region.clone());
+      }
+      if does_intersect(write_region, &read_regions) {
         return false;
       }
     }
@@ -1248,15 +1320,14 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Next, we see if we can provide Region Protection
 
-    // To account for both `verifying_writes` and `prepared_writes`, we merge
-    // them into a single container similar to `verifying_writes`. This is just
-    // for expedience; it should be optimized later. (We can probably change
-    // `prepared_writes` to `VerifyingReadWriteRegion` and then zip 2 iterators).
+    // To account for both `verifying_writes` and `prepared_writes`, we merge them into a
+    // single container similar to `verifying_writes`. This should be optimized later.
     let mut all_cur_writes = BTreeMap::<Timestamp, VerifyingReadWriteRegion>::new();
     for (cur_timestamp, verifying_write) in &self.verifying_writes {
       all_cur_writes.insert(*cur_timestamp, verifying_write.clone());
     }
-    for (cur_timestamp, prepared_write) in &self.prepared_writes {
+    let write_it = self.inserting_prepared_writes.iter().chain(self.prepared_writes.iter());
+    for (cur_timestamp, prepared_write) in write_it {
       all_cur_writes.insert(
         *cur_timestamp,
         VerifyingReadWriteRegion {
@@ -1276,13 +1347,17 @@ impl<T: IOTypes> TabletContext<T> {
       let bound = (Bound::Unbounded, Bound::Excluded(first_write_timestamp));
       for (timestamp, set) in self.waiting_read_protected.range(bound) {
         let protect_request = set.first().unwrap().clone();
-        self.grant_read_region(statuses, *timestamp, protect_request);
+        self.grant_local_read_protected(statuses, *timestamp, protect_request);
         return true;
       }
 
       // Next, process all `m_read_protected`s for the first `verifying_write`
       for protect_request in &verifying_write.m_waiting_read_protected {
-        self.grant_m_read_region(statuses, *first_write_timestamp, protect_request.clone());
+        self.grant_m_local_read_protected(
+          statuses,
+          *first_write_timestamp,
+          protect_request.clone(),
+        );
         return true;
       }
 
@@ -1293,13 +1368,14 @@ impl<T: IOTypes> TabletContext<T> {
       let bound = (Bound::Excluded(first_write_timestamp), Bound::Unbounded);
       for (cur_timestamp, verifying_write) in all_cur_writes.range(bound) {
         // The loop state is that `cum_write_regions` contains all WriteRegions <=
-        // `prev_write_timestamp`, all `m_read_protected` <= `prev_write_timestamp` have been
-        // processed, and all `read_protected`s < `prev_write_timestamp` have been processed.
+        // `prev_write_timestamp`, all `m_waiting_read_protected` <= `prev_write_timestamp`
+        // have been processed, and all `waiting_read_protected`s < `prev_write_timestamp`
+        // have been processed.
 
         // Process `m_read_protected`
         for protect_request in &verifying_write.m_waiting_read_protected {
           if !does_intersect(&protect_request.read_region, &cum_write_regions) {
-            self.grant_m_read_region(statuses, *cur_timestamp, protect_request.clone());
+            self.grant_m_local_read_protected(statuses, *cur_timestamp, protect_request.clone());
             return true;
           }
         }
@@ -1309,7 +1385,7 @@ impl<T: IOTypes> TabletContext<T> {
         for (timestamp, set) in self.waiting_read_protected.range(bound) {
           for protect_request in set {
             if !does_intersect(&protect_request.read_region, &cum_write_regions) {
-              self.grant_read_region(statuses, *timestamp, protect_request.clone());
+              self.grant_local_read_protected(statuses, *timestamp, protect_request.clone());
               return true;
             }
           }
@@ -1327,7 +1403,7 @@ impl<T: IOTypes> TabletContext<T> {
       for (timestamp, set) in self.waiting_read_protected.range(bound) {
         for protect_request in set {
           if !does_intersect(&protect_request.read_region, &cum_write_regions) {
-            self.grant_read_region(statuses, *timestamp, protect_request.clone());
+            self.grant_local_read_protected(statuses, *timestamp, protect_request.clone());
             return true;
           }
         }
@@ -1335,7 +1411,7 @@ impl<T: IOTypes> TabletContext<T> {
     } else {
       for (timestamp, set) in &self.waiting_read_protected {
         for protect_request in set {
-          self.grant_read_region(statuses, *timestamp, protect_request.clone());
+          self.grant_local_read_protected(statuses, *timestamp, protect_request.clone());
           return true;
         }
       }
@@ -1347,18 +1423,6 @@ impl<T: IOTypes> TabletContext<T> {
         for protect_request in set {
           if does_intersect(&protect_request.read_region, &verifying_write.m_write_protected) {
             self.deadlock_safety_write_abort(statuses, verifying_write.orig_p.clone(), *timestamp);
-            return true;
-          }
-        }
-      }
-    }
-
-    // Finally, we search for any DeadlockSafetyReadAbort.
-    for (timestamp, set) in &self.waiting_read_protected {
-      if let Some(prepared_write) = self.prepared_writes.get(timestamp) {
-        for protect_request in set {
-          if does_intersect(&protect_request.read_region, &prepared_write.m_write_protected) {
-            self.deadlock_safety_read_abort(statuses, *timestamp, protect_request.clone());
             return true;
           }
         }
@@ -1414,101 +1478,81 @@ impl<T: IOTypes> TabletContext<T> {
 
   /// Route the column locking to the appropriate ES.
   fn grant_table_dropped(&mut self, statuses: &mut Statuses, orig_p: OrigP) {
-    // TODO: do
+    let query_id = orig_p.query_id;
+    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
+      // TableReadES
+      let action = read.es.table_dropped(self);
+      self.handle_read_es_action(statuses, query_id, action);
+    } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
+      // MSTableWriteES
+      let action = ms_write.es.table_dropped(self);
+      self.handle_ms_write_es_action(statuses, query_id, action);
+    } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
+      // MSTableReadES
+      let action = ms_read.es.table_dropped(self);
+      self.handle_ms_read_es_action(statuses, query_id, action);
+    }
   }
 
   /// Move the ProtectRequest in `waiting_read_protected` forward.
-  fn grant_read_region(
+  fn grant_local_read_protected(
     &mut self,
     statuses: &mut Statuses,
     timestamp: Timestamp,
-    protect_request: ProtectRequest,
+    protect_request: RequestedReadProtected,
   ) {
-    self.remove_read_protected_request(&timestamp, &protect_request.protect_qid).unwrap();
-    btree_multimap_insert(&mut self.read_protected, &timestamp, protect_request.read_region);
+    self.remove_read_protected_request(&timestamp, &protect_request.query_id).unwrap();
+    btree_multimap_insert(&mut self.inserting_read_protected, &timestamp, protect_request.clone());
+    self.tablet_bundle.push(TabletPLm::ReadProtected(ReadProtected {
+      query_id: protect_request.query_id.clone(),
+      timestamp: timestamp,
+      region: protect_request.read_region,
+    }));
 
     // Inform the originator.
-    self.read_protected_for_query(statuses, protect_request.orig_p, protect_request.protect_qid);
+    let query_id = protect_request.orig_p.query_id;
+    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
+      // TableReadES
+      let action = read.es.local_read_protected(self, protect_request.query_id);
+      self.handle_read_es_action(statuses, query_id, action);
+    }
   }
 
   /// Move the ProtectRequest in `m_waiting_read_protected` forward.
-  fn grant_m_read_region(
+  fn grant_m_local_read_protected(
     &mut self,
     statuses: &mut Statuses,
     timestamp: Timestamp,
-    protect_request: ProtectRequest,
+    protect_request: RequestedReadProtected,
   ) {
     let verifying_write = self.verifying_writes.get_mut(&timestamp).unwrap();
     verifying_write.m_waiting_read_protected.remove(&protect_request);
     verifying_write.m_read_protected.insert(protect_request.read_region);
 
     // Inform the originator.
-    self.read_protected_for_query(statuses, protect_request.orig_p, protect_request.protect_qid);
-  }
-
-  /// We call this when a DeadlockSafetyReadAbort happens for a `waiting_read_protected`.
-  fn deadlock_safety_read_abort(
-    &mut self,
-    statuses: &mut Statuses,
-    timestamp: Timestamp,
-    protect_request: ProtectRequest,
-  ) {
-    // Remove the ProtectRequest.
-    self.remove_read_protected_request(&timestamp, &protect_request.protect_qid).unwrap();
-
-    // Send back Aborted and ECU.
     let query_id = protect_request.orig_p.query_id;
-    if let Some(mut read) = statuses.table_read_ess.remove(&query_id) {
-      let sender_path = read.sender_path;
-      let responder_path = self.mk_query_path(query_id);
-      self.ctx().send_to_path(
-        sender_path.clone(),
-        CommonQuery::QueryAborted(msg::QueryAborted {
-          return_qid: sender_path.query_id,
-          responder_path,
-          payload: msg::AbortedData::QueryError(msg::QueryError::DeadlockSafetyAbortion),
-        }),
+    if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
+      // MSTableWriteES
+      let action = ms_write.es.local_read_protected(
+        self,
+        statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap(),
+        protect_request.query_id,
       );
-      read.es.exit_and_clean_up(self);
-      self.exit_all(statuses, read.child_queries)
+      self.handle_ms_write_es_action(statuses, query_id, action);
+    } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
+      // MSTableReadES
+      let action = ms_read.es.local_read_protected(
+        self,
+        statuses.ms_query_ess.get(&ms_read.es.ms_query_id).unwrap(),
+        protect_request.query_id,
+      );
+      self.handle_ms_read_es_action(statuses, query_id, action);
     }
   }
 
   /// Simply aborts the MSQueryES, which will clean up everything to do with it.
   fn deadlock_safety_write_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP, _: Timestamp) {
     self.exit_ms_query_es(statuses, orig_p.query_id, msg::QueryError::DeadlockSafetyAbortion);
-  }
-
-  /// We get this if a ReadProtection was granted by the Main Loop. This includes standard
-  /// read_protected, or m_read_protected.
-  fn read_protected_for_query(
-    &mut self,
-    statuses: &mut Statuses,
-    orig_p: OrigP,
-    protect_query_id: QueryId,
-  ) {
-    let query_id = orig_p.query_id;
-    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
-      // TableReadES
-      let action = read.es.read_protected(self, protect_query_id);
-      self.handle_read_es_action(statuses, query_id, action);
-    } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
-      // MSTableWriteES
-      let action = ms_write.es.read_protected(
-        self,
-        statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap(),
-        protect_query_id,
-      );
-      self.handle_ms_write_es_action(statuses, query_id, action);
-    } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
-      // MSTableReadES
-      let action = ms_read.es.read_protected(
-        self,
-        statuses.ms_query_ess.get(&ms_read.es.ms_query_id).unwrap(),
-        protect_query_id,
-      );
-      self.handle_ms_read_es_action(statuses, query_id, action);
-    }
   }
 
   /// Handles an incoming QuerySuccess message.

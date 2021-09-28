@@ -17,7 +17,7 @@ use crate::server::{
 use crate::storage::MSStorageView;
 use crate::tablet::{
   compute_subqueries, ColumnsLocking, ContextKeyboundComputer, Executing, MSQueryES, Pending,
-  ProtectRequest, QueryReplanningSqlView, SingleSubqueryStatus, StorageLocalTable,
+  QueryReplanningSqlView, RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable,
   SubqueryFinished, SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion,
   TabletContext,
 };
@@ -149,6 +149,11 @@ impl MSTableReadES {
     }
   }
 
+  /// TODO: do
+  pub fn table_dropped<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> MSTableReadAction {
+    return MSTableReadAction::Wait;
+  }
+
   /// Starts the Execution state
   fn start_ms_table_read_es<T: IOTypes>(
     &mut self,
@@ -195,16 +200,16 @@ impl MSTableReadES {
 
     // Add a ReadRegion to the m_waiting_read_protected.
     let verifying = ctx.verifying_writes.get_mut(&self.timestamp).unwrap();
-    verifying.m_waiting_read_protected.insert(ProtectRequest {
+    verifying.m_waiting_read_protected.insert(RequestedReadProtected {
       orig_p: OrigP::new(self.query_id.clone()),
-      protect_qid,
+      query_id: protect_qid,
       read_region,
     });
     MSTableReadAction::Wait
   }
 
   /// Handle ReadRegion protection
-  pub fn read_protected<T: IOTypes>(
+  pub fn local_read_protected<T: IOTypes>(
     &mut self,
     ctx: &mut TabletContext<T>,
     ms_query_es: &MSQueryES,
