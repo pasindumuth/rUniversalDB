@@ -212,6 +212,14 @@ impl TransTableReadES {
     }
   }
 
+  /// TODO: do
+  pub fn remote_leader_changed<T: IOTypes>(
+    &mut self,
+    _: &mut ServerContext<T>,
+  ) -> TransTableAction {
+    return TransTableAction::Wait;
+  }
+
   /// This is can be called both for if a subquery fails, or if there is a LateralError
   /// due to the ES owning the TransTable disappears. This simply responds to the sender
   /// and Exits and Clean Ups this ES.

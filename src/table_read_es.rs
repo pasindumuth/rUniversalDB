@@ -276,6 +276,16 @@ impl TableReadES {
     return TableAction::Wait;
   }
 
+  /// TODO: do
+  pub fn remote_leader_changed<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> TableAction {
+    return TableAction::Wait;
+  }
+
+  /// TODO: do
+  pub fn gossip_data_changed<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> TableAction {
+    return TableAction::Wait;
+  }
+
   /// This is called if a subquery fails. This simply responds to the sender
   /// and Exits and Clean Ups this ES. This is also called when a Deadlock Safety
   /// Abortion happens.

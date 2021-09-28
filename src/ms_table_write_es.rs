@@ -285,6 +285,22 @@ impl MSTableWriteES {
     }
   }
 
+  /// TODO: do
+  pub fn remote_leader_changed<T: IOTypes>(
+    &mut self,
+    _: &mut TabletContext<T>,
+  ) -> MSTableWriteAction {
+    return MSTableWriteAction::Wait;
+  }
+
+  /// TODO: do
+  pub fn gossip_data_changed<T: IOTypes>(
+    &mut self,
+    _: &mut TabletContext<T>,
+  ) -> MSTableWriteAction {
+    return MSTableWriteAction::Wait;
+  }
+
   /// This is called if a subquery fails.
   pub fn handle_internal_query_error<T: IOTypes>(
     &mut self,

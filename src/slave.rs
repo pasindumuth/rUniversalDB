@@ -5,9 +5,9 @@ use crate::common::{
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
-  iast, proc, ColName, ColType, Context, ContextRow, Gen, NodeGroupId, NodePath, QueryPath,
-  SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
-  TransTableLocationPrefix, TransTableName,
+  iast, proc, ColName, ColType, Context, ContextRow, Gen, LeadershipId, NodeGroupId, NodePath,
+  PaxosGroupId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
+  TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
@@ -22,12 +22,22 @@ use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{
   TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
 };
+use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+
+// -----------------------------------------------------------------------------------------------
+//  Paxos
+// -----------------------------------------------------------------------------------------------
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RemoteLeaderChangedPLm {
+  pub gid: PaxosGroupId,
+  pub lid: LeadershipId,
+}
 
 // -----------------------------------------------------------------------------------------------
 //  Slave State

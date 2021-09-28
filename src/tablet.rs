@@ -20,8 +20,8 @@ use crate::gr_query_es::{
   SubqueryComputableSql,
 };
 use crate::model::common::{
-  proc, ColType, ColValN, Context, ContextRow, ContextSchema, Gen, NodeGroupId, NodePath,
-  QueryPath, TableView, TierMap, TransTableLocationPrefix, TransTableName,
+  proc, ColType, ColValN, Context, ContextRow, ContextSchema, Gen, LeadershipId, NodeGroupId,
+  NodePath, PaxosGroupId, QueryPath, TableView, TierMap, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::common::{
   ColName, ColVal, EndpointId, PrimaryKey, QueryId, SlaveGroupId, TablePath, TabletGroupId,
@@ -36,6 +36,7 @@ use crate::server::{
   are_cols_locked, contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error,
   CommonQuery, ContextConstructor, LocalTable, ServerContext,
 };
+use crate::slave::RemoteLeaderChangedPLm;
 use crate::storage::{commit_to_storage, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{
@@ -473,7 +474,7 @@ pub enum TabletForwardMsg {
   TabletBundle(Vec<TabletPLm>),
   TabletMessage(msg::TabletMessage),
   GossipData(Arc<GossipData>),
-  RemoteLeaderChanged(msg::RemoteLeaderChanged),
+  RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(LeaderChanged),
 }
 
@@ -500,7 +501,10 @@ pub struct TabletContext<T: IOTypes> {
   pub master_eid: EndpointId,
 
   /// Gossip
-  pub gossip: Arc<GossipData>,
+  pub gossip_data: Arc<GossipData>,
+
+  /// LeaderMap
+  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
 
   // Storage
   pub storage: GenericMVTable,
@@ -560,7 +564,8 @@ impl<T: IOTypes> TabletState<T> {
         this_slave_group_id,
         this_tablet_group_id,
         master_eid,
-        gossip,
+        gossip_data: gossip,
+        leader_map: Default::default(),
         storage: GenericMVTable::new(),
         this_table_path,
         this_table_key_range,
@@ -600,7 +605,7 @@ impl<T: IOTypes> TabletContext<T> {
       this_slave_group_id: &self.this_slave_group_id,
       maybe_this_tablet_group_id: Some(&self.this_tablet_group_id),
       master_eid: &self.master_eid,
-      gossip: &mut self.gossip,
+      gossip: &mut self.gossip_data,
     }
   }
 
@@ -1030,8 +1035,65 @@ impl<T: IOTypes> TabletContext<T> {
         }
         self.run_main_loop(statuses);
       }
-      TabletForwardMsg::GossipData(_) => panic!(),
-      TabletForwardMsg::RemoteLeaderChanged(_) => panic!(),
+      TabletForwardMsg::GossipData(gossip_data) => {
+        self.gossip_data = gossip_data;
+
+        // Inform Top-Level ESs.
+        let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let read = statuses.table_read_ess.get_mut(&query_id).unwrap();
+          let action = read.es.gossip_data_changed(self);
+          self.handle_read_es_action(statuses, query_id, action);
+        }
+
+        let query_ids: Vec<QueryId> = statuses.ms_table_read_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let ms_read = statuses.ms_table_read_ess.get_mut(&query_id).unwrap();
+          let action = ms_read.es.gossip_data_changed(self);
+          self.handle_ms_read_es_action(statuses, query_id, action);
+        }
+
+        let query_ids: Vec<QueryId> = statuses.ms_table_write_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let ms_write = statuses.ms_table_write_ess.get_mut(&query_id).unwrap();
+          let action = ms_write.es.gossip_data_changed(self);
+          self.handle_ms_write_es_action(statuses, query_id, action);
+        }
+      }
+      TabletForwardMsg::RemoteLeaderChanged(RemoteLeaderChangedPLm { gid, lid }) => {
+        self.leader_map.insert(gid, lid); // Update the LeadershipId
+
+        // Inform Top-Level ESs.
+        let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let read = statuses.table_read_ess.get_mut(&query_id).unwrap();
+          let action = read.es.remote_leader_changed(self);
+          self.handle_read_es_action(statuses, query_id, action);
+        }
+
+        let query_ids: Vec<QueryId> = statuses.trans_table_read_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
+          let action = trans_read.es.remote_leader_changed(&mut self.ctx());
+          self.handle_trans_read_es_action(statuses, query_id, action);
+        }
+
+        let query_ids: Vec<QueryId> = statuses.ms_table_read_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let ms_read = statuses.ms_table_read_ess.get_mut(&query_id).unwrap();
+          let action = ms_read.es.remote_leader_changed(self);
+          self.handle_ms_read_es_action(statuses, query_id, action);
+        }
+
+        let query_ids: Vec<QueryId> = statuses.ms_table_write_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let ms_write = statuses.ms_table_write_ess.get_mut(&query_id).unwrap();
+          let action = ms_write.es.remote_leader_changed(self);
+          self.handle_ms_write_es_action(statuses, query_id, action);
+        }
+
+        // TODO: Infrom TMStatus
+      }
       TabletForwardMsg::LeaderChanged(_) => panic!(),
     }
   }
