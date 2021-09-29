@@ -3,8 +3,8 @@ use crate::common::{lookup_pos, GossipData, IOTypes, KeyBound, NetworkOut, OrigP
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
   proc, ColName, ColType, ColVal, ColValN, ContextRow, ContextSchema, CoordGroupId, EndpointId,
-  NodeGroupId, NodePath, QueryId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId,
-  TabletKeyRange, Timestamp, TransTableName,
+  Gen, NodeGroupId, NodePath, QueryId, QueryPath, SlaveGroupId, TablePath, TableView,
+  TabletGroupId, TabletKeyRange, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use sqlparser::test_utils::table;
@@ -27,7 +27,7 @@ pub struct CoreServerContext<'a, T: IOTypes> {
   pub network_output: &'a mut T::NetworkOutT,
 
   /// Distribution
-  pub sharding_config: &'a HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub sharding_config: &'a HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: &'a HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: &'a HashMap<SlaveGroupId, EndpointId>,
   // TODO: we should not need coord_address_config; any responder should remember
@@ -172,7 +172,8 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
   ) -> Vec<TabletGroupId> {
     // Next, we try to reduce the number of TabletGroups we must contact by computing
     // the key_region of TablePath that we're going to be reading.
-    let tablet_groups = self.gossip.sharding_config.get(table_path).unwrap();
+    // TODO: fix this logic
+    let tablet_groups = self.gossip.sharding_config.get(&(table_path.clone(), Gen(0))).unwrap();
     let key_cols = &self.gossip.db_schema.get(table_path).unwrap().key_cols;
     match &compute_key_region(selection, HashMap::new(), key_cols) {
       Ok(_) => {

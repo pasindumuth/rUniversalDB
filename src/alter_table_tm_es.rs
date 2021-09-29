@@ -1,7 +1,7 @@
 use crate::common::{GossipData, GossipDataSer, IOTypes, NetworkOut};
 use crate::master::MasterContext;
 use crate::model::common::{
-  proc, EndpointId, QueryId, RequestId, TablePath, TabletGroupId, Timestamp,
+  proc, EndpointId, Gen, QueryId, RequestId, TablePath, TabletGroupId, Timestamp,
 };
 use crate::model::message as msg;
 use std::cmp::max;
@@ -65,7 +65,8 @@ impl AlterTableES {
     } else {
       // Otherwise, we start the 2PC.
       let mut tm_state = HashMap::<TabletGroupId, Option<Timestamp>>::new();
-      for (_, tid) in ctx.sharding_config.get(&self.table_path).unwrap() {
+      // TODO: fix
+      for (_, tid) in ctx.sharding_config.get(&(self.table_path.clone(), Gen(0))).unwrap() {
         tm_state.insert(tid.clone(), None);
       }
 

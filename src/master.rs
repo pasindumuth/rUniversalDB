@@ -42,7 +42,7 @@ impl<T: IOTypes> MasterState<T> {
     clock: T::ClockT,
     network_output: T::NetworkOutT,
     db_schema: HashMap<TablePath, TableSchema>,
-    sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+    sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
     slave_address_config: HashMap<SlaveGroupId, EndpointId>,
   ) -> MasterState<T> {
@@ -82,7 +82,7 @@ pub struct MasterContext<T: IOTypes> {
   pub table_generation: HashMap<TablePath, Gen>,
 
   /// Distribution
-  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
 

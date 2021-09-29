@@ -544,7 +544,8 @@ impl<T: IOTypes> TabletState<T> {
     this_tablet_group_id: TabletGroupId,
     master_eid: EndpointId,
   ) -> TabletState<T> {
-    let (this_table_path, this_table_key_range) = (|| {
+    // TODO fix this logic
+    let ((this_table_path, _), this_table_key_range) = (|| {
       // Search the sharding config, which should contain this data.
       for (path, shards) in &gossip.sharding_config {
         for (key_range, tid) in shards {

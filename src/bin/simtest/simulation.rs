@@ -121,7 +121,7 @@ impl Simulation {
 
     // Arguments that are specific to SlaveState and TabletState
     schema: HashMap<TablePath, TableSchema>,
-    sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+    sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
     slave_address_config: HashMap<SlaveGroupId, EndpointId>,
   ) -> Simulation {

@@ -3,7 +3,7 @@ mod simulation;
 use crate::simulation::{client_eid, slave_eid, Simulation};
 use runiversal::common::TableSchema;
 use runiversal::model::common::{
-  ColName, ColType, ColVal, EndpointId, PrimaryKey, RequestId, SlaveGroupId, TablePath,
+  ColName, ColType, ColVal, EndpointId, Gen, PrimaryKey, RequestId, SlaveGroupId, TablePath,
   TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message as msg;
@@ -63,9 +63,9 @@ fn main() {
   .collect();
 
   #[rustfmt::skip]
-  let sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>> = vec![
+  let sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>> = vec![
     (
-      mk_tab("tab0"),
+      (mk_tab("tab0"), Gen(0)),
       vec![
         (
           TabletKeyRange {
@@ -91,7 +91,7 @@ fn main() {
       ],
     ),
     (
-      mk_tab("tab1"),
+      (mk_tab("tab1"), Gen(0)),
       vec![
         (
           TabletKeyRange {
@@ -110,7 +110,7 @@ fn main() {
       ],
     ),
     (
-      mk_tab("tab2"),
+      (mk_tab("tab2"), Gen(0)),
       vec![
         (
           TabletKeyRange {

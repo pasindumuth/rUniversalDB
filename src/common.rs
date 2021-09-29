@@ -162,9 +162,8 @@ pub struct GossipData {
   pub db_schema: HashMap<TablePath, TableSchema>,
   pub table_generation: HashMap<TablePath, Gen>,
 
-  // TODO: Change the keys here to (TablePath, Gen)
   /// Distribution
-  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
   // TODO: we should not need coord_address_config; any responder should remember
@@ -178,7 +177,7 @@ pub struct GossipDataSer {
   pub gen: Gen,
   pub db_schema: HashMap<TablePath, TableSchemaSer>,
   pub table_generation: HashMap<TablePath, Gen>,
-  pub sharding_config: HashMap<TablePath, Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
 }
