@@ -63,6 +63,9 @@ pub struct SlaveContext<T: IOTypes> {
   /// Gossip
   pub gossip: Arc<GossipData>,
 
+  /// Paxos
+  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
+
   /// External Query Management
   pub external_request_id_map: HashMap<RequestId, QueryId>,
 }
@@ -86,6 +89,7 @@ impl<T: IOTypes> SlaveState<T> {
         this_slave_group_id,
         master_eid,
         gossip,
+        leader_map: Default::default(),
         external_request_id_map: Default::default(),
       },
     }
@@ -104,7 +108,7 @@ impl<T: IOTypes> SlaveContext<T> {
       network_output: &mut self.network_output,
       this_slave_group_id: &self.this_slave_group_id,
       maybe_this_tablet_group_id: None,
-      master_eid: &self.master_eid,
+      leader_map: &self.leader_map,
       gossip: &mut self.gossip,
     }
   }

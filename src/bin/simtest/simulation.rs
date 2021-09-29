@@ -202,7 +202,6 @@ impl Simulation {
             gossip.clone(),
             sid.clone(),
             tid.clone(),
-            EndpointId("".to_string()), // TODO: Implement Master properly.
           ),
         );
       }

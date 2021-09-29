@@ -24,8 +24,16 @@ pub enum NetworkMessage {
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum MasterExternalReq {
+  PerformExternalDDLQuery(PerformExternalDDLQuery),
+  CancelExternalDDLQuery(CancelExternalDDLQuery),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterMessage {
-  // External AlterTable Messages
+  // Old
+
+  // External DDL Query Messages
   PerformExternalDDLQuery(PerformExternalDDLQuery),
   CancelExternalDDLQuery(CancelExternalDDLQuery),
 
@@ -47,6 +55,11 @@ pub enum MasterMessage {
   DropTablePrepared(DropTablePrepared),
   DropTableAborted(DropTableAborted),
   DropTableCloseConfirm(DropTableCloseConfirm),
+
+  // New
+  MasterExternalReq(MasterExternalReq),
+  RemoteMessage(RemoteMessage<MasterRemotePayload>),
+  PaxosMessage(PaxosMessage),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -122,6 +135,9 @@ pub enum MasterRemotePayload {
   DropTablePrepared(DropTablePrepared),
   DropTableAborted(DropTableAborted),
   DropTableCloseConfirm(DropTableCloseConfirm),
+
+  // Gossip
+  MasterGossipRequest(MasterGossipRequest),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -596,6 +612,11 @@ pub struct DropTableCloseConfirm {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterGossip {
   pub gossip_data: GossipDataSer,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MasterGossipRequest {
+  pub slave_group_id: SlaveGroupId,
 }
 
 // -------------------------------------------------------------------------------------------------

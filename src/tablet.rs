@@ -28,6 +28,7 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
+use crate::model::message::SlaveMessage::PaxosMessage;
 use crate::ms_table_read_es::{MSReadExecutionS, MSTableReadAction, MSTableReadES};
 use crate::ms_table_write_es::{MSTableWriteAction, MSTableWriteES, MSWriteExecutionS};
 use crate::multiversion_map::MVM;
@@ -227,11 +228,23 @@ struct TableReadESWrapper {
   es: TableReadES,
 }
 
+impl TableReadESWrapper {
+  fn sender_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.sender_path.node_path.slave_group_id.clone())
+  }
+}
+
 #[derive(Debug)]
 pub struct TransTableReadESWrapper {
   pub sender_path: QueryPath,
   pub child_queries: Vec<QueryId>,
   pub es: TransTableReadES,
+}
+
+impl TransTableReadESWrapper {
+  fn sender_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.sender_path.node_path.slave_group_id.clone())
+  }
 }
 
 #[derive(Debug)]
@@ -241,11 +254,23 @@ struct MSTableReadESWrapper {
   es: MSTableReadES,
 }
 
+impl MSTableReadESWrapper {
+  fn sender_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.sender_path.node_path.slave_group_id.clone())
+  }
+}
+
 #[derive(Debug)]
 struct MSTableWriteESWrapper {
   sender_path: QueryPath,
   child_queries: Vec<QueryId>,
   es: MSTableWriteES,
+}
+
+impl MSTableWriteESWrapper {
+  fn sender_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.sender_path.node_path.slave_group_id.clone())
+  }
 }
 
 #[derive(Debug)]
@@ -498,7 +523,7 @@ pub struct TabletContext<T: IOTypes> {
   /// Metadata
   pub this_slave_group_id: SlaveGroupId,
   pub this_tablet_group_id: TabletGroupId,
-  pub master_eid: EndpointId,
+  pub this_eid: EndpointId,
 
   /// Gossip
   pub gossip_data: Arc<GossipData>,
@@ -542,7 +567,6 @@ impl<T: IOTypes> TabletState<T> {
     gossip: Arc<GossipData>,
     this_slave_group_id: SlaveGroupId,
     this_tablet_group_id: TabletGroupId,
-    master_eid: EndpointId,
   ) -> TabletState<T> {
     // TODO fix this logic
     let ((this_table_path, _), this_table_key_range) = (|| {
@@ -564,7 +588,7 @@ impl<T: IOTypes> TabletState<T> {
         network_output,
         this_slave_group_id,
         this_tablet_group_id,
-        master_eid,
+        this_eid: EndpointId("".to_string()),
         gossip_data: gossip,
         leader_map: Default::default(),
         storage: GenericMVTable::new(),
@@ -605,7 +629,7 @@ impl<T: IOTypes> TabletContext<T> {
       network_output: &mut self.network_output,
       this_slave_group_id: &self.this_slave_group_id,
       maybe_this_tablet_group_id: Some(&self.this_tablet_group_id),
-      master_eid: &self.master_eid,
+      leader_map: &self.leader_map,
       gossip: &mut self.gossip_data,
     }
   }
@@ -651,7 +675,7 @@ impl<T: IOTypes> TabletContext<T> {
               let query_id = req.orig_p.query_id;
               if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
                 // TableReadES
-                let action = read.es.global_read_protected(self);
+                let action = read.es.global_read_protected(self, req.query_id);
                 self.handle_read_es_action(statuses, query_id, action);
               }
             }
@@ -944,15 +968,12 @@ impl<T: IOTypes> TabletContext<T> {
               alter_table_es.handle_abort(abort, self);
             } else {
               // Send back a `CloseConfirm` to the Master.
-              self.network_output.send(
-                &self.master_eid,
-                msg::NetworkMessage::Master(msg::MasterMessage::AlterTableCloseConfirm(
-                  msg::AlterTableCloseConfirm {
-                    query_id: abort.query_id,
-                    tablet_group_id: self.this_tablet_group_id.clone(),
-                  },
-                )),
-              );
+              let payload =
+                msg::MasterRemotePayload::AlterTableCloseConfirm(msg::AlterTableCloseConfirm {
+                  query_id: abort.query_id,
+                  tablet_group_id: self.this_tablet_group_id.clone(),
+                });
+              self.ctx().send_to_master(payload);
             }
           }
           msg::TabletMessage::AlterTableCommit(commit) => {
@@ -961,15 +982,12 @@ impl<T: IOTypes> TabletContext<T> {
               alter_table_es.handle_commit(commit, self);
             } else {
               // Send back a `CloseConfirm` to the Master.
-              self.network_output.send(
-                &self.master_eid,
-                msg::NetworkMessage::Master(msg::MasterMessage::AlterTableCloseConfirm(
-                  msg::AlterTableCloseConfirm {
-                    query_id: commit.query_id,
-                    tablet_group_id: self.this_tablet_group_id.clone(),
-                  },
-                )),
-              );
+              let payload =
+                msg::MasterRemotePayload::AlterTableCloseConfirm(msg::AlterTableCloseConfirm {
+                  query_id: commit.query_id,
+                  tablet_group_id: self.this_tablet_group_id.clone(),
+                });
+              self.ctx().send_to_master(payload);
             }
           }
           msg::TabletMessage::DropTablePrepare(prepare) => {
@@ -1005,15 +1023,12 @@ impl<T: IOTypes> TabletContext<T> {
               drop_table_es.handle_abort(abort, self);
             } else {
               // Send back a `CloseConfirm` to the Master.
-              self.network_output.send(
-                &self.master_eid,
-                msg::NetworkMessage::Master(msg::MasterMessage::DropTableCloseConfirm(
-                  msg::DropTableCloseConfirm {
-                    query_id: abort.query_id,
-                    tablet_group_id: self.this_tablet_group_id.clone(),
-                  },
-                )),
-              );
+              let payload =
+                msg::MasterRemotePayload::DropTableCloseConfirm(msg::DropTableCloseConfirm {
+                  query_id: abort.query_id,
+                  tablet_group_id: self.this_tablet_group_id.clone(),
+                });
+              self.ctx().send_to_master(payload);
             }
           }
           msg::TabletMessage::DropTableCommit(commit) => {
@@ -1022,15 +1037,12 @@ impl<T: IOTypes> TabletContext<T> {
               drop_table_es.handle_commit(commit, self);
             } else {
               // Send back a `CloseConfirm` to the Master.
-              self.network_output.send(
-                &self.master_eid,
-                msg::NetworkMessage::Master(msg::MasterMessage::DropTableCloseConfirm(
-                  msg::DropTableCloseConfirm {
-                    query_id: commit.query_id,
-                    tablet_group_id: self.this_tablet_group_id.clone(),
-                  },
-                )),
-              );
+              let payload =
+                msg::MasterRemotePayload::DropTableCloseConfirm(msg::DropTableCloseConfirm {
+                  query_id: commit.query_id,
+                  tablet_group_id: self.this_tablet_group_id.clone(),
+                });
+              self.ctx().send_to_master(payload);
             }
           }
         }
@@ -1062,35 +1074,39 @@ impl<T: IOTypes> TabletContext<T> {
         }
       }
       TabletForwardMsg::RemoteLeaderChanged(RemoteLeaderChangedPLm { gid, lid }) => {
-        self.leader_map.insert(gid, lid); // Update the LeadershipId
+        self.leader_map.insert(gid.clone(), lid.clone()); // Update the LeadershipId
 
-        // Inform Top-Level ESs.
+        // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no response).
         let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
         for query_id in query_ids {
           let read = statuses.table_read_ess.get_mut(&query_id).unwrap();
-          let action = read.es.remote_leader_changed(self);
-          self.handle_read_es_action(statuses, query_id, action);
+          if read.sender_gid() == gid {
+            self.exit_and_clean_up(statuses, query_id);
+          }
         }
 
         let query_ids: Vec<QueryId> = statuses.trans_table_read_ess.keys().cloned().collect();
         for query_id in query_ids {
           let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
-          let action = trans_read.es.remote_leader_changed(&mut self.ctx());
-          self.handle_trans_read_es_action(statuses, query_id, action);
+          if trans_read.sender_gid() == gid {
+            self.exit_and_clean_up(statuses, query_id);
+          }
         }
 
         let query_ids: Vec<QueryId> = statuses.ms_table_read_ess.keys().cloned().collect();
         for query_id in query_ids {
           let ms_read = statuses.ms_table_read_ess.get_mut(&query_id).unwrap();
-          let action = ms_read.es.remote_leader_changed(self);
-          self.handle_ms_read_es_action(statuses, query_id, action);
+          if ms_read.sender_gid() == gid {
+            self.exit_and_clean_up(statuses, query_id);
+          }
         }
 
         let query_ids: Vec<QueryId> = statuses.ms_table_write_ess.keys().cloned().collect();
         for query_id in query_ids {
           let ms_write = statuses.ms_table_write_ess.get_mut(&query_id).unwrap();
-          let action = ms_write.es.remote_leader_changed(self);
-          self.handle_ms_write_es_action(statuses, query_id, action);
+          if ms_write.sender_gid() == gid {
+            self.exit_and_clean_up(statuses, query_id);
+          }
         }
 
         // TODO: Infrom TMStatus

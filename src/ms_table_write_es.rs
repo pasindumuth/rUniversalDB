@@ -98,7 +98,9 @@ impl MSTableWriteES {
     MSTableWriteAction::Wait
   }
 
-  /// This checks that `external_cols` aren't present, and `safe_present_cols` are present.
+  /// This checks that `external_cols` are not present, and `safe_present_cols` and
+  /// `extra_req_cols` are preset.
+  ///
   /// Note: this does *not* required columns to be locked.
   fn does_query_plan_align<T: IOTypes>(&self, ctx: &TabletContext<T>) -> bool {
     // First, check that `external_cols are absent.
@@ -130,6 +132,27 @@ impl MSTableWriteES {
     return true;
   }
 
+  // Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
+  fn check_gossip_data<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> MSTableWriteAction {
+    for (table_path, gen) in &self.query_plan.table_location_map {
+      if !ctx.gossip_data.sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
+        // If not, we go to GossipDataWaiting
+        self.state = MSWriteExecutionS::GossipDataWaiting;
+
+        // Request a GossipData from the Master to help stimulate progress.
+        let payload = msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest {
+          slave_group_id: ctx.this_slave_group_id.clone(),
+        });
+        ctx.ctx().send_to_master(payload);
+
+        return MSTableWriteAction::Wait;
+      }
+    }
+
+    // We start locking the regions.
+    self.start_ms_table_write_es(ctx)
+  }
+
   /// Handle Columns being locked
   pub fn local_locked_cols<T: IOTypes>(
     &mut self,
@@ -138,19 +161,35 @@ impl MSTableWriteES {
   ) -> MSTableWriteAction {
     let locking = cast!(MSWriteExecutionS::ColumnsLocking, &self.state).unwrap();
     assert_eq!(locking.locked_cols_qid, locked_cols_qid);
-
     // Now, we check whether the TableSchema aligns with the QueryPlan.
-    if self.does_query_plan_align(ctx) {
+    if !self.does_query_plan_align(ctx) {
+      self.state = MSWriteExecutionS::Done;
       MSTableWriteAction::QueryError(msg::QueryError::InvalidQueryPlan)
     } else {
-      // If it aligns, we start locking the regions.
-      self.start_ms_table_write_es(ctx)
+      // If it aligns, we verify is GossipData is recent enough.
+      self.check_gossip_data(ctx)
     }
   }
 
-  /// TODO: do
+  /// Here, the column locking request results in us realizing the table has been dropped.
   pub fn table_dropped<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> MSTableWriteAction {
-    return MSTableWriteAction::Wait;
+    assert!(cast!(MSWriteExecutionS::ColumnsLocking, &self.state).is_ok());
+    self.state = MSWriteExecutionS::Done;
+    MSTableWriteAction::QueryError(msg::QueryError::InvalidQueryPlan)
+  }
+
+  /// Here, we GossipData gets delivered.
+  pub fn gossip_data_changed<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+  ) -> MSTableWriteAction {
+    if let MSWriteExecutionS::GossipDataWaiting = self.state {
+      // Verify is GossipData is now recent enough.
+      self.check_gossip_data(ctx)
+    } else {
+      // Do nothing
+      MSTableWriteAction::Wait
+    }
   }
 
   /// Starts the Execution state
@@ -283,22 +322,6 @@ impl MSTableWriteES {
       // Return the subqueries
       MSTableWriteAction::SendSubqueries(gr_query_statuses)
     }
-  }
-
-  /// TODO: do
-  pub fn remote_leader_changed<T: IOTypes>(
-    &mut self,
-    _: &mut TabletContext<T>,
-  ) -> MSTableWriteAction {
-    return MSTableWriteAction::Wait;
-  }
-
-  /// TODO: do
-  pub fn gossip_data_changed<T: IOTypes>(
-    &mut self,
-    _: &mut TabletContext<T>,
-  ) -> MSTableWriteAction {
-    return MSTableWriteAction::Wait;
   }
 
   /// This is called if a subquery fails.
@@ -480,33 +503,7 @@ impl MSTableWriteES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
-    match &self.state {
-      MSWriteExecutionS::Start => {}
-      MSWriteExecutionS::ColumnsLocking(_) => {}
-      MSWriteExecutionS::GossipDataWaiting => {}
-      MSWriteExecutionS::Pending(pending) => {
-        // Here, we remove the ReadRegion from `m_waiting_read_protected`, if it still
-        // exists. Note that we leave `m_read_protected` and `m_write_protected` intact
-        // since they are inconvenient to change (since they don't have `query_id`.
-        ctx.remove_m_read_protected_request(&self.timestamp, &pending.query_id);
-      }
-      MSWriteExecutionS::Executing(executing) => {
-        // Here, we need to cancel every Subquery. Depending on the state of the
-        // SingleSubqueryStatus, we either need to either clean up the column locking
-        // request or the ReadRegion from m_waiting_read_protected.
-
-        // Note that we leave `m_read_protected` and `m_write_protected` in-tact
-        // since they are inconvenient to change (since they don't have `query_id`).
-        for single_status in &executing.subqueries {
-          match single_status {
-            SingleSubqueryStatus::Pending(_) => {}
-            SingleSubqueryStatus::Finished(_) => {}
-          }
-        }
-      }
-      MSWriteExecutionS::Done => {}
-    }
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, _: &mut TabletContext<T>) {
     self.state = MSWriteExecutionS::Done;
   }
 }

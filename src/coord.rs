@@ -137,7 +137,7 @@ impl<T: IOTypes> CoordContext<T> {
       network_output: &mut self.network_output,
       this_slave_group_id: &self.this_slave_group_id,
       maybe_this_tablet_group_id: None,
-      master_eid: &self.master_eid,
+      leader_map: &self.leader_map,
       gossip: &mut self.gossip,
     }
   }

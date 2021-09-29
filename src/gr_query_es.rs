@@ -263,12 +263,9 @@ impl GRQueryES {
       GRExecutionS::Start => {}
       GRExecutionS::ReadStage(_) => {}
       GRExecutionS::MasterQueryReplanning(planning) => {
-        ctx.network_output.send(
-          &ctx.master_eid,
-          msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-            msg::CancelMasterFrozenColUsage { query_id: planning.master_query_id.clone() },
-          )),
-        );
+        ctx.send_to_master(msg::MasterRemotePayload::CancelMasterFrozenColUsage(
+          msg::CancelMasterFrozenColUsage { query_id: planning.master_query_id.clone() },
+        ));
       }
       GRExecutionS::Done => {}
     };

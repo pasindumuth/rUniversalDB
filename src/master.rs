@@ -209,6 +209,9 @@ impl<T: IOTypes> MasterContext<T> {
       MasterMessage::DropTableAborted(_) => panic!(),
       MasterMessage::AlterTableCloseConfirm(_) => panic!(),
       MasterMessage::DropTableCloseConfirm(_) => panic!(),
+      MasterMessage::MasterExternalReq(_) => {}
+      MasterMessage::RemoteMessage(_) => {}
+      MasterMessage::PaxosMessage(_) => {}
     }
 
     self.run_main_loop(statuses);

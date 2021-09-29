@@ -347,7 +347,7 @@ pub struct TableRegion {
 // -----------------------------------------------------------------------------------------------
 
 /// Contains the result of ESs like *Table*ES and TransTableReadES.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueryESResult {
   pub result: (Vec<ColName>, Vec<TableView>),
   pub new_rms: Vec<QueryPath>,

@@ -99,7 +99,9 @@ impl MSTableReadES {
     MSTableReadAction::Wait
   }
 
-  /// This checks that `external_cols` aren't present, and `safe_present_cols` are present.
+  /// This checks that `external_cols` are not present, and `safe_present_cols` and
+  /// `extra_req_cols` are preset.
+  ///
   /// Note: this does *not* required columns to be locked.
   fn does_query_plan_align<T: IOTypes>(&self, ctx: &TabletContext<T>) -> bool {
     // First, check that `external_cols are absent.
@@ -131,6 +133,27 @@ impl MSTableReadES {
     return true;
   }
 
+  // Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
+  fn check_gossip_data<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> MSTableReadAction {
+    for (table_path, gen) in &self.query_plan.table_location_map {
+      if !ctx.gossip_data.sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
+        // If not, we go to GossipDataWaiting
+        self.state = MSReadExecutionS::GossipDataWaiting;
+
+        // Request a GossipData from the Master to help stimulate progress.
+        let payload = msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest {
+          slave_group_id: ctx.this_slave_group_id.clone(),
+        });
+        ctx.ctx().send_to_master(payload);
+
+        return MSTableReadAction::Wait;
+      }
+    }
+
+    // We start locking the regions.
+    self.start_ms_table_read_es(ctx)
+  }
+
   /// Handle Columns being locked
   pub fn local_locked_cols<T: IOTypes>(
     &mut self,
@@ -139,19 +162,35 @@ impl MSTableReadES {
   ) -> MSTableReadAction {
     let locking = cast!(MSReadExecutionS::ColumnsLocking, &self.state).unwrap();
     assert_eq!(locking.locked_cols_qid, locked_cols_qid);
-
     // Now, we check whether the TableSchema aligns with the QueryPlan.
-    if self.does_query_plan_align(ctx) {
+    if !self.does_query_plan_align(ctx) {
+      self.state = MSReadExecutionS::Done;
       MSTableReadAction::QueryError(msg::QueryError::InvalidQueryPlan)
     } else {
-      // If it aligns, we start locking the regions.
-      self.start_ms_table_read_es(ctx)
+      // If it aligns, we verify is GossipData is recent enough.
+      self.check_gossip_data(ctx)
     }
   }
 
-  /// TODO: do
+  /// Here, the column locking request results in us realizing the table has been dropped.
   pub fn table_dropped<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> MSTableReadAction {
-    return MSTableReadAction::Wait;
+    assert!(cast!(MSReadExecutionS::ColumnsLocking, &self.state).is_ok());
+    self.state = MSReadExecutionS::Done;
+    MSTableReadAction::QueryError(msg::QueryError::InvalidQueryPlan)
+  }
+
+  /// Here, we GossipData gets delivered.
+  pub fn gossip_data_changed<T: IOTypes>(
+    &mut self,
+    ctx: &mut TabletContext<T>,
+  ) -> MSTableReadAction {
+    if let MSReadExecutionS::GossipDataWaiting = self.state {
+      // Verify is GossipData is now recent enough.
+      self.check_gossip_data(ctx)
+    } else {
+      // Do nothing
+      MSTableReadAction::Wait
+    }
   }
 
   /// Starts the Execution state
@@ -268,19 +307,6 @@ impl MSTableReadES {
       // Return the subqueries
       MSTableReadAction::SendSubqueries(gr_query_statuses)
     }
-  }
-
-  /// TODO: do
-  pub fn remote_leader_changed<T: IOTypes>(
-    &mut self,
-    _: &mut TabletContext<T>,
-  ) -> MSTableReadAction {
-    return MSTableReadAction::Wait;
-  }
-
-  /// TODO: do
-  pub fn gossip_data_changed<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> MSTableReadAction {
-    return MSTableReadAction::Wait;
   }
 
   /// This is called if a subquery fails.

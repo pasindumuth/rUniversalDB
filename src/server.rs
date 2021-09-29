@@ -3,8 +3,8 @@ use crate::common::{lookup_pos, GossipData, IOTypes, KeyBound, NetworkOut, OrigP
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
   proc, ColName, ColType, ColVal, ColValN, ContextRow, ContextSchema, CoordGroupId, EndpointId,
-  Gen, NodeGroupId, NodePath, QueryId, QueryPath, SlaveGroupId, TablePath, TableView,
-  TabletGroupId, TabletKeyRange, Timestamp, TransTableName,
+  Gen, LeadershipId, NodeGroupId, NodePath, PaxosGroupId, QueryId, QueryPath, SlaveGroupId,
+  TablePath, TableView, TabletGroupId, TabletKeyRange, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use sqlparser::test_utils::table;
@@ -105,7 +105,9 @@ pub struct ServerContext<'a, T: IOTypes> {
   /// Metadata
   pub this_slave_group_id: &'a SlaveGroupId,
   pub maybe_this_tablet_group_id: Option<&'a TabletGroupId>,
-  pub master_eid: &'a EndpointId,
+
+  /// Paxos
+  pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
 
   /// Gossip
   pub gossip: &'a mut Arc<GossipData>,
@@ -203,6 +205,28 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
       },
       query_id,
     }
+  }
+
+  /// Send a RemotePlayload to the Master Group
+  pub fn send_to_master(&mut self, payload: msg::MasterRemotePayload) {
+    let master_gid = PaxosGroupId::Master;
+    let master_lid = self.leader_map.get(&master_gid).unwrap();
+
+    let this_gid = PaxosGroupId::Slave(self.this_slave_group_id.clone());
+    let this_lid = self.leader_map.get(&this_gid).unwrap();
+
+    let remote_message = msg::RemoteMessage {
+      payload,
+      from_lid: this_lid.clone(),
+      from_gid: this_gid,
+      to_lid: master_lid.clone(),
+      to_gid: master_gid,
+    };
+
+    self.network_output.send(
+      &master_lid.eid,
+      msg::NetworkMessage::Master(msg::MasterMessage::RemoteMessage(remote_message)),
+    );
   }
 }
 
