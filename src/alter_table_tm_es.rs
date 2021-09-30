@@ -70,16 +70,16 @@ impl AlterTableES {
         tm_state.insert(tid.clone(), None);
       }
 
-      // Send off AlterTablePrepare to the Tablets and move the `state` to Executing.
-      for tid in tm_state.keys() {
-        ctx.ctx().send_to_tablet(
-          tid.clone(),
-          msg::TabletMessage::AlterTablePrepare(msg::AlterTablePrepare {
-            query_id: self.query_id.clone(),
-            alter_op: self.alter_op.clone(),
-          }),
-        )
-      }
+      // // Send off AlterTablePrepare to the Tablets and move the `state` to Executing.
+      // for tid in tm_state.keys() {
+      //   ctx.ctx().send_to_tablet(
+      //     tid.clone(),
+      //     msg::TabletMessage::AlterTablePrepare(msg::AlterTablePrepare {
+      //       query_id: self.query_id.clone(),
+      //       alter_op: self.alter_op.clone(),
+      //     }),
+      //   )
+      // }
 
       // Note that since there is at least one `tid` for a Table, we do not have to short-circuit
       // for the case that we vacuously have all the Prepareds by this point.
@@ -130,13 +130,13 @@ impl AlterTableES {
         slave_address_config: ctx.slave_address_config.clone(),
       });
       for tid in executing.tm_state.keys() {
-        ctx.ctx().send_to_tablet(
-          tid.clone(),
-          msg::TabletMessage::AlterTableCommit(msg::AlterTableCommit {
-            query_id: self.query_id.clone(),
-            timestamp: new_timestamp,
-          }),
-        );
+        // ctx.ctx().send_to_tablet(
+        //   tid.clone(),
+        //   msg::TabletMessage::AlterTableCommit(msg::AlterTableCommit {
+        //     query_id: self.query_id.clone(),
+        //     timestamp: new_timestamp,
+        //   }),
+        // );
       }
       self.state = AlterTableS::Done;
       AlterTableAction::Success(new_timestamp)
@@ -149,12 +149,12 @@ impl AlterTableES {
       AlterTableS::Start => {}
       AlterTableS::Executing(executing) => {
         for tid in executing.tm_state.keys() {
-          ctx.ctx().send_to_tablet(
-            tid.clone(),
-            msg::TabletMessage::AlterTableAbort(msg::AlterTableAbort {
-              query_id: self.query_id.clone(),
-            }),
-          );
+          // ctx.ctx().send_to_tablet(
+          //   tid.clone(),
+          //   msg::TabletMessage::AlterTableAbort(msg::AlterTableAbort {
+          //     query_id: self.query_id.clone(),
+          //   }),
+          // );
         }
       }
       AlterTableS::Done => {}

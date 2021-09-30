@@ -5,9 +5,10 @@ use crate::common::{
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
-  iast, proc, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, LeadershipId, NodeGroupId,
-  NodePath, PaxosGroupId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId,
-  TabletKeyRange, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
+  iast, proc, CNodePath, CQueryPath, CSubNodePath, CTQueryPath, CTSubNodePath, ColName, ColType,
+  Context, ContextRow, CoordGroupId, Gen, LeadershipId, NodeGroupId, PaxosGroupId, SlaveGroupId,
+  TQueryPath, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
+  TransTableLocationPrefix, TransTableName,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
@@ -85,6 +86,7 @@ pub struct CoordContext<T: IOTypes> {
   /// Metadata
   pub this_slave_group_id: SlaveGroupId,
   pub this_coord_group_id: CoordGroupId,
+  pub sub_node_path: CTSubNodePath, // Simply wraps `this_coord_group_id`, used for expedience
   pub master_eid: EndpointId,
 
   /// Gossip
@@ -115,6 +117,7 @@ impl<T: IOTypes> CoordState<T> {
         network_output,
         this_slave_group_id,
         this_coord_group_id,
+        sub_node_path: CTSubNodePath::Coord(CoordGroupId("".to_string())),
         master_eid,
         gossip,
         leader_map,
@@ -136,7 +139,7 @@ impl<T: IOTypes> CoordContext<T> {
       clock: &mut self.clock,
       network_output: &mut self.network_output,
       this_slave_group_id: &self.this_slave_group_id,
-      maybe_this_tablet_group_id: None,
+      sub_node_path: &self.sub_node_path,
       leader_map: &self.leader_map,
       gossip: &mut self.gossip,
     }
@@ -205,7 +208,9 @@ impl<T: IOTypes> CoordContext<T> {
               msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
                 // First, we check if the MSCoordES or GRCoordES still exists in the Statuses,
                 // continuing if so and aborting if not.
-                if let Some(ms_coord) = statuses.ms_coord_ess.get(&query.location_prefix.query_id) {
+                if let Some(ms_coord) =
+                  statuses.ms_coord_ess.get(&query.location_prefix.source.query_id)
+                {
                   let es = ms_coord.es.to_exec();
                   // Construct and start the TransQueryReplanningES
                   let trans_table = map_insert(
@@ -232,7 +237,7 @@ impl<T: IOTypes> CoordContext<T> {
                   let action = trans_table.es.start(&mut self.ctx(), es);
                   self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
                 } else if let Some(gr_query) =
-                  statuses.gr_query_ess.get(&query.location_prefix.query_id)
+                  statuses.gr_query_ess.get(&query.location_prefix.source.query_id)
                 {
                   // Construct and start the TransQueryReplanningES
                   let trans_table = map_insert(
@@ -419,7 +424,7 @@ impl<T: IOTypes> CoordContext<T> {
     statuses: &mut Statuses,
     orig_p: OrigP,
     tm_qid: QueryId,
-    new_rms: HashSet<QueryPath>,
+    new_rms: HashSet<TQueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
@@ -444,8 +449,8 @@ impl<T: IOTypes> CoordContext<T> {
       for (rm_path, rm_result) in tm_status.tm_state {
         if rm_result.is_none() && rm_path != query_aborted.responder_path.node_path {
           // We avoid sending CancelQuery for the RM that just responded.
-          self.ctx().send_to_node(
-            rm_path.to_node_id(),
+          self.ctx().send_to_ct_2(
+            rm_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: tm_status.child_query_id.clone(),
             }),
@@ -484,14 +489,14 @@ impl<T: IOTypes> CoordContext<T> {
     statuses: &mut Statuses,
     orig_p: OrigP,
     subquery_id: QueryId,
-    subquery_new_rms: HashSet<QueryPath>,
+    subquery_new_rms: HashSet<TQueryPath>,
     (table_schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
     let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
     remove_item(&mut trans_read.child_queries, &subquery_id);
     let prefix = trans_read.es.location_prefix();
-    let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
+    let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id) {
       trans_read.es.handle_subquery_done(
         &mut self.ctx(),
         &gr_query.es,
@@ -499,7 +504,7 @@ impl<T: IOTypes> CoordContext<T> {
         subquery_new_rms,
         (table_schema, table_views),
       )
-    } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.query_id) {
+    } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.source.query_id) {
       trans_read.es.handle_subquery_done(
         &mut self.ctx(),
         ms_coord.es.to_exec(),
@@ -638,9 +643,9 @@ impl<T: IOTypes> CoordContext<T> {
         // Remove the TableReadESWrapper and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
-          sender_path.clone(),
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct_2(
+          sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
             responder_path,
@@ -653,9 +658,9 @@ impl<T: IOTypes> CoordContext<T> {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
-          sender_path.clone(),
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct_2(
+          sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
             responder_path,
@@ -710,8 +715,8 @@ impl<T: IOTypes> CoordContext<T> {
       // Otherwise, the MSCoordES no longer exists, and we should
       // cancel the MSQueryES immediately.
       let query_path = register.query_path;
-      self.ctx().core_ctx().send_to_tablet(
-        query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
+      self.ctx().send_to_t_2(
+        query_path.node_path,
         msg::TabletMessage::CancelQuery(msg::CancelQuery { query_id: query_path.query_id.clone() }),
       );
     }
@@ -745,8 +750,8 @@ impl<T: IOTypes> CoordContext<T> {
       // We ECU this TMStatus by sending CancelQuery to all remaining participants.
       for (rm_path, rm_result) in tm_status.tm_state {
         if rm_result.is_none() {
-          self.ctx().send_to_node(
-            rm_path.to_node_id(),
+          self.ctx().send_to_ct_2(
+            rm_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: tm_status.child_query_id.clone(),
             }),
@@ -756,14 +761,15 @@ impl<T: IOTypes> CoordContext<T> {
     }
   }
 
-  /// Construct QueryPath for a given `query_id` that belongs to this Slave.
-  pub fn mk_query_path(&self, query_id: QueryId) -> QueryPath {
-    QueryPath {
-      node_path: NodePath {
+  /// Construct QueryPath for a given `query_id` that belongs to this Coord.
+  pub fn mk_query_path(&self, query_id: QueryId) -> CQueryPath {
+    CQueryPath {
+      node_path: CNodePath {
         slave_group_id: self.this_slave_group_id.clone(),
-        maybe_tablet_group_id: None,
+        sub_node_path: CSubNodePath::Coord(self.this_coord_group_id.clone()),
       },
       query_id,
     }
   }
+  // .into_c_query_path()
 }

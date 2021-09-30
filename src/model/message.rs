@@ -1,9 +1,10 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::common::{GossipDataSer, QueryPlan};
 use crate::model::common::{
-  proc, ColName, ColType, Context, CoordGroupId, EndpointId, Gen, LeadershipId, NodeGroupId,
-  PaxosGroupId, QueryId, QueryPath, RequestId, SlaveGroupId, TablePath, TableView, TabletGroupId,
-  TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
+  proc, CQueryPath, CSubNodePath, CTQueryPath, ColName, ColType, Context, CoordGroupId, EndpointId,
+  Gen, LeadershipId, NodeGroupId, PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath,
+  TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
+  TransTableName,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -217,8 +218,8 @@ pub struct RemoteLeaderChanged {}
 // -------------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformQuery {
-  pub root_query_path: QueryPath,
-  pub sender_path: QueryPath,
+  pub root_query_path: CQueryPath,
+  pub sender_path: CTQueryPath,
   pub query_id: QueryId,
   pub query: GeneralQuery,
 }
@@ -233,9 +234,9 @@ pub struct QuerySuccess {
   /// The receiving nodes' State that the responses should be routed to. (e.g. TMStatus)
   pub return_qid: QueryId,
   /// Contains QueryId of the query that was succeeded.
-  pub responder_path: QueryPath,
+  pub responder_path: CTQueryPath,
   pub result: (Vec<ColName>, Vec<TableView>),
-  pub new_rms: Vec<QueryPath>,
+  pub new_rms: Vec<TQueryPath>,
 }
 
 /// These are Errors that are simply recursively propagated up to the Slave,
@@ -267,7 +268,7 @@ pub enum AbortedData {
 pub struct QueryAborted {
   pub return_qid: QueryId,
   /// Contains QueryId of the query that was aborted.
-  pub responder_path: QueryPath,
+  pub responder_path: CTQueryPath,
   pub payload: AbortedData,
 }
 
@@ -313,24 +314,22 @@ pub struct UpdateQuery {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RegisterQuery {
   pub root_query_id: QueryId,
-  pub query_path: QueryPath,
+  pub query_path: TQueryPath,
 }
 
 // -------------------------------------------------------------------------------------------------
 //  2PC messages
 // -------------------------------------------------------------------------------------------------
-// TODO: rename to FinishQuery and fix the message structures.
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FinishQueryPrepare {
-  pub sender_path: QueryPath,
+  pub sender_path: CQueryPath,
   pub ms_query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FinishQueryPrepared {
   pub return_qid: QueryId,
-  pub rm_path: QueryPath,
+  pub rm_path: TQueryPath,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -343,7 +342,7 @@ pub enum FinishQueryAbortReason {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FinishQueryAborted {
   pub return_qid: QueryId,
-  pub rm_path: QueryPath,
+  pub rm_path: TQueryPath,
   pub reason: FinishQueryAbortReason,
 }
 
@@ -442,7 +441,7 @@ pub enum FrozenColUsageTree {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformMasterFrozenColUsage {
-  pub sender_path: QueryPath,
+  pub sender_path: CQueryPath,
   pub query_id: QueryId,
   pub timestamp: Timestamp,
   pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,

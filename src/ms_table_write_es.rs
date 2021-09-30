@@ -5,8 +5,8 @@ use crate::common::{
 use crate::expression::{compress_row_region, is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, ColName, ColType, ColVal, ColValN, Context, ContextRow, Gen, PrimaryKey, QueryId,
-  QueryPath, TableView, TierMap, Timestamp, TransTableName,
+  proc, CQueryPath, CTQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow, Gen,
+  PrimaryKey, QueryId, TQueryPath, TableView, TierMap, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use crate::ms_table_read_es::MSTableReadES;
@@ -39,7 +39,7 @@ pub enum MSWriteExecutionS {
 
 #[derive(Debug)]
 pub struct MSTableWriteES {
-  pub root_query_path: QueryPath,
+  pub root_query_path: CQueryPath,
   pub timestamp: Timestamp,
   pub tier: u32,
   pub context: Rc<Context>,
@@ -55,7 +55,7 @@ pub struct MSTableWriteES {
   pub ms_query_id: QueryId,
 
   // Dynamically evolving fields.
-  pub new_rms: HashSet<QueryPath>,
+  pub new_rms: HashSet<TQueryPath>,
   pub state: MSWriteExecutionS,
 }
 
@@ -340,7 +340,7 @@ impl MSTableWriteES {
     ctx: &mut TabletContext<T>,
     ms_query_es: &mut MSQueryES,
     subquery_id: QueryId,
-    subquery_new_rms: HashSet<QueryPath>,
+    subquery_new_rms: HashSet<TQueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> MSTableWriteAction {
     // Add the subquery results into the MSTableWriteES.

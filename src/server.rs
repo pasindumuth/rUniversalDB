@@ -2,9 +2,10 @@ use crate::col_usage::{collect_top_level_cols, nodes_external_trans_tables, Froz
 use crate::common::{lookup_pos, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, TableSchema};
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
-  proc, ColName, ColType, ColVal, ColValN, ContextRow, ContextSchema, CoordGroupId, EndpointId,
-  Gen, LeadershipId, NodeGroupId, NodePath, PaxosGroupId, QueryId, QueryPath, SlaveGroupId,
-  TablePath, TableView, TabletGroupId, TabletKeyRange, Timestamp, TransTableName,
+  proc, CNodePath, CQueryPath, CSubNodePath, CTNodePath, CTQueryPath, CTSubNodePath, ColName,
+  ColType, ColVal, ColValN, ContextRow, ContextSchema, CoordGroupId, EndpointId, Gen, LeadershipId,
+  NodeGroupId, PaxosGroupId, QueryId, SlaveGroupId, TNodePath, TQueryPath, TSubNodePath, TablePath,
+  TableView, TabletGroupId, TabletKeyRange, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use sqlparser::test_utils::table;
@@ -34,65 +35,7 @@ pub struct CoreServerContext<'a, T: IOTypes> {
   //  the full sender_path
 }
 
-impl<'a, T: IOTypes> CoreServerContext<'a, T> {
-  /// Send a message to the Tablet `tid`
-  pub fn send_to_tablet(&mut self, tablet_group_id: TabletGroupId, query: msg::TabletMessage) {
-    // TODO: fix
-    // let sid = self.tablet_address_config.get(&tablet_group_id).unwrap();
-    // let eid = self.slave_address_config.get(sid).unwrap();
-    // self.network_output.send(
-    //   eid,
-    //   msg::NetworkMessage::Slave(msg::SlaveMessage::TabletMessage(tablet_group_id, query)),
-    // );
-  }
-
-  /// Send a message to the Slave `sid`
-  pub fn send_to_slave(&mut self, sid: SlaveGroupId, query: msg::SlaveMessage) {
-    // let eid = self.slave_address_config.get(&sid).unwrap();
-    // self.network_output.send(eid, msg::NetworkMessage::Slave(query));
-  }
-
-  // TODO: this is totoally wrong, just a place holder.
-  pub fn send_to_coord(&mut self, sender_path: QueryPath, query: msg::CoordMessage) {
-    // let eid = self.slave_address_config.get(&sid).unwrap();
-    // self.network_output.send(eid, msg::NetworkMessage::Slave(query));
-  }
-
-  /// This function infers weather the CommonQuery is destined for a Slave or a Tablet
-  /// by using the `sender_path`, and then acts accordingly.
-  pub fn send_to_path(&mut self, sender_path: QueryPath, common_query: CommonQuery) {
-    // if let Some(tablet_group_id) = sender_path.node_path.maybe_tablet_group_id {
-    //   self.send_to_tablet(tablet_group_id, common_query.tablet_msg());
-    // } else {
-    //   self.send_to_slave(sender_path.node_path.slave_group_id, common_query.slave_msg());
-    // }
-  }
-
-  /// This is similar to the above, except uses a `node_group_id`.
-  pub fn send_to_node(&mut self, node_group_id: NodeGroupId, common_query: CommonQuery) {
-    match node_group_id {
-      NodeGroupId::Tablet(tid) => {
-        self.send_to_tablet(tid, common_query.tablet_msg());
-      }
-      NodeGroupId::Slave(sid) => {
-        self.send_to_slave(sid, common_query.slave_msg());
-      }
-    };
-  }
-
-  /// Construct a `NodePath` from a `NodeGroupId`.
-  pub fn mk_node_path(&mut self, node_group_id: NodeGroupId) -> NodePath {
-    match node_group_id {
-      NodeGroupId::Tablet(tid) => {
-        let sid = self.tablet_address_config.get(&tid).unwrap();
-        NodePath { slave_group_id: sid.clone(), maybe_tablet_group_id: Some(tid) }
-      }
-      NodeGroupId::Slave(sid) => {
-        NodePath { slave_group_id: sid.clone(), maybe_tablet_group_id: None }
-      }
-    }
-  }
-}
+impl<'a, T: IOTypes> CoreServerContext<'a, T> {}
 
 /// This is used to present a consistent view of Tablets and Slave to shared ESs so
 /// that they can execute agnotisticly.
@@ -104,7 +47,7 @@ pub struct ServerContext<'a, T: IOTypes> {
 
   /// Metadata
   pub this_slave_group_id: &'a SlaveGroupId,
-  pub maybe_this_tablet_group_id: Option<&'a TabletGroupId>,
+  pub sub_node_path: &'a CTSubNodePath,
 
   /// Paxos
   pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
@@ -125,35 +68,130 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
     }
   }
 
-  /// See `CoreServerContext::send_to_path`
-  pub fn send_to_path(&mut self, sender_path: QueryPath, common_query: CommonQuery) {
-    self.core_ctx().send_to_path(sender_path, common_query);
+  pub fn send_to_slave_common(&mut self, payload: msg::SlaveRemotePayload, to_slave: SlaveGroupId) {
+    let to_gid = PaxosGroupId::Slave(to_slave);
+    let to_lid = self.leader_map.get(&to_gid).unwrap();
+
+    let this_gid = PaxosGroupId::Slave(self.this_slave_group_id.clone());
+    let this_lid = self.leader_map.get(&this_gid).unwrap();
+
+    let remote_message = msg::RemoteMessage {
+      payload,
+      from_lid: this_lid.clone(),
+      from_gid: this_gid,
+      to_lid: to_lid.clone(),
+      to_gid: to_gid,
+    };
+
+    self.network_output.send(
+      &to_lid.eid,
+      msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteMessage(remote_message)),
+    );
   }
-  /// See `CoreServerContext::send_to_node`
-  pub fn send_to_node(&mut self, node_group_id: NodeGroupId, common_query: CommonQuery) {
-    self.core_ctx().send_to_node(node_group_id, common_query);
+
+  pub fn send_to_c_2(&mut self, node_path: CNodePath, query: msg::CoordMessage) {
+    let CSubNodePath::Coord(cid) = node_path.sub_node_path;
+    self.send_to_slave_common(
+      msg::SlaveRemotePayload::CoordMessage(cid, query),
+      node_path.slave_group_id.clone(),
+    );
   }
+
+  pub fn send_to_c(&mut self, query_path: CQueryPath, query: msg::CoordMessage) {
+    self.send_to_c_2(query_path.node_path, query);
+  }
+
+  pub fn send_to_t_2(&mut self, node_path: TNodePath, query: msg::TabletMessage) {
+    let TSubNodePath::Tablet(tid) = node_path.sub_node_path;
+    self.send_to_slave_common(
+      msg::SlaveRemotePayload::TabletMessage(tid, query),
+      node_path.slave_group_id.clone(),
+    );
+  }
+
+  pub fn send_to_t(&mut self, query_path: TQueryPath, query: msg::TabletMessage) {
+    self.send_to_t_2(query_path.node_path, query);
+  }
+
+  pub fn send_to_ct_2(&mut self, node_path: CTNodePath, query: CommonQuery) {
+    self.send_to_slave_common(
+      match node_path.sub_node_path {
+        CTSubNodePath::Tablet(tid) => {
+          msg::SlaveRemotePayload::TabletMessage(tid.clone(), query.into_tablet_msg())
+        }
+        CTSubNodePath::Coord(cid) => {
+          msg::SlaveRemotePayload::CoordMessage(cid.clone(), query.into_coord_msg())
+        }
+      },
+      node_path.slave_group_id.clone(),
+    );
+  }
+
+  pub fn send_to_ct(&mut self, query_path: CTQueryPath, query: CommonQuery) {
+    self.send_to_ct_2(query_path.node_path, query);
+  }
+
+  /// Send a RemotePlayload to the Master Group
+  pub fn send_to_master(&mut self, payload: msg::MasterRemotePayload) {
+    let master_gid = PaxosGroupId::Master;
+    let master_lid = self.leader_map.get(&master_gid).unwrap();
+
+    let this_gid = PaxosGroupId::Slave(self.this_slave_group_id.clone());
+    let this_lid = self.leader_map.get(&this_gid).unwrap();
+
+    let remote_message = msg::RemoteMessage {
+      payload,
+      from_lid: this_lid.clone(),
+      from_gid: this_gid,
+      to_lid: master_lid.clone(),
+      to_gid: master_gid,
+    };
+
+    self.network_output.send(
+      &master_lid.eid,
+      msg::NetworkMessage::Master(msg::MasterMessage::RemoteMessage(remote_message)),
+    );
+  }
+
+  /// Construct a `NodePath` from a `NodeGroupId`.
+  /// NOTE: the `tid` must exist in the `gossip` at this point.
+  pub fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
+    let sid = self.gossip.tablet_address_config.get(&tid).unwrap();
+    TNodePath { slave_group_id: sid.clone(), sub_node_path: TSubNodePath::Tablet(tid.clone()) }
+  }
+
+  /// Make a `CTQueryPath` of an ES at this node with `query_id`.
+  pub fn mk_this_query_path(&self, query_id: QueryId) -> CTQueryPath {
+    CTQueryPath {
+      node_path: CTNodePath {
+        slave_group_id: self.this_slave_group_id.clone(),
+        sub_node_path: self.sub_node_path.clone(),
+      },
+      query_id,
+    }
+  }
+
   /// This responds to the given `sender_path` with a QueryAborted containing the given
   /// `abort_data`. Here, the `query_id` is that of the ES that's responding.
   pub fn send_abort_data(
     &mut self,
-    sender_path: QueryPath,
+    sender_path: CTQueryPath,
     query_id: QueryId,
     abort_data: msg::AbortedData,
   ) {
     let aborted = msg::QueryAborted {
       return_qid: sender_path.query_id.clone(),
-      responder_path: self.mk_query_path(query_id),
+      responder_path: self.mk_this_query_path(query_id),
       payload: abort_data,
     };
-    self.send_to_path(sender_path, CommonQuery::QueryAborted(aborted));
+    self.send_to_ct_2(sender_path.node_path, CommonQuery::QueryAborted(aborted));
   }
 
   /// This responds to the given `sender_path` with a QueryAborted containing the given
   /// `query_error`. Here, the `query_id` is that of the ES that's responding.
   pub fn send_query_error(
     &mut self,
-    sender_path: QueryPath,
+    sender_path: CTQueryPath,
     query_id: QueryId,
     query_error: msg::QueryError,
   ) {
@@ -186,48 +224,6 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
       Err(_) => panic!(),
     }
   }
-
-  /// Get the NodeGroupId of this Server.
-  pub fn node_group_id(&self) -> NodeGroupId {
-    if let Some(tablet_group_id) = self.maybe_this_tablet_group_id {
-      NodeGroupId::Tablet(tablet_group_id.clone())
-    } else {
-      NodeGroupId::Slave(self.this_slave_group_id.clone())
-    }
-  }
-
-  /// Construct QueryPath for a given `query_id` that belongs to this Server.
-  pub fn mk_query_path(&self, query_id: QueryId) -> QueryPath {
-    QueryPath {
-      node_path: NodePath {
-        slave_group_id: self.this_slave_group_id.clone(),
-        maybe_tablet_group_id: self.maybe_this_tablet_group_id.cloned(),
-      },
-      query_id,
-    }
-  }
-
-  /// Send a RemotePlayload to the Master Group
-  pub fn send_to_master(&mut self, payload: msg::MasterRemotePayload) {
-    let master_gid = PaxosGroupId::Master;
-    let master_lid = self.leader_map.get(&master_gid).unwrap();
-
-    let this_gid = PaxosGroupId::Slave(self.this_slave_group_id.clone());
-    let this_lid = self.leader_map.get(&this_gid).unwrap();
-
-    let remote_message = msg::RemoteMessage {
-      payload,
-      from_lid: this_lid.clone(),
-      from_gid: this_gid,
-      to_lid: master_lid.clone(),
-      to_gid: master_gid,
-    };
-
-    self.network_output.send(
-      &master_lid.eid,
-      msg::NetworkMessage::Master(msg::MasterMessage::RemoteMessage(remote_message)),
-    );
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -244,24 +240,22 @@ pub enum CommonQuery {
 }
 
 impl CommonQuery {
-  pub fn tablet_msg(self) -> msg::TabletMessage {
-    unimplemented!()
-    // match self {
-    //   CommonQuery::PerformQuery(query) => msg::TabletMessage::PerformQuery(query),
-    //   CommonQuery::CancelQuery(query) => msg::TabletMessage::CancelQuery(query),
-    //   CommonQuery::QueryAborted(query) => msg::TabletMessage::QueryAborted(query),
-    //   CommonQuery::QuerySuccess(query) => msg::TabletMessage::QuerySuccess(query),
-    // }
+  pub fn into_tablet_msg(self) -> msg::TabletMessage {
+    match self {
+      CommonQuery::PerformQuery(query) => msg::TabletMessage::PerformQuery(query),
+      CommonQuery::CancelQuery(query) => msg::TabletMessage::CancelQuery(query),
+      CommonQuery::QueryAborted(query) => msg::TabletMessage::QueryAborted(query),
+      CommonQuery::QuerySuccess(query) => msg::TabletMessage::QuerySuccess(query),
+    }
   }
 
-  pub fn slave_msg(self) -> msg::SlaveMessage {
-    unimplemented!()
-    // match self {
-    //   CommonQuery::PerformQuery(query) => msg::SlaveMessage::PerformQuery(query),
-    //   CommonQuery::CancelQuery(query) => msg::SlaveMessage::CancelQuery(query),
-    //   CommonQuery::QueryAborted(query) => msg::SlaveMessage::QueryAborted(query),
-    //   CommonQuery::QuerySuccess(query) => msg::SlaveMessage::QuerySuccess(query),
-    // }
+  pub fn into_coord_msg(self) -> msg::CoordMessage {
+    match self {
+      CommonQuery::PerformQuery(query) => msg::CoordMessage::PerformQuery(query),
+      CommonQuery::CancelQuery(query) => msg::CoordMessage::CancelQuery(query),
+      CommonQuery::QueryAborted(query) => msg::CoordMessage::QueryAborted(query),
+      CommonQuery::QuerySuccess(query) => msg::CoordMessage::QuerySuccess(query),
+    }
   }
 }
 

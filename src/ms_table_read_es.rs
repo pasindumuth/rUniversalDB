@@ -5,8 +5,8 @@ use crate::common::{
 use crate::expression::{compress_row_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, ColName, ColValN, Context, ContextRow, Gen, QueryId, QueryPath, TableView, TierMap,
-  Timestamp, TransTableName,
+  proc, CQueryPath, CTQueryPath, ColName, ColValN, Context, ContextRow, Gen, QueryId, TQueryPath,
+  TableView, TierMap, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use crate::model::message::ColUsageTree::MSQueryStage;
@@ -40,7 +40,7 @@ pub enum MSReadExecutionS {
 
 #[derive(Debug)]
 pub struct MSTableReadES {
-  pub root_query_path: QueryPath,
+  pub root_query_path: CQueryPath,
   pub timestamp: Timestamp,
   pub tier: u32,
   pub context: Rc<Context>,
@@ -56,7 +56,7 @@ pub struct MSTableReadES {
   pub ms_query_id: QueryId,
 
   // Dynamically evolving fields.
-  pub new_rms: HashSet<QueryPath>,
+  pub new_rms: HashSet<TQueryPath>,
   pub state: MSReadExecutionS,
 }
 
@@ -325,7 +325,7 @@ impl MSTableReadES {
     ctx: &mut TabletContext<T>,
     ms_query_es: &MSQueryES,
     subquery_id: QueryId,
-    subquery_new_rms: HashSet<QueryPath>,
+    subquery_new_rms: HashSet<TQueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> MSTableReadAction {
     // Add the subquery results into the MSTableReadES.

@@ -112,6 +112,12 @@ pub struct QueryId(pub [u8; 8]);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SlaveGroupId(pub String);
 
+impl SlaveGroupId {
+  pub fn to_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.clone())
+  }
+}
+
 /// A global identfier of a Coord.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoordGroupId(pub String);
@@ -127,25 +133,109 @@ pub enum NodeGroupId {
   Slave(SlaveGroupId),
 }
 
+// -------------------------------------------------------------------------------------------------
+//  QueryPath
+// -------------------------------------------------------------------------------------------------
+
+// SubNodePaths
+
+// SubNodePaths point to a specific thread besides the main thread that is running in a
+// server. Here, we define the `main` thread to be the one that messages come into.
+
+/// `CTSubNodePath`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum SubNodePath {
+pub enum CTSubNodePath {
   Tablet(TabletGroupId),
   Coord(CoordGroupId),
 }
 
-/// This is a generic struct that refers to a non-Master node in the system.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NodePath {
-  pub slave_group_id: SlaveGroupId,
-  pub maybe_tablet_group_id: Option<TabletGroupId>,
+trait IntoCTSubNodePath {
+  fn into_ct(self) -> CTSubNodePath;
 }
 
-/// This is a generic struct that refers to an ES in the system.
+/// `TSubNodePath`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct QueryPath {
-  pub node_path: NodePath,
+pub enum TSubNodePath {
+  Tablet(TabletGroupId),
+}
+
+impl IntoCTSubNodePath for TSubNodePath {
+  fn into_ct(self) -> CTSubNodePath {
+    match self {
+      TSubNodePath::Tablet(tid) => CTSubNodePath::Tablet(tid),
+    }
+  }
+}
+
+/// `CSubNodePath`
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CSubNodePath {
+  Coord(CoordGroupId),
+}
+
+impl IntoCTSubNodePath for CSubNodePath {
+  fn into_ct(self) -> CTSubNodePath {
+    match self {
+      CSubNodePath::Coord(cid) => CTSubNodePath::Coord(cid),
+    }
+  }
+}
+
+// SlaveNodePath
+
+/// `SlaveNodePath`
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SlaveNodePath<SubNodePathT> {
+  pub slave_group_id: SlaveGroupId,
+  pub sub_node_path: SubNodePathT,
+}
+
+impl<SubNodePathT: IntoCTSubNodePath> SlaveNodePath<SubNodePathT> {
+  pub fn into_ct(self) -> CTNodePath {
+    SlaveNodePath {
+      slave_group_id: self.slave_group_id,
+      sub_node_path: self.sub_node_path.into_ct(),
+    }
+  }
+}
+
+/// `CTNodePath`
+pub type CTNodePath = SlaveNodePath<CTSubNodePath>;
+
+/// `TNodePath`
+pub type TNodePath = SlaveNodePath<TSubNodePath>;
+
+/// `CNodePath`
+pub type CNodePath = SlaveNodePath<CSubNodePath>;
+
+// QueryPaths
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SlaveQueryPath<SubNodePathT> {
+  pub node_path: SlaveNodePath<SubNodePathT>,
   pub query_id: QueryId,
 }
+
+impl<SubNodePathT: IntoCTSubNodePath> SlaveQueryPath<SubNodePathT> {
+  pub fn into_ct(self) -> CTQueryPath {
+    CTQueryPath {
+      node_path: CTNodePath {
+        slave_group_id: self.node_path.slave_group_id,
+        sub_node_path: self.node_path.sub_node_path.into_ct(),
+      },
+      query_id: self.query_id,
+    }
+  }
+}
+
+/// `CTQueryPath`
+pub type CTQueryPath = SlaveQueryPath<CTSubNodePath>;
+
+/// `TQueryPath`
+pub type TQueryPath = SlaveQueryPath<TSubNodePath>;
+
+/// `CQueryPath`
+pub type CQueryPath = SlaveQueryPath<CSubNodePath>;
 
 // -------------------------------------------------------------------------------------------------
 //  Paxos
@@ -171,8 +261,7 @@ pub enum PaxosGroupId {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TransTableLocationPrefix {
-  pub source: NodeGroupId,
-  pub query_id: QueryId,
+  pub source: CTQueryPath,
   pub trans_table_name: TransTableName,
 }
 
@@ -213,16 +302,6 @@ impl ContextSchema {
 impl Context {
   pub fn new(context_schema: ContextSchema) -> Context {
     Context { context_schema, context_rows: vec![] }
-  }
-}
-
-impl NodePath {
-  pub fn to_node_id(&self) -> NodeGroupId {
-    if let Some(tid) = &self.maybe_tablet_group_id {
-      NodeGroupId::Tablet(tid.clone())
-    } else {
-      NodeGroupId::Slave(self.slave_group_id.clone())
-    }
   }
 }
 

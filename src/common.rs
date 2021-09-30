@@ -1,8 +1,8 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::model::common::{
-  proc, ColName, ColType, EndpointId, Gen, LeadershipId, NodeGroupId, NodePath, QueryId, QueryPath,
-  SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
-  TransTableName,
+  proc, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColType, EndpointId, Gen, LeadershipId,
+  NodeGroupId, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
+  TabletKeyRange, TierMap, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
@@ -225,10 +225,10 @@ pub struct TMStatus {
   /// This is the QueryId of the PerformQuery. We keep this distinct from the TMStatus'
   /// QueryId, since one of the RMs might be this node.
   pub child_query_id: QueryId,
-  pub new_rms: HashSet<QueryPath>,
+  pub new_rms: HashSet<TQueryPath>,
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   pub responded_count: usize,
-  pub tm_state: HashMap<NodePath, Option<(Vec<ColName>, Vec<TableView>)>>,
+  pub tm_state: HashMap<CTNodePath, Option<(Vec<ColName>, Vec<TableView>)>>,
   pub orig_p: OrigP,
 }
 
@@ -350,5 +350,5 @@ pub struct TableRegion {
 #[derive(Debug, Clone)]
 pub struct QueryESResult {
   pub result: (Vec<ColName>, Vec<TableView>),
-  pub new_rms: Vec<QueryPath>,
+  pub new_rms: Vec<TQueryPath>,
 }

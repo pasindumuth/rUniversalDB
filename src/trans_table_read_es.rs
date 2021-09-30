@@ -6,10 +6,10 @@ use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryESResul
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRExecutionS, GRQueryConstructorView, GRQueryES, GRQueryPlan};
 use crate::model::common::{
-  proc, ColName, ColType, ColValN, ContextRow, ContextSchema, Gen, TableView, Timestamp,
-  TransTableName,
+  proc, CQueryPath, ColName, ColType, ColValN, ContextRow, ContextSchema, Gen, TQueryPath,
+  TableView, Timestamp, TransTableName,
 };
-use crate::model::common::{Context, QueryId, QueryPath, TierMap, TransTableLocationPrefix};
+use crate::model::common::{CTQueryPath, Context, QueryId, TierMap, TransTableLocationPrefix};
 use crate::model::message as msg;
 use crate::server::{
   evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor, LocalTable,
@@ -40,12 +40,12 @@ pub enum TransExecutionS {
 
 #[derive(Debug)]
 pub struct TransTableReadES {
-  pub root_query_path: QueryPath,
+  pub root_query_path: CQueryPath,
   pub location_prefix: TransTableLocationPrefix,
   pub context: Rc<Context>,
 
   // Fields needed for responding.
-  pub sender_path: QueryPath,
+  pub sender_path: CTQueryPath,
   pub query_id: QueryId,
 
   // Query-related fields.
@@ -53,7 +53,7 @@ pub struct TransTableReadES {
   pub query_plan: QueryPlan,
 
   // Dynamically evolving fields.
-  pub new_rms: HashSet<QueryPath>,
+  pub new_rms: HashSet<TQueryPath>,
   pub state: TransExecutionS,
 
   // Convenience fields
@@ -177,6 +177,7 @@ impl TransTableReadES {
       query_id: &self.query_id,
       context: &self.context,
     };
+
     let mut gr_query_ess = Vec::<GRQueryES>::new();
     for (subquery_idx, child_context) in child_contexts.into_iter().enumerate() {
       gr_query_ess.push(subquery_view.mk_gr_query_es(
@@ -238,7 +239,7 @@ impl TransTableReadES {
     ctx: &mut ServerContext<T>,
     trans_table_source: &SourceT,
     subquery_id: QueryId,
-    subquery_new_rms: HashSet<QueryPath>,
+    subquery_new_rms: HashSet<TQueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> TransTableAction {
     // Add the subquery results into the TableReadES.
@@ -353,35 +354,11 @@ impl TransTableReadES {
 
   /// Cleans up all currently owned resources, and goes to Done.
   pub fn exit_and_clean_up<T: IOTypes>(&mut self, _: &mut ServerContext<T>) {
-    match &self.state {
-      TransExecutionS::Start => {}
-      TransExecutionS::GossipDataWaiting => {}
-      TransExecutionS::Executing(executing) => {
-        // Here, we need to cancel every Subquery.
-        for single_status in &executing.subqueries {
-          match single_status {
-            SingleSubqueryStatus::Pending(_) => {}
-            SingleSubqueryStatus::Finished(_) => {}
-          }
-        }
-      }
-      TransExecutionS::Done => {}
-    }
     self.state = TransExecutionS::Done
   }
 
   /// Get the `TransTableLocationPrefix` of this ES.
   pub fn location_prefix(&self) -> &TransTableLocationPrefix {
     &self.location_prefix
-  }
-
-  /// Get the `QueryPath` of the sender of this ES.
-  pub fn sender_path(&self) -> QueryPath {
-    self.sender_path.clone()
-  }
-
-  /// Get the `QueryId` of the sender of this ES.
-  pub fn query_id(&self) -> QueryId {
-    self.query_id.clone()
   }
 }

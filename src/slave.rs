@@ -5,9 +5,9 @@ use crate::common::{
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
-  iast, proc, ColName, ColType, Context, ContextRow, Gen, LeadershipId, NodeGroupId, NodePath,
-  PaxosGroupId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
-  TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
+  iast, proc, CTQueryPath, ColName, ColType, Context, ContextRow, Gen, LeadershipId, NodeGroupId,
+  PaxosGroupId, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap,
+  Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
@@ -101,18 +101,6 @@ impl<T: IOTypes> SlaveState<T> {
 }
 
 impl<T: IOTypes> SlaveContext<T> {
-  pub fn ctx(&mut self) -> ServerContext<T> {
-    ServerContext {
-      rand: &mut self.rand,
-      clock: &mut self.clock,
-      network_output: &mut self.network_output,
-      this_slave_group_id: &self.this_slave_group_id,
-      maybe_this_tablet_group_id: None,
-      leader_map: &self.leader_map,
-      gossip: &mut self.gossip,
-    }
-  }
-
   /// Handles all messages, coming from Tablets, the Master, External, etc.
   pub fn handle_incoming_message(&mut self, message: msg::SlaveMessage) {
     match message {

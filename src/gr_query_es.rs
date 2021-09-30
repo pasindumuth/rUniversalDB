@@ -4,9 +4,9 @@ use crate::col_usage::{
 };
 use crate::common::{lookup, lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
 use crate::model::common::{
-  proc, ColName, Context, ContextRow, ContextSchema, Gen, LeadershipId, NodeGroupId, NodePath,
-  QueryId, QueryPath, SlaveGroupId, TablePath, TableView, TabletGroupId, TierMap, Timestamp,
-  TransTableLocationPrefix, TransTableName,
+  proc, CQueryPath, CTQueryPath, CTSubNodePath, ColName, Context, ContextRow, ContextSchema, Gen,
+  LeadershipId, NodeGroupId, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
+  TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::{CommonQuery, ServerContext};
@@ -25,7 +25,7 @@ pub enum InternalError {
 }
 
 pub struct GRQueryResult {
-  pub new_rms: HashSet<QueryPath>,
+  pub new_rms: HashSet<TQueryPath>,
   pub schema: Vec<ColName>,
   pub result: Vec<TableView>,
 }
@@ -82,7 +82,7 @@ pub struct GRQueryPlan {
 #[derive(Debug)]
 pub struct GRQueryES {
   /// This is only here so it can be forwarded to child queries.
-  pub root_query_path: QueryPath,
+  pub root_query_path: CQueryPath,
   /// This is only here so it can be forwarded to child queries.
   pub timestamp: Timestamp,
   pub context: Rc<Context>,
@@ -101,7 +101,7 @@ pub struct GRQueryES {
   pub query_plan: GRQueryPlan,
 
   // The dynamically evolving fields.
-  pub new_rms: HashSet<QueryPath>,
+  pub new_rms: HashSet<TQueryPath>,
   pub trans_table_views: Vec<(TransTableName, (Vec<ColName>, Vec<TableView>))>,
   pub state: GRExecutionS,
 
@@ -148,7 +148,7 @@ impl SubqueryComputableSql for proc::Update {
 }
 
 pub struct GRQueryConstructorView<'a, SqlQueryT: SubqueryComputableSql> {
-  pub root_query_path: &'a QueryPath,
+  pub root_query_path: &'a CQueryPath,
   pub timestamp: &'a Timestamp,
   /// SQL query containing by the parent ES.
   pub sql_query: &'a SqlQueryT,
@@ -212,7 +212,7 @@ impl GRQueryES {
     &mut self,
     ctx: &mut ServerContext<T>,
     tm_qid: QueryId,
-    new_rms: HashSet<QueryPath>,
+    new_rms: HashSet<TQueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
@@ -395,8 +395,7 @@ impl GRQueryES {
         TransTableIdx::Local(idx) => {
           let (trans_table_name, _) = self.trans_table_views.get(*idx).unwrap();
           new_context_schema.trans_table_context_schema.push(TransTableLocationPrefix {
-            source: ctx.node_group_id(),
-            query_id: self.query_id.clone(),
+            source: ctx.mk_this_query_path(self.query_id.clone()),
             trans_table_name: trans_table_name.clone(),
           });
         }
@@ -467,7 +466,7 @@ impl GRQueryES {
       tm_state: Default::default(),
       orig_p: OrigP::new(self.query_id.clone()),
     };
-    let sender_path = ctx.mk_query_path(tm_qid.clone());
+    let sender_path = ctx.mk_this_query_path(tm_qid.clone());
 
     // Send out the PerformQuery and populate TMStatus accordingly.
     let (_, stage) = self.sql_query.trans_tables.get(stage_idx).unwrap();
@@ -496,11 +495,11 @@ impl GRQueryES {
           };
 
           // Send out PerformQuery. Recall that this could only be a Tablet.
-          let nid = NodeGroupId::Tablet(tid);
-          ctx.send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
+          let node_path = ctx.mk_node_path_from_tablet(tid).into_ct();
+          ctx.send_to_ct_2(node_path.clone(), CommonQuery::PerformQuery(perform_query));
 
           // Add the TabletGroup into the TMStatus.
-          tm_status.tm_state.insert(ctx.core_ctx().mk_node_path(nid), None);
+          tm_status.tm_state.insert(node_path, None);
         }
       }
       proc::TableRef::TransTableName(trans_table_name) => {
@@ -529,11 +528,11 @@ impl GRQueryES {
         };
 
         // Send out PerformQuery. Recall that this could be a Slave or a Tablet.
-        let nid = location_prefix.source.clone();
-        ctx.send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
+        let node_path = location_prefix.source.node_path.clone();
+        ctx.send_to_ct_2(node_path.clone(), CommonQuery::PerformQuery(perform_query));
 
         // Add the TabletGroup into the TMStatus.
-        tm_status.tm_state.insert(ctx.core_ctx().mk_node_path(nid), None);
+        tm_status.tm_state.insert(node_path, None);
       }
     };
 

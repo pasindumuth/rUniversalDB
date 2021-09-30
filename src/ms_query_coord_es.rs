@@ -2,8 +2,9 @@ use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsa
 use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
 use crate::coord::CoordContext;
 use crate::model::common::{
-  proc, ColName, Context, ContextRow, EndpointId, Gen, NodeGroupId, QueryId, QueryPath, RequestId,
-  TablePath, TableView, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
+  proc, CTQueryPath, ColName, Context, ContextRow, EndpointId, Gen, NodeGroupId, QueryId,
+  RequestId, TQueryPath, TablePath, TableView, TierMap, Timestamp, TransTableLocationPrefix,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::CommonQuery;
@@ -22,7 +23,7 @@ pub struct CoordQueryPlan {
 
 #[derive(Debug)]
 pub struct PreparingState {
-  prepared_rms: HashSet<QueryPath>,
+  prepared_rms: HashSet<TQueryPath>,
 }
 
 #[derive(Debug)]
@@ -72,12 +73,12 @@ pub struct MSCoordES {
   pub all_tier_maps: HashMap<TransTableName, TierMap>,
 
   // The dynamically evolving fields.
-  pub all_rms: HashSet<QueryPath>,
+  pub all_rms: HashSet<TQueryPath>,
   pub trans_table_views: Vec<(TransTableName, (Vec<ColName>, TableView))>,
   pub state: CoordState,
 
   // Memory management fields
-  pub registered_queries: HashSet<QueryPath>,
+  pub registered_queries: HashSet<TQueryPath>,
 }
 
 impl TransTableSource for MSCoordES {
@@ -202,7 +203,7 @@ impl FullMSCoordES {
     &mut self,
     ctx: &mut CoordContext<T>,
     tm_qid: QueryId,
-    new_rms: HashSet<QueryPath>,
+    new_rms: HashSet<TQueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
@@ -307,8 +308,8 @@ impl FullMSCoordES {
 
     // First, we commit all RMs.
     for query_path in &es.all_rms {
-      ctx.ctx().core_ctx().send_to_tablet(
-        query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
+      ctx.ctx().send_to_t_2(
+        query_path.node_path.clone(),
         msg::TabletMessage::FinishQueryCommit(msg::FinishQueryCommit {
           ms_query_id: query_path.query_id.clone(),
         }),
@@ -318,9 +319,9 @@ impl FullMSCoordES {
     // Next, we inform all `registered_query`s that are not an RM that they should exit,
     // since they were falsely added to this transaction.
     for query_path in &es.registered_queries {
-      if !es.all_rms.contains(query_path) {
-        ctx.ctx().core_ctx().send_to_tablet(
-          query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
+      if !es.all_rms.contains(&query_path) {
+        ctx.ctx().send_to_t_2(
+          query_path.node_path.clone(),
           msg::TabletMessage::CancelQuery(msg::CancelQuery {
             query_id: query_path.query_id.clone(),
           }),
@@ -355,8 +356,8 @@ impl FullMSCoordES {
         // Otherwise, this transaction had writes, so we start 2PC by sending out Prepared.
         let sender_path = ctx.mk_query_path(es.query_id.clone());
         for query_path in &es.all_rms {
-          ctx.ctx().core_ctx().send_to_tablet(
-            query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
+          ctx.ctx().send_to_t_2(
+            query_path.node_path.clone(),
             msg::TabletMessage::FinishQueryPrepare(msg::FinishQueryPrepare {
               sender_path: sender_path.clone(),
               ms_query_id: query_path.query_id.clone(),
@@ -389,8 +390,7 @@ impl FullMSCoordES {
     let mut context_row = ContextRow::default();
     for trans_table_name in &trans_table_names {
       context.context_schema.trans_table_context_schema.push(TransTableLocationPrefix {
-        source: NodeGroupId::Slave(ctx.this_slave_group_id.clone()),
-        query_id: es.query_id.clone(),
+        source: ctx.ctx().mk_this_query_path(es.query_id.clone()),
         trans_table_name: trans_table_name.clone(),
       });
       context_row.trans_table_context_row.push(0);
@@ -444,17 +444,17 @@ impl FullMSCoordES {
             for tid in tids {
               let perform_query = msg::PerformQuery {
                 root_query_path: root_query_path.clone(),
-                sender_path: sender_path.clone(),
+                sender_path: sender_path.clone().into_ct(),
                 query_id: child_qid.clone(),
                 query: msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query.clone()),
               };
 
-              // Send out PerformQuery. Recall that this could only be a a Tablet.
-              let nid = NodeGroupId::Tablet(tid);
-              ctx.ctx().send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
+              // Send out PerformQuery. Recall that this could only be a Tablet.
+              let node_path = ctx.ctx().mk_node_path_from_tablet(tid).into_ct();
+              ctx.ctx().send_to_ct_2(node_path.clone(), CommonQuery::PerformQuery(perform_query));
 
               // Add the TabletGroup into the TMStatus.
-              tm_status.tm_state.insert(ctx.ctx().core_ctx().mk_node_path(nid), None);
+              tm_status.tm_state.insert(node_path, None);
             }
           }
           proc::TableRef::TransTableName(sub_trans_table_name) => {
@@ -471,7 +471,7 @@ impl FullMSCoordES {
             // if we are doing a TransTableRead here, then the TransTable must be located here.
             let perform_query = msg::PerformQuery {
               root_query_path,
-              sender_path,
+              sender_path: sender_path.into_ct(),
               query_id: child_qid.clone(),
               query: msg::GeneralQuery::SuperSimpleTransTableSelectQuery(
                 msg::SuperSimpleTransTableSelectQuery {
@@ -484,11 +484,11 @@ impl FullMSCoordES {
             };
 
             // Send out PerformQuery. Recall that this could be a Slave or a Tablet.
-            let nid = location_prefix.source.clone();
-            ctx.ctx().send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
+            let node_path = location_prefix.source.node_path.clone();
+            ctx.ctx().send_to_ct_2(node_path.clone(), CommonQuery::PerformQuery(perform_query));
 
             // Add the TabletGroup into the TMStatus.
-            tm_status.tm_state.insert(ctx.ctx().core_ctx().mk_node_path(nid), None);
+            tm_status.tm_state.insert(node_path, None);
           }
         }
       }
@@ -508,17 +508,17 @@ impl FullMSCoordES {
         for tid in tids {
           let perform_query = msg::PerformQuery {
             root_query_path: root_query_path.clone(),
-            sender_path: sender_path.clone(),
+            sender_path: sender_path.clone().into_ct(),
             query_id: child_qid.clone(),
             query: msg::GeneralQuery::UpdateQuery(child_query.clone()),
           };
 
-          // Send out PerformQuery. Recall that this could only be a a Tablet.
-          let nid = NodeGroupId::Tablet(tid);
-          ctx.ctx().send_to_node(nid.clone(), CommonQuery::PerformQuery(perform_query));
+          // Send out PerformQuery. Recall that this could only be a Tablet.
+          let node_path = ctx.ctx().mk_node_path_from_tablet(tid).into_ct();
+          ctx.ctx().send_to_ct_2(node_path.clone(), CommonQuery::PerformQuery(perform_query));
 
           // Add the TabletGroup into the TMStatus.
-          tm_status.tm_state.insert(ctx.ctx().core_ctx().mk_node_path(nid), None);
+          tm_status.tm_state.insert(node_path, None);
         }
       }
     };
@@ -539,8 +539,8 @@ impl FullMSCoordES {
             // Clean up any Registered Queries in the MSCoordES. Recall that in the
             // absence of Commit/Abort, this is the only way that MSQueryESs can get cleaned up.
             for registered_query in &es.registered_queries {
-              ctx.ctx().send_to_path(
-                registered_query.clone(),
+              ctx.ctx().send_to_ct_2(
+                registered_query.clone().into_ct().node_path,
                 CommonQuery::CancelQuery(msg::CancelQuery {
                   query_id: registered_query.query_id.clone(),
                 }),
@@ -552,8 +552,8 @@ impl FullMSCoordES {
             // cancelled with FinishQueryAbort (they don't react to CancelQuery). The remaining
             // `registered_queries` can be cancelled with CancelQuery.
             for query_path in &es.all_rms {
-              ctx.ctx().core_ctx().send_to_tablet(
-                query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
+              ctx.ctx().send_to_t_2(
+                query_path.node_path.clone(),
                 msg::TabletMessage::FinishQueryAbort(msg::FinishQueryAbort {
                   ms_query_id: query_path.query_id.clone(),
                 }),
@@ -561,8 +561,8 @@ impl FullMSCoordES {
             }
             for query_path in &es.registered_queries {
               if !es.all_rms.contains(query_path) {
-                ctx.ctx().core_ctx().send_to_tablet(
-                  query_path.node_path.maybe_tablet_group_id.clone().unwrap(),
+                ctx.ctx().send_to_t_2(
+                  query_path.node_path.clone(),
                   msg::TabletMessage::CancelQuery(msg::CancelQuery {
                     query_id: query_path.query_id.clone(),
                   }),

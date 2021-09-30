@@ -20,8 +20,9 @@ use crate::gr_query_es::{
   SubqueryComputableSql,
 };
 use crate::model::common::{
-  proc, ColType, ColValN, Context, ContextRow, ContextSchema, Gen, LeadershipId, NodeGroupId,
-  NodePath, PaxosGroupId, QueryPath, TableView, TierMap, TransTableLocationPrefix, TransTableName,
+  proc, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColValN, Context, ContextRow,
+  ContextSchema, Gen, LeadershipId, NodeGroupId, PaxosGroupId, TNodePath, TQueryPath, TSubNodePath,
+  TableView, TierMap, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::common::{
   ColName, ColVal, EndpointId, PrimaryKey, QueryId, SlaveGroupId, TablePath, TabletGroupId,
@@ -223,7 +224,7 @@ pub struct MSQueryES {
 
 #[derive(Debug)]
 struct TableReadESWrapper {
-  sender_path: QueryPath,
+  sender_path: CTQueryPath,
   child_queries: Vec<QueryId>,
   es: TableReadES,
 }
@@ -236,7 +237,7 @@ impl TableReadESWrapper {
 
 #[derive(Debug)]
 pub struct TransTableReadESWrapper {
-  pub sender_path: QueryPath,
+  pub sender_path: CTQueryPath,
   pub child_queries: Vec<QueryId>,
   pub es: TransTableReadES,
 }
@@ -249,7 +250,7 @@ impl TransTableReadESWrapper {
 
 #[derive(Debug)]
 struct MSTableReadESWrapper {
-  sender_path: QueryPath,
+  sender_path: CTQueryPath,
   child_queries: Vec<QueryId>,
   es: MSTableReadES,
 }
@@ -262,7 +263,7 @@ impl MSTableReadESWrapper {
 
 #[derive(Debug)]
 struct MSTableWriteESWrapper {
-  sender_path: QueryPath,
+  sender_path: CTQueryPath,
   child_queries: Vec<QueryId>,
   es: MSTableWriteES,
 }
@@ -523,6 +524,7 @@ pub struct TabletContext<T: IOTypes> {
   /// Metadata
   pub this_slave_group_id: SlaveGroupId,
   pub this_tablet_group_id: TabletGroupId,
+  pub sub_node_path: CTSubNodePath, // Simply wraps `this_coord_group_id`, used for expedience
   pub this_eid: EndpointId,
 
   /// Gossip
@@ -588,6 +590,7 @@ impl<T: IOTypes> TabletState<T> {
         network_output,
         this_slave_group_id,
         this_tablet_group_id,
+        sub_node_path: CTSubNodePath::Tablet(TabletGroupId("".to_string())),
         this_eid: EndpointId("".to_string()),
         gossip_data: gossip,
         leader_map: Default::default(),
@@ -628,7 +631,7 @@ impl<T: IOTypes> TabletContext<T> {
       clock: &mut self.clock,
       network_output: &mut self.network_output,
       this_slave_group_id: &self.this_slave_group_id,
-      maybe_this_tablet_group_id: Some(&self.this_tablet_group_id),
+      sub_node_path: &self.sub_node_path,
       leader_map: &self.leader_map,
       gossip: &mut self.gossip_data,
     }
@@ -689,7 +692,9 @@ impl<T: IOTypes> TabletContext<T> {
               msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
                 // First, we check if the GRQueryES still exists in the Statuses, continuing
                 // if so and aborting if not.
-                if let Some(gr_query) = statuses.gr_query_ess.get(&query.location_prefix.query_id) {
+                if let Some(gr_query) =
+                  statuses.gr_query_ess.get(&query.location_prefix.source.query_id)
+                {
                   // Construct and start the TransQueryReplanningES
                   let trans_table = map_insert(
                     &mut statuses.trans_table_read_ess,
@@ -885,7 +890,7 @@ impl<T: IOTypes> TabletContext<T> {
               // Send back Prepared
               let return_qid = prepare.sender_path.query_id.clone();
               let rm_path = self.mk_query_path(prepare.ms_query_id);
-              self.ctx().core_ctx().send_to_coord(
+              self.ctx().send_to_c(
                 prepare.sender_path,
                 msg::CoordMessage::FinishQueryPrepared(msg::FinishQueryPrepared {
                   return_qid,
@@ -898,7 +903,7 @@ impl<T: IOTypes> TabletContext<T> {
               // the Slave as such.
               let return_qid = prepare.sender_path.query_id.clone();
               let rm_path = self.mk_query_path(prepare.ms_query_id);
-              self.ctx().core_ctx().send_to_coord(
+              self.ctx().send_to_c(
                 prepare.sender_path,
                 msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
                   return_qid,
@@ -1121,7 +1126,7 @@ impl<T: IOTypes> TabletContext<T> {
   fn get_msquery_id(
     &mut self,
     statuses: &mut Statuses,
-    root_query_path: QueryPath,
+    root_query_path: CQueryPath,
     timestamp: Timestamp,
   ) -> Result<QueryId, msg::QueryError> {
     let root_query_id = root_query_path.query_id.clone();
@@ -1158,10 +1163,7 @@ impl<T: IOTypes> TabletContext<T> {
           root_query_id: root_query_id.clone(),
           query_path: self.mk_query_path(ms_query_id.clone()),
         };
-        self
-          .ctx()
-          .core_ctx()
-          .send_to_coord(root_query_path, msg::CoordMessage::RegisterQuery(register_query));
+        self.ctx().send_to_c(root_query_path, msg::CoordMessage::RegisterQuery(register_query));
 
         // Finally, add an empty VerifyingReadWriteRegion
         self.verifying_writes.insert(
@@ -1584,7 +1586,7 @@ impl<T: IOTypes> TabletContext<T> {
     btree_multimap_insert(&mut self.inserting_read_protected, &timestamp, protect_request.clone());
     self.tablet_bundle.push(TabletPLm::ReadProtected(ReadProtected {
       query_id: protect_request.query_id.clone(),
-      timestamp: timestamp,
+      timestamp,
       region: protect_request.read_region,
     }));
 
@@ -1675,8 +1677,8 @@ impl<T: IOTypes> TabletContext<T> {
       for (rm_path, rm_result) in tm_status.tm_state {
         if rm_result.is_none() && rm_path != query_aborted.responder_path.node_path {
           // We avoid sending CancelQuery for the RM that just responded.
-          self.ctx().send_to_node(
-            rm_path.to_node_id(),
+          self.ctx().send_to_ct_2(
+            rm_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: tm_status.child_query_id.clone(),
             }),
@@ -1700,7 +1702,7 @@ impl<T: IOTypes> TabletContext<T> {
     statuses: &mut Statuses,
     orig_p: OrigP,
     subquery_id: QueryId,
-    subquery_new_rms: HashSet<QueryPath>,
+    subquery_new_rms: HashSet<TQueryPath>,
     (table_schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
@@ -1718,7 +1720,7 @@ impl<T: IOTypes> TabletContext<T> {
       // TransTableReadES
       let prefix = trans_read.es.location_prefix();
       remove_item(&mut trans_read.child_queries, &subquery_id);
-      let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
+      let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id) {
         trans_read.es.handle_subquery_done(
           &mut self.ctx(),
           &gr_query.es,
@@ -1825,8 +1827,8 @@ impl<T: IOTypes> TabletContext<T> {
         // Remove the TableReadESWrapper and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct(
           sender_path.clone(),
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -1840,8 +1842,8 @@ impl<T: IOTypes> TabletContext<T> {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -1870,8 +1872,8 @@ impl<T: IOTypes> TabletContext<T> {
         // Remove the TableReadESWrapper and respond.
         let read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct(
           sender_path.clone(),
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -1885,8 +1887,8 @@ impl<T: IOTypes> TabletContext<T> {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let read = statuses.table_read_ess.remove(&query_id).unwrap();
         let sender_path = read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -1915,8 +1917,8 @@ impl<T: IOTypes> TabletContext<T> {
         // MSTableReadES
         ms_read.es.exit_and_clean_up(self);
         let sender_path = ms_read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -1929,8 +1931,8 @@ impl<T: IOTypes> TabletContext<T> {
         // MSTableWriteES
         ms_write.es.exit_and_clean_up(self);
         let sender_path = ms_write.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -1965,8 +1967,8 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_query_es = statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_write.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct(
           sender_path.clone(),
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -1982,8 +1984,8 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_query_es = statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_write.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2013,8 +2015,8 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_query_es = statuses.ms_query_ess.get_mut(&ms_read.es.ms_query_id).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct(
           sender_path.clone(),
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -2029,8 +2031,8 @@ impl<T: IOTypes> TabletContext<T> {
         let ms_query_es = statuses.ms_query_ess.get_mut(&ms_read.es.ms_query_id).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_read.sender_path;
-        let responder_path = self.mk_query_path(query_id);
-        self.ctx().send_to_path(
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        self.ctx().send_to_ct(
           sender_path.clone(),
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2104,8 +2106,8 @@ impl<T: IOTypes> TabletContext<T> {
       // We ECU this TMStatus by sending CancelQuery to all remaining participants.
       for (rm_path, rm_result) in tm_status.tm_state {
         if rm_result.is_none() {
-          self.ctx().send_to_node(
-            rm_path.to_node_id(),
+          self.ctx().send_to_ct_2(
+            rm_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: tm_status.child_query_id.clone(),
             }),
@@ -2145,11 +2147,11 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   /// Construct QueryPath for a given `query_id` that belongs to this Tablet.
-  pub fn mk_query_path(&self, query_id: QueryId) -> QueryPath {
-    QueryPath {
-      node_path: NodePath {
+  pub fn mk_query_path(&self, query_id: QueryId) -> TQueryPath {
+    TQueryPath {
+      node_path: TNodePath {
         slave_group_id: self.this_slave_group_id.clone(),
-        maybe_tablet_group_id: Some(self.this_tablet_group_id.clone()),
+        sub_node_path: TSubNodePath::Tablet(self.this_tablet_group_id.clone()),
       },
       query_id,
     }
