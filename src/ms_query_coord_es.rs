@@ -144,10 +144,11 @@ impl FullMSCoordES {
   pub fn handle_master_response<T: IOTypes>(
     &mut self,
     ctx: &mut CoordContext<T>,
-    response: msg::MasterQueryPlanningSuccess,
+    master_qid: QueryId,
+    result: msg::MasteryQueryPlanningResult,
   ) -> MSQueryCoordAction {
     let plan_es = cast!(FullMSCoordES::QueryPlanning, self).unwrap();
-    let action = plan_es.handle_master_query_plan(ctx, response);
+    let action = plan_es.handle_master_query_plan(ctx, master_qid, result);
     self.handle_planning_action(ctx, action)
   }
 
@@ -241,6 +242,18 @@ impl FullMSCoordES {
     }
   }
 
+  /// This is called when one of the remote node's Leadership changes beyond the
+  /// LeadershipId that we had sent a PerformQuery to.
+  pub fn handle_tm_remote_leadership_changed<T: IOTypes>(
+    &mut self,
+    ctx: &mut CoordContext<T>,
+  ) -> MSQueryCoordAction {
+    let es = cast!(FullMSCoordES::Executing, self).unwrap();
+    let stage = cast!(CoordState::Stage, &es.state).unwrap();
+    let stage_idx = stage.stage_idx.clone();
+    self.process_ms_query_stage(ctx, stage_idx)
+  }
+
   // Handle a RegisterQuery sent by an MSQuery to an MSCoordES.
   pub fn handle_register_query(&mut self, register: msg::RegisterQuery) {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
@@ -301,7 +314,20 @@ impl FullMSCoordES {
           MSQueryCoordAction::Wait
         }
       }
-      FullMSCoordES::Executing(_) => MSQueryCoordAction::Wait,
+      FullMSCoordES::Executing(es) => {
+        // Compute the set of RegisteredQuery's that can be removed due to the Leadership change.
+        let mut to_remove = Vec::<TQueryPath>::new();
+        for registered_query in &es.registered_queries {
+          if &remote_leader_changed.gid == &registered_query.node_path.sid.to_gid() {
+            to_remove.push(registered_query.clone())
+          }
+        }
+        // Remove them from the ES.
+        for registered_query in to_remove {
+          es.registered_queries.remove(&registered_query);
+        }
+        MSQueryCoordAction::Wait
+      }
     }
   }
 
@@ -326,7 +352,7 @@ impl FullMSCoordES {
 
     // First, we commit all RMs.
     for query_path in &es.all_rms {
-      ctx.ctx().send_to_t_2(
+      ctx.ctx().send_to_t(
         query_path.node_path.clone(),
         msg::TabletMessage::FinishQueryCommit(msg::FinishQueryCommit {
           ms_query_id: query_path.query_id.clone(),
@@ -338,7 +364,7 @@ impl FullMSCoordES {
     // since they were falsely added to this transaction.
     for query_path in &es.registered_queries {
       if !es.all_rms.contains(&query_path) {
-        ctx.ctx().send_to_t_2(
+        ctx.ctx().send_to_t(
           query_path.node_path.clone(),
           msg::TabletMessage::CancelQuery(msg::CancelQuery {
             query_id: query_path.query_id.clone(),
@@ -371,10 +397,35 @@ impl FullMSCoordES {
         // If there are no RMs, that means this was purely a read, so we can finish up.
         self.finish_ms_coord(ctx)
       } else {
+        // Check that none of the Leaderships in `all_rms` have changed.
+        for rm in &es.all_rms {
+          let orig_lid = es.query_plan.query_leader_map.get(&rm.node_path.sid).unwrap();
+          let cur_lid = ctx.leader_map.get(&rm.node_path.sid.to_gid()).unwrap();
+          if orig_lid != cur_lid {
+            // If a Leadership has changed, we abort and retry this MSCoordES.
+            self.exit_and_clean_up(ctx);
+            return MSQueryCoordAction::NonFatalFailure;
+          }
+        }
+
+        // Cancel all RegisteredQueries that are not also an RM in the upcoming Paxos2PC.
+        for registered_query in &es.registered_queries {
+          if !es.all_rms.contains(registered_query) {
+            ctx.ctx().send_to_ct(
+              registered_query.clone().into_ct().node_path,
+              CommonQuery::CancelQuery(msg::CancelQuery {
+                query_id: registered_query.query_id.clone(),
+              }),
+            )
+          }
+        }
+
+        // TODO: remove
+
         // Otherwise, this transaction had writes, so we start 2PC by sending out Prepared.
         let sender_path = ctx.mk_query_path(es.query_id.clone());
         for query_path in &es.all_rms {
-          ctx.ctx().send_to_t_2(
+          ctx.ctx().send_to_t(
             query_path.node_path.clone(),
             msg::TabletMessage::FinishQueryPrepare(msg::FinishQueryPrepare {
               sender_path: sender_path.clone(),
@@ -535,15 +586,15 @@ impl FullMSCoordES {
         for tid in tids {
           // Send out PerformQuery. Recall that this could only be a Tablet. Also recall
           // from the prior leader_map check, the local `leader_map` and the `query_leader_map`
-          // for the given `tids` align, so using `send_to_t_2` sends to Leaderships
+          // for the given `tids` align, so using `send_to_t` sends to Leaderships
           // in `query_leader_map`.
           let tablet_msg = msg::TabletMessage::PerformQuery(perform_query.clone());
           let node_path = ctx.ctx().mk_node_path_from_tablet(tid);
-          ctx.ctx().send_to_t_2(node_path.clone(), tablet_msg);
+          ctx.ctx().send_to_t(node_path.clone(), tablet_msg);
 
           // Add the TabletGroup into the TMStatus.
           tm_status.tm_state.insert(node_path.clone().into_ct(), None);
-          let sid = node_path.slave_group_id.clone();
+          let sid = node_path.sid.clone();
           let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
           tm_status.leaderships.insert(sid, lid.clone());
         }
@@ -553,11 +604,11 @@ impl FullMSCoordES {
         // MSCoordES. Thus, there is no need to verify Leadership of `location_prefix` is
         // still alive, since it obviously is if we get here.
         let node_path = location_prefix.source.node_path.clone();
-        ctx.ctx().send_to_ct_2(node_path.clone(), CommonQuery::PerformQuery(perform_query));
+        ctx.ctx().send_to_ct(node_path.clone(), CommonQuery::PerformQuery(perform_query));
 
         // Add the TabletGroup into the TMStatus.
         tm_status.tm_state.insert(node_path.clone(), None);
-        let sid = node_path.slave_group_id.clone();
+        let sid = node_path.sid.clone();
         let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
         tm_status.leaderships.insert(sid, lid.clone());
       }
@@ -577,9 +628,9 @@ impl FullMSCoordES {
           CoordState::Start => {}
           CoordState::Stage(_) => {
             // Clean up any Registered Queries in the MSCoordES. The `registered_queries` docs
-            // describe why `send_to_ct_2` sends the message to the right PaxosNode.
+            // describe why `send_to_ct` sends the message to the right PaxosNode.
             for registered_query in &es.registered_queries {
-              ctx.ctx().send_to_ct_2(
+              ctx.ctx().send_to_ct(
                 registered_query.clone().into_ct().node_path,
                 CommonQuery::CancelQuery(msg::CancelQuery {
                   query_id: registered_query.query_id.clone(),
@@ -592,7 +643,7 @@ impl FullMSCoordES {
             // cancelled with FinishQueryAbort (they don't react to CancelQuery). The remaining
             // `registered_queries` can be cancelled with CancelQuery.
             for query_path in &es.all_rms {
-              ctx.ctx().send_to_t_2(
+              ctx.ctx().send_to_t(
                 query_path.node_path.clone(),
                 msg::TabletMessage::FinishQueryAbort(msg::FinishQueryAbort {
                   ms_query_id: query_path.query_id.clone(),
@@ -601,7 +652,7 @@ impl FullMSCoordES {
             }
             for query_path in &es.registered_queries {
               if !es.all_rms.contains(query_path) {
-                ctx.ctx().send_to_t_2(
+                ctx.ctx().send_to_t(
                   query_path.node_path.clone(),
                   msg::TabletMessage::CancelQuery(msg::CancelQuery {
                     query_id: query_path.query_id.clone(),
@@ -884,11 +935,11 @@ impl QueryPlanningES {
   pub fn handle_master_query_plan<T: IOTypes>(
     &mut self,
     ctx: &mut CoordContext<T>,
-    response: msg::MasterQueryPlanningSuccess,
+    master_qid: QueryId,
+    result: msg::MasteryQueryPlanningResult,
   ) -> QueryPlanningAction {
     let last_state = cast!(QueryPlanningS::MasterQueryPlanning, &self.state).unwrap();
-    assert_eq!(last_state.master_query_id, response.query_id);
-    let result = response.result;
+    assert_eq!(last_state.master_query_id, master_qid);
     match result {
       MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
         // We must still check that there are no top-level External Columns.

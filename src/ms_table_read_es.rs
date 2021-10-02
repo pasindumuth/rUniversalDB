@@ -135,7 +135,7 @@ impl MSTableReadES {
   // Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
   fn check_gossip_data<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> MSTableReadAction {
     for (table_path, gen) in &self.query_plan.table_location_map {
-      if !ctx.gossip_data.sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
+      if !ctx.gossip.sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
         // If not, we go to GossipDataWaiting
         self.state = MSReadExecutionS::GossipDataWaiting;
 

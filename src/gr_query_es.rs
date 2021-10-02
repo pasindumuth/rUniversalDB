@@ -495,13 +495,13 @@ impl GRQueryES {
           // Send out PerformQuery. Recall that this could only be a Tablet.
           let common_query = CommonQuery::PerformQuery(perform_query);
           let node_path = ctx.mk_node_path_from_tablet(tid).into_ct();
-          let sid = node_path.slave_group_id.clone();
+          let sid = node_path.sid.clone();
           if let Some(lid) = query_leader_map.get(&sid) {
             // Recall we already validated that `lid` is no lower than the
             // one at this node's LeaderMap.
-            ctx.send_to_ct_2_lid(node_path.clone(), common_query, lid.clone());
+            ctx.send_to_ct_lid(node_path.clone(), common_query, lid.clone());
           } else {
-            ctx.send_to_ct_2(node_path.clone(), common_query);
+            ctx.send_to_ct(node_path.clone(), common_query);
           }
 
           // Add the TabletGroup into the TMStatus.
@@ -526,7 +526,7 @@ impl GRQueryES {
 
         // Validate the LeadershipId of PaxosGroups that the PerformQuery will be sent to.
         // We do this before sending any messages, in case it fails.
-        let sid = &location_prefix.source.node_path.slave_group_id;
+        let sid = &location_prefix.source.node_path.sid;
         if let Some(lid) = query_leader_map.get(sid) {
           if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
             // The `lid` is too old, so we cannot finish this GRQueryES.
@@ -554,13 +554,13 @@ impl GRQueryES {
         // Send out PerformQuery. Recall that this could be a Slave or a Tablet.
         let common_query = CommonQuery::PerformQuery(perform_query);
         let node_path = location_prefix.source.node_path.clone();
-        let sid = node_path.slave_group_id.clone();
+        let sid = node_path.sid.clone();
         if let Some(lid) = query_leader_map.get(&sid) {
           // Recall we already validated that `lid` is no lower than the
           // one at this node's LeaderMap.
-          ctx.send_to_ct_2_lid(node_path.clone(), common_query, lid.clone());
+          ctx.send_to_ct_lid(node_path.clone(), common_query, lid.clone());
         } else {
-          ctx.send_to_ct_2(node_path.clone(), common_query);
+          ctx.send_to_ct(node_path.clone(), common_query);
         }
 
         // Add the TabletGroup into the TMStatus.

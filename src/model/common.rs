@@ -187,16 +187,13 @@ impl IntoCTSubNodePath for CSubNodePath {
 /// `SlaveNodePath`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SlaveNodePath<SubNodePathT> {
-  pub slave_group_id: SlaveGroupId,
-  pub sub_node_path: SubNodePathT,
+  pub sid: SlaveGroupId,
+  pub sub: SubNodePathT,
 }
 
 impl<SubNodePathT: IntoCTSubNodePath> SlaveNodePath<SubNodePathT> {
   pub fn into_ct(self) -> CTNodePath {
-    SlaveNodePath {
-      slave_group_id: self.slave_group_id,
-      sub_node_path: self.sub_node_path.into_ct(),
-    }
+    SlaveNodePath { sid: self.sid, sub: self.sub.into_ct() }
   }
 }
 
@@ -220,10 +217,7 @@ pub struct SlaveQueryPath<SubNodePathT> {
 impl<SubNodePathT: IntoCTSubNodePath> SlaveQueryPath<SubNodePathT> {
   pub fn into_ct(self) -> CTQueryPath {
     CTQueryPath {
-      node_path: CTNodePath {
-        slave_group_id: self.node_path.slave_group_id,
-        sub_node_path: self.node_path.sub_node_path.into_ct(),
-      },
+      node_path: CTNodePath { sid: self.node_path.sid, sub: self.node_path.sub.into_ct() },
       query_id: self.query_id,
     }
   }

@@ -10,6 +10,7 @@ pub mod coord;
 pub mod drop_table_es;
 pub mod experimental;
 pub mod expression;
+pub mod finish_query_tm_es;
 pub mod gr_query_es;
 pub mod master;
 pub mod model;

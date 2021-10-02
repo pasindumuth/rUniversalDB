@@ -233,7 +233,7 @@ struct TableReadESWrapper {
 
 impl TableReadESWrapper {
   fn sender_gid(&self) -> PaxosGroupId {
-    self.sender_path.node_path.slave_group_id.to_gid()
+    self.sender_path.node_path.sid.to_gid()
   }
 }
 
@@ -246,7 +246,7 @@ pub struct TransTableReadESWrapper {
 
 impl TransTableReadESWrapper {
   fn sender_gid(&self) -> PaxosGroupId {
-    self.sender_path.node_path.slave_group_id.to_gid()
+    self.sender_path.node_path.sid.to_gid()
   }
 }
 
@@ -259,7 +259,7 @@ struct MSTableReadESWrapper {
 
 impl MSTableReadESWrapper {
   fn sender_gid(&self) -> PaxosGroupId {
-    self.sender_path.node_path.slave_group_id.to_gid()
+    self.sender_path.node_path.sid.to_gid()
   }
 }
 
@@ -272,7 +272,7 @@ struct MSTableWriteESWrapper {
 
 impl MSTableWriteESWrapper {
   fn sender_gid(&self) -> PaxosGroupId {
-    self.sender_path.node_path.slave_group_id.to_gid()
+    self.sender_path.node_path.sid.to_gid()
   }
 }
 
@@ -530,7 +530,7 @@ pub struct TabletContext<T: IOTypes> {
   pub this_eid: EndpointId,
 
   /// Gossip
-  pub gossip_data: Arc<GossipData>,
+  pub gossip: Arc<GossipData>,
 
   /// LeaderMap
   pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
@@ -594,7 +594,7 @@ impl<T: IOTypes> TabletState<T> {
         this_tablet_group_id,
         sub_node_path: CTSubNodePath::Tablet(TabletGroupId("".to_string())),
         this_eid: EndpointId("".to_string()),
-        gossip_data: gossip,
+        gossip: gossip,
         leader_map: Default::default(),
         storage: GenericMVTable::new(),
         this_table_path,
@@ -635,7 +635,7 @@ impl<T: IOTypes> TabletContext<T> {
       this_slave_group_id: &self.this_slave_group_id,
       sub_node_path: &self.sub_node_path,
       leader_map: &self.leader_map,
-      gossip: &mut self.gossip_data,
+      gossip: &mut self.gossip,
     }
   }
 
@@ -903,7 +903,7 @@ impl<T: IOTypes> TabletContext<T> {
               let return_qid = prepare.sender_path.query_id.clone();
               let rm_path = self.mk_query_path(prepare.ms_query_id);
               self.ctx().send_to_c(
-                prepare.sender_path,
+                prepare.sender_path.node_path,
                 msg::CoordMessage::FinishQueryPrepared(msg::FinishQueryPrepared {
                   return_qid,
                   rm_path,
@@ -916,7 +916,7 @@ impl<T: IOTypes> TabletContext<T> {
               let return_qid = prepare.sender_path.query_id.clone();
               let rm_path = self.mk_query_path(prepare.ms_query_id);
               self.ctx().send_to_c(
-                prepare.sender_path,
+                prepare.sender_path.node_path,
                 msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
                   return_qid,
                   rm_path,
@@ -1066,7 +1066,7 @@ impl<T: IOTypes> TabletContext<T> {
         self.run_main_loop(statuses);
       }
       TabletForwardMsg::GossipData(gossip_data) => {
-        self.gossip_data = gossip_data;
+        self.gossip = gossip_data;
 
         // Inform Top-Level ESs.
         let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
@@ -1152,7 +1152,7 @@ impl<T: IOTypes> TabletContext<T> {
           let query_ids: Vec<QueryId> = statuses.ms_query_ess.keys().cloned().collect();
           for query_id in query_ids {
             let ms_query_es = statuses.ms_query_ess.get_mut(&query_id).unwrap();
-            let root_sid = &ms_query_es.root_query_path.node_path.slave_group_id;
+            let root_sid = &ms_query_es.root_query_path.node_path.sid;
             if root_sid == &sid && ms_query_es.root_lid < lid {
               // Here, the root PaxosNode is dead, so we simply ECU the MSQueryES.
               self.exit_and_clean_up(statuses, query_id);
@@ -1195,7 +1195,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // We check that the original Leadership of root_query_path is not dead,
     // returning a QueryError if so.
-    let root_sid = root_query_path.node_path.slave_group_id.clone();
+    let root_sid = root_query_path.node_path.sid.clone();
     let root_lid = query_leader_map.get(&root_sid).unwrap().clone();
     if self.leader_map.get(&root_sid.to_gid()).unwrap() > &root_lid {
       return Err(msg::QueryError::InvalidLeadershipId);
@@ -1203,7 +1203,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Otherwise, send a register message back to the root.
     let ms_query_path = self.mk_query_path(ms_query_id.clone());
-    self.ctx().send_to_c_2_lid(
+    self.ctx().send_to_c_lid(
       root_query_path.node_path.clone(),
       msg::CoordMessage::RegisterQuery(msg::RegisterQuery {
         root_query_id: root_query_id.clone(),
@@ -1733,10 +1733,10 @@ impl<T: IOTypes> TabletContext<T> {
   /// Handles an incoming QueryAborted message.
   fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
     let tm_query_id = &query_aborted.return_qid;
-    if let Some(tm_status) = statuses.tm_statuss.remove(tm_query_id) {
+    if let Some(tm_status) = statuses.tm_statuss.get(tm_query_id) {
       // We ECU this TMStatus by sending CancelQuery to all remaining participants.
       // Then, we propagate the QueryAborted back to the orig_p.
-      let gr_query_id = tm_status.orig_p.query_id;
+      let gr_query_id = tm_status.orig_p.query_id.clone();
       self.exit_and_clean_up(statuses, tm_query_id.clone());
 
       // Then, inform the GRQueryES
@@ -1755,18 +1755,13 @@ impl<T: IOTypes> TabletContext<T> {
     orig_p: OrigP,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<TQueryPath>,
-    (table_schema, table_views): (Vec<ColName>, Vec<TableView>),
+    result: (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
     if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
       remove_item(&mut read.child_queries, &subquery_id);
-      let action = read.es.handle_subquery_done(
-        self,
-        subquery_id,
-        subquery_new_rms,
-        (table_schema, table_views),
-      );
+      let action = read.es.handle_subquery_done(self, subquery_id, subquery_new_rms, result);
       self.handle_read_es_action(statuses, query_id, action);
     } else if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
       // TransTableReadES
@@ -1778,7 +1773,7 @@ impl<T: IOTypes> TabletContext<T> {
           &gr_query.es,
           subquery_id,
           subquery_new_rms,
-          (table_schema, table_views),
+          result,
         )
       } else {
         trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
@@ -1792,7 +1787,7 @@ impl<T: IOTypes> TabletContext<T> {
         statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap(),
         subquery_id,
         subquery_new_rms,
-        (table_schema, table_views),
+        result,
       );
       self.handle_ms_write_es_action(statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
@@ -1803,7 +1798,7 @@ impl<T: IOTypes> TabletContext<T> {
         statuses.ms_query_ess.get(&ms_read.es.ms_query_id).unwrap(),
         subquery_id,
         subquery_new_rms,
-        (table_schema, table_views),
+        result,
       );
       self.handle_ms_read_es_action(statuses, query_id, action);
     }
@@ -1882,7 +1877,7 @@ impl<T: IOTypes> TabletContext<T> {
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx().send_to_ct(
-          sender_path.clone(),
+          sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
             responder_path,
@@ -1898,7 +1893,7 @@ impl<T: IOTypes> TabletContext<T> {
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx().send_to_ct(
-          sender_path.clone(),
+          sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
             responder_path,
@@ -1929,7 +1924,7 @@ impl<T: IOTypes> TabletContext<T> {
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx().send_to_ct(
-          sender_path.clone(),
+          sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
             responder_path,
@@ -1945,7 +1940,7 @@ impl<T: IOTypes> TabletContext<T> {
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx().send_to_ct(
-          sender_path.clone(),
+          sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
             responder_path,
@@ -1976,7 +1971,7 @@ impl<T: IOTypes> TabletContext<T> {
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx().send_to_ct(
-          sender_path.clone(),
+          sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
             responder_path,
@@ -1991,7 +1986,7 @@ impl<T: IOTypes> TabletContext<T> {
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx().send_to_ct(
-          sender_path.clone(),
+          sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
             responder_path,
@@ -2028,7 +2023,7 @@ impl<T: IOTypes> TabletContext<T> {
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx().send_to_ct(
-          sender_path.clone(),
+          sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
             responder_path,
@@ -2046,7 +2041,7 @@ impl<T: IOTypes> TabletContext<T> {
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx().send_to_ct(
-          sender_path.clone(),
+          sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
             responder_path,
@@ -2078,7 +2073,7 @@ impl<T: IOTypes> TabletContext<T> {
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx().send_to_ct(
-          sender_path.clone(),
+          sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
             responder_path,
@@ -2095,7 +2090,7 @@ impl<T: IOTypes> TabletContext<T> {
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx().send_to_ct(
-          sender_path.clone(),
+          sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
             responder_path,
@@ -2172,9 +2167,9 @@ impl<T: IOTypes> TabletContext<T> {
       // We ECU this TMStatus by sending CancelQuery to all remaining RMs.
       for (rm_path, rm_result) in tm_status.tm_state {
         if rm_result.is_none() {
-          let orig_sid = &rm_path.slave_group_id;
+          let orig_sid = &rm_path.sid;
           let orig_lid = tm_status.leaderships.get(&orig_sid).unwrap().clone();
-          self.ctx().send_to_ct_2_lid(
+          self.ctx().send_to_ct_lid(
             rm_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: tm_status.child_query_id.clone(),
@@ -2221,8 +2216,8 @@ impl<T: IOTypes> TabletContext<T> {
   pub fn mk_query_path(&self, query_id: QueryId) -> TQueryPath {
     TQueryPath {
       node_path: TNodePath {
-        slave_group_id: self.this_slave_group_id.clone(),
-        sub_node_path: TSubNodePath::Tablet(self.this_tablet_group_id.clone()),
+        sid: self.this_slave_group_id.clone(),
+        sub: TSubNodePath::Tablet(self.this_tablet_group_id.clone()),
       },
       query_id,
     }

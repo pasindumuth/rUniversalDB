@@ -3,6 +3,7 @@ use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, Clock, GossipData,
   IOTypes, NetworkOut, OrigP, TMStatus, TableSchema, TabletForwardOut,
 };
+use crate::finish_query_tm_es::FinishQueryTMES;
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
   iast, proc, CNodePath, CQueryPath, CSubNodePath, CTQueryPath, CTSubNodePath, ColName, ColType,
@@ -26,6 +27,7 @@ use crate::trans_table_read_es::{
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
+use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -61,6 +63,7 @@ struct MSCoordESWrapper {
 #[derive(Debug, Default)]
 pub struct Statuses {
   ms_coord_ess: HashMap<QueryId, MSCoordESWrapper>,
+  finish_query_tm_ess: HashMap<QueryId, FinishQueryTMES>,
   gr_query_ess: HashMap<QueryId, GRQueryESWrapper>,
   trans_table_read_ess: HashMap<QueryId, TransTableReadESWrapper>,
   tm_statuss: HashMap<QueryId, TMStatus>,
@@ -301,58 +304,23 @@ impl<T: IOTypes> CoordContext<T> {
               self.handle_ms_coord_es_action(statuses, query_id, action);
             }
           }
+          msg::CoordMessage::FinishQueryInformPrepared(_) => panic!(),
+          msg::CoordMessage::FinishQueryWait(_) => panic!(),
           msg::CoordMessage::MasterQueryPlanningAborted(_) => {
             panic!(); // In practice, this is never received.
           }
           msg::CoordMessage::MasterQueryPlanningSuccess(success) => {
-            // Update the Gossip with incoming Gossip data.
-            // let gossip_data = success.gossip.clone().to_gossip();
-            // if self.gossip.gossip_gen < gossip_data.gossip_gen {
-            //   self.gossip = Arc::new(gossip_data);
-            // }
-
-            // Route the response to the appropriate ES.
+            // Route the response to the appropriate MSCoordES.
             let query_id = success.return_qid;
-            if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
-              // TODO: remove this section.
-              // let prefix = trans_read.es.location_prefix();
-              // let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.query_id) {
-              //   trans_read.es.handle_master_response(
-              //     &mut self.ctx(),
-              //     &gr_query.es,
-              //     success.gossip.gossip_gen,
-              //     success.frozen_col_usage_tree,
-              //   )
-              // } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.query_id) {
-              //   trans_read.es.handle_master_response(
-              //     &mut self.ctx(),
-              //     ms_coord.es.to_exec(),
-              //     success.gossip.gossip_gen,
-              //     success.frozen_col_usage_tree,
-              //   )
-              // } else {
-              //   // TODO: I'm not fully convinced it's a good practice to use
-              //   // handle_internal_query_error for this.
-              //   trans_read
-              //     .es
-              //     .handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
-              // };
-              // self.handle_trans_read_es_action(statuses, query_id, action);
-            } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
-              // let action = ms_coord.es.handle_master_response(
-              //   self,
-              //   success.gossip.gen,
-              //   success.frozen_col_usage_tree,
-              // );
-              // self.handle_ms_coord_es_action(statuses, query_id, action);
-              panic!()
+            if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
+              let action =
+                ms_coord.es.handle_master_response(self, success.query_id, success.result);
+              self.handle_ms_coord_es_action(statuses, query_id, action);
             }
           }
           msg::CoordMessage::RegisterQuery(register) => {
             self.handle_register_query(statuses, register)
           }
-          msg::CoordMessage::FinishQueryInformPrepared(_) => panic!(),
-          msg::CoordMessage::FinishQueryWait(_) => panic!(),
         }
       }
       CoordForwardMsg::GossipData(_) => panic!(),
@@ -426,41 +394,33 @@ impl<T: IOTypes> CoordContext<T> {
     orig_p: OrigP,
     tm_qid: QueryId,
     new_rms: HashSet<TQueryPath>,
-    (schema, table_views): (Vec<ColName>, Vec<TableView>),
+    merged_result: (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
+    // Route TM results to MSQueryES
     if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
-      // Route TM results to MSQueryES
       remove_item(&mut ms_coord.child_queries, &tm_qid);
-      let action = ms_coord.es.handle_tm_success(self, tm_qid, new_rms, (schema, table_views));
+      let action = ms_coord.es.handle_tm_success(self, tm_qid, new_rms, merged_result);
       self.handle_ms_coord_es_action(statuses, query_id, action);
-    } else if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
-      // Route TM results to GRQueryES
+    }
+    // Route TM results to GRQueryES
+    else if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
       remove_item(&mut gr_query.child_queries, &tm_qid);
-      let action =
-        gr_query.es.handle_tm_success(&mut self.ctx(), tm_qid, new_rms, (schema, table_views));
+      let action = gr_query.es.handle_tm_success(&mut self.ctx(), tm_qid, new_rms, merged_result);
       self.handle_gr_query_es_action(statuses, query_id, action);
     }
   }
 
   fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
-    if let Some(tm_status) = statuses.tm_statuss.remove(&query_aborted.return_qid) {
+    let tm_query_id = &query_aborted.return_qid;
+    if let Some(tm_status) = statuses.tm_statuss.get(tm_query_id) {
       // We ECU this TMStatus by sending CancelQuery to all remaining participants.
-      // Then, we send the QueryAborted back to the orig_p.
-      for (rm_path, rm_result) in tm_status.tm_state {
-        if rm_result.is_none() && rm_path != query_aborted.responder_path.node_path {
-          // We avoid sending CancelQuery for the RM that just responded.
-          self.ctx().send_to_ct_2(
-            rm_path,
-            CommonQuery::CancelQuery(msg::CancelQuery {
-              query_id: tm_status.child_query_id.clone(),
-            }),
-          );
-        }
-      }
+      // Then, we propagate the QueryAborted back to the orig_p.
+      let orig_p = tm_status.orig_p.clone();
+      self.exit_and_clean_up(statuses, tm_query_id.clone());
 
       // Finally, we propagate up the AbortData to the ES that owns this TMStatus
-      self.handle_tm_aborted(statuses, tm_status.orig_p, query_aborted.payload);
+      self.handle_tm_aborted(statuses, orig_p, query_aborted.payload);
     }
   }
 
@@ -473,12 +433,14 @@ impl<T: IOTypes> CoordContext<T> {
     orig_p: OrigP,
     aborted_data: msg::AbortedData,
   ) {
-    // Finally, we propagate up the AbortData to the GRQueryES that owns this TMStatus
     let query_id = orig_p.query_id;
+    // Route TM results to MSQueryES
     if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
       let action = gr_query.es.handle_tm_aborted(&mut self.ctx(), aborted_data);
       self.handle_gr_query_es_action(statuses, query_id, action);
-    } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
+    }
+    // Route TM results to GRQueryES
+    else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
       let action = ms_coord.es.handle_tm_aborted(self, aborted_data);
       self.handle_ms_coord_es_action(statuses, query_id, action);
     }
@@ -491,7 +453,7 @@ impl<T: IOTypes> CoordContext<T> {
     orig_p: OrigP,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<TQueryPath>,
-    (table_schema, table_views): (Vec<ColName>, Vec<TableView>),
+    result: (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
     let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
@@ -503,7 +465,7 @@ impl<T: IOTypes> CoordContext<T> {
         &gr_query.es,
         subquery_id,
         subquery_new_rms,
-        (table_schema, table_views),
+        result,
       )
     } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.source.query_id) {
       trans_read.es.handle_subquery_done(
@@ -511,7 +473,7 @@ impl<T: IOTypes> CoordContext<T> {
         ms_coord.es.to_exec(),
         subquery_id,
         subquery_new_rms,
-        (table_schema, table_views),
+        result,
       )
     } else {
       trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
@@ -538,6 +500,28 @@ impl<T: IOTypes> CoordContext<T> {
     remove_item(&mut trans_read.child_queries, &subquery_id);
     let action = trans_read.es.handle_internal_query_error(&mut self.ctx(), query_error);
     self.handle_trans_read_es_action(statuses, query_id, action);
+  }
+
+  /// Adds the given `gr_query_ess` to `statuses`, executing them one at a time.
+  fn launch_subqueries(&mut self, statuses: &mut Statuses, gr_query_ess: Vec<GRQueryES>) {
+    /// Here, we have to add in the GRQueryESs and start them.
+    let mut subquery_ids = Vec::<QueryId>::new();
+    for gr_query_es in gr_query_ess {
+      let subquery_id = gr_query_es.query_id.clone();
+      let gr_query = GRQueryESWrapper { child_queries: vec![], es: gr_query_es };
+      statuses.gr_query_ess.insert(subquery_id.clone(), gr_query);
+      subquery_ids.push(subquery_id);
+    }
+
+    // Drive GRQueries
+    for query_id in subquery_ids {
+      if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
+        // Generally, we use an `if` guard in case one child Query aborts the parent and
+        // thus all other children. (This won't happen for GRQueryESs, though)
+        let action = gr_query.es.start::<T>(&mut self.ctx());
+        self.handle_gr_query_es_action(statuses, query_id, action);
+      }
+    }
   }
 
   /// Handles the actions specified by a GRQueryES.
@@ -592,11 +576,11 @@ impl<T: IOTypes> CoordContext<T> {
 
         // Construct a new MSCoordES using a Timestamp that's strictly greater than before.
         let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+        let exec = ms_coord.es.to_exec();
         let query_id = mk_qid(&mut self.rand);
-        let new_timestamp = self.clock.now();
         ms_coord.es = FullMSCoordES::QueryPlanning(QueryPlanningES {
-          timestamp: new_timestamp,
-          sql_query: ms_coord.es.to_exec().sql_query.clone(),
+          timestamp: max(self.clock.now(), exec.timestamp),
+          sql_query: exec.sql_query.clone(),
           query_id: query_id.clone(),
           state: QueryPlanningS::Start,
         });
@@ -621,31 +605,15 @@ impl<T: IOTypes> CoordContext<T> {
     match action {
       TransTableAction::Wait => {}
       TransTableAction::SendSubqueries(gr_query_ess) => {
-        /// Here, we have to add in the GRQueryESs and start them.
-        let mut subquery_ids = Vec::<QueryId>::new();
-        for gr_query_es in gr_query_ess {
-          let subquery_id = gr_query_es.query_id.clone();
-          let gr_query = GRQueryESWrapper { child_queries: vec![], es: gr_query_es };
-          statuses.gr_query_ess.insert(subquery_id.clone(), gr_query);
-          subquery_ids.push(subquery_id);
-        }
-
-        // Drive GRQueries
-        for query_id in subquery_ids {
-          if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
-            // Generally, we use an `if` guard in case one child Query aborts the parent and
-            // thus all other children. (This won't happen for GRQueryESs, though)
-            let action = gr_query.es.start::<T>(&mut self.ctx());
-            self.handle_gr_query_es_action(statuses, query_id, action);
-          }
-        }
+        self.launch_subqueries(statuses, gr_query_ess);
       }
       TransTableAction::Success(success) => {
         // Remove the TableReadESWrapper and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
-        self.ctx().send_to_ct_2(
+        // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
+        self.ctx().send_to_ct(
           sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -660,7 +628,8 @@ impl<T: IOTypes> CoordContext<T> {
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
-        self.ctx().send_to_ct_2(
+        // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
+        self.ctx().send_to_ct(
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -716,7 +685,7 @@ impl<T: IOTypes> CoordContext<T> {
       // Otherwise, the MSCoordES no longer exists, and we should
       // cancel the MSQueryES immediately.
       let query_path = register.query_path;
-      self.ctx().send_to_t_2(
+      self.ctx().send_to_t(
         query_path.node_path,
         msg::TabletMessage::CancelQuery(msg::CancelQuery { query_id: query_path.query_id.clone() }),
       );
@@ -755,9 +724,9 @@ impl<T: IOTypes> CoordContext<T> {
       // We ECU this TMStatus by sending CancelQuery to all remaining RMs.
       for (rm_path, rm_result) in tm_status.tm_state {
         if rm_result.is_none() {
-          let orig_sid = &rm_path.slave_group_id;
+          let orig_sid = &rm_path.sid;
           let orig_lid = tm_status.leaderships.get(&orig_sid).unwrap().clone();
-          self.ctx().send_to_ct_2_lid(
+          self.ctx().send_to_ct_lid(
             rm_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: tm_status.child_query_id.clone(),
@@ -773,8 +742,8 @@ impl<T: IOTypes> CoordContext<T> {
   pub fn mk_query_path(&self, query_id: QueryId) -> CQueryPath {
     CQueryPath {
       node_path: CNodePath {
-        slave_group_id: self.this_slave_group_id.clone(),
-        sub_node_path: CSubNodePath::Coord(self.this_coord_group_id.clone()),
+        sid: self.this_slave_group_id.clone(),
+        sub: CSubNodePath::Coord(self.this_coord_group_id.clone()),
       },
       query_id,
     }

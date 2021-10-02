@@ -98,84 +98,69 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
 
   // send_to_c
 
-  pub fn send_to_c_2_lid(
+  pub fn send_to_c_lid(
     &mut self,
     node_path: CNodePath,
     query: msg::CoordMessage,
     to_lid: LeadershipId,
   ) {
-    let CSubNodePath::Coord(cid) = node_path.sub_node_path;
+    let CSubNodePath::Coord(cid) = node_path.sub;
     self.send_to_slave_leadership(
       msg::SlaveRemotePayload::CoordMessage(cid, query),
-      node_path.slave_group_id.clone(),
+      node_path.sid.clone(),
       to_lid,
     );
   }
 
-  pub fn send_to_c_2(&mut self, node_path: CNodePath, query: msg::CoordMessage) {
-    let CSubNodePath::Coord(cid) = node_path.sub_node_path;
+  pub fn send_to_c(&mut self, node_path: CNodePath, query: msg::CoordMessage) {
+    let CSubNodePath::Coord(cid) = node_path.sub;
     self.send_to_slave_common(
       msg::SlaveRemotePayload::CoordMessage(cid, query),
-      node_path.slave_group_id.clone(),
+      node_path.sid.clone(),
     );
-  }
-
-  pub fn send_to_c(&mut self, query_path: CQueryPath, query: msg::CoordMessage) {
-    self.send_to_c_2(query_path.node_path, query);
   }
 
   // send_to_t
 
-  pub fn send_to_t_2_lid(
+  pub fn send_to_t_lid(
     &mut self,
     node_path: TNodePath,
     query: msg::TabletMessage,
     to_lid: LeadershipId,
   ) {
-    let TSubNodePath::Tablet(tid) = node_path.sub_node_path;
+    let TSubNodePath::Tablet(tid) = node_path.sub;
     self.send_to_slave_leadership(
       msg::SlaveRemotePayload::TabletMessage(tid, query),
-      node_path.slave_group_id.clone(),
+      node_path.sid.clone(),
       to_lid,
     );
   }
 
-  pub fn send_to_t_2(&mut self, node_path: TNodePath, query: msg::TabletMessage) {
-    let TSubNodePath::Tablet(tid) = node_path.sub_node_path;
+  pub fn send_to_t(&mut self, node_path: TNodePath, query: msg::TabletMessage) {
+    let TSubNodePath::Tablet(tid) = node_path.sub;
     self.send_to_slave_common(
       msg::SlaveRemotePayload::TabletMessage(tid, query),
-      node_path.slave_group_id.clone(),
+      node_path.sid.clone(),
     );
-  }
-
-  pub fn send_to_t(&mut self, query_path: TQueryPath, query: msg::TabletMessage) {
-    self.send_to_t_2(query_path.node_path, query);
   }
 
   // send_to_ct
 
-  pub fn send_to_ct_2_lid(
+  pub fn send_to_ct_lid(
     &mut self,
     node_path: CTNodePath,
     query: CommonQuery,
     to_lid: LeadershipId,
   ) {
     self.send_to_slave_leadership(
-      query.into_remote_payload(node_path.sub_node_path),
-      node_path.slave_group_id.clone(),
+      query.into_remote_payload(node_path.sub),
+      node_path.sid.clone(),
       to_lid,
     );
   }
 
-  pub fn send_to_ct_2(&mut self, node_path: CTNodePath, query: CommonQuery) {
-    self.send_to_slave_common(
-      query.into_remote_payload(node_path.sub_node_path),
-      node_path.slave_group_id.clone(),
-    );
-  }
-
-  pub fn send_to_ct(&mut self, query_path: CTQueryPath, query: CommonQuery) {
-    self.send_to_ct_2(query_path.node_path, query);
+  pub fn send_to_ct(&mut self, node_path: CTNodePath, query: CommonQuery) {
+    self.send_to_slave_common(query.into_remote_payload(node_path.sub), node_path.sid.clone());
   }
 
   // send_to_master
@@ -206,15 +191,15 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
   /// NOTE: the `tid` must exist in the `gossip` at this point.
   pub fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
     let sid = self.gossip.tablet_address_config.get(&tid).unwrap();
-    TNodePath { slave_group_id: sid.clone(), sub_node_path: TSubNodePath::Tablet(tid.clone()) }
+    TNodePath { sid: sid.clone(), sub: TSubNodePath::Tablet(tid.clone()) }
   }
 
   /// Make a `CTQueryPath` of an ES at this node with `query_id`.
   pub fn mk_this_query_path(&self, query_id: QueryId) -> CTQueryPath {
     CTQueryPath {
       node_path: CTNodePath {
-        slave_group_id: self.this_slave_group_id.clone(),
-        sub_node_path: self.sub_node_path.clone(),
+        sid: self.this_slave_group_id.clone(),
+        sub: self.sub_node_path.clone(),
       },
       query_id,
     }
@@ -233,7 +218,7 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
       responder_path: self.mk_this_query_path(query_id),
       payload: abort_data,
     };
-    self.send_to_ct_2(sender_path.node_path, CommonQuery::QueryAborted(aborted));
+    self.send_to_ct(sender_path.node_path, CommonQuery::QueryAborted(aborted));
   }
 
   /// This responds to the given `sender_path` with a QueryAborted containing the given
