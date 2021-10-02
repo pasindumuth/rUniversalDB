@@ -13,7 +13,7 @@ use crate::model::common::{
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
 use crate::ms_query_coord_es::{
-  FullMSCoordES, MSCoordES, MSQueryCoordAction, MSQueryCoordReplanningES, MSQueryCoordReplanningS,
+  FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
 use crate::paxos::LeaderChanged;
 use crate::query_converter::convert_to_msquery;
@@ -86,7 +86,7 @@ pub struct CoordContext<T: IOTypes> {
   /// Metadata
   pub this_slave_group_id: SlaveGroupId,
   pub this_coord_group_id: CoordGroupId,
-  pub sub_node_path: CTSubNodePath, // Simply wraps `this_coord_group_id`, used for expedience
+  pub sub_node_path: CTSubNodePath, // // Wraps `this_coord_group_id` for expedience
   pub master_eid: EndpointId,
 
   /// Gossip
@@ -162,11 +162,11 @@ impl<T: IOTypes> CoordContext<T> {
                     request_id: external_query.request_id,
                     sender_eid: external_query.sender_eid,
                     child_queries: vec![],
-                    es: FullMSCoordES::QueryReplanning(MSQueryCoordReplanningES {
+                    es: FullMSCoordES::QueryPlanning(QueryPlanningES {
                       timestamp: self.clock.now(),
                       sql_query: ms_query,
                       query_id: query_id.clone(),
-                      state: MSQueryCoordReplanningS::Start,
+                      state: QueryPlanningS::Start,
                     }),
                   },
                 );
@@ -301,10 +301,10 @@ impl<T: IOTypes> CoordContext<T> {
               self.handle_ms_coord_es_action(statuses, query_id, action);
             }
           }
-          msg::CoordMessage::MasterFrozenColUsageAborted(_) => {
+          msg::CoordMessage::MasterQueryPlanningAborted(_) => {
             panic!(); // In practice, this is never received.
           }
-          msg::CoordMessage::MasterFrozenColUsageSuccess(success) => {
+          msg::CoordMessage::MasterQueryPlanningSuccess(success) => {
             // Update the Gossip with incoming Gossip data.
             // let gossip_data = success.gossip.clone().to_gossip();
             // if self.gossip.gossip_gen < gossip_data.gossip_gen {
@@ -339,12 +339,13 @@ impl<T: IOTypes> CoordContext<T> {
               // };
               // self.handle_trans_read_es_action(statuses, query_id, action);
             } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
-              let action = ms_coord.es.handle_master_response(
-                self,
-                success.gossip.gen,
-                success.frozen_col_usage_tree,
-              );
-              self.handle_ms_coord_es_action(statuses, query_id, action);
+              // let action = ms_coord.es.handle_master_response(
+              //   self,
+              //   success.gossip.gen,
+              //   success.frozen_col_usage_tree,
+              // );
+              // self.handle_ms_coord_es_action(statuses, query_id, action);
+              panic!()
             }
           }
           msg::CoordMessage::RegisterQuery(register) => {
@@ -375,7 +376,7 @@ impl<T: IOTypes> CoordContext<T> {
         Ok(parsed_ast) => {
           // Convert to MSQuery
           let internal_ast = convert_ast(&parsed_ast);
-          convert_to_msquery(&self.gossip.db_schema, internal_ast)
+          convert_to_msquery(internal_ast)
         }
         Err(parse_error) => {
           // Extract error string
@@ -557,7 +558,7 @@ impl<T: IOTypes> CoordContext<T> {
         // Send back a success to the External, and ECU the MSCoordES.
         let ms_coord = statuses.ms_coord_ess.get(&query_id).unwrap();
         let timestamp = match &ms_coord.es {
-          FullMSCoordES::QueryReplanning(es) => es.timestamp.clone(),
+          FullMSCoordES::QueryPlanning(es) => es.timestamp.clone(),
           FullMSCoordES::Executing(es) => es.timestamp.clone(),
         };
         self.network_output.send(
@@ -593,11 +594,11 @@ impl<T: IOTypes> CoordContext<T> {
         let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
         let query_id = mk_qid(&mut self.rand);
         let new_timestamp = self.clock.now();
-        ms_coord.es = FullMSCoordES::QueryReplanning(MSQueryCoordReplanningES {
+        ms_coord.es = FullMSCoordES::QueryPlanning(QueryPlanningES {
           timestamp: new_timestamp,
           sql_query: ms_coord.es.to_exec().sql_query.clone(),
           query_id: query_id.clone(),
-          state: MSQueryCoordReplanningS::Start,
+          state: QueryPlanningS::Start,
         });
 
         // Update the QueryId that's stored in the request map.

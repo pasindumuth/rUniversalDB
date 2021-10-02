@@ -31,8 +31,6 @@ pub struct CoreServerContext<'a, T: IOTypes> {
   pub sharding_config: &'a HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: &'a HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: &'a HashMap<SlaveGroupId, EndpointId>,
-  // TODO: we should not need coord_address_config; any responder should remember
-  //  the full sender_path
 }
 
 impl<'a, T: IOTypes> CoreServerContext<'a, T> {}
@@ -68,9 +66,13 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
     }
   }
 
-  pub fn send_to_slave_common(&mut self, payload: msg::SlaveRemotePayload, to_slave: SlaveGroupId) {
-    let to_gid = PaxosGroupId::Slave(to_slave);
-    let to_lid = self.leader_map.get(&to_gid).unwrap();
+  pub fn send_to_slave_leadership(
+    &mut self,
+    payload: msg::SlaveRemotePayload,
+    to_sid: SlaveGroupId,
+    to_lid: LeadershipId,
+  ) {
+    let to_gid = to_sid.to_gid();
 
     let this_gid = PaxosGroupId::Slave(self.this_slave_group_id.clone());
     let this_lid = self.leader_map.get(&this_gid).unwrap();
@@ -89,6 +91,27 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
     );
   }
 
+  pub fn send_to_slave_common(&mut self, payload: msg::SlaveRemotePayload, to_sid: SlaveGroupId) {
+    let to_lid = self.leader_map.get(&to_sid.to_gid()).unwrap().clone();
+    self.send_to_slave_leadership(payload, to_sid, to_lid);
+  }
+
+  // send_to_c
+
+  pub fn send_to_c_2_lid(
+    &mut self,
+    node_path: CNodePath,
+    query: msg::CoordMessage,
+    to_lid: LeadershipId,
+  ) {
+    let CSubNodePath::Coord(cid) = node_path.sub_node_path;
+    self.send_to_slave_leadership(
+      msg::SlaveRemotePayload::CoordMessage(cid, query),
+      node_path.slave_group_id.clone(),
+      to_lid,
+    );
+  }
+
   pub fn send_to_c_2(&mut self, node_path: CNodePath, query: msg::CoordMessage) {
     let CSubNodePath::Coord(cid) = node_path.sub_node_path;
     self.send_to_slave_common(
@@ -99,6 +122,22 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
 
   pub fn send_to_c(&mut self, query_path: CQueryPath, query: msg::CoordMessage) {
     self.send_to_c_2(query_path.node_path, query);
+  }
+
+  // send_to_t
+
+  pub fn send_to_t_2_lid(
+    &mut self,
+    node_path: TNodePath,
+    query: msg::TabletMessage,
+    to_lid: LeadershipId,
+  ) {
+    let TSubNodePath::Tablet(tid) = node_path.sub_node_path;
+    self.send_to_slave_leadership(
+      msg::SlaveRemotePayload::TabletMessage(tid, query),
+      node_path.slave_group_id.clone(),
+      to_lid,
+    );
   }
 
   pub fn send_to_t_2(&mut self, node_path: TNodePath, query: msg::TabletMessage) {
@@ -113,16 +152,24 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
     self.send_to_t_2(query_path.node_path, query);
   }
 
+  // send_to_ct
+
+  pub fn send_to_ct_2_lid(
+    &mut self,
+    node_path: CTNodePath,
+    query: CommonQuery,
+    to_lid: LeadershipId,
+  ) {
+    self.send_to_slave_leadership(
+      query.into_remote_payload(node_path.sub_node_path),
+      node_path.slave_group_id.clone(),
+      to_lid,
+    );
+  }
+
   pub fn send_to_ct_2(&mut self, node_path: CTNodePath, query: CommonQuery) {
     self.send_to_slave_common(
-      match node_path.sub_node_path {
-        CTSubNodePath::Tablet(tid) => {
-          msg::SlaveRemotePayload::TabletMessage(tid.clone(), query.into_tablet_msg())
-        }
-        CTSubNodePath::Coord(cid) => {
-          msg::SlaveRemotePayload::CoordMessage(cid.clone(), query.into_coord_msg())
-        }
-      },
+      query.into_remote_payload(node_path.sub_node_path),
       node_path.slave_group_id.clone(),
     );
   }
@@ -130,6 +177,8 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
   pub fn send_to_ct(&mut self, query_path: CTQueryPath, query: CommonQuery) {
     self.send_to_ct_2(query_path.node_path, query);
   }
+
+  // send_to_master
 
   /// Send a RemotePlayload to the Master Group
   pub fn send_to_master(&mut self, payload: msg::MasterRemotePayload) {
@@ -214,7 +263,7 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
     // the key_region of TablePath that we're going to be reading.
     // TODO: fix this logic
     let tablet_groups = self.gossip.sharding_config.get(&(table_path.clone(), Gen(0))).unwrap();
-    let key_cols = &self.gossip.db_schema.get(table_path).unwrap().key_cols;
+    let key_cols = &self.gossip.db_schema.get(&(table_path.clone(), Gen(0))).unwrap().key_cols;
     match &compute_key_region(selection, HashMap::new(), key_cols) {
       Ok(_) => {
         // We use a trivial implementation for now, where we just return all TabletGroupIds
@@ -231,7 +280,7 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
 // -----------------------------------------------------------------------------------------------
 // These enums are used for communication between algorithms.
 
-/// This is a convenience enum to strealine the sending of PCSA messages to Tablets and Slaves.
+/// This is a convenience enum to streamline the sending of PCSA messages to `Tablet`s and `Coord`s.
 pub enum CommonQuery {
   PerformQuery(msg::PerformQuery),
   CancelQuery(msg::CancelQuery),
@@ -255,6 +304,17 @@ impl CommonQuery {
       CommonQuery::CancelQuery(query) => msg::CoordMessage::CancelQuery(query),
       CommonQuery::QueryAborted(query) => msg::CoordMessage::QueryAborted(query),
       CommonQuery::QuerySuccess(query) => msg::CoordMessage::QuerySuccess(query),
+    }
+  }
+
+  pub fn into_remote_payload(self, sub_node_path: CTSubNodePath) -> msg::SlaveRemotePayload {
+    match sub_node_path {
+      CTSubNodePath::Tablet(tid) => {
+        msg::SlaveRemotePayload::TabletMessage(tid.clone(), self.into_tablet_msg())
+      }
+      CTSubNodePath::Coord(cid) => {
+        msg::SlaveRemotePayload::CoordMessage(cid.clone(), self.into_coord_msg())
+      }
     }
   }
 }

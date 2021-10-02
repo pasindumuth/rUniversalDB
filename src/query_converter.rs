@@ -4,10 +4,7 @@ use crate::model::message::ExternalAbortedData;
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 
-pub fn convert_to_msquery(
-  gossiped_db_schema: &HashMap<TablePath, TableSchema>,
-  query: iast::Query,
-) -> Result<proc::MSQuery, ExternalAbortedData> {
+pub fn convert_to_msquery(query: iast::Query) -> Result<proc::MSQuery, ExternalAbortedData> {
   // First, we rename all TransTable definitions and references so that they're
   // unique. To do this, we just prepend `tt\n\`, where `n` is integers that we get
   // from a counter. This guarantees uniqueness, since backslashes aren't allowed in
@@ -16,15 +13,6 @@ pub fn convert_to_msquery(
     RenameContext { trans_table_map: HashMap::new(), counter: 0, table_names: HashSet::new() };
   let mut renamed_query = query.clone();
   rename_trans_tables_query_R(&mut ctx, &mut renamed_query);
-
-  // We have to validate that all Table references (that aren't TransTables) are
-  // actual tables that exist in the gossiped_db_schema. If we find one that doesn't,
-  // we return an error.
-  for table_name in ctx.table_names {
-    if !gossiped_db_schema.contains_key(&TablePath(table_name.clone())) {
-      return Err(ExternalAbortedData::TableDNE(table_name.clone()));
-    }
-  }
 
   // Next, we flatten the `renamed_query` to produce an MSQuery. Since we renamed
   // all TransTable references, this won't change the semantics.

@@ -242,6 +242,7 @@ pub type CQueryPath = SlaveQueryPath<CSubNodePath>;
 // -------------------------------------------------------------------------------------------------
 
 /// Used to identify a Leadership in a given PaxosGroup.
+/// The default total ordering is works, since `Gen` is compared first.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LeadershipId {
   pub gen: Gen,

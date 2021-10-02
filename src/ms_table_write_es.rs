@@ -140,10 +140,10 @@ impl MSTableWriteES {
         self.state = MSWriteExecutionS::GossipDataWaiting;
 
         // Request a GossipData from the Master to help stimulate progress.
-        let payload = msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest {
-          slave_group_id: ctx.this_slave_group_id.clone(),
-        });
-        ctx.ctx().send_to_master(payload);
+        let this_sender_path = ctx.ctx().mk_this_query_path(self.query_id.clone());
+        ctx.ctx().send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+          msg::MasterGossipRequest { sender_path: this_sender_path },
+        ));
 
         return MSTableWriteAction::Wait;
       }

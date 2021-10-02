@@ -54,7 +54,7 @@ pub enum AlterTableAction {
 impl AlterTableES {
   pub fn start<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> AlterTableAction {
     // First, we see if the AlterOp is Column Valid.
-    let table_schema = ctx.db_schema.get(&self.table_path).unwrap();
+    let table_schema = ctx.db_schema.get(&(self.table_path.clone(), Gen(0))).unwrap();
     let maybe_col_type = table_schema.val_cols.get_last_version(&self.alter_op.col_name);
     if (maybe_col_type.is_none() && self.alter_op.maybe_col_type.is_none())
       || (maybe_col_type.is_some() && self.alter_op.maybe_col_type.is_some())
@@ -105,7 +105,7 @@ impl AlterTableES {
       AlterTableAction::Wait
     } else {
       // Compute the final timestamp to apply the `alter_op` at.
-      let table_schema = ctx.db_schema.get_mut(&self.table_path).unwrap();
+      let table_schema = ctx.db_schema.get_mut(&(self.table_path.clone(), Gen(0))).unwrap();
       let mut new_timestamp = table_schema.val_cols.get_lat(&self.alter_op.col_name);
       for (_, rm_state) in &executing.tm_state {
         new_timestamp = max(new_timestamp, rm_state.unwrap());

@@ -120,7 +120,7 @@ impl Simulation {
     num_clients: i32,
 
     // Arguments that are specific to SlaveState and TabletState
-    schema: HashMap<TablePath, TableSchema>,
+    schema: HashMap<(TablePath, Gen), TableSchema>,
     sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
     slave_address_config: HashMap<SlaveGroupId, EndpointId>,

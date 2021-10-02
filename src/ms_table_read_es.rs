@@ -9,7 +9,6 @@ use crate::model::common::{
   TableView, TierMap, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
-use crate::model::message::ColUsageTree::MSQueryStage;
 use crate::server::{
   contains_col, evaluate_super_simple_select, mk_eval_error, weak_contains_col, CommonQuery,
   ContextConstructor,
@@ -141,10 +140,10 @@ impl MSTableReadES {
         self.state = MSReadExecutionS::GossipDataWaiting;
 
         // Request a GossipData from the Master to help stimulate progress.
-        let payload = msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest {
-          slave_group_id: ctx.this_slave_group_id.clone(),
-        });
-        ctx.ctx().send_to_master(payload);
+        let this_sender_path = ctx.ctx().mk_this_query_path(self.query_id.clone());
+        ctx.ctx().send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+          msg::MasterGossipRequest { sender_path: this_sender_path },
+        ));
 
         return MSTableReadAction::Wait;
       }

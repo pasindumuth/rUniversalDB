@@ -39,8 +39,8 @@ pub enum MasterMessage {
   CancelExternalDDLQuery(CancelExternalDDLQuery),
 
   // Master FrozenColUsageAlgorithm
-  PerformMasterFrozenColUsage(PerformMasterFrozenColUsage),
-  CancelMasterFrozenColUsage(CancelMasterFrozenColUsage),
+  PerformMasterQueryPlanning(PerformMasterQueryPlanning),
+  CancelMasterQueryPlanning(CancelMasterQueryPlanning),
 
   // CreateTable TM Messages
   CreateTablePrepared(CreateTablePrepared),
@@ -119,8 +119,8 @@ pub enum MasterRemotePayload {
   RemoteLeaderChanged(RemoteLeaderChanged),
 
   // Master FrozenColUsageAlgorithm
-  PerformMasterFrozenColUsage(PerformMasterFrozenColUsage),
-  CancelMasterFrozenColUsage(CancelMasterFrozenColUsage),
+  PerformMasterQueryPlanning(PerformMasterQueryPlanning),
+  CancelMasterQueryPlanning(CancelMasterQueryPlanning),
 
   // CreateTable TM Messages
   CreateTablePrepared(CreateTablePrepared),
@@ -187,8 +187,8 @@ pub enum TabletMessage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum CoordMessage {
   // Master Responses
-  MasterFrozenColUsageAborted(MasterFrozenColUsageAborted),
-  MasterFrozenColUsageSuccess(MasterFrozenColUsageSuccess),
+  MasterQueryPlanningAborted(MasterQueryPlanningAborted),
+  MasterQueryPlanningSuccess(MasterQueryPlanningSuccess),
 
   // PCSA
   PerformQuery(PerformQuery),
@@ -401,7 +401,7 @@ pub enum ExternalAbortedData {
   /// that is neither a TransTable or a Table in the gossiped_db_schema.
   TableDNE(String),
   /// This occurs if an Update appears as a Subquery (i.e. not at the top-level
-  /// of the SQL transaction).
+  /// of the SQL transaction). It also occurs if the Update is trying to write to a key column.
   InvalidUpdate,
   /// This is a fatal Query Execution error, including non-recoverable QueryErrors
   /// and ColumnsDNEs. We don't give any details for simplicity. The External should just
@@ -420,49 +420,57 @@ pub struct ExternalQueryAborted {
 }
 
 // -------------------------------------------------------------------------------------------------
-//  Master FrozenColUsageAlgorithm messages
+//  MasterQueryPlanning messages
 // -------------------------------------------------------------------------------------------------
+// PCSA Messages
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ColUsageTree {
-  MSQuery(proc::MSQuery),
-  GRQuery(proc::GRQuery),
-  MSQueryStage(proc::MSQueryStage),
-}
-
+// TODO remove this.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum FrozenColUsageTree {
   ColUsageNodes(Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>),
   ColUsageNode((Vec<ColName>, FrozenColUsageNode)),
 }
 
-// These messages follow the same PCSA pattern, including using common data members
-// (i.e. `sender_path`, `query_id`, and `return_qid`).
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct PerformMasterFrozenColUsage {
+pub struct PerformMasterQueryPlanning {
   pub sender_path: CQueryPath,
   pub query_id: QueryId,
   pub timestamp: Timestamp,
-  pub trans_table_schemas: HashMap<TransTableName, Vec<ColName>>,
-  pub col_usage_tree: ColUsageTree,
+  pub ms_query: proc::MSQuery,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CancelMasterFrozenColUsage {
+pub struct CancelMasterQueryPlanning {
   pub query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct MasterFrozenColUsageAborted {
+pub struct MasterQueryPlanningAborted {
   pub return_qid: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct MasterFrozenColUsageSuccess {
+pub struct MasterQueryPlan {
+  pub all_tier_maps: HashMap<TransTableName, TierMap>,
+  pub table_location_map: HashMap<TablePath, Gen>,
+  pub extra_req_cols: HashMap<TablePath, Vec<ColName>>,
+  pub col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum MasteryQueryPlanningResult {
+  MasterQueryPlan(MasterQueryPlan),
+  TablePathDNE(Vec<ColName>),
+  /// This is returned if one of the Update queries tried modifiying a KeyCol.
+  InvalidUpdate,
+  RequiredColumnDNE(Vec<ColName>),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MasterQueryPlanningSuccess {
   pub return_qid: QueryId,
-  pub frozen_col_usage_tree: FrozenColUsageTree,
-  pub gossip: GossipDataSer, // TODO: see if we cannot need GossipDataSer; MVM should be serializable.
+  pub query_id: QueryId,
+  pub result: MasteryQueryPlanningResult,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -615,7 +623,7 @@ pub struct MasterGossip {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterGossipRequest {
-  pub slave_group_id: SlaveGroupId,
+  pub sender_path: CTQueryPath,
 }
 
 // -------------------------------------------------------------------------------------------------

@@ -39,20 +39,20 @@ fn main() {
   .into_iter()
   .collect();
 
-  let schema: HashMap<TablePath, TableSchema> = vec![
+  let schema: HashMap<(TablePath, Gen), TableSchema> = vec![
     (
-      mk_tab("tab0"),
+      (mk_tab("tab0"), Gen(0)),
       TableSchema::new(vec![(cn("id0"), ColType::String)], vec![(cn("c1"), ColType::Int)]),
     ),
     (
-      mk_tab("tab1"),
+      (mk_tab("tab1"), Gen(0)),
       TableSchema::new(
         vec![(cn("id1"), ColType::String), (cn("id2"), ColType::String)],
         vec![(cn("c2"), ColType::Int)],
       ),
     ),
     (
-      mk_tab("tab2"),
+      (mk_tab("tab2"), Gen(0)),
       TableSchema::new(
         vec![(cn("id3"), ColType::Int)],
         vec![(cn("c3"), ColType::String), (cn("c4"), ColType::Bool)],

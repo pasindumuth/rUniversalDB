@@ -13,7 +13,7 @@ use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
 use crate::model::message::{GeneralQuery, QueryError, SlaveMessage};
 use crate::ms_query_coord_es::{
-  FullMSCoordES, MSCoordES, MSQueryCoordAction, MSQueryCoordReplanningES, MSQueryCoordReplanningS,
+  FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContext};

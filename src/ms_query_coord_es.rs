@@ -1,13 +1,19 @@
-use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
+use crate::col_usage::{
+  collect_table_paths, iterate_stage_ms_query, node_external_trans_tables, ColUsagePlanner,
+  FrozenColUsageNode, GeneralStage,
+};
 use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
 use crate::coord::CoordContext;
+use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
-  proc, CTQueryPath, ColName, Context, ContextRow, EndpointId, Gen, NodeGroupId, QueryId,
-  RequestId, TQueryPath, TablePath, TableView, TierMap, Timestamp, TransTableLocationPrefix,
-  TransTableName,
+  proc, CTQueryPath, ColName, Context, ContextRow, EndpointId, Gen, LeadershipId, NodeGroupId,
+  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TierMap,
+  Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::message as msg;
-use crate::server::CommonQuery;
+use crate::model::message::MasteryQueryPlanningResult;
+use crate::server::{weak_contains_col, CommonQuery};
+use crate::slave::RemoteLeaderChangedPLm;
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{HashMap, HashSet};
 
@@ -17,7 +23,10 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct CoordQueryPlan {
-  gossip_gen: Gen,
+  all_tier_maps: HashMap<TransTableName, TierMap>,
+  query_leader_map: HashMap<SlaveGroupId, LeadershipId>,
+  table_location_map: HashMap<TablePath, Gen>,
+  extra_req_cols: HashMap<TablePath, Vec<ColName>>,
   col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 }
 
@@ -27,13 +36,16 @@ pub struct PreparingState {
 }
 
 #[derive(Debug)]
+pub struct Stage {
+  stage_idx: usize,
+  stage_query_id: QueryId,
+}
+
+#[derive(Debug)]
 pub enum CoordState {
   Start,
   /// Here, `stage_query_id` is the QueryId of the TMStatus
-  Stage {
-    stage_idx: usize,
-    stage_query_id: QueryId,
-  },
+  Stage(Stage),
   Preparing(PreparingState),
   Done,
 }
@@ -42,14 +54,14 @@ impl CoordState {
   fn stage_idx(&self) -> Option<usize> {
     match self {
       CoordState::Start => Some(0),
-      CoordState::Stage { stage_idx, .. } => Some(*stage_idx),
+      CoordState::Stage(stage) => Some(stage.stage_idx),
       _ => None,
     }
   }
 
   fn stage_query_id(&self) -> Option<QueryId> {
     match self {
-      CoordState::Stage { stage_query_id, .. } => Some(stage_query_id.clone()),
+      CoordState::Stage(stage) => Some(stage.stage_query_id.clone()),
       _ => None,
     }
   }
@@ -96,7 +108,7 @@ impl TransTableSource for MSCoordES {
 
 #[derive(Debug)]
 pub enum FullMSCoordES {
-  QueryReplanning(MSQueryCoordReplanningES),
+  QueryPlanning(QueryPlanningES),
   Executing(MSCoordES),
 }
 
@@ -122,33 +134,32 @@ pub enum MSQueryCoordAction {
 impl FullMSCoordES {
   /// Start the FullMSCoordES
   pub fn start<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordAction {
-    let plan_es = cast!(Self::QueryReplanning, self).unwrap();
+    let plan_es = cast!(Self::QueryPlanning, self).unwrap();
     let action = plan_es.start(ctx);
-    self.handle_replanning_action(ctx, action)
+    self.handle_planning_action(ctx, action)
   }
 
   /// Handle Master Response, routing it to the QueryReplanning.
   pub fn handle_master_response<T: IOTypes>(
     &mut self,
     ctx: &mut CoordContext<T>,
-    gossip_gen: Gen,
-    tree: msg::FrozenColUsageTree,
+    response: msg::MasterQueryPlanningSuccess,
   ) -> MSQueryCoordAction {
-    let plan_es = cast!(FullMSCoordES::QueryReplanning, self).unwrap();
-    let action = plan_es.handle_master_response(gossip_gen, tree);
-    self.handle_replanning_action(ctx, action)
+    let plan_es = cast!(FullMSCoordES::QueryPlanning, self).unwrap();
+    let action = plan_es.handle_master_query_plan(ctx, response);
+    self.handle_planning_action(ctx, action)
   }
 
   /// Handle the `action` sent back by the `MSQueryCoordReplanningES`.
-  fn handle_replanning_action<T: IOTypes>(
+  fn handle_planning_action<T: IOTypes>(
     &mut self,
     ctx: &mut CoordContext<T>,
-    action: MSQueryCoordReplanningAction,
+    action: QueryPlanningAction,
   ) -> MSQueryCoordAction {
     match action {
-      MSQueryCoordReplanningAction::Wait => MSQueryCoordAction::Wait,
-      MSQueryCoordReplanningAction::Success(query_plan) => {
-        let plan_es = cast!(FullMSCoordES::QueryReplanning, self).unwrap();
+      QueryPlanningAction::Wait => MSQueryCoordAction::Wait,
+      QueryPlanningAction::Success(query_plan) => {
+        let plan_es = cast!(FullMSCoordES::QueryPlanning, self).unwrap();
 
         // We compute the TierMap here.
         let mut tier_map = HashMap::<TablePath, u32>::new();
@@ -190,7 +201,7 @@ impl FullMSCoordES {
         // Move the ES onto the next stage.
         self.advance(ctx)
       }
-      MSQueryCoordReplanningAction::Failed(error) => {
+      QueryPlanningAction::Failed(error) => {
         // Here, the QueryReplanning had failed. We do not need to ECU because
         // QueryReplanning will be in Done.
         MSQueryCoordAction::FatalFailure(error)
@@ -298,6 +309,25 @@ impl FullMSCoordES {
         // transaction again at a higher timestamp. Thus, we signal that the failure is non-fatal.
         MSQueryCoordAction::NonFatalFailure
       }
+    }
+  }
+
+  /// Handle a RemoteLeaderChanged
+  pub fn remote_leader_changed<T: IOTypes>(
+    &mut self,
+    ctx: &mut CoordContext<T>,
+    remote_leader_changed: RemoteLeaderChangedPLm,
+  ) -> MSQueryCoordAction {
+    match self {
+      FullMSCoordES::QueryPlanning(es) => {
+        if remote_leader_changed.gid == PaxosGroupId::Master {
+          let action = es.master_leader_changed(ctx);
+          self.handle_planning_action(ctx, action)
+        } else {
+          MSQueryCoordAction::Wait
+        }
+      }
+      FullMSCoordES::Executing(_) => MSQueryCoordAction::Wait,
     }
   }
 
@@ -414,6 +444,7 @@ impl FullMSCoordES {
       query_id: tm_qid.clone(),
       child_query_id: child_qid.clone(),
       new_rms: Default::default(),
+      leaderships: Default::default(), // TODO properly
       responded_count: 0,
       tm_state: Default::default(),
       orig_p: OrigP::new(es.query_id.clone()),
@@ -524,18 +555,18 @@ impl FullMSCoordES {
     };
 
     // Populate the TMStatus accordingly.
-    es.state = CoordState::Stage { stage_idx, stage_query_id: tm_qid.clone() };
+    es.state = CoordState::Stage(Stage { stage_idx, stage_query_id: tm_qid.clone() });
     MSQueryCoordAction::ExecuteTMStatus(tm_status)
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
   pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) {
     match self {
-      FullMSCoordES::QueryReplanning(plan_es) => plan_es.exit_and_clean_up(ctx),
+      FullMSCoordES::QueryPlanning(plan_es) => plan_es.exit_and_clean_up(ctx),
       FullMSCoordES::Executing(es) => {
         match &es.state {
           CoordState::Start => {}
-          CoordState::Stage { .. } => {
+          CoordState::Stage(_) => {
             // Clean up any Registered Queries in the MSCoordES. Recall that in the
             // absence of Commit/Abort, this is the only way that MSQueryESs can get cleaned up.
             for registered_query in &es.registered_queries {
@@ -584,28 +615,39 @@ impl FullMSCoordES {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  QueryReplanning
+//  QueryPlanning
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub enum MSQueryCoordReplanningS {
+pub struct MasterQueryPlanning {
+  master_query_id: QueryId,
+}
+
+#[derive(Debug)]
+pub struct GossipDataWaiting {
+  master_query_plan: msg::MasterQueryPlan,
+}
+
+#[derive(Debug)]
+pub enum QueryPlanningS {
   Start,
-  MasterQueryReplanning { master_query_id: QueryId },
+  MasterQueryPlanning(MasterQueryPlanning),
+  GossipDataWaiting(GossipDataWaiting),
   Done,
 }
 
 #[derive(Debug)]
-pub struct MSQueryCoordReplanningES {
+pub struct QueryPlanningES {
   pub timestamp: Timestamp,
   /// The query to do the replanning with.
   pub sql_query: proc::MSQuery,
   /// The OrigP of the Task holding this MSQueryCoordReplanningES
   pub query_id: QueryId,
   /// Used for managing MasterQueryReplanning
-  pub state: MSQueryCoordReplanningS,
+  pub state: QueryPlanningS,
 }
 
-enum MSQueryCoordReplanningAction {
+pub enum QueryPlanningAction {
   /// Indicates the parent needs to wait, making sure to fowards MasterQueryReplanning responses.
   Wait,
   /// Indicates the that MSQueryCoordReplanningES has computed a valid query, and it's stored
@@ -616,83 +658,333 @@ enum MSQueryCoordReplanningAction {
   Failed(msg::ExternalAbortedData),
 }
 
-impl MSQueryCoordReplanningES {
-  fn start<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordReplanningAction {
-    // First, we compute the ColUsageNode.
-    let mut planner =
-      ColUsagePlanner { db_schema: &ctx.gossip.db_schema, timestamp: self.timestamp.clone() };
+impl QueryPlanningES {
+  pub fn start<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> QueryPlanningAction {
+    assert!(matches!(&self.state, QueryPlanningS::Start));
+
+    // First, we see if all TablePaths are in the GossipData
+    for table_path in collect_table_paths(&self.sql_query) {
+      if !ctx.gossip.table_generation.contains_key(&table_path) {
+        // We must go to MasterQueryPlanning.
+        return self.perform_master_query_planning(ctx);
+      }
+    }
+
+    // Next, we check that we are not trying to modify a Key Column in an Update.
+    let mut attempted_key_col_update = false;
+    'outer: for (_, stage) in &self.sql_query.trans_tables {
+      match stage {
+        MSQueryStage::SuperSimpleSelect(_) => {}
+        MSQueryStage::Update(query) => {
+          // The TablePath exists, from the above.
+          let gen = ctx.gossip.table_generation.get(&query.table).unwrap();
+          let schema = ctx.gossip.db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
+          for (col_name, _) in &query.assignment {
+            if lookup(&schema.key_cols, col_name).is_some() {
+              attempted_key_col_update = true;
+              break 'outer;
+            }
+          }
+        }
+      }
+    }
+
+    if attempted_key_col_update {
+      // If so, we return an InvalidUpdate to the External.
+      return QueryPlanningAction::Failed(msg::ExternalAbortedData::InvalidUpdate);
+    }
+
+    // Next, we see if all required columns in Select and Update queries are present.
+    let mut required_cols_exist = true;
+    iterate_stage_ms_query(
+      &mut |stage: GeneralStage| match stage {
+        GeneralStage::SuperSimpleSelect(query) => {
+          if let proc::TableRef::TablePath(table_path) = &query.from {
+            // The TablePath exists, from the above.
+            let gen = ctx.gossip.table_generation.get(&table_path).unwrap();
+            let schema = ctx.gossip.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
+            for col_name in &query.projection {
+              if !weak_contains_col(schema, col_name, &self.timestamp) {
+                required_cols_exist = false;
+              }
+            }
+          }
+        }
+        GeneralStage::Update(query) => {
+          // The TablePath exists, from the above.
+          let gen = ctx.gossip.table_generation.get(&query.table).unwrap();
+          let schema = ctx.gossip.db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
+          for (col_name, _) in &query.assignment {
+            if !weak_contains_col(schema, col_name, &self.timestamp) {
+              required_cols_exist = false;
+            }
+          }
+        }
+      },
+      &self.sql_query,
+    );
+
+    if !required_cols_exist {
+      // We must go to MasterQueryPlanning.
+      return self.perform_master_query_planning(ctx);
+    }
+
+    // Next, we run the FrozenColUsageAlgorithm
+    let mut planner = ColUsagePlanner {
+      db_schema: &ctx.gossip.db_schema,
+      table_generation: &ctx.gossip.table_generation,
+      timestamp: self.timestamp.clone(),
+    };
     let col_usage_nodes = planner.plan_ms_query(&self.sql_query);
 
+    // If there is an External Column at the top-level, we must go to MasterQueryPlanning.
     for (_, (_, child)) in &col_usage_nodes {
       if !child.external_cols.is_empty() {
-        // If there are External Columns in any of the stages, then we need to consult the Master.
-        let master_query_id = mk_qid(&mut ctx.rand);
-        ctx.network_output.send(
-          &ctx.master_eid,
-          msg::NetworkMessage::Master(msg::MasterMessage::PerformMasterFrozenColUsage(
-            msg::PerformMasterFrozenColUsage {
-              sender_path: ctx.mk_query_path(self.query_id.clone()),
-              query_id: master_query_id.clone(),
-              timestamp: self.timestamp.clone(),
-              trans_table_schemas: HashMap::new(),
-              col_usage_tree: msg::ColUsageTree::MSQuery(self.sql_query.clone()),
-            },
-          )),
-        );
-
-        // Advance Replanning State.
-        self.state = MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id };
-        return MSQueryCoordReplanningAction::Wait;
+        return self.perform_master_query_planning(ctx);
       }
     }
 
     // If we get here, the QueryPlan is valid, so we return it and go to Done.
-    self.state = MSQueryCoordReplanningS::Done;
-    MSQueryCoordReplanningAction::Success(CoordQueryPlan {
-      gossip_gen: ctx.gossip.gen,
+    self.finish_planning(ctx, col_usage_nodes)
+  }
+
+  /// Send a `PerformMasterQueryPlanning` and go to the `MasterQueryReplanning` state.
+  fn perform_master_query_planning<T: IOTypes>(
+    &mut self,
+    ctx: &mut CoordContext<T>,
+  ) -> QueryPlanningAction {
+    let master_query_id = mk_qid(&mut ctx.rand);
+    let sender_path = ctx.mk_query_path(self.query_id.clone());
+    ctx.ctx().send_to_master(msg::MasterRemotePayload::PerformMasterQueryPlanning(
+      msg::PerformMasterQueryPlanning {
+        sender_path,
+        query_id: master_query_id.clone(),
+        timestamp: self.timestamp.clone(),
+        ms_query: self.sql_query.clone(),
+      },
+    ));
+
+    // Advance Replanning State.
+    self.state = QueryPlanningS::MasterQueryPlanning(MasterQueryPlanning { master_query_id });
+    QueryPlanningAction::Wait
+  }
+
+  /// All verifications of `gossip` have been complete and we construct a
+  /// `CoordQueryPlan` before going to the `Done` state.
+  fn finish_planning<T: IOTypes>(
+    &mut self,
+    ctx: &mut CoordContext<T>,
+    col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
+  ) -> QueryPlanningAction {
+    // Compute `all_tier_maps
+
+    // The Tier should be where every Read query should be reading from, except
+    // if the current stage is an Update, which should be one Tier ahead (i.e.
+    // lower) for that TablePath.
+    let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
+    let mut cur_tier_map = HashMap::<TablePath, u32>::new();
+    for (_, stage) in &self.sql_query.trans_tables {
+      match stage {
+        proc::MSQueryStage::SuperSimpleSelect(_) => {}
+        proc::MSQueryStage::Update(update) => {
+          cur_tier_map.insert(update.table.clone(), 0);
+        }
+      }
+    }
+    for (trans_table_name, stage) in self.sql_query.trans_tables.iter().rev() {
+      all_tier_maps.insert(trans_table_name.clone(), TierMap { map: cur_tier_map.clone() });
+      match stage {
+        proc::MSQueryStage::SuperSimpleSelect(_) => {}
+        proc::MSQueryStage::Update(update) => {
+          *cur_tier_map.get_mut(&update.table).unwrap() += 1;
+        }
+      }
+    }
+
+    // Compute `table_location_map` and `extra_req_cols`.
+    let mut table_location_map = HashMap::<TablePath, Gen>::new();
+    let mut extra_req_cols = HashMap::<TablePath, Vec<ColName>>::new();
+    iterate_stage_ms_query(
+      &mut |stage: GeneralStage| match stage {
+        GeneralStage::SuperSimpleSelect(query) => {
+          if let proc::TableRef::TablePath(table_path) = &query.from {
+            let gen = ctx.gossip.table_generation.get(&table_path).unwrap();
+            table_location_map.insert(table_path.clone(), gen.clone());
+
+            // Recall there might already be required columns for this TablePath.
+            if !extra_req_cols.contains_key(&table_path) {
+              extra_req_cols.insert(table_path.clone(), Vec::new());
+            }
+            let req_cols = extra_req_cols.get_mut(&table_path).unwrap();
+            for col_name in &query.projection {
+              if !req_cols.contains(col_name) {
+                req_cols.push(col_name.clone());
+              }
+            }
+          }
+        }
+        GeneralStage::Update(query) => {
+          let gen = ctx.gossip.table_generation.get(&query.table).unwrap();
+          table_location_map.insert(query.table.clone(), gen.clone());
+
+          // Recall there might already be required columns for this TablePath.
+          if !extra_req_cols.contains_key(&query.table) {
+            extra_req_cols.insert(query.table.clone(), Vec::new());
+          }
+          let req_cols = extra_req_cols.get_mut(&query.table).unwrap();
+          for (col_name, _) in &query.assignment {
+            if !req_cols.contains(col_name) {
+              req_cols.push(col_name.clone());
+            }
+          }
+        }
+      },
+      &self.sql_query,
+    );
+
+    // Finish
+    self.state = QueryPlanningS::Done;
+    QueryPlanningAction::Success(CoordQueryPlan {
+      all_tier_maps,
+      query_leader_map: self.compute_query_leader_map(ctx, &table_location_map),
+      table_location_map,
+      extra_req_cols,
       col_usage_nodes,
     })
   }
 
-  /// Handles the Query Plan constructed by the Master.
-  fn handle_master_response(
+  /// Compute a query_leader_map using the `TablePath`s in `table_location_map`.
+  fn compute_query_leader_map<T: IOTypes>(
     &mut self,
-    gossip_gen: Gen,
-    tree: msg::FrozenColUsageTree,
-  ) -> MSQueryCoordReplanningAction {
-    // Here, we expect the `tree` to be multiple `nodes`.
-    let col_usage_nodes = cast!(msg::FrozenColUsageTree::ColUsageNodes, tree).unwrap();
-    for (_, (_, child)) in &col_usage_nodes {
-      if !child.external_cols.is_empty() {
-        // This means that the Master has confirmed that this Query doesn't have a
-        // valid Query Plan (i.e. one of the ColumnRefs don't exist). Thus, we return
-        // a fatal error and go to Done.
-        self.state = MSQueryCoordReplanningS::Done;
-        return MSQueryCoordReplanningAction::Failed(msg::ExternalAbortedData::QueryExecutionError);
+    ctx: &mut CoordContext<T>,
+    table_location_map: &HashMap<TablePath, Gen>,
+  ) -> HashMap<SlaveGroupId, LeadershipId> {
+    let mut query_leader_map = HashMap::<SlaveGroupId, LeadershipId>::new();
+    for (table_path, gen) in table_location_map {
+      let shards = ctx.gossip.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap();
+      for (_, tid) in shards.clone() {
+        let sid = ctx.ctx().gossip.tablet_address_config.get(&tid).unwrap().clone();
+        let lid = ctx.ctx().leader_map.get(&sid.to_gid()).unwrap();
+        query_leader_map.insert(sid.clone(), lid.clone());
       }
     }
+    query_leader_map
+  }
 
-    // This means the QueryReplanning was a success, so we update the QueryPlan and go to Done.
-    self.state = MSQueryCoordReplanningS::Done;
-    MSQueryCoordReplanningAction::Success(CoordQueryPlan { gossip_gen, col_usage_nodes })
+  /// Handles the QueryPlan constructed by the Master.
+  pub fn handle_master_query_plan<T: IOTypes>(
+    &mut self,
+    ctx: &mut CoordContext<T>,
+    response: msg::MasterQueryPlanningSuccess,
+  ) -> QueryPlanningAction {
+    let last_state = cast!(QueryPlanningS::MasterQueryPlanning, &self.state).unwrap();
+    assert_eq!(last_state.master_query_id, response.query_id);
+    let result = response.result;
+    match result {
+      MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
+        // We must still check that there are no top-level External Columns.
+        for (_, (_, child)) in &master_query_plan.col_usage_nodes {
+          if !child.external_cols.is_empty() {
+            // If so, we can definitively return an failure.
+            self.state = QueryPlanningS::Done;
+            return QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryExecutionError);
+          }
+        }
+
+        // By now, we know the QueryPlanning can succeed. However, recall that the MasterQueryPlan
+        // might have used a db_schema that is beyond what this node has in its GossipData. Thus,
+        // we check if all TablePaths are in the GossipData, waiting if not. This is only needed
+        // so that we can actually contact those nodes.
+        for table_path in collect_table_paths(&self.sql_query) {
+          if !ctx.gossip.table_generation.contains_key(&table_path) {
+            // We send a MasterGossipRequest and go to GossipDataWaiting.
+            let sender_path = ctx.ctx().mk_this_query_path(self.query_id.clone());
+            ctx.ctx().send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+              msg::MasterGossipRequest { sender_path },
+            ));
+
+            self.state = QueryPlanningS::GossipDataWaiting(GossipDataWaiting { master_query_plan });
+            return QueryPlanningAction::Wait;
+          }
+        }
+
+        // Otherwise, we can finish QueryPlanning and return a Success.
+        self.finish_master_query_plan(ctx, master_query_plan)
+      }
+      MasteryQueryPlanningResult::TablePathDNE(_)
+      | MasteryQueryPlanningResult::InvalidUpdate
+      | MasteryQueryPlanningResult::RequiredColumnDNE(_) => {
+        // We just return a generic error to the External
+        self.state = QueryPlanningS::Done;
+        QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryExecutionError)
+      }
+    }
+  }
+
+  /// Handles the QueryPlan constructed by the Master.
+  pub fn gossip_data_change<T: IOTypes>(
+    &mut self,
+    ctx: &mut CoordContext<T>,
+  ) -> QueryPlanningAction {
+    if let QueryPlanningS::GossipDataWaiting(last_state) = &self.state {
+      // We must check again whether the GossipData is new enough, since this is called
+      // for any GossipData update whatsoever (not just the one resulting from the
+      // MasterGossipRequest we sent out).
+      for table_path in collect_table_paths(&self.sql_query) {
+        if !ctx.gossip.table_generation.contains_key(&table_path) {
+          // We stay in GossipDataWaiting.
+          return QueryPlanningAction::Wait;
+        }
+      }
+
+      // We have a recent enough GossipData, so we finish QueryPlanning and return Success.
+      self.finish_master_query_plan(ctx, last_state.master_query_plan.clone())
+    } else {
+      QueryPlanningAction::Wait
+    }
+  }
+
+  /// Here, we have verified all `TablePath`s are present in the GossipData.
+  fn finish_master_query_plan<T: IOTypes>(
+    &mut self,
+    ctx: &mut CoordContext<T>,
+    master_query_plan: msg::MasterQueryPlan,
+  ) -> QueryPlanningAction {
+    self.state = QueryPlanningS::Done;
+    QueryPlanningAction::Success(CoordQueryPlan {
+      all_tier_maps: master_query_plan.all_tier_maps,
+      query_leader_map: self.compute_query_leader_map(ctx, &master_query_plan.table_location_map),
+      table_location_map: master_query_plan.table_location_map,
+      extra_req_cols: master_query_plan.extra_req_cols,
+      col_usage_nodes: master_query_plan.col_usage_nodes,
+    })
+  }
+
+  /// This is called when there is a Leadership change in the Master PaxosGroup.
+  pub fn master_leader_changed<T: IOTypes>(
+    &mut self,
+    ctx: &mut CoordContext<T>,
+  ) -> QueryPlanningAction {
+    if let QueryPlanningS::MasterQueryPlanning(_) = &self.state {
+      // This means we have to resend the PerformMasterQueryPlanning to the new Leader.
+      self.perform_master_query_planning(ctx)
+    } else {
+      QueryPlanningAction::Wait
+    }
   }
 
   /// This Exits and Cleans up this QueryReplanningES
   fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) {
     match &self.state {
-      MSQueryCoordReplanningS::Start => {}
-      MSQueryCoordReplanningS::MasterQueryReplanning { master_query_id } => {
-        // If the removal was successful, we should also send a Cancellation
-        // message to the Master.
-        ctx.network_output.send(
-          &ctx.master_eid,
-          msg::NetworkMessage::Master(msg::MasterMessage::CancelMasterFrozenColUsage(
-            msg::CancelMasterFrozenColUsage { query_id: master_query_id.clone() },
-          )),
-        );
+      QueryPlanningS::Start => {}
+      QueryPlanningS::MasterQueryPlanning(MasterQueryPlanning { master_query_id }) => {
+        ctx.ctx().send_to_master(msg::MasterRemotePayload::CancelMasterQueryPlanning(
+          msg::CancelMasterQueryPlanning { query_id: master_query_id.clone() },
+        ));
       }
-      MSQueryCoordReplanningS::Done => {}
+      QueryPlanningS::GossipDataWaiting(_) => {}
+      QueryPlanningS::Done => {}
     }
-    self.state = MSQueryCoordReplanningS::Done;
+    self.state = QueryPlanningS::Done;
   }
 }

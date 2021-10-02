@@ -1,7 +1,7 @@
 use crate::common::TableSchema;
 use crate::model::common::{
-  iast, proc, ColName, ColType, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
-  TransTableName,
+  iast, proc, ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
+  Timestamp, TransTableName,
 };
 use crate::server::{contains_col, weak_contains_col};
 use serde::{Deserialize, Serialize};
@@ -55,11 +55,17 @@ impl FrozenColUsageNode {
   }
 }
 
-/// This algorithm will assume that all projected columns in `SELECT` queries and all
-/// SET columns in `UPDATE` queries exist in the `db_schema`. Users of this algorithm must
-/// verify this fact first.
+/// This algorithm contains the following assumptions:
+///   1. All `TablePath`s referenced the `MSQuery` exist in `table_generation` and `db_schema`.
+///   2. All projected columns in `SELECT` queries and all assigned columns in `UPDATE` queries
+///      exist in the `db_schema`.
+///   3. The assigned columns in an `UPDATE` are disjoint from the Key Columns. (This algorithm
+///      does not support such queries).
+///
+/// Users of this algorithm must verify these facts first.
 pub struct ColUsagePlanner<'a> {
-  pub db_schema: &'a HashMap<TablePath, TableSchema>,
+  pub db_schema: &'a HashMap<(TablePath, Gen), TableSchema>,
+  pub table_generation: &'a HashMap<TablePath, Gen>,
   pub timestamp: Timestamp,
 }
 
@@ -102,9 +108,9 @@ impl<'a> ColUsagePlanner<'a> {
     match table_ref {
       proc::TableRef::TransTableName(trans_table_name) => {
         // The Query converter should make sure that all TransTableNames actually exist.
-        let schema = trans_table_ctx.get(trans_table_name).unwrap();
+        let table_schema = trans_table_ctx.get(trans_table_name).unwrap();
         for col in all_cols {
-          if schema.contains(&col) {
+          if table_schema.contains(&col) {
             node.safe_present_cols.push(col);
           } else {
             node.external_cols.push(col);
@@ -113,7 +119,8 @@ impl<'a> ColUsagePlanner<'a> {
       }
       proc::TableRef::TablePath(table_path) => {
         // The Query converter should make sure that all TablePaths actually exist.
-        let table_schema = self.db_schema.get(table_path).unwrap();
+        let gen = self.table_generation.get(table_path).unwrap();
+        let table_schema = self.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
         for col in all_cols {
           if weak_contains_col(&table_schema, &col, &self.timestamp) {
             node.safe_present_cols.push(col);
@@ -150,7 +157,8 @@ impl<'a> ColUsagePlanner<'a> {
     update: &proc::Update,
   ) -> (Vec<ColName>, FrozenColUsageNode) {
     let mut projection = Vec::new();
-    for (col, _) in &self.db_schema.get(&update.table).unwrap().key_cols {
+    let gen = self.table_generation.get(&update.table).unwrap();
+    for (col, _) in &self.db_schema.get(&(update.table.clone(), gen.clone())).unwrap().key_cols {
       projection.push(col.clone());
     }
     for (col, _) in &update.assignment {
@@ -347,6 +355,88 @@ pub fn nodes_external_cols(
 }
 
 // -----------------------------------------------------------------------------------------------
+//  Stage Iteration
+// -----------------------------------------------------------------------------------------------
+pub enum GeneralStage<'a> {
+  SuperSimpleSelect(&'a proc::SuperSimpleSelect),
+  Update(&'a proc::Update),
+}
+
+fn iterate_stage_expr<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
+  cb: &mut CbT,
+  expr: &'a proc::ValExpr,
+) {
+  match expr {
+    proc::ValExpr::ColumnRef { .. } => {}
+    proc::ValExpr::UnaryExpr { expr, .. } => iterate_stage_expr(cb, expr),
+    proc::ValExpr::BinaryExpr { left, right, .. } => {
+      iterate_stage_expr(cb, left);
+      iterate_stage_expr(cb, right);
+    }
+    proc::ValExpr::Value { .. } => {}
+    proc::ValExpr::Subquery { query } => {
+      iterate_stage_gr_query(cb, query);
+    }
+  }
+}
+
+fn iterate_stage_gr_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
+  cb: &mut CbT,
+  query: &'a proc::GRQuery,
+) {
+  for (_, stage) in &query.trans_tables {
+    match stage {
+      proc::GRQueryStage::SuperSimpleSelect(query) => {
+        cb(GeneralStage::SuperSimpleSelect(query));
+        iterate_stage_expr(cb, &query.selection)
+      }
+    }
+  }
+}
+
+pub fn iterate_stage_ms_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
+  cb: &mut CbT,
+  query: &'a proc::MSQuery,
+) {
+  for (_, stage) in &query.trans_tables {
+    match stage {
+      proc::MSQueryStage::SuperSimpleSelect(query) => {
+        cb(GeneralStage::SuperSimpleSelect(query));
+        iterate_stage_expr(cb, &query.selection)
+      }
+      proc::MSQueryStage::Update(query) => {
+        cb(GeneralStage::Update(query));
+        for (_, expr) in &query.assignment {
+          iterate_stage_expr(cb, expr)
+        }
+      }
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  QueryPlanning helpers
+// -----------------------------------------------------------------------------------------------
+
+pub fn collect_table_paths(query: &proc::MSQuery) -> HashSet<TablePath> {
+  let mut table_paths = HashSet::<TablePath>::new();
+  iterate_stage_ms_query(
+    &mut |stage: GeneralStage| match stage {
+      GeneralStage::SuperSimpleSelect(query) => {
+        if let proc::TableRef::TablePath(table_path) = &query.from {
+          table_paths.insert(table_path.clone());
+        }
+      }
+      GeneralStage::Update(query) => {
+        table_paths.insert(query.table.clone());
+      }
+    },
+    query,
+  );
+  table_paths
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Tests
 // -----------------------------------------------------------------------------------------------
 
@@ -358,20 +448,25 @@ mod test {
 
   #[test]
   fn basic_test() {
-    let schema: HashMap<TablePath, TableSchema> = vec![
+    let table_generation: HashMap<TablePath, Gen> =
+      vec![(mk_tab("t1"), Gen(0)), (mk_tab("t2"), Gen(0)), (mk_tab("t3"), Gen(0))]
+        .into_iter()
+        .collect();
+
+    let db_schema: HashMap<(TablePath, Gen), TableSchema> = vec![
       (
-        mk_tab("t1"),
+        (mk_tab("t1"), Gen(0)),
         TableSchema::new(vec![(cn("c1"), ColType::String)], vec![(cn("c2"), ColType::Int)]),
       ),
       (
-        mk_tab("t2"),
+        (mk_tab("t2"), Gen(0)),
         TableSchema::new(
           vec![(cn("c1"), ColType::String), (cn("c3"), ColType::String)],
           vec![(cn("c4"), ColType::Int)],
         ),
       ),
       (
-        mk_tab("t3"),
+        (mk_tab("t3"), Gen(0)),
         TableSchema::new(
           vec![(cn("c5"), ColType::Int)],
           vec![(cn("c6"), ColType::String), (cn("c7"), ColType::Bool)],
@@ -431,7 +526,11 @@ mod test {
       returning: mk_ttab("tt1"),
     };
 
-    let mut planner = ColUsagePlanner { db_schema: &schema, timestamp: Timestamp(0) };
+    let mut planner = ColUsagePlanner {
+      db_schema: &db_schema,
+      table_generation: &table_generation,
+      timestamp: Timestamp(0),
+    };
     let col_usage_nodes = planner.plan_ms_query(&ms_query);
 
     let exp_col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> = vec![

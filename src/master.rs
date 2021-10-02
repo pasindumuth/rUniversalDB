@@ -9,9 +9,7 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::model::message::{
-  ColUsageTree, ExternalDDLQueryAbortData, FrozenColUsageTree, MasterMessage,
-};
+use crate::model::message::{ExternalDDLQueryAbortData, FrozenColUsageTree, MasterMessage};
 use crate::server::{CommonQuery, CoreServerContext};
 use crate::sql_parser::convert_ddl_ast;
 use sqlparser::dialect::GenericDialect;
@@ -41,7 +39,7 @@ impl<T: IOTypes> MasterState<T> {
     rand: T::RngCoreT,
     clock: T::ClockT,
     network_output: T::NetworkOutT,
-    db_schema: HashMap<TablePath, TableSchema>,
+    db_schema: HashMap<(TablePath, Gen), TableSchema>,
     sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
     slave_address_config: HashMap<SlaveGroupId, EndpointId>,
@@ -77,7 +75,7 @@ pub struct MasterContext<T: IOTypes> {
 
   /// Database Schema
   pub gen: Gen,
-  pub db_schema: HashMap<TablePath, TableSchema>,
+  pub db_schema: HashMap<(TablePath, Gen), TableSchema>,
   // TODO: make use of this.
   pub table_generation: HashMap<TablePath, Gen>,
 
@@ -159,27 +157,16 @@ impl<T: IOTypes> MasterContext<T> {
         // The Tablets never send this.
         panic!()
       }
-      MasterMessage::PerformMasterFrozenColUsage(request) => {
+      MasterMessage::PerformMasterQueryPlanning(request) => {
         // Construct the FrozenColUsageTree with the current database schema in the Master.
         let timestamp = request.timestamp.clone();
-        let mut planner = ColUsagePlanner { db_schema: &self.db_schema, timestamp };
-        let frozen_col_usage_tree = match request.col_usage_tree {
-          ColUsageTree::MSQuery(ms_query) => {
-            msg::FrozenColUsageTree::ColUsageNodes(planner.plan_ms_query(&ms_query))
-          }
-          ColUsageTree::GRQuery(gr_query) => {
-            let mut trans_table_schemas = request.trans_table_schemas;
-            msg::FrozenColUsageTree::ColUsageNodes(
-              planner.plan_gr_query(&mut trans_table_schemas, &gr_query),
-            )
-          }
-          ColUsageTree::MSQueryStage(stage_query) => {
-            let mut trans_table_schemas = request.trans_table_schemas;
-            msg::FrozenColUsageTree::ColUsageNode(
-              planner.plan_ms_query_stage(&mut trans_table_schemas, &stage_query),
-            )
-          }
+        let mut planner = ColUsagePlanner {
+          db_schema: &self.db_schema,
+          table_generation: &self.table_generation,
+          timestamp,
         };
+        let frozen_col_usage_tree =
+          msg::FrozenColUsageTree::ColUsageNodes(planner.plan_ms_query(&request.ms_query));
 
         // Freeze the `safe_present_cols` and `external_cols` used for every node in the
         // FrozenColUsageTree computed above.
@@ -187,7 +174,7 @@ impl<T: IOTypes> MasterContext<T> {
 
         // Send the response to the originator.
         // TODO: send this to the coord properly
-        // let response = CommonQuery::MasterFrozenColUsageSuccess(msg::MasterFrozenColUsageSuccess {
+        // let response = CommonQuery::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
         //   return_qid: request.sender_path.query_id.clone(),
         //   frozen_col_usage_tree,
         //   gossip: GossipDataSer::from_gossip(GossipData {
@@ -201,7 +188,7 @@ impl<T: IOTypes> MasterContext<T> {
         // });
         // self.ctx().send_to_path(request.sender_path, response);
       }
-      MasterMessage::CancelMasterFrozenColUsage(_) => panic!(),
+      MasterMessage::CancelMasterQueryPlanning(_) => panic!(),
       MasterMessage::CreateTablePrepared(_) => panic!(),
       MasterMessage::CreateTableAborted(_) => panic!(),
       MasterMessage::CreateTableCloseConfirm(_) => panic!(),
@@ -232,11 +219,11 @@ impl<T: IOTypes> MasterContext<T> {
         Ok(parsed_ast) => {
           let alter_table = convert_ddl_ast(&parsed_ast);
           // Do several more checks on `alter_table` before returning.
-          if let Some(table_schema) = self.db_schema.get(&alter_table.table_path) {
-            if lookup(&table_schema.key_cols, &alter_table.alter_op.col_name).is_none() {
-              return Ok(alter_table);
-            }
-          }
+          // if let Some(table_schema) = self.db_schema.get(&alter_table.table_path) {
+          //   if lookup(&table_schema.key_cols, &alter_table.alter_op.col_name).is_none() {
+          //     return Ok(alter_table);
+          //   }
+          // }
           Err(msg::ExternalDDLQueryAbortData::InvalidAlterOp)
         }
         Err(parse_error) => {
@@ -313,17 +300,17 @@ impl<T: IOTypes> MasterContext<T> {
         }
       }
     }
-
-    match frozen_col_usage_tree {
-      FrozenColUsageTree::ColUsageNodes(nodes) => {
-        for (_, (_, node)) in nodes {
-          freeze_schema_r(&mut self.db_schema, node, timestamp);
-        }
-      }
-      FrozenColUsageTree::ColUsageNode((_, node)) => {
-        freeze_schema_r(&mut self.db_schema, node, timestamp);
-      }
-    }
+    //
+    // match frozen_col_usage_tree {
+    //   FrozenColUsageTree::ColUsageNodes(nodes) => {
+    //     for (_, (_, node)) in nodes {
+    //       freeze_schema_r(&mut self.db_schema, node, timestamp);
+    //     }
+    //   }
+    //   FrozenColUsageTree::ColUsageNode((_, node)) => {
+    //     freeze_schema_r(&mut self.db_schema, node, timestamp);
+    //   }
+    // }
   }
 
   /// Handles the actions specified by a AlterTableES.

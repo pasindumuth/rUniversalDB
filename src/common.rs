@@ -159,15 +159,13 @@ impl TableSchemaSer {
 #[derive(Debug, Clone)]
 pub struct GossipData {
   pub gen: Gen,
-  pub db_schema: HashMap<TablePath, TableSchema>,
+  pub db_schema: HashMap<(TablePath, Gen), TableSchema>,
   pub table_generation: HashMap<TablePath, Gen>,
 
   /// Distribution
   pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
-  // TODO: we should not need coord_address_config; any responder should remember
-  //  the full sender_path
 }
 
 /// A Serializable version of `GossipData`. This is needed since it's
@@ -175,7 +173,7 @@ pub struct GossipData {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct GossipDataSer {
   pub gen: Gen,
-  pub db_schema: HashMap<TablePath, TableSchemaSer>,
+  pub db_schema: HashMap<(TablePath, Gen), TableSchemaSer>,
   pub table_generation: HashMap<TablePath, Gen>,
   pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
@@ -226,6 +224,9 @@ pub struct TMStatus {
   /// QueryId, since one of the RMs might be this node.
   pub child_query_id: QueryId,
   pub new_rms: HashSet<TQueryPath>,
+  /// The current set of Leaderships that this TMStatus is waiting on. Thus, in order to
+  /// contact an RM, we just use the `LeadershipId` found here.
+  pub leaderships: HashMap<SlaveGroupId, LeadershipId>,
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   pub responded_count: usize,
   pub tm_state: HashMap<CTNodePath, Option<(Vec<ColName>, Vec<TableView>)>>,
