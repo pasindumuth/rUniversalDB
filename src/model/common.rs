@@ -83,9 +83,10 @@ pub struct TableView {
   pub rows: BTreeMap<Vec<ColValN>, u64>,
 }
 
-/// This is used to hold onto Tier that each TablePath is currently being
-/// processed at. This is necessary for performing Intermediary Writes
-/// and Reads properly.
+/// A TablePath should appear here iff that Table is written to in the MSQuery.
+/// The Tier for every such TablePath here is the Tier that MSTableRead should be
+/// using to read. If the TransTable is corresponds to an Update, the Tier for TablePath
+/// being updated should be one ahead (i.e. lower).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TierMap {
   pub map: HashMap<TablePath, u32>,

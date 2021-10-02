@@ -7,8 +7,8 @@ use crate::coord::CoordContext;
 use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
   proc, CTQueryPath, ColName, Context, ContextRow, EndpointId, Gen, LeadershipId, NodeGroupId,
-  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TierMap,
-  Timestamp, TransTableLocationPrefix, TransTableName,
+  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
+  TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::model::message as msg;
 use crate::model::message::MasteryQueryPlanningResult;
@@ -78,18 +78,14 @@ pub struct MSCoordES {
   // Results of the query planning.
   pub query_plan: CoordQueryPlan,
 
-  /// For every TierMap, a TablePath should appear here iff that Table is written
-  /// to in the MSQuery. The Tier for every such TablePath here is the Tier that
-  /// MSTableRead should be using. If the TransTable is corresponds to an Update,
-  /// the Tier for TablePath being updated should be one ahead (i.e. lower).
-  pub all_tier_maps: HashMap<TransTableName, TierMap>,
-
   // The dynamically evolving fields.
   pub all_rms: HashSet<TQueryPath>,
   pub trans_table_views: Vec<(TransTableName, (Vec<ColName>, TableView))>,
   pub state: CoordState,
 
-  // Memory management fields
+  /// Recall that since we remove a `TQueryPath` when its Leadership changes, that means that
+  /// the LeadershipId of the PaxosGroup of a `TQueryPath`s here is the same as the one
+  /// when this `TQueryPath` came in.
   pub registered_queries: HashSet<TQueryPath>,
 }
 
@@ -131,6 +127,11 @@ pub enum MSQueryCoordAction {
 //  Implementation
 // -----------------------------------------------------------------------------------------------
 
+pub enum SendHelper {
+  TableQuery(msg::PerformQuery, Vec<TabletGroupId>),
+  TransTableQuery(msg::PerformQuery, TransTableLocationPrefix),
+}
+
 impl FullMSCoordES {
   /// Start the FullMSCoordES
   pub fn start<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordAction {
@@ -160,38 +161,11 @@ impl FullMSCoordES {
       QueryPlanningAction::Wait => MSQueryCoordAction::Wait,
       QueryPlanningAction::Success(query_plan) => {
         let plan_es = cast!(FullMSCoordES::QueryPlanning, self).unwrap();
-
-        // We compute the TierMap here.
-        let mut tier_map = HashMap::<TablePath, u32>::new();
-        for (_, stage) in &plan_es.sql_query.trans_tables {
-          match stage {
-            proc::MSQueryStage::SuperSimpleSelect(_) => {}
-            proc::MSQueryStage::Update(update) => {
-              tier_map.insert(update.table.clone(), 0);
-            }
-          }
-        }
-
-        // The Tier should be where every Read query should be reading from, except
-        // if the current stage is an Update, which should be one Tier ahead (i.e.
-        // lower) for that TablePath.
-        let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
-        for (trans_table_name, stage) in plan_es.sql_query.trans_tables.iter().rev() {
-          all_tier_maps.insert(trans_table_name.clone(), TierMap { map: tier_map.clone() });
-          match stage {
-            proc::MSQueryStage::SuperSimpleSelect(_) => {}
-            proc::MSQueryStage::Update(update) => {
-              *tier_map.get_mut(&update.table).unwrap() += 1;
-            }
-          }
-        }
-
         *self = FullMSCoordES::Executing(MSCoordES {
           timestamp: plan_es.timestamp.clone(),
           query_id: plan_es.query_id.clone(),
           sql_query: plan_es.sql_query.clone(),
           query_plan: query_plan.clone(),
-          all_tier_maps,
           all_rms: Default::default(),
           trans_table_views: vec![],
           state: CoordState::Start,
@@ -331,6 +305,20 @@ impl FullMSCoordES {
     }
   }
 
+  /// Handles the GossipData changing.
+  pub fn gossip_data_change<T: IOTypes>(
+    &mut self,
+    ctx: &mut CoordContext<T>,
+  ) -> MSQueryCoordAction {
+    match self {
+      FullMSCoordES::QueryPlanning(es) => {
+        let action = es.gossip_data_change(ctx);
+        self.handle_planning_action(ctx, action)
+      }
+      FullMSCoordES::Executing(_) => MSQueryCoordAction::Wait,
+    }
+  }
+
   /// By now, all Prepared must have come on. Thus, we send out Commit, abort the
   /// RegisteredQueries, and return the results.
   fn finish_ms_coord<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordAction {
@@ -428,13 +416,17 @@ impl FullMSCoordES {
     context.context_rows.push(context_row);
 
     // Construct the QueryPlan
-    // TODO: do this properly
+    let mut query_leader_map = es.query_plan.query_leader_map.clone();
+    query_leader_map.insert(
+      ctx.this_slave_group_id.clone(),
+      ctx.leader_map.get(&ctx.this_slave_group_id.to_gid()).unwrap().clone(),
+    );
     let query_plan = QueryPlan {
-      tier_map: es.all_tier_maps.get(trans_table_name).unwrap().clone(),
-      query_leader_map: Default::default(),
-      table_location_map: Default::default(),
+      tier_map: es.query_plan.all_tier_maps.get(trans_table_name).unwrap().clone(),
+      query_leader_map: query_leader_map.clone(),
+      table_location_map: es.query_plan.table_location_map.clone(),
+      extra_req_cols: es.query_plan.extra_req_cols.clone(),
       col_usage_node: col_usage_node.clone(),
-      extra_req_cols: Default::default(),
     };
 
     // Create Construct the TMStatus that's going to be used to coordinate this stage.
@@ -444,7 +436,7 @@ impl FullMSCoordES {
       query_id: tm_qid.clone(),
       child_query_id: child_qid.clone(),
       new_rms: Default::default(),
-      leaderships: Default::default(), // TODO properly
+      leaderships: Default::default(),
       responded_count: 0,
       tm_state: Default::default(),
       orig_p: OrigP::new(es.query_id.clone()),
@@ -456,37 +448,25 @@ impl FullMSCoordES {
     let root_query_path = ctx.mk_query_path(es.query_id.clone());
 
     // Send out the PerformQuery.
-    match ms_query_stage {
+    let helper = match ms_query_stage {
       proc::MSQueryStage::SuperSimpleSelect(select_query) => {
         match &select_query.from {
           proc::TableRef::TablePath(table_path) => {
-            // Here, we must do a SuperSimpleTableSelectQuery.
-            let child_query = msg::SuperSimpleTableSelectQuery {
-              timestamp: es.timestamp.clone(),
-              context: context.clone(),
-              sql_query: select_query.clone(),
-              query_plan,
+            let perform_query = msg::PerformQuery {
+              root_query_path: root_query_path.clone(),
+              sender_path: sender_path.clone().into_ct(),
+              query_id: child_qid.clone(),
+              query: msg::GeneralQuery::SuperSimpleTableSelectQuery(
+                msg::SuperSimpleTableSelectQuery {
+                  timestamp: es.timestamp.clone(),
+                  context: context.clone(),
+                  sql_query: select_query.clone(),
+                  query_plan,
+                },
+              ),
             };
-
-            // Compute the TabletGroups involved.
-            let tids = ctx.ctx().get_min_tablets(table_path, &select_query.selection);
-            // Having non-empty `tids` solves the TMStatus deadlock and determining the child schema.
-            assert!(tids.len() > 0);
-            for tid in tids {
-              let perform_query = msg::PerformQuery {
-                root_query_path: root_query_path.clone(),
-                sender_path: sender_path.clone().into_ct(),
-                query_id: child_qid.clone(),
-                query: msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query.clone()),
-              };
-
-              // Send out PerformQuery. Recall that this could only be a Tablet.
-              let node_path = ctx.ctx().mk_node_path_from_tablet(tid).into_ct();
-              ctx.ctx().send_to_ct_2(node_path.clone(), CommonQuery::PerformQuery(perform_query));
-
-              // Add the TabletGroup into the TMStatus.
-              tm_status.tm_state.insert(node_path, None);
-            }
+            let tids = ctx.ctx().get_min_tablets(&table_path, &select_query.selection);
+            SendHelper::TableQuery(perform_query, tids)
           }
           proc::TableRef::TransTableName(sub_trans_table_name) => {
             // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
@@ -497,9 +477,6 @@ impl FullMSCoordES {
               .find(|prefix| &prefix.trans_table_name == sub_trans_table_name)
               .unwrap()
               .clone();
-
-            // Add in the Slave to `tm_state`, and send out the PerformQuery. Recall that
-            // if we are doing a TransTableRead here, then the TransTable must be located here.
             let perform_query = msg::PerformQuery {
               root_query_path,
               sender_path: sender_path.into_ct(),
@@ -513,46 +490,78 @@ impl FullMSCoordES {
                 },
               ),
             };
-
-            // Send out PerformQuery. Recall that this could be a Slave or a Tablet.
-            let node_path = location_prefix.source.node_path.clone();
-            ctx.ctx().send_to_ct_2(node_path.clone(), CommonQuery::PerformQuery(perform_query));
-
-            // Add the TabletGroup into the TMStatus.
-            tm_status.tm_state.insert(node_path, None);
+            SendHelper::TransTableQuery(perform_query, location_prefix)
           }
         }
       }
       proc::MSQueryStage::Update(update_query) => {
-        // Here, we must do a Update.
-        let child_query = msg::UpdateQuery {
-          timestamp: es.timestamp.clone(),
-          context: context.clone(),
-          sql_query: update_query.clone(),
-          query_plan,
+        let perform_query = msg::PerformQuery {
+          root_query_path: root_query_path.clone(),
+          sender_path: sender_path.clone().into_ct(),
+          query_id: child_qid.clone(),
+          query: msg::GeneralQuery::UpdateQuery(msg::UpdateQuery {
+            timestamp: es.timestamp.clone(),
+            context: context.clone(),
+            sql_query: update_query.clone(),
+            query_plan,
+          }),
         };
-
-        // Compute the TabletGroups involved.
         let tids = ctx.ctx().get_min_tablets(&update_query.table, &update_query.selection);
+        SendHelper::TableQuery(perform_query, tids)
+      }
+    };
+
+    match helper {
+      SendHelper::TableQuery(perform_query, tids) => {
+        // Validate the LeadershipId of PaxosGroups that the PerformQuery will be sent to.
+        // We do this before sending any messages, in case it fails. Recall that the local
+        // `leader_map` is allowed to get ahead of the `query_leader_map` which we computed
+        // earlier, so this check is necessary.
+        for tid in &tids {
+          let sid = ctx.gossip.tablet_address_config.get(&tid).unwrap();
+          if let Some(lid) = query_leader_map.get(sid) {
+            if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
+              // The `lid` has since changed, so we cannot finish this MSQueryES.
+              self.exit_and_clean_up(ctx);
+              return MSQueryCoordAction::NonFatalFailure;
+            }
+            // Recall that since > is not possible, these Leadership must be equals.
+            assert_eq!(lid.gen, ctx.leader_map.get(&sid.to_gid()).unwrap().gen);
+          }
+        }
+
         // Having non-empty `tids` solves the TMStatus deadlock and determining the child schema.
         assert!(tids.len() > 0);
         for tid in tids {
-          let perform_query = msg::PerformQuery {
-            root_query_path: root_query_path.clone(),
-            sender_path: sender_path.clone().into_ct(),
-            query_id: child_qid.clone(),
-            query: msg::GeneralQuery::UpdateQuery(child_query.clone()),
-          };
-
-          // Send out PerformQuery. Recall that this could only be a Tablet.
-          let node_path = ctx.ctx().mk_node_path_from_tablet(tid).into_ct();
-          ctx.ctx().send_to_ct_2(node_path.clone(), CommonQuery::PerformQuery(perform_query));
+          // Send out PerformQuery. Recall that this could only be a Tablet. Also recall
+          // from the prior leader_map check, the local `leader_map` and the `query_leader_map`
+          // for the given `tids` align, so using `send_to_t_2` sends to Leaderships
+          // in `query_leader_map`.
+          let tablet_msg = msg::TabletMessage::PerformQuery(perform_query.clone());
+          let node_path = ctx.ctx().mk_node_path_from_tablet(tid);
+          ctx.ctx().send_to_t_2(node_path.clone(), tablet_msg);
 
           // Add the TabletGroup into the TMStatus.
-          tm_status.tm_state.insert(node_path, None);
+          tm_status.tm_state.insert(node_path.clone().into_ct(), None);
+          let sid = node_path.slave_group_id.clone();
+          let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
+          tm_status.leaderships.insert(sid, lid.clone());
         }
       }
-    };
+      SendHelper::TransTableQuery(perform_query, location_prefix) => {
+        // Send out PerformQuery. Recall that this TransTable is held in this very
+        // MSCoordES. Thus, there is no need to verify Leadership of `location_prefix` is
+        // still alive, since it obviously is if we get here.
+        let node_path = location_prefix.source.node_path.clone();
+        ctx.ctx().send_to_ct_2(node_path.clone(), CommonQuery::PerformQuery(perform_query));
+
+        // Add the TabletGroup into the TMStatus.
+        tm_status.tm_state.insert(node_path.clone(), None);
+        let sid = node_path.slave_group_id.clone();
+        let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
+        tm_status.leaderships.insert(sid, lid.clone());
+      }
+    }
 
     // Populate the TMStatus accordingly.
     es.state = CoordState::Stage(Stage { stage_idx, stage_query_id: tm_qid.clone() });
@@ -567,8 +576,8 @@ impl FullMSCoordES {
         match &es.state {
           CoordState::Start => {}
           CoordState::Stage(_) => {
-            // Clean up any Registered Queries in the MSCoordES. Recall that in the
-            // absence of Commit/Abort, this is the only way that MSQueryESs can get cleaned up.
+            // Clean up any Registered Queries in the MSCoordES. The `registered_queries` docs
+            // describe why `send_to_ct_2` sends the message to the right PaxosNode.
             for registered_query in &es.registered_queries {
               ctx.ctx().send_to_ct_2(
                 registered_query.clone().into_ct().node_path,
@@ -921,7 +930,7 @@ impl QueryPlanningES {
     }
   }
 
-  /// Handles the QueryPlan constructed by the Master.
+  /// Handles the GossipData changing.
   pub fn gossip_data_change<T: IOTypes>(
     &mut self,
     ctx: &mut CoordContext<T>,

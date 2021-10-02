@@ -734,28 +734,35 @@ impl<T: IOTypes> CoordContext<T> {
   /// CancelQuery's, as well as when one ES wants to Exit and Clean Up another ES. Note that
   /// we allow the ES at `query_id` to be in any state, and to not even exist.
   fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+    // MSCoordES
     if let Some(mut ms_coord) = statuses.ms_coord_ess.remove(&query_id) {
-      // MSCoordES
       self.external_request_id_map.remove(&ms_coord.request_id);
       ms_coord.es.exit_and_clean_up(self);
       self.exit_all(statuses, ms_coord.child_queries);
-    } else if let Some(mut gr_query) = statuses.gr_query_ess.remove(&query_id) {
-      // GRQueryES
+    }
+    // GRQueryES
+    else if let Some(mut gr_query) = statuses.gr_query_ess.remove(&query_id) {
       gr_query.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(statuses, gr_query.child_queries);
-    } else if let Some(mut trans_read) = statuses.trans_table_read_ess.remove(&query_id) {
-      // TransTableReadES
+    }
+    // TransTableReadES
+    else if let Some(mut trans_read) = statuses.trans_table_read_ess.remove(&query_id) {
       trans_read.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(statuses, trans_read.child_queries);
-    } else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
-      // We ECU this TMStatus by sending CancelQuery to all remaining participants.
+    }
+    // TMStatus
+    else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
+      // We ECU this TMStatus by sending CancelQuery to all remaining RMs.
       for (rm_path, rm_result) in tm_status.tm_state {
         if rm_result.is_none() {
-          self.ctx().send_to_ct_2(
+          let orig_sid = &rm_path.slave_group_id;
+          let orig_lid = tm_status.leaderships.get(&orig_sid).unwrap().clone();
+          self.ctx().send_to_ct_2_lid(
             rm_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: tm_status.child_query_id.clone(),
             }),
+            orig_lid,
           );
         }
       }

@@ -51,7 +51,7 @@ pub struct ReadStage {
   /// in this SubqueryStatus. We cache this here since it's computed when the child
   /// context is computed.
   pub parent_context_map: Vec<usize>,
-  pub pending_status: SubqueryPending,
+  pub stage_query_id: QueryId,
 }
 
 #[derive(Debug)]
@@ -214,12 +214,8 @@ impl GRQueryES {
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
-
-    // Extract the `context` from the SubqueryPending status and verify
-    // that it corresponds to `table_views`.
-    let pending_status = &read_stage.pending_status;
-    assert_eq!(pending_status.query_id, tm_qid);
-    assert_eq!(table_views.len(), pending_status.context.context_rows.len());
+    let stage_query_id = &read_stage.stage_query_id;
+    assert_eq!(stage_query_id, &tm_qid);
 
     // For now, just assert that the schema that we get corresponds to that in the QueryPlan.
     let (trans_table_name, (cur_schema, _)) =
@@ -429,7 +425,7 @@ impl GRQueryES {
     let context = Context { context_schema: new_context_schema, context_rows: new_context_rows };
 
     // Construct the QueryPlan. We amend this Slave to the `query_leader_map`.
-    let (_, (_, child)) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
+    let (_, (_, col_usage_node)) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
     let mut query_leader_map = self.query_plan.query_leader_map.clone();
     query_leader_map.insert(
       ctx.this_slave_group_id.clone(),
@@ -437,10 +433,10 @@ impl GRQueryES {
     );
     let query_plan = QueryPlan {
       tier_map: self.query_plan.tier_map.clone(),
-      query_leader_map,
+      query_leader_map: query_leader_map.clone(),
       table_location_map: self.query_plan.table_location_map.clone(),
       extra_req_cols: self.query_plan.extra_req_cols.clone(),
-      col_usage_node: child.clone(),
+      col_usage_node: col_usage_node.clone(),
     };
 
     // Construct the TMStatus
@@ -475,9 +471,10 @@ impl GRQueryES {
         let tids = ctx.get_min_tablets(table_path, &child_sql_query.selection);
         for tid in &tids {
           let sid = ctx.gossip.tablet_address_config.get(&tid).unwrap();
-          if let Some(lid) = self.query_plan.query_leader_map.get(sid) {
+          if let Some(lid) = query_leader_map.get(sid) {
             if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
               // The `lid` is too old, so we cannot finish this GRQueryES.
+              self.exit_and_clean_up(ctx);
               return GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId);
             }
           }
@@ -499,7 +496,7 @@ impl GRQueryES {
           let common_query = CommonQuery::PerformQuery(perform_query);
           let node_path = ctx.mk_node_path_from_tablet(tid).into_ct();
           let sid = node_path.slave_group_id.clone();
-          if let Some(lid) = self.query_plan.query_leader_map.get(&sid) {
+          if let Some(lid) = query_leader_map.get(&sid) {
             // Recall we already validated that `lid` is no lower than the
             // one at this node's LeaderMap.
             ctx.send_to_ct_2_lid(node_path.clone(), common_query, lid.clone());
@@ -509,7 +506,7 @@ impl GRQueryES {
 
           // Add the TabletGroup into the TMStatus.
           tm_status.tm_state.insert(node_path, None);
-          if let Some(lid) = self.query_plan.query_leader_map.get(&sid) {
+          if let Some(lid) = query_leader_map.get(&sid) {
             tm_status.leaderships.insert(sid, lid.clone());
           } else {
             let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
@@ -526,22 +523,24 @@ impl GRQueryES {
           .find(|prefix| &prefix.trans_table_name == trans_table_name)
           .unwrap()
           .clone();
+
+        // Validate the LeadershipId of PaxosGroups that the PerformQuery will be sent to.
+        // We do this before sending any messages, in case it fails.
+        let sid = &location_prefix.source.node_path.slave_group_id;
+        if let Some(lid) = query_leader_map.get(sid) {
+          if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
+            // The `lid` is too old, so we cannot finish this GRQueryES.
+            self.exit_and_clean_up(ctx);
+            return GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId);
+          }
+        }
+
         let child_query = msg::SuperSimpleTransTableSelectQuery {
           location_prefix: location_prefix.clone(),
           context: context.clone(),
           sql_query: child_sql_query.clone(),
           query_plan,
         };
-
-        // Validate the LeadershipId of PaxosGroups that the PerformQuery will be sent to.
-        // We do this before sending any messages, in case it fails.
-        let sid = &location_prefix.source.node_path.slave_group_id;
-        if let Some(lid) = self.query_plan.query_leader_map.get(sid) {
-          if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
-            // The `lid` is too old, so we cannot finish this GRQueryES.
-            return GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId);
-          }
-        }
 
         // Construct PerformQuery
         let general_query = msg::GeneralQuery::SuperSimpleTransTableSelectQuery(child_query);
@@ -556,7 +555,7 @@ impl GRQueryES {
         let common_query = CommonQuery::PerformQuery(perform_query);
         let node_path = location_prefix.source.node_path.clone();
         let sid = node_path.slave_group_id.clone();
-        if let Some(lid) = self.query_plan.query_leader_map.get(&sid) {
+        if let Some(lid) = query_leader_map.get(&sid) {
           // Recall we already validated that `lid` is no lower than the
           // one at this node's LeaderMap.
           ctx.send_to_ct_2_lid(node_path.clone(), common_query, lid.clone());
@@ -566,7 +565,7 @@ impl GRQueryES {
 
         // Add the TabletGroup into the TMStatus.
         tm_status.tm_state.insert(node_path, None);
-        if let Some(lid) = self.query_plan.query_leader_map.get(&sid) {
+        if let Some(lid) = query_leader_map.get(&sid) {
           tm_status.leaderships.insert(sid, lid.clone());
         } else {
           let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
@@ -579,7 +578,7 @@ impl GRQueryES {
     self.state = GRExecutionS::ReadStage(ReadStage {
       stage_idx,
       parent_context_map,
-      pending_status: SubqueryPending { context: Rc::new(context), query_id: tm_qid.clone() },
+      stage_query_id: tm_qid.clone(),
     });
 
     // Return the TMStatus for the parent Server to execute.
