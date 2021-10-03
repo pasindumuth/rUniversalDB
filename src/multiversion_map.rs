@@ -1,10 +1,11 @@
 use crate::model::common::Timestamp;
+use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::HashMap;
 use std::hash::Hash;
 
-#[derive(Debug, Clone)]
-pub struct MVM<K, V> {
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MVM<K: Eq + Hash + Clone, V> {
   pub map: HashMap<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>,
 }
 
@@ -22,17 +23,21 @@ where
   }
 
   pub fn write(&mut self, key: &K, value: Option<V>, timestamp: Timestamp) -> Result<(), String> {
-    if let Some((lat, versions)) = self.map.get_mut(key) {
-      if timestamp <= *lat {
-        Err(String::from("Timestamps must be >= current lat."))
+    if timestamp == 0 {
+      Err(String::from("Timestamps must be >= current lat."))
+    } else {
+      if let Some((lat, versions)) = self.map.get_mut(key) {
+        if timestamp <= *lat {
+          Err(String::from("Timestamps must be >= current lat."))
+        } else {
+          *lat = timestamp;
+          versions.push((timestamp, value));
+          Ok(())
+        }
       } else {
-        *lat = timestamp;
-        versions.push((timestamp, value));
+        self.map.insert(key.clone(), (timestamp, vec![(timestamp, value)]));
         Ok(())
       }
-    } else {
-      self.map.insert(key.clone(), (timestamp, vec![(timestamp, value)]));
-      Ok(())
     }
   }
 
@@ -104,7 +109,7 @@ where
     if let Some((lat, _)) = self.map.get(key) {
       *lat
     } else {
-      Timestamp(0)
+      0
     }
   }
 
@@ -112,9 +117,9 @@ where
   pub fn get_latest_lat(&self) -> Timestamp {
     let mut latest_lat = 0;
     for (_, (lat, _)) in &self.map {
-      latest_lat = max(latest_lat, lat.0);
+      latest_lat = max(latest_lat, *lat);
     }
-    Timestamp(latest_lat)
+    latest_lat
   }
 }
 
@@ -139,15 +144,15 @@ mod tests {
     let v1 = String::from("v1");
     let v2 = String::from("v2");
     let v3 = String::from("v3");
-    assert_eq!(mvm.read(&k, Timestamp(1)), None);
-    assert!(mvm.write(&k, Some(v1.clone()), Timestamp(2)).is_ok());
-    assert!(mvm.write(&k, Some(v2.clone()), Timestamp(4)).is_ok());
-    assert_eq!(mvm.read(&k, Timestamp(3)), Some(v1));
-    assert_eq!(mvm.read(&k, Timestamp(5)), Some(v2));
-    assert!(mvm.write(&k, Some(v3.clone()), Timestamp(5)).is_err());
-    assert!(mvm.write(&k, Some(v3.clone()), Timestamp(6)).is_ok());
-    assert_eq!(mvm.read(&k, Timestamp(6)), Some(v3));
-    assert!(mvm.write(&k, None, Timestamp(7)).is_ok());
-    assert_eq!(mvm.read(&k, Timestamp(7)), None);
+    assert_eq!(mvm.read(&k, 1), None);
+    assert!(mvm.write(&k, Some(v1.clone()), 2).is_ok());
+    assert!(mvm.write(&k, Some(v2.clone()), 4).is_ok());
+    assert_eq!(mvm.read(&k, 3), Some(v1));
+    assert_eq!(mvm.read(&k, 5), Some(v2));
+    assert!(mvm.write(&k, Some(v3.clone()), 5).is_err());
+    assert!(mvm.write(&k, Some(v3.clone()), 6).is_ok());
+    assert_eq!(mvm.read(&k, 6), Some(v3));
+    assert!(mvm.write(&k, None, 7).is_ok());
+    assert_eq!(mvm.read(&k, 7), None);
   }
 }

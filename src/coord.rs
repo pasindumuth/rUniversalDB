@@ -706,7 +706,7 @@ impl<T: IOTypes> CoordContext<T> {
         let exec = ms_coord.es.to_exec();
         let query_id = mk_qid(&mut self.rand);
         ms_coord.es = FullMSCoordES::QueryPlanning(QueryPlanningES {
-          timestamp: Timestamp(max(self.clock.now().0, exec.timestamp.0 + 1)),
+          timestamp: max(self.clock.now(), exec.timestamp + 1),
           sql_query: exec.sql_query.clone(),
           query_id: query_id.clone(),
           state: QueryPlanningS::Start,
@@ -760,7 +760,7 @@ impl<T: IOTypes> CoordContext<T> {
               sender_eid: response_data.sender_eid,
               child_queries: vec![],
               es: FullMSCoordES::QueryPlanning(QueryPlanningES {
-                timestamp: Timestamp(max(self.clock.now().0, response_data.timestamp.0 + 1)),
+                timestamp: max(self.clock.now(), response_data.timestamp + 1),
                 sql_query: response_data.sql_query,
                 query_id: query_id.clone(),
                 state: QueryPlanningS::Start,

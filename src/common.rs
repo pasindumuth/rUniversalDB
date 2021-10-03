@@ -6,6 +6,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
+use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sqlparser::test_utils::table;
@@ -75,6 +76,16 @@ pub fn map_insert<'a, K: Clone + Eq + Hash, V>(
   map.get_mut(key).unwrap()
 }
 
+/// Same as above, except for BTrees
+pub fn btree_map_insert<'a, K: Clone + Eq + Ord, V>(
+  map: &'a mut BTreeMap<K, V>,
+  key: &K,
+  value: V,
+) -> &'a mut V {
+  map.insert(key.clone(), value);
+  map.get_mut(key).unwrap()
+}
+
 /// Used to add elements form a BTree MultiMap
 pub fn btree_multimap_insert<K: Ord + Clone, V: Ord>(
   map: &mut BTreeMap<K, BTreeSet<V>>,
@@ -111,7 +122,7 @@ pub fn btree_multimap_remove<K: Ord, V: Ord>(
 /// A struct to encode the Table Schema of a table. Recall that Key Columns (which forms
 /// the PrimaryKey) can't change. However, Value Columns can change, and they do so in a
 /// versioned fashion with an MVM.
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TableSchema {
   pub key_cols: Vec<(ColName, ColType)>,
   pub val_cols: MVM<ColName, ColType>,
@@ -123,7 +134,9 @@ impl TableSchema {
     // set the version Timestamp to be 0, and also set the initial LAT to be 0.
     let mut mvm = MVM::<ColName, ColType>::new();
     for (col_name, col_type) in val_cols {
-      mvm.write(&col_name, Some(col_type), Timestamp(0));
+      // We start at Timestamp 1 because 0 is already used, where every key in
+      // existance maps to None.
+      mvm.write(&col_name, Some(col_type), 1);
     }
     TableSchema { key_cols, val_cols: mvm }
   }
@@ -133,84 +146,22 @@ impl TableSchema {
   }
 }
 
-/// A Serializable version of `TableSchema`. This is needed since it's
-/// not serializable automatically
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct TableSchemaSer {
-  pub key_cols: Vec<(ColName, ColType)>,
-  pub val_cols: HashMap<ColName, (Timestamp, Vec<(Timestamp, Option<ColType>)>)>,
-}
-
-impl TableSchemaSer {
-  pub fn from_schema(schema: TableSchema) -> TableSchemaSer {
-    TableSchemaSer { key_cols: schema.key_cols, val_cols: schema.val_cols.map }
-  }
-
-  pub fn to_schema(self) -> TableSchema {
-    TableSchema { key_cols: self.key_cols, val_cols: MVM { map: self.val_cols } }
-  }
-}
-
 // -------------------------------------------------------------------------------------------------
 // Gossip
 // -------------------------------------------------------------------------------------------------
 
 /// Holds Gossip Data in a node. It's accessible in both Tablets and Slaves.
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct GossipData {
   /// Database Schema
   pub gen: Gen,
   pub db_schema: HashMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: HashMap<TablePath, Gen>,
+  pub table_generation: MVM<TablePath, Gen>,
 
   /// Distribution
   pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
-}
-
-/// A Serializable version of `GossipData`. This is needed since it's
-/// not serializable automatically
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct GossipDataSer {
-  pub gen: Gen,
-  pub db_schema: HashMap<(TablePath, Gen), TableSchemaSer>,
-  pub table_generation: HashMap<TablePath, Gen>,
-  pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
-}
-
-impl GossipDataSer {
-  pub fn from_gossip(gossip: GossipData) -> GossipDataSer {
-    GossipDataSer {
-      gen: gossip.gen,
-      db_schema: gossip
-        .db_schema
-        .into_iter()
-        .map(|(table_path, schema)| (table_path, TableSchemaSer::from_schema(schema)))
-        .collect(),
-      table_generation: gossip.table_generation,
-      sharding_config: gossip.sharding_config,
-      tablet_address_config: gossip.tablet_address_config,
-      slave_address_config: gossip.slave_address_config,
-    }
-  }
-
-  pub fn to_gossip(self) -> GossipData {
-    GossipData {
-      gen: self.gen,
-      db_schema: self
-        .db_schema
-        .into_iter()
-        .map(|(table_path, schema)| (table_path, schema.to_schema()))
-        .collect(),
-      table_generation: self.table_generation,
-      sharding_config: self.sharding_config,
-      tablet_address_config: self.tablet_address_config,
-      slave_address_config: self.slave_address_config,
-    }
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -247,10 +198,20 @@ pub struct TMStatus {
 //  Basic Utils
 // -----------------------------------------------------------------------------------------------
 
+fn rand_string<R: Rng>(rng: &mut R) -> String {
+  rng.sample_iter(&Alphanumeric).take(8).map(char::from).collect()
+}
+
 pub fn mk_qid<R: Rng>(rng: &mut R) -> QueryId {
-  let mut bytes: [u8; 8] = [0; 8];
-  rng.fill(&mut bytes);
-  QueryId(bytes)
+  QueryId(rand_string(rng))
+}
+
+pub fn mk_tid<R: Rng>(rng: &mut R) -> TabletGroupId {
+  TabletGroupId(rand_string(rng))
+}
+
+pub fn mk_sid<R: Rng>(rng: &mut R) -> SlaveGroupId {
+  SlaveGroupId(rand_string(rng))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

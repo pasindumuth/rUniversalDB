@@ -610,7 +610,7 @@ impl QueryPlanningES {
 
     // First, we see if all TablePaths are in the GossipData
     for table_path in collect_table_paths(&self.sql_query) {
-      if !ctx.gossip.table_generation.contains_key(&table_path) {
+      if ctx.gossip.table_generation.static_read(&table_path, self.timestamp).is_none() {
         // We must go to MasterQueryPlanning.
         return self.perform_master_query_planning(ctx);
       }
@@ -623,7 +623,7 @@ impl QueryPlanningES {
         MSQueryStage::SuperSimpleSelect(_) => {}
         MSQueryStage::Update(query) => {
           // The TablePath exists, from the above.
-          let gen = ctx.gossip.table_generation.get(&query.table).unwrap();
+          let gen = ctx.gossip.table_generation.static_read(&query.table, self.timestamp).unwrap();
           let schema = ctx.gossip.db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
           for (col_name, _) in &query.assignment {
             if lookup(&schema.key_cols, col_name).is_some() {
@@ -647,7 +647,7 @@ impl QueryPlanningES {
         GeneralStage::SuperSimpleSelect(query) => {
           if let proc::TableRef::TablePath(table_path) = &query.from {
             // The TablePath exists, from the above.
-            let gen = ctx.gossip.table_generation.get(&table_path).unwrap();
+            let gen = ctx.gossip.table_generation.static_read(&table_path, self.timestamp).unwrap();
             let schema = ctx.gossip.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
             for col_name in &query.projection {
               if !weak_contains_col(schema, col_name, &self.timestamp) {
@@ -658,7 +658,7 @@ impl QueryPlanningES {
         }
         GeneralStage::Update(query) => {
           // The TablePath exists, from the above.
-          let gen = ctx.gossip.table_generation.get(&query.table).unwrap();
+          let gen = ctx.gossip.table_generation.static_read(&query.table, self.timestamp).unwrap();
           let schema = ctx.gossip.db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
           for (col_name, _) in &query.assignment {
             if !weak_contains_col(schema, col_name, &self.timestamp) {
@@ -754,7 +754,7 @@ impl QueryPlanningES {
       &mut |stage: GeneralStage| match stage {
         GeneralStage::SuperSimpleSelect(query) => {
           if let proc::TableRef::TablePath(table_path) = &query.from {
-            let gen = ctx.gossip.table_generation.get(&table_path).unwrap();
+            let gen = ctx.gossip.table_generation.static_read(&table_path, self.timestamp).unwrap();
             table_location_map.insert(table_path.clone(), gen.clone());
 
             // Recall there might already be required columns for this TablePath.
@@ -770,7 +770,7 @@ impl QueryPlanningES {
           }
         }
         GeneralStage::Update(query) => {
-          let gen = ctx.gossip.table_generation.get(&query.table).unwrap();
+          let gen = ctx.gossip.table_generation.static_read(&query.table, self.timestamp).unwrap();
           table_location_map.insert(query.table.clone(), gen.clone());
 
           // Recall there might already be required columns for this TablePath.
@@ -842,7 +842,7 @@ impl QueryPlanningES {
         // we check if all TablePaths are in the GossipData, waiting if not. This is only needed
         // so that we can actually contact those nodes.
         for table_path in collect_table_paths(&self.sql_query) {
-          if !ctx.gossip.table_generation.contains_key(&table_path) {
+          if ctx.gossip.table_generation.static_read(&table_path, self.timestamp).is_none() {
             // We send a MasterGossipRequest and go to GossipDataWaiting.
             let sender_path = ctx.ctx().mk_this_query_path(self.query_id.clone());
             ctx.ctx().send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
@@ -877,7 +877,7 @@ impl QueryPlanningES {
       // for any GossipData update whatsoever (not just the one resulting from the
       // MasterGossipRequest we sent out).
       for table_path in collect_table_paths(&self.sql_query) {
-        if !ctx.gossip.table_generation.contains_key(&table_path) {
+        if ctx.gossip.table_generation.static_read(&table_path, self.timestamp).is_none() {
           // We stay in GossipDataWaiting.
           return QueryPlanningAction::Wait;
         }

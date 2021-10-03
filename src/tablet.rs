@@ -1019,14 +1019,14 @@ impl<T: IOTypes> TabletContext<T> {
               alter_table_es.handle_prepare(prepare, self);
             } else {
               // Construct the `preparing_timestamp`
-              let mut timestamp = self.clock.now().0;
+              let mut timestamp = self.clock.now();
               timestamp =
-                max(timestamp, self.table_schema.val_cols.get_lat(&prepare.alter_op.col_name).0);
+                max(timestamp, self.table_schema.val_cols.get_lat(&prepare.alter_op.col_name));
               for (_, req) in
                 self.waiting_locked_cols.iter().chain(self.inserting_locked_cols.iter())
               {
                 if req.cols.contains(&prepare.alter_op.col_name) {
-                  timestamp = max(timestamp, req.timestamp.0);
+                  timestamp = max(timestamp, req.timestamp);
                 }
               }
               timestamp += 1;
@@ -1038,7 +1038,7 @@ impl<T: IOTypes> TabletContext<T> {
                 DDLES::Alter(AlterTableES {
                   query_id,
                   alter_op: prepare.alter_op,
-                  prepare_timestamp: Timestamp(timestamp),
+                  prepare_timestamp: timestamp,
                   state: State::WaitingInsertingPrepared,
                 }),
               ));
@@ -1078,12 +1078,12 @@ impl<T: IOTypes> TabletContext<T> {
               drop_table_es.handle_prepare(prepare, self);
             } else {
               // Construct the `preparing_timestamp`
-              let mut timestamp = self.clock.now().0;
-              timestamp = max(timestamp, self.table_schema.val_cols.get_latest_lat().0);
+              let mut timestamp = self.clock.now();
+              timestamp = max(timestamp, self.table_schema.val_cols.get_latest_lat());
               for (_, req) in
                 self.waiting_locked_cols.iter().chain(self.inserting_locked_cols.iter())
               {
-                timestamp = max(timestamp, req.timestamp.0);
+                timestamp = max(timestamp, req.timestamp);
               }
               timestamp += 1;
 
@@ -1093,7 +1093,7 @@ impl<T: IOTypes> TabletContext<T> {
                 query_id.clone(),
                 DDLES::Drop(DropTableES::DropExecuting(DropExecuting {
                   query_id,
-                  prepare_timestamp: Timestamp(timestamp),
+                  prepare_timestamp: timestamp,
                   state: State::WaitingInsertingPrepared,
                 })),
               ));

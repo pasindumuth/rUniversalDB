@@ -1,4 +1,4 @@
-use crate::common::{GossipData, GossipDataSer, IOTypes, NetworkOut};
+use crate::common::{GossipData, IOTypes, NetworkOut};
 use crate::create_table_tm_es::{ResponseData, TMClosedState};
 use crate::master::MasterContext;
 use crate::model::common::{

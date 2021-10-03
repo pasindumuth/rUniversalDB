@@ -3,6 +3,7 @@ use crate::model::common::{
   iast, proc, ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
   Timestamp, TransTableName,
 };
+use crate::multiversion_map::MVM;
 use crate::server::{contains_col, weak_contains_col};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -56,7 +57,8 @@ impl FrozenColUsageNode {
 }
 
 /// This algorithm contains the following assumptions:
-///   1. All `TablePath`s referenced the `MSQuery` exist in `table_generation` and `db_schema`.
+///   1. All `TablePath`s referenced the `MSQuery` exist in `table_generation` and `db_schema`
+///      at the given `Timestamp`.
 ///   2. All projected columns in `SELECT` queries and all assigned columns in `UPDATE` queries
 ///      exist in the `db_schema`.
 ///   3. The assigned columns in an `UPDATE` are disjoint from the Key Columns. (This algorithm
@@ -65,7 +67,7 @@ impl FrozenColUsageNode {
 /// Users of this algorithm must verify these facts first.
 pub struct ColUsagePlanner<'a> {
   pub db_schema: &'a HashMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: &'a HashMap<TablePath, Gen>,
+  pub table_generation: &'a MVM<TablePath, Gen>,
   pub timestamp: Timestamp,
 }
 
@@ -119,7 +121,7 @@ impl<'a> ColUsagePlanner<'a> {
       }
       proc::TableRef::TablePath(table_path) => {
         // The Query converter should make sure that all TablePaths actually exist.
-        let gen = self.table_generation.get(table_path).unwrap();
+        let gen = self.table_generation.static_read(table_path, self.timestamp).unwrap();
         let table_schema = self.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
         for col in all_cols {
           if weak_contains_col(&table_schema, &col, &self.timestamp) {
@@ -157,7 +159,7 @@ impl<'a> ColUsagePlanner<'a> {
     update: &proc::Update,
   ) -> (Vec<ColName>, FrozenColUsageNode) {
     let mut projection = Vec::new();
-    let gen = self.table_generation.get(&update.table).unwrap();
+    let gen = self.table_generation.static_read(&update.table, self.timestamp).unwrap();
     for (col, _) in &self.db_schema.get(&(update.table.clone(), gen.clone())).unwrap().key_cols {
       projection.push(col.clone());
     }
@@ -448,10 +450,10 @@ mod test {
 
   #[test]
   fn basic_test() {
-    let table_generation: HashMap<TablePath, Gen> =
-      vec![(mk_tab("t1"), Gen(0)), (mk_tab("t2"), Gen(0)), (mk_tab("t3"), Gen(0))]
-        .into_iter()
-        .collect();
+    let mut table_generation: MVM<TablePath, Gen> = MVM::new();
+    table_generation.write(&mk_tab("t1"), Some(Gen(0)), 1);
+    table_generation.write(&mk_tab("t2"), Some(Gen(0)), 1);
+    table_generation.write(&mk_tab("t3"), Some(Gen(0)), 1);
 
     let db_schema: HashMap<(TablePath, Gen), TableSchema> = vec![
       (
@@ -526,11 +528,8 @@ mod test {
       returning: mk_ttab("tt1"),
     };
 
-    let mut planner = ColUsagePlanner {
-      db_schema: &db_schema,
-      table_generation: &table_generation,
-      timestamp: Timestamp(0),
-    };
+    let mut planner =
+      ColUsagePlanner { db_schema: &db_schema, table_generation: &table_generation, timestamp: 1 };
     let col_usage_nodes = planner.plan_ms_query(&ms_query);
 
     let exp_col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> = vec![

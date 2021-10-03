@@ -1,7 +1,7 @@
 use crate::alter_table_tm_es::{AlterTableAction, AlterTableTMES, AlterTableTMS};
 use crate::col_usage::{ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
-  lookup, mk_qid, GossipData, GossipDataSer, IOTypes, NetworkOut, TableSchema, TableSchemaSer,
+  btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, IOTypes, NetworkOut, TableSchema,
 };
 use crate::common::{map_insert, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTableTMES, CreateTableTMS, ResponseData};
@@ -15,17 +15,19 @@ use crate::model::message as msg;
 use crate::model::message::{
   ExternalDDLQueryAbortData, FrozenColUsageTree, MasterExternalReq, MasterMessage,
 };
+use crate::multiversion_map::MVM;
 use crate::paxos::LeaderChanged;
 use crate::server::{CommonQuery, CoreServerContext};
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
-use crate::test_utils::mk_tid;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use sqlparser::test_utils::table;
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::iter::FromIterator;
 
 // -----------------------------------------------------------------------------------------------
 //  MasterPLm
@@ -179,10 +181,10 @@ struct MasterQueryPlanningES {
 
 #[derive(Debug, Default)]
 pub struct Statuses {
-  create_table_tm_ess: HashMap<QueryId, CreateTableTMES>,
-  alter_table_tm_ess: HashMap<QueryId, AlterTableTMES>,
-  drop_table_tm_ess: HashMap<QueryId, DropTableTMES>,
-  planning_ess: HashMap<QueryId, MasterQueryPlanningES>,
+  create_table_tm_ess: BTreeMap<QueryId, CreateTableTMES>,
+  alter_table_tm_ess: BTreeMap<QueryId, AlterTableTMES>,
+  drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
+  planning_ess: BTreeMap<QueryId, MasterQueryPlanningES>,
 }
 
 #[derive(Debug)]
@@ -204,7 +206,7 @@ pub struct MasterContext<T: IOTypes> {
   /// Database Schema
   pub gen: Gen,
   pub db_schema: HashMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: HashMap<TablePath, Gen>,
+  pub table_generation: MVM<TablePath, Gen>,
 
   /// Distribution
   pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
@@ -236,7 +238,7 @@ impl<T: IOTypes> MasterState<T> {
         this_eid: EndpointId("".to_string()),
         gen: Gen(0),
         db_schema,
-        table_generation: Default::default(),
+        table_generation: MVM::new(),
         sharding_config,
         tablet_address_config,
         slave_address_config,
@@ -278,32 +280,36 @@ impl<T: IOTypes> MasterContext<T> {
                 self.external_request_id_map.insert(request_id.clone(), query_id.clone());
                 match ddl_query {
                   DDLQuery::Create(create_table) => {
-                    // Construct shards
-                    // pub shards: Vec<(TabletKeyRange, TabletGroupId, SlaveGroupId)>,
+                    // Choose a random SlaveGroupId to place the Tablet
+                    let sids = Vec::from_iter(self.slave_address_config.keys().into_iter());
+                    let idx = self.rand.next_u32() as usize % sids.len();
+                    let sid = sids[idx].clone();
 
-                    // TODO: continue
-                    // let tablet_group_id = mk_tid()
-                    // let shards = vec
+                    // Construct shards
+                    let shards = vec![(
+                      TabletKeyRange { start: None, end: None },
+                      mk_tid(&mut self.rand),
+                      sid,
+                    )];
 
                     // Construct ES
-                    map_insert(
+                    btree_map_insert(
                       &mut statuses.create_table_tm_ess,
                       &query_id,
                       CreateTableTMES {
                         response_data: Some(ResponseData { request_id, sender_eid }),
                         query_id: query_id.clone(),
-                        tablet_group_id: TabletGroupId("".to_string()),
                         table_path: create_table.table_path,
                         key_cols: create_table.key_cols,
                         val_cols: create_table.val_cols,
-                        shards: vec![],
+                        shards,
                         state: CreateTableTMS::Start,
                       },
                     );
                   }
                   DDLQuery::Alter(alter_table) => {
                     // Construct ES
-                    map_insert(
+                    btree_map_insert(
                       &mut statuses.alter_table_tm_ess,
                       &query_id,
                       AlterTableTMES {
@@ -317,7 +323,7 @@ impl<T: IOTypes> MasterContext<T> {
                   }
                   DDLQuery::Drop(drop_table) => {
                     // Construct ES
-                    map_insert(
+                    btree_map_insert(
                       &mut statuses.drop_table_tm_ess,
                       &query_id,
                       DropTableTMES {
@@ -384,24 +390,40 @@ impl<T: IOTypes> MasterContext<T> {
 
   /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
   fn run_main_loop_once(&mut self, statuses: &mut Statuses) -> bool {
-    // First, figure out which (TablePath, ColName)s are used by `alter_table_ess`.
-    // let mut used_col_names = HashSet::<(TablePath, ColName)>::new();
-    // for (_, es) in &statuses.alter_table_ess {
-    //   used_col_names.insert((es.table_path.clone(), es.alter_op.col_name.clone()));
-    // }
-    //
-    // // Then, see if there is AlterTableES that is still in the `Start` state that
-    // // does not use the above, and start it if it exists.
-    // for (query_id, es) in &mut statuses.alter_table_ess {
-    //   if matches!(es.state, AlterTableS::Start) {
-    //     if !used_col_names.contains(&(es.table_path.clone(), es.alter_op.col_name.clone())) {
-    //       let query_id = query_id.clone();
-    //       let action = es.start(self);
-    //       self.handle_alter_table_es_action(statuses, query_id, action);
-    //       return true;
-    //     }
-    //   }
-    // }
+    // First, we accumulate all TablePaths that currently have a a DDL Query running for them.
+    let mut tables_being_modified = HashSet::<TablePath>::new();
+    for (_, create_table_es) in &statuses.create_table_tm_ess {
+      if let CreateTableTMS::Start = &create_table_es.state {
+      } else {
+        tables_being_modified.insert(create_table_es.table_path.clone());
+      }
+    }
+
+    for (_, alter_table_es) in &statuses.alter_table_tm_ess {
+      if let AlterTableTMS::Start = &alter_table_es.state {
+      } else {
+        tables_being_modified.insert(alter_table_es.table_path.clone());
+      }
+    }
+
+    for (_, drop_table_es) in &statuses.drop_table_tm_ess {
+      if let DropTableTMS::Start = &drop_table_es.state {
+      } else {
+        tables_being_modified.insert(drop_table_es.table_path.clone());
+      }
+    }
+
+    // Move CreateTableESs forward for TablePaths not in `tables_being_modified`
+    for (_, create_table_es) in &statuses.create_table_tm_ess {
+      if let CreateTableTMS::Start = &create_table_es.state {
+        if !tables_being_modified.contains(&create_table_es.table_path) {
+          // Check table Validity
+          // self.table_generation
+          // Move it forward
+          tables_being_modified.insert(create_table_es.table_path.clone());
+        }
+      }
+    }
 
     return false;
   }

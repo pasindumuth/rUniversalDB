@@ -17,7 +17,7 @@ struct ProdClock {}
 
 impl Clock for ProdClock {
   fn now(&mut self) -> Timestamp {
-    Timestamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis())
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
   }
 }
 

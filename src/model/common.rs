@@ -64,8 +64,8 @@ pub struct TabletKeyRange {
 }
 
 /// A simple Timestamp type.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
-pub struct Timestamp(pub u128);
+/// Note: We avoid defining a new type so we can use the arithmetic operators easily
+pub type Timestamp = u128;
 
 /// A Type used to represent a generation.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
@@ -107,7 +107,7 @@ pub struct TabletGroupId(pub String);
 
 /// A global identfier of a Tablet.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct QueryId(pub [u8; 8]);
+pub struct QueryId(pub String);
 
 /// A global identfier of a Slave.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -1,5 +1,5 @@
 use crate::col_usage::FrozenColUsageNode;
-use crate::common::{GossipDataSer, QueryPlan};
+use crate::common::{GossipData, QueryPlan};
 use crate::model::common::{
   proc, CQueryPath, CSubNodePath, CTQueryPath, ColName, ColType, Context, CoordGroupId, EndpointId,
   Gen, LeadershipId, NodeGroupId, PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath,
@@ -600,7 +600,7 @@ pub struct DropTableCloseConfirm {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterGossip {
-  pub gossip_data: GossipDataSer,
+  pub gossip_data: GossipData,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

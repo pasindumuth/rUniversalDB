@@ -11,7 +11,7 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::{GeneralQuery, QueryError, SlaveMessage};
+use crate::model::message::{GeneralQuery, QueryError, SlaveMessage, SlaveRemotePayload};
 use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
@@ -96,7 +96,17 @@ impl<T: IOTypes> SlaveContext<T> {
   pub fn handle_incoming_message(&mut self, message: msg::SlaveMessage) {
     match message {
       SlaveMessage::ExternalMessage(_) => {}
-      SlaveMessage::RemoteMessage(_) => {}
+      SlaveMessage::RemoteMessage(remote_message) => match remote_message.payload {
+        SlaveRemotePayload::RemoteLeaderChanged(_) => {}
+        SlaveRemotePayload::CreateTablePrepare(_) => {}
+        SlaveRemotePayload::CreateTableCommit(_) => {}
+        SlaveRemotePayload::CreateTableAbort(_) => {}
+        SlaveRemotePayload::MasterGossip(gossip) => {
+          self.gossip = Arc::new(gossip.gossip_data);
+        }
+        SlaveRemotePayload::TabletMessage(_, _) => {}
+        SlaveRemotePayload::CoordMessage(_, _) => {}
+      },
       SlaveMessage::PaxosMessage(_) => {}
     }
   }

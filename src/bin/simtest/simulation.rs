@@ -7,6 +7,7 @@ use runiversal::model::common::{
   EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use runiversal::model::message as msg;
+use runiversal::multiversion_map::MVM;
 use runiversal::slave::SlaveState;
 use runiversal::tablet::TabletState;
 use std::cell::RefCell;
@@ -20,7 +21,7 @@ struct TestClock {}
 
 impl Clock for TestClock {
   fn now(&mut self) -> Timestamp {
-    Timestamp(0) // TODO: make this proper.
+    0 // TODO: make this proper.
   }
 }
 
@@ -171,7 +172,7 @@ impl Simulation {
       let gossip = Arc::new(GossipData {
         gen: Gen(0),
         db_schema: schema.clone(),
-        table_generation: Default::default(),
+        table_generation: MVM::new(),
         sharding_config: sharding_config.clone(),
         tablet_address_config: tablet_address_config.clone(),
         slave_address_config: slave_address_config.clone(),

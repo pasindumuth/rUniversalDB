@@ -50,7 +50,6 @@ pub struct CreateTableTMES {
 
   // CreateTable Query data
   pub query_id: QueryId,
-  pub tablet_group_id: TabletGroupId,
   pub table_path: TablePath,
 
   pub key_cols: Vec<(ColName, ColType)>,

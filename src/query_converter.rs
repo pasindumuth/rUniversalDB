@@ -1,10 +1,10 @@
 use crate::common::TableSchema;
 use crate::model::common::{iast, proc, ColName, TablePath, TransTableName};
-use crate::model::message::ExternalAbortedData;
+use crate::model::message as msg;
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 
-pub fn convert_to_msquery(query: iast::Query) -> Result<proc::MSQuery, ExternalAbortedData> {
+pub fn convert_to_msquery(query: iast::Query) -> Result<proc::MSQuery, msg::ExternalAbortedData> {
   // First, we rename all TransTable definitions and references so that they're
   // unique. To do this, we just prepend `tt\n\`, where `n` is integers that we get
   // from a counter. This guarantees uniqueness, since backslashes aren't allowed in
@@ -139,7 +139,7 @@ fn rename_trans_tables_val_expr_R(ctx: &mut RenameContext, val_expr: &mut iast::
 fn flatten_top_level_query(
   query: &iast::Query,
   counter: &mut u32,
-) -> Result<proc::MSQuery, ExternalAbortedData> {
+) -> Result<proc::MSQuery, msg::ExternalAbortedData> {
   let aux_table_name = unique_name(counter, &"".to_string());
   let mut ms_query = proc::MSQuery {
     trans_tables: Vec::default(),
@@ -159,7 +159,7 @@ fn flatten_top_level_query_R(
   query: &iast::Query,
   counter: &mut u32,
   trans_table_map: &mut Vec<(TransTableName, proc::MSQueryStage)>,
-) -> Result<(), ExternalAbortedData> {
+) -> Result<(), msg::ExternalAbortedData> {
   // First, have the CTEs flatten their Querys and add their TransTables to the map.
   for (trans_table_name, cte_query) in &query.ctes {
     flatten_top_level_query_R(trans_table_name, cte_query, counter, trans_table_map)?;
@@ -203,7 +203,7 @@ fn flatten_top_level_query_R(
 fn flatten_val_expr_R(
   val_expr: &iast::ValExpr,
   counter: &mut u32,
-) -> Result<proc::ValExpr, ExternalAbortedData> {
+) -> Result<proc::ValExpr, msg::ExternalAbortedData> {
   match val_expr {
     iast::ValExpr::ColumnRef { col_ref } => {
       Ok(proc::ValExpr::ColumnRef { col_ref: ColName(col_ref.clone()) })
@@ -238,7 +238,7 @@ fn flatten_sub_query_R(
   query: &iast::Query,
   counter: &mut u32,
   trans_table_map: &mut Vec<(TransTableName, proc::GRQueryStage)>,
-) -> Result<(), ExternalAbortedData> {
+) -> Result<(), msg::ExternalAbortedData> {
   // First, have the CTEs flatten their Querys and add their TransTables to the map.
   for (trans_table_name, cte_query) in &query.ctes {
     flatten_sub_query_R(trans_table_name, cte_query, counter, trans_table_map)?;
@@ -261,7 +261,7 @@ fn flatten_sub_query_R(
       ));
       Ok(())
     }
-    iast::QueryBody::Update(_) => Err(ExternalAbortedData::InvalidUpdate),
+    iast::QueryBody::Update(_) => Err(msg::ExternalAbortedData::InvalidUpdate),
   }
 }
 
@@ -347,47 +347,45 @@ mod rename_test {
       "tt\\2\\tt2",
     );
 
-    assert_eq!(
-      flatten_top_level_query(&query, &mut 3),
-      Ok(proc::MSQuery {
-        trans_tables: vec![
-          (
-            TransTableName("tt\\0\\tt1".to_string()),
-            proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
-              projection: vec![],
-              from: proc::TableRef::TablePath(TablePath("t2".to_string())),
-              selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) }
-            })
-          ),
-          (
-            TransTableName("tt\\1\\tt1".to_string()),
-            proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
-              projection: vec![],
-              from: proc::TableRef::TransTableName(TransTableName("tt\\0\\tt1".to_string())),
-              selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) }
-            })
-          ),
-          (
-            TransTableName("tt\\2\\tt2".to_string()),
-            proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
-              projection: vec![],
-              from: proc::TableRef::TransTableName(TransTableName("tt\\1\\tt1".to_string())),
-              selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) }
-            })
-          ),
-          (
-            TransTableName("tt\\3\\".to_string()),
-            proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
-              projection: vec![],
-              from: proc::TableRef::TransTableName(TransTableName("tt\\2\\tt2".to_string())),
-              selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) }
-            })
-          )
-        ]
-        .into_iter()
-        .collect(),
-        returning: TransTableName("tt\\3\\".to_string())
-      })
-    );
+    let expected: Result<proc::MSQuery, msg::ExternalAbortedData> = Ok(proc::MSQuery {
+      trans_tables: vec![
+        (
+          TransTableName("tt\\0\\tt1".to_string()),
+          proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+            projection: vec![],
+            from: proc::TableRef::TablePath(TablePath("t2".to_string())),
+            selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
+          }),
+        ),
+        (
+          TransTableName("tt\\1\\tt1".to_string()),
+          proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+            projection: vec![],
+            from: proc::TableRef::TransTableName(TransTableName("tt\\0\\tt1".to_string())),
+            selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
+          }),
+        ),
+        (
+          TransTableName("tt\\2\\tt2".to_string()),
+          proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+            projection: vec![],
+            from: proc::TableRef::TransTableName(TransTableName("tt\\1\\tt1".to_string())),
+            selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
+          }),
+        ),
+        (
+          TransTableName("tt\\3\\".to_string()),
+          proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+            projection: vec![],
+            from: proc::TableRef::TransTableName(TransTableName("tt\\2\\tt2".to_string())),
+            selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
+          }),
+        ),
+      ]
+      .into_iter()
+      .collect(),
+      returning: TransTableName("tt\\3\\".to_string()),
+    });
+    assert_eq!(flatten_top_level_query(&query, &mut 3), expected);
   }
 }
