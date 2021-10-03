@@ -1,17 +1,25 @@
-use crate::alter_table_tm_es::{AlterTableAction, AlterTableES, AlterTableS};
+use crate::alter_table_tm_es::{AlterTableAction, AlterTableTMES, AlterTableTMS};
 use crate::col_usage::{ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   lookup, mk_qid, GossipData, GossipDataSer, IOTypes, NetworkOut, TableSchema, TableSchemaSer,
 };
+use crate::common::{map_insert, RemoteLeaderChangedPLm};
+use crate::create_table_tm_es::{CreateTableTMES, CreateTableTMS, ResponseData};
+use crate::drop_table_tm_es::{DropTableTMES, DropTableTMS};
 use crate::model::common::proc::{AlterTable, TableRef};
 use crate::model::common::{
-  proc, ColName, EndpointId, Gen, QueryId, RequestId, SlaveGroupId, TablePath, TabletGroupId,
-  TabletKeyRange, Timestamp,
+  proc, CQueryPath, ColName, EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId, RequestId,
+  SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::model::message::{ExternalDDLQueryAbortData, FrozenColUsageTree, MasterMessage};
+use crate::model::message::{
+  ExternalDDLQueryAbortData, FrozenColUsageTree, MasterExternalReq, MasterMessage,
+};
+use crate::paxos::LeaderChanged;
 use crate::server::{CommonQuery, CoreServerContext};
-use crate::sql_parser::convert_ddl_ast;
+use crate::sql_parser::{convert_ddl_ast, DDLQuery};
+use crate::test_utils::mk_tid;
+use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
@@ -20,18 +28,194 @@ use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 
 // -----------------------------------------------------------------------------------------------
+//  MasterPLm
+// -----------------------------------------------------------------------------------------------
+
+pub mod plm {
+  use crate::model::common::{
+    proc, ColName, ColType, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
+    Timestamp,
+  };
+  use serde::{Deserialize, Serialize};
+
+  // MasterQueryPlanning
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct MasterQueryPlanning {
+    pub query_id: QueryId,
+    pub timestamp: Timestamp,
+    pub ms_query: proc::MSQuery,
+  }
+
+  // CreateTable
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct CreateTableTMPrepared {
+    pub query_id: QueryId,
+    pub tablet_group_id: TabletGroupId,
+    pub table_path: TablePath,
+
+    pub key_cols: Vec<(ColName, ColType)>,
+    pub val_cols: Vec<(ColName, ColType)>,
+    pub shards: Vec<(TabletKeyRange, TabletGroupId, SlaveGroupId)>,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct CreateTableTMCommitted {
+    pub query_id: QueryId,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct CreateTableTMAborted {
+    pub query_id: QueryId,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct CreateTableTMClosed {
+    pub query_id: QueryId,
+    pub timestamp_hint: Timestamp,
+  }
+
+  // AlterTable
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct AlterTableTMPrepared {
+    pub query_id: QueryId,
+    pub table_path: TablePath,
+    pub alter_op: proc::AlterOp,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct AlterTableTMCommitted {
+    pub query_id: QueryId,
+    pub timestamp_hint: Timestamp,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct AlterTableTMAborted {
+    pub query_id: QueryId,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct AlterTableTMClosed {
+    pub query_id: QueryId,
+  }
+
+  // DropTable
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct DropTableTMPrepared {
+    pub query_id: QueryId,
+    pub table_path: TablePath,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct DropTableTMCommitted {
+    pub query_id: QueryId,
+    pub timestamp_hint: Timestamp,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct DropTableTMAborted {
+    pub query_id: QueryId,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct DropTableTMClosed {
+    pub query_id: QueryId,
+  }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum MasterPLm {
+  MasterQueryPlanning(plm::MasterQueryPlanning),
+  CreateTableTMPrepared(plm::CreateTableTMPrepared),
+  CreateTableTMCommitted(plm::CreateTableTMCommitted),
+  CreateTableTMAborted(plm::CreateTableTMAborted),
+  CreateTableTMClosed(plm::CreateTableTMClosed),
+  AlterTableTMPrepared(plm::AlterTableTMPrepared),
+  AlterTableTMCommitted(plm::AlterTableTMCommitted),
+  AlterTableTMAborted(plm::AlterTableTMAborted),
+  AlterTableTMClosed(plm::AlterTableTMClosed),
+  DropTableTMPrepared(plm::DropTableTMPrepared),
+  DropTableTMCommitted(plm::DropTableTMCommitted),
+  DropTableTMAborted(plm::DropTableTMAborted),
+  DropTableTMClosed(plm::DropTableTMClosed),
+}
+
+// -----------------------------------------------------------------------------------------------
+//  MasterForwardMsg
+// -----------------------------------------------------------------------------------------------
+
+pub enum MasterForwardMsg {
+  MasterBundle(Vec<MasterPLm>),
+  MasterExternalReq(msg::MasterExternalReq),
+  MasterRemotePayload(msg::MasterRemotePayload),
+  RemoteLeaderChanged(RemoteLeaderChangedPLm),
+  LeaderChanged(LeaderChanged),
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Master MasterQueryPlanningES
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+enum MasterQueryPlanningS {
+  WaitingInserting,
+  Inserting,
+}
+
+#[derive(Debug)]
+struct MasterQueryPlanningES {
+  sender_path: CQueryPath,
+  query_id: QueryId,
+  timestamp: Timestamp,
+  ms_query: proc::MSQuery,
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Master State
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug, Default)]
 pub struct Statuses {
-  alter_table_ess: HashMap<QueryId, AlterTableES>,
+  create_table_tm_ess: HashMap<QueryId, CreateTableTMES>,
+  alter_table_tm_ess: HashMap<QueryId, AlterTableTMES>,
+  drop_table_tm_ess: HashMap<QueryId, DropTableTMES>,
+  planning_ess: HashMap<QueryId, MasterQueryPlanningES>,
 }
 
 #[derive(Debug)]
 pub struct MasterState<T: IOTypes> {
   context: MasterContext<T>,
   statuses: Statuses,
+}
+
+#[derive(Debug)]
+pub struct MasterContext<T: IOTypes> {
+  /// IO Objects.
+  pub rand: T::RngCoreT,
+  pub clock: T::ClockT,
+  pub network_output: T::NetworkOutT,
+
+  /// Metadata
+  pub this_eid: EndpointId,
+
+  /// Database Schema
+  pub gen: Gen,
+  pub db_schema: HashMap<(TablePath, Gen), TableSchema>,
+  pub table_generation: HashMap<TablePath, Gen>,
+
+  /// Distribution
+  pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
+
+  /// LeaderMap
+  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
+
+  /// Request Management
+  pub external_request_id_map: HashMap<RequestId, QueryId>,
 }
 
 impl<T: IOTypes> MasterState<T> {
@@ -42,19 +226,21 @@ impl<T: IOTypes> MasterState<T> {
     db_schema: HashMap<(TablePath, Gen), TableSchema>,
     sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-    slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+    slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
   ) -> MasterState<T> {
     MasterState {
       context: MasterContext {
         rand,
         clock,
         network_output,
+        this_eid: EndpointId("".to_string()),
         gen: Gen(0),
         db_schema,
         table_generation: Default::default(),
         sharding_config,
         tablet_address_config,
         slave_address_config,
+        leader_map: Default::default(),
         external_request_id_map: Default::default(),
       },
       statuses: Default::default(),
@@ -62,30 +248,8 @@ impl<T: IOTypes> MasterState<T> {
   }
 
   pub fn handle_incoming_message(&mut self, message: msg::MasterMessage) {
-    self.context.handle_incoming_message(&mut self.statuses, message);
+    // self.context.handle_incoming_message(&mut self.statuses, message);
   }
-}
-
-#[derive(Debug)]
-pub struct MasterContext<T: IOTypes> {
-  /// IO Objects.
-  pub rand: T::RngCoreT,
-  pub clock: T::ClockT,
-  pub network_output: T::NetworkOutT,
-
-  /// Database Schema
-  pub gen: Gen,
-  pub db_schema: HashMap<(TablePath, Gen), TableSchema>,
-  // TODO: make use of this.
-  pub table_generation: HashMap<TablePath, Gen>,
-
-  /// Distribution
-  pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
-
-  /// Request Management
-  pub external_request_id_map: HashMap<RequestId, QueryId>,
 }
 
 impl<T: IOTypes> MasterContext<T> {
@@ -100,108 +264,93 @@ impl<T: IOTypes> MasterContext<T> {
     }
   }
 
-  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::MasterMessage) {
-    match message {
-      MasterMessage::PerformExternalDDLQuery(external_alter) => {
-        match self.validate_ddl_query(&external_alter) {
-          Ok(alter_table) => {
-            let query_id = mk_qid(&mut self.rand);
-            let request_id = external_alter.request_id;
-            self.external_request_id_map.insert(request_id.clone(), query_id.clone());
-            statuses.alter_table_ess.insert(
-              query_id.clone(),
-              AlterTableES {
-                request_id,
-                sender_eid: external_alter.sender_eid,
-                query_id,
-                table_path: alter_table.table_path,
-                alter_op: alter_table.alter_op,
-                state: AlterTableS::Start,
-              },
-            );
-          }
-          Err(payload) => {
-            // We return an error because the RequestId is not unique.
-            self.network_output.send(
-              &external_alter.sender_eid,
-              msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-                msg::ExternalDDLQueryAborted { request_id: external_alter.request_id, payload },
-              )),
-            );
-          }
-        }
-      }
-      MasterMessage::CancelExternalDDLQuery(cancel) => {
-        if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
-          self.exit_and_clean_up(statuses, query_id.clone())
-        }
-        // Send off a cancellation confirmation to the External.
-        self.network_output.send(
-          &cancel.sender_eid,
-          msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-            msg::ExternalDDLQueryAborted {
-              request_id: cancel.request_id,
-              payload: ExternalDDLQueryAbortData::ConfirmCancel,
-            },
-          )),
-        );
-      }
-      MasterMessage::AlterTablePrepared(prepared) => {
-        let query_id = prepared.query_id.clone();
-        if let Some(es) = statuses.alter_table_ess.get_mut(&query_id) {
-          let action = es.handle_prepared(self, prepared);
-          self.handle_alter_table_es_action(statuses, query_id, action);
-        }
-      }
-      MasterMessage::AlterTableAborted(_) => {
-        // The Tablets never send this.
-        panic!()
-      }
-      MasterMessage::PerformMasterQueryPlanning(request) => {
-        // Construct the FrozenColUsageTree with the current database schema in the Master.
-        let timestamp = request.timestamp.clone();
-        let mut planner = ColUsagePlanner {
-          db_schema: &self.db_schema,
-          table_generation: &self.table_generation,
-          timestamp,
-        };
-        let frozen_col_usage_tree =
-          msg::FrozenColUsageTree::ColUsageNodes(planner.plan_ms_query(&request.ms_query));
+  pub fn handle_input(&mut self, statuses: &mut Statuses, master_input: MasterForwardMsg) {
+    match master_input {
+      MasterForwardMsg::MasterBundle(_) => {}
+      MasterForwardMsg::MasterExternalReq(message) => {
+        match message {
+          MasterExternalReq::PerformExternalDDLQuery(external_query) => {
+            match self.validate_ddl_query(&external_query) {
+              Ok(ddl_query) => {
+                let query_id = mk_qid(&mut self.rand);
+                let sender_eid = external_query.sender_eid;
+                let request_id = external_query.request_id;
+                self.external_request_id_map.insert(request_id.clone(), query_id.clone());
+                match ddl_query {
+                  DDLQuery::Create(create_table) => {
+                    // Construct shards
+                    // pub shards: Vec<(TabletKeyRange, TabletGroupId, SlaveGroupId)>,
 
-        // Freeze the `safe_present_cols` and `external_cols` used for every node in the
-        // FrozenColUsageTree computed above.
-        self.freeze_schema(&frozen_col_usage_tree, timestamp);
+                    // TODO: continue
+                    // let tablet_group_id = mk_tid()
+                    // let shards = vec
 
-        // Send the response to the originator.
-        // TODO: send this to the coord properly
-        // let response = CommonQuery::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
-        //   return_qid: request.sender_path.query_id.clone(),
-        //   frozen_col_usage_tree,
-        //   gossip: GossipDataSer::from_gossip(GossipData {
-        //     gen: self.gen.clone(),
-        //     db_schema: self.db_schema.clone(),
-        //     table_generation: self.table_generation.clone(),
-        //     sharding_config: self.sharding_config.clone(),
-        //     tablet_address_config: self.tablet_address_config.clone(),
-        //     slave_address_config: self.slave_address_config.clone(),
-        //   }),
-        // });
-        // self.ctx().send_to_path(request.sender_path, response);
+                    // Construct ES
+                    map_insert(
+                      &mut statuses.create_table_tm_ess,
+                      &query_id,
+                      CreateTableTMES {
+                        response_data: Some(ResponseData { request_id, sender_eid }),
+                        query_id: query_id.clone(),
+                        tablet_group_id: TabletGroupId("".to_string()),
+                        table_path: create_table.table_path,
+                        key_cols: create_table.key_cols,
+                        val_cols: create_table.val_cols,
+                        shards: vec![],
+                        state: CreateTableTMS::Start,
+                      },
+                    );
+                  }
+                  DDLQuery::Alter(alter_table) => {
+                    // Construct ES
+                    map_insert(
+                      &mut statuses.alter_table_tm_ess,
+                      &query_id,
+                      AlterTableTMES {
+                        response_data: Some(ResponseData { request_id, sender_eid }),
+                        query_id: query_id.clone(),
+                        table_path: alter_table.table_path,
+                        alter_op: alter_table.alter_op,
+                        state: AlterTableTMS::Start,
+                      },
+                    );
+                  }
+                  DDLQuery::Drop(drop_table) => {
+                    // Construct ES
+                    map_insert(
+                      &mut statuses.drop_table_tm_ess,
+                      &query_id,
+                      DropTableTMES {
+                        response_data: Some(ResponseData { request_id, sender_eid }),
+                        query_id: query_id.clone(),
+                        table_path: drop_table.table_path,
+                        state: DropTableTMS::Start,
+                      },
+                    );
+                  }
+                }
+              }
+              Err(payload) => {
+                // We return an error because the RequestId is not unique.
+                self.network_output.send(
+                  &external_query.sender_eid,
+                  msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+                    msg::ExternalDDLQueryAborted { request_id: external_query.request_id, payload },
+                  )),
+                );
+              }
+            }
+          }
+          MasterExternalReq::CancelExternalDDLQuery(_) => {}
+        }
+
+        // Run Main Loop
+        self.run_main_loop(statuses);
       }
-      MasterMessage::CancelMasterQueryPlanning(_) => panic!(),
-      MasterMessage::CreateTablePrepared(_) => panic!(),
-      MasterMessage::CreateTableAborted(_) => panic!(),
-      MasterMessage::CreateTableCloseConfirm(_) => panic!(),
-      MasterMessage::DropTablePrepared(_) => panic!(),
-      MasterMessage::DropTableAborted(_) => panic!(),
-      MasterMessage::AlterTableCloseConfirm(_) => panic!(),
-      MasterMessage::DropTableCloseConfirm(_) => panic!(),
-      MasterMessage::MasterExternalReq(_) => {}
-      MasterMessage::RemoteMessage(_) => {}
-      MasterMessage::PaxosMessage(_) => {}
+      MasterForwardMsg::MasterRemotePayload(_) => {}
+      MasterForwardMsg::RemoteLeaderChanged(_) => {}
+      MasterForwardMsg::LeaderChanged(_) => {}
     }
-
-    self.run_main_loop(statuses);
   }
 
   /// Validate the uniqueness of `RequestId`, parse the SQL, ensure the `TablePath` exists, and
@@ -209,23 +358,14 @@ impl<T: IOTypes> MasterContext<T> {
   fn validate_ddl_query(
     &self,
     external_query: &msg::PerformExternalDDLQuery,
-  ) -> Result<proc::AlterTable, msg::ExternalDDLQueryAbortData> {
+  ) -> Result<DDLQuery, msg::ExternalDDLQueryAbortData> {
     if self.external_request_id_map.contains_key(&external_query.request_id) {
       // Duplicate RequestId; respond with an abort.
       Err(msg::ExternalDDLQueryAbortData::NonUniqueRequestId)
     } else {
       // Parse the SQL
       match Parser::parse_sql(&GenericDialect {}, &external_query.query) {
-        Ok(parsed_ast) => {
-          let alter_table = convert_ddl_ast(&parsed_ast);
-          // Do several more checks on `alter_table` before returning.
-          // if let Some(table_schema) = self.db_schema.get(&alter_table.table_path) {
-          //   if lookup(&table_schema.key_cols, &alter_table.alter_op.col_name).is_none() {
-          //     return Ok(alter_table);
-          //   }
-          // }
-          Err(msg::ExternalDDLQueryAbortData::InvalidAlterOp)
-        }
+        Ok(parsed_ast) => Ok(convert_ddl_ast(&parsed_ast)),
         Err(parse_error) => {
           // Extract error string
           Err(msg::ExternalDDLQueryAbortData::ParseError(match parse_error {
@@ -239,29 +379,29 @@ impl<T: IOTypes> MasterContext<T> {
 
   /// Runs the `run_main_loop_once` until it finally results in no states changes.
   fn run_main_loop(&mut self, statuses: &mut Statuses) {
-    while self.run_main_loop_once(statuses) {}
+    while !self.run_main_loop_once(statuses) {}
   }
 
   /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
   fn run_main_loop_once(&mut self, statuses: &mut Statuses) -> bool {
     // First, figure out which (TablePath, ColName)s are used by `alter_table_ess`.
-    let mut used_col_names = HashSet::<(TablePath, ColName)>::new();
-    for (_, es) in &statuses.alter_table_ess {
-      used_col_names.insert((es.table_path.clone(), es.alter_op.col_name.clone()));
-    }
-
-    // Then, see if there is AlterTableES that is still in the `Start` state that
-    // does not use the above, and start it if it exists.
-    for (query_id, es) in &mut statuses.alter_table_ess {
-      if matches!(es.state, AlterTableS::Start) {
-        if !used_col_names.contains(&(es.table_path.clone(), es.alter_op.col_name.clone())) {
-          let query_id = query_id.clone();
-          let action = es.start(self);
-          self.handle_alter_table_es_action(statuses, query_id, action);
-          return true;
-        }
-      }
-    }
+    // let mut used_col_names = HashSet::<(TablePath, ColName)>::new();
+    // for (_, es) in &statuses.alter_table_ess {
+    //   used_col_names.insert((es.table_path.clone(), es.alter_op.col_name.clone()));
+    // }
+    //
+    // // Then, see if there is AlterTableES that is still in the `Start` state that
+    // // does not use the above, and start it if it exists.
+    // for (query_id, es) in &mut statuses.alter_table_ess {
+    //   if matches!(es.state, AlterTableS::Start) {
+    //     if !used_col_names.contains(&(es.table_path.clone(), es.alter_op.col_name.clone())) {
+    //       let query_id = query_id.clone();
+    //       let action = es.start(self);
+    //       self.handle_alter_table_es_action(statuses, query_id, action);
+    //       return true;
+    //     }
+    //   }
+    // }
 
     return false;
   }
@@ -323,41 +463,41 @@ impl<T: IOTypes> MasterContext<T> {
     match action {
       AlterTableAction::Wait => {}
       AlterTableAction::Success(new_timestamp) => {
-        let es = statuses.alter_table_ess.remove(&query_id).unwrap();
-        self.external_request_id_map.remove(&es.request_id);
-        // Send off a success message to the Externa.
-        self.network_output.send(
-          &es.sender_eid,
-          msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
-            msg::ExternalDDLQuerySuccess {
-              request_id: es.request_id.clone(),
-              timestamp: new_timestamp,
-            },
-          )),
-        );
+        // let es = statuses.alter_table_ess.remove(&query_id).unwrap();
+        // self.external_request_id_map.remove(&es.request_id);
+        // // Send off a success message to the Externa.
+        // self.network_output.send(
+        //   &es.sender_eid,
+        //   msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
+        //     msg::ExternalDDLQuerySuccess {
+        //       request_id: es.request_id.clone(),
+        //       timestamp: new_timestamp,
+        //     },
+        //   )),
+        // );
       }
       AlterTableAction::ColumnInvalid => {
-        let es = statuses.alter_table_ess.remove(&query_id).unwrap();
-        self.external_request_id_map.remove(&es.request_id);
-        // Send off a failure message to the External.
-        self.network_output.send(
-          &es.sender_eid,
-          msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-            msg::ExternalDDLQueryAborted {
-              request_id: es.request_id.clone(),
-              payload: ExternalDDLQueryAbortData::InvalidAlterOp,
-            },
-          )),
-        );
+        // let es = statuses.alter_table_ess.remove(&query_id).unwrap();
+        // self.external_request_id_map.remove(&es.request_id);
+        // // Send off a failure message to the External.
+        // self.network_output.send(
+        //   &es.sender_eid,
+        //   msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+        //     msg::ExternalDDLQueryAborted {
+        //       request_id: es.request_id.clone(),
+        //       payload: ExternalDDLQueryAbortData::InvalidAlterOp,
+        //     },
+        //   )),
+        // );
       }
     }
   }
 
   /// Removes the `query_id` from the Master, cleaning up any remaining resources as well.
   fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
-    if let Some(mut es) = statuses.alter_table_ess.remove(&query_id) {
-      self.external_request_id_map.remove(&es.request_id);
-      es.exit_and_clean_up(self);
-    }
+    // if let Some(mut es) = statuses.alter_table_ess.remove(&query_id) {
+    //   self.external_request_id_map.remove(&es.request_id);
+    //   es.exit_and_clean_up(self);
+    // }
   }
 }

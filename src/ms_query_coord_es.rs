@@ -2,6 +2,7 @@ use crate::col_usage::{
   collect_table_paths, iterate_stage_ms_query, node_external_trans_tables, ColUsagePlanner,
   FrozenColUsageNode, GeneralStage,
 };
+use crate::common::RemoteLeaderChangedPLm;
 use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
 use crate::coord::CoordContext;
 use crate::model::common::proc::MSQueryStage;
@@ -13,7 +14,6 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::model::message::MasteryQueryPlanningResult;
 use crate::server::{weak_contains_col, CommonQuery};
-use crate::slave::RemoteLeaderChangedPLm;
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{HashMap, HashSet};
 

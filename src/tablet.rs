@@ -4,6 +4,7 @@ use crate::col_usage::{
   node_external_trans_tables, nodes_external_cols, nodes_external_trans_tables, ColUsagePlanner,
   FrozenColUsageNode,
 };
+use crate::common::RemoteLeaderChangedPLm;
 use crate::common::{
   btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
   mk_qid, remove_item, Clock, ColBound, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
@@ -41,7 +42,6 @@ use crate::server::{
   are_cols_locked, contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error,
   CommonQuery, ContextConstructor, LocalTable, ServerContext,
 };
-use crate::slave::RemoteLeaderChangedPLm;
 use crate::storage::{
   commit_to_storage, compress_updates_views, GenericMVTable, GenericTable, StorageView,
 };
@@ -1128,6 +1128,8 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
         }
+
+        // Run Main Loop
         self.run_main_loop(statuses);
       }
       TabletForwardMsg::GossipData(gossip) => {
@@ -1154,6 +1156,9 @@ impl<T: IOTypes> TabletContext<T> {
           let action = ms_write.es.gossip_data_changed(self);
           self.handle_ms_write_es_action(statuses, query_id, action);
         }
+
+        // Run Main Loop
+        self.run_main_loop(statuses);
       }
       TabletForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
         let gid = remote_leader_changed.gid.clone();
@@ -1235,6 +1240,9 @@ impl<T: IOTypes> TabletContext<T> {
           }
 
           // TODO: inform ddl_es
+
+          // Run Main Loop
+          self.run_main_loop(statuses);
         }
       }
       TabletForwardMsg::LeaderChanged(leader_changed) => {

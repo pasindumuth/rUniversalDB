@@ -1,8 +1,8 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::model::common::{
   proc, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColType, EndpointId, Gen, LeadershipId,
-  NodeGroupId, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
-  TabletKeyRange, TierMap, Timestamp, TransTableName,
+  NodeGroupId, PaxosGroupId, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
+  TabletGroupId, TabletKeyRange, TierMap, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
@@ -158,6 +158,7 @@ impl TableSchemaSer {
 /// Holds Gossip Data in a node. It's accessible in both Tablets and Slaves.
 #[derive(Debug, Clone)]
 pub struct GossipData {
+  /// Database Schema
   pub gen: Gen,
   pub db_schema: HashMap<(TablePath, Gen), TableSchema>,
   pub table_generation: HashMap<TablePath, Gen>,
@@ -165,7 +166,7 @@ pub struct GossipData {
   /// Distribution
   pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+  pub slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
 }
 
 /// A Serializable version of `GossipData`. This is needed since it's
@@ -177,7 +178,7 @@ pub struct GossipDataSer {
   pub table_generation: HashMap<TablePath, Gen>,
   pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+  pub slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
 }
 
 impl GossipDataSer {
@@ -210,6 +211,15 @@ impl GossipDataSer {
       slave_address_config: self.slave_address_config,
     }
   }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Common Paxos Messages
+// -----------------------------------------------------------------------------------------------
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RemoteLeaderChangedPLm {
+  pub gid: PaxosGroupId,
+  pub lid: LeadershipId,
 }
 
 // -----------------------------------------------------------------------------------------------

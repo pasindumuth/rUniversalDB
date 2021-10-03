@@ -1,4 +1,5 @@
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
+use crate::common::RemoteLeaderChangedPLm;
 use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, Clock, GossipData,
   IOTypes, NetworkOut, OrigP, TMStatus, TableSchema, TabletForwardOut,
@@ -21,7 +22,6 @@ use crate::ms_query_coord_es::{
 use crate::paxos::LeaderChanged;
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContext};
-use crate::slave::RemoteLeaderChangedPLm;
 use crate::sql_parser::convert_ast;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{

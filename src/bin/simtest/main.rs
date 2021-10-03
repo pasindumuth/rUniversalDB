@@ -18,12 +18,12 @@ fn main() {
     seed[i] = i as u8;
   }
 
-  let slave_address_config: HashMap<SlaveGroupId, EndpointId> = vec![
-    (mk_sid("s0"), slave_eid(&0)),
-    (mk_sid("s1"), slave_eid(&1)),
-    (mk_sid("s2"), slave_eid(&2)),
-    (mk_sid("s3"), slave_eid(&3)),
-    (mk_sid("s4"), slave_eid(&4)),
+  let slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>> = vec![
+    (mk_sid("s0"), vec![slave_eid(&0)]),
+    (mk_sid("s1"), vec![slave_eid(&1)]),
+    (mk_sid("s2"), vec![slave_eid(&2)]),
+    (mk_sid("s3"), vec![slave_eid(&3)]),
+    (mk_sid("s4"), vec![slave_eid(&4)]),
   ]
   .into_iter()
   .collect();

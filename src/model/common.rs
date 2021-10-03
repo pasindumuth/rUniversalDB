@@ -405,6 +405,14 @@ pub mod proc {
   // (We add DML parsed SQL data here for consistency. These don't appear in
   // `iast` because they can be constructed from SQL trivially.
 
+  // TODO: Parse this up right
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct CreateTable {
+    pub table_path: TablePath,
+    pub key_cols: Vec<(ColName, ColType)>,
+    pub val_cols: Vec<(ColName, ColType)>,
+  }
+
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct AlterOp {
     pub col_name: ColName,
@@ -417,6 +425,11 @@ pub mod proc {
   pub struct AlterTable {
     pub table_path: TablePath,
     pub alter_op: AlterOp,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct DropTable {
+    pub table_path: TablePath,
   }
 }
 

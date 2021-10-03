@@ -30,7 +30,7 @@ pub struct CoreServerContext<'a, T: IOTypes> {
   /// Distribution
   pub sharding_config: &'a HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: &'a HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: &'a HashMap<SlaveGroupId, EndpointId>,
+  pub slave_address_config: &'a HashMap<SlaveGroupId, Vec<EndpointId>>,
 }
 
 impl<'a, T: IOTypes> CoreServerContext<'a, T> {}

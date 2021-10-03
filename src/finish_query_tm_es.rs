@@ -1,10 +1,10 @@
+use crate::common::RemoteLeaderChangedPLm;
 use crate::common::{IOTypes, NetworkOut};
 use crate::coord::CoordContext;
 use crate::model::common::{
   proc, EndpointId, QueryId, RequestId, TQueryPath, TableView, Timestamp,
 };
 use crate::model::message as msg;
-use crate::slave::RemoteLeaderChangedPLm;
 use std::collections::{HashMap, HashSet};
 
 // -----------------------------------------------------------------------------------------------

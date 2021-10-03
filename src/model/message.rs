@@ -32,32 +32,6 @@ pub enum MasterExternalReq {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterMessage {
-  // Old
-
-  // External DDL Query Messages
-  PerformExternalDDLQuery(PerformExternalDDLQuery),
-  CancelExternalDDLQuery(CancelExternalDDLQuery),
-
-  // Master FrozenColUsageAlgorithm
-  PerformMasterQueryPlanning(PerformMasterQueryPlanning),
-  CancelMasterQueryPlanning(CancelMasterQueryPlanning),
-
-  // CreateTable TM Messages
-  CreateTablePrepared(CreateTablePrepared),
-  CreateTableAborted(CreateTableAborted),
-  CreateTableCloseConfirm(CreateTableCloseConfirm),
-
-  // AlterTable TM Messages
-  AlterTablePrepared(AlterTablePrepared),
-  AlterTableAborted(AlterTableAborted),
-  AlterTableCloseConfirm(AlterTableCloseConfirm),
-
-  // DropTable TM Messages
-  DropTablePrepared(DropTablePrepared),
-  DropTableAborted(DropTableAborted),
-  DropTableCloseConfirm(DropTableCloseConfirm),
-
-  // New
   MasterExternalReq(MasterExternalReq),
   RemoteMessage(RemoteMessage<MasterRemotePayload>),
   PaxosMessage(PaxosMessage),

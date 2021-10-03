@@ -123,7 +123,7 @@ impl Simulation {
     schema: HashMap<(TablePath, Gen), TableSchema>,
     sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-    slave_address_config: HashMap<SlaveGroupId, EndpointId>,
+    slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
   ) -> Simulation {
     let mut sim = Simulation {
       rng: XorShiftRng::from_seed(seed),
@@ -139,7 +139,7 @@ impl Simulation {
     };
 
     // Setup eids
-    sim.slave_eids = slave_address_config.values().cloned().collect();
+    sim.slave_eids = slave_address_config.values().cloned().into_iter().flatten().collect();
     sim.client_eids = rvec(0, num_clients).iter().map(client_eid).collect();
     let all_eids: Vec<EndpointId> =
       sim.slave_eids.iter().cloned().chain(sim.client_eids.iter().cloned()).collect();
@@ -160,7 +160,8 @@ impl Simulation {
     }
 
     // Construct SlaveState and TabletState
-    for (sid, eid) in &slave_address_config {
+    for (sid, eids) in &slave_address_config {
+      let eid = &eids[0]; // TODO: fix this
       let network_out = TestNetworkOut {
         queues: sim.queues.clone(),
         nonempty_queues: sim.nonempty_queues.clone(),

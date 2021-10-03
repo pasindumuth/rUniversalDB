@@ -164,26 +164,34 @@ fn convert_expr(expr: &ast::Expr) -> iast::ValExpr {
 //  DQL Query Parsing
 // -----------------------------------------------------------------------------------------------
 
+pub enum DDLQuery {
+  Create(proc::CreateTable),
+  Alter(proc::AlterTable),
+  Drop(proc::DropTable),
+}
+
 /// This function converts the sqlparser AST into an internal DDL struct.
-pub fn convert_ddl_ast(raw_query: &Vec<ast::Statement>) -> proc::AlterTable {
+pub fn convert_ddl_ast(raw_query: &Vec<ast::Statement>) -> DDLQuery {
   assert_eq!(raw_query.len(), 1, "Only one SQL statement support atm.");
   let stmt = &raw_query[0];
   match stmt {
     ast::Statement::AlterTable { name, operation } => match operation {
-      ast::AlterTableOperation::AddColumn { column_def } => proc::AlterTable {
+      ast::AlterTableOperation::AddColumn { column_def } => DDLQuery::Alter(proc::AlterTable {
         table_path: TablePath(name.0.get(0).unwrap().value.clone()),
         alter_op: proc::AlterOp {
           col_name: ColName(column_def.name.value.clone()),
           maybe_col_type: Some(convert_data_type(&column_def.data_type)),
         },
-      },
-      ast::AlterTableOperation::DropColumn { column_name, .. } => proc::AlterTable {
-        table_path: TablePath(name.0.get(0).unwrap().value.clone()),
-        alter_op: proc::AlterOp {
-          col_name: ColName(column_name.value.clone()),
-          maybe_col_type: None,
-        },
-      },
+      }),
+      ast::AlterTableOperation::DropColumn { column_name, .. } => {
+        DDLQuery::Alter(proc::AlterTable {
+          table_path: TablePath(name.0.get(0).unwrap().value.clone()),
+          alter_op: proc::AlterOp {
+            col_name: ColName(column_name.value.clone()),
+            maybe_col_type: None,
+          },
+        })
+      }
       _ => panic!("Unsupported ast::Statement {:?}", stmt),
     },
     _ => panic!("Unsupported ast::Statement {:?}", stmt),
