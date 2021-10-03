@@ -322,8 +322,11 @@ pub struct RegisterQuery {
 // -------------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FinishQueryPrepare {
-  pub sender_path: CQueryPath,
-  pub ms_query_id: QueryId,
+  pub tm: CQueryPath,
+  pub all_rms: Vec<TQueryPath>,
+  // This is the MSQueryES's QueryId. Recall that this will also be used
+  // as the QueryId for the FinishQueryES in the RM.
+  pub query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -333,39 +336,40 @@ pub struct FinishQueryPrepared {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum FinishQueryAbortReason {
-  /// The MSQueryES in the Tablet couldn't respond with Prepared because it was removed
-  /// due to a DeadlockSafetyWriteAbort.
-  DeadlockSafetyAbortion,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FinishQueryAborted {
   pub return_qid: QueryId,
   pub rm_path: TQueryPath,
-  pub reason: FinishQueryAbortReason,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FinishQueryAbort {
-  pub ms_query_id: QueryId,
+  pub query_id: QueryId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FinishQueryCommit {
-  pub ms_query_id: QueryId,
+  pub query_id: QueryId,
 }
 
 // Other Paxos2PC messages
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryCheckPrepared {}
+pub struct FinishQueryCheckPrepared {
+  pub tm: CQueryPath,
+  pub query_id: QueryId,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryInformPrepared {}
+pub struct FinishQueryInformPrepared {
+  pub tm: CQueryPath,
+  pub all_rms: Vec<TQueryPath>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryWait {}
+pub struct FinishQueryWait {
+  pub return_qid: QueryId,
+  pub rm_path: TQueryPath,
+}
 
 // -------------------------------------------------------------------------------------------------
 //  Transaction Processing External Messages

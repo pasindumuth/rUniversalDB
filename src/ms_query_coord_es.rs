@@ -31,22 +31,16 @@ pub struct CoordQueryPlan {
 }
 
 #[derive(Debug)]
-pub struct PreparingState {
-  prepared_rms: HashSet<TQueryPath>,
-}
-
-#[derive(Debug)]
 pub struct Stage {
   stage_idx: usize,
+  /// Here, `stage_query_id` is the QueryId of the TMStatus
   stage_query_id: QueryId,
 }
 
 #[derive(Debug)]
 pub enum CoordState {
   Start,
-  /// Here, `stage_query_id` is the QueryId of the TMStatus
   Stage(Stage),
-  Preparing(PreparingState),
   Done,
 }
 
@@ -114,7 +108,7 @@ pub enum MSQueryCoordAction {
   /// This tells the parent Server to execute the given TMStatus.
   ExecuteTMStatus(TMStatus),
   /// Indicates that a valid MSCoordES was successful, and was ECU.
-  Success(TableView),
+  Success(Vec<TQueryPath>, proc::MSQuery, TableView, Timestamp),
   /// Indicates that a valid MSCoordES was unsuccessful and there is no
   /// chance of success, and was ECU.
   FatalFailure(msg::ExternalAbortedData),
@@ -260,45 +254,6 @@ impl FullMSCoordES {
     es.registered_queries.insert(register.query_path);
   }
 
-  /// Handle a Prepared message sent to an MSCoordES.
-  pub fn handle_prepared<T: IOTypes>(
-    &mut self,
-    ctx: &mut CoordContext<T>,
-    prepared: msg::FinishQueryPrepared,
-  ) -> MSQueryCoordAction {
-    let es = cast!(FullMSCoordES::Executing, self).unwrap();
-    let preparing = cast!(CoordState::Preparing, &mut es.state).unwrap();
-
-    // First, insert the QueryPath of the RM into the prepare state.
-    assert!(!preparing.prepared_rms.contains(&prepared.rm_path));
-    preparing.prepared_rms.insert(prepared.rm_path);
-
-    // Next see if the prepare state is done.
-    if preparing.prepared_rms.len() < es.all_rms.len() {
-      MSQueryCoordAction::Wait
-    } else {
-      self.finish_ms_coord(ctx)
-    }
-  }
-
-  /// Handle a Aborted message sent to an MSCoordES.
-  pub fn handle_aborted<T: IOTypes>(
-    &mut self,
-    ctx: &mut CoordContext<T>,
-    aborted: msg::FinishQueryAborted,
-  ) -> MSQueryCoordAction {
-    // Recall that although ECU will send Abort to the RM that just responded,
-    // this is not incorrect. We ignore this for simplicity.
-    self.exit_and_clean_up(ctx);
-    match aborted.reason {
-      msg::FinishQueryAbortReason::DeadlockSafetyAbortion => {
-        // Since this error is an anomaly that usually does not happen, we may try again the
-        // transaction again at a higher timestamp. Thus, we signal that the failure is non-fatal.
-        MSQueryCoordAction::NonFatalFailure
-      }
-    }
-  }
-
   /// Handle a RemoteLeaderChanged
   pub fn remote_leader_changed<T: IOTypes>(
     &mut self,
@@ -332,55 +287,17 @@ impl FullMSCoordES {
   }
 
   /// Handles the GossipData changing.
-  pub fn gossip_data_change<T: IOTypes>(
+  pub fn gossip_data_changed<T: IOTypes>(
     &mut self,
     ctx: &mut CoordContext<T>,
   ) -> MSQueryCoordAction {
     match self {
       FullMSCoordES::QueryPlanning(es) => {
-        let action = es.gossip_data_change(ctx);
+        let action = es.gossip_data_changed(ctx);
         self.handle_planning_action(ctx, action)
       }
       FullMSCoordES::Executing(_) => MSQueryCoordAction::Wait,
     }
-  }
-
-  /// By now, all Prepared must have come on. Thus, we send out Commit, abort the
-  /// RegisteredQueries, and return the results.
-  fn finish_ms_coord<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordAction {
-    let es = cast!(FullMSCoordES::Executing, self).unwrap();
-
-    // First, we commit all RMs.
-    for query_path in &es.all_rms {
-      ctx.ctx().send_to_t(
-        query_path.node_path.clone(),
-        msg::TabletMessage::FinishQueryCommit(msg::FinishQueryCommit {
-          ms_query_id: query_path.query_id.clone(),
-        }),
-      );
-    }
-
-    // Next, we inform all `registered_query`s that are not an RM that they should exit,
-    // since they were falsely added to this transaction.
-    for query_path in &es.registered_queries {
-      if !es.all_rms.contains(&query_path) {
-        ctx.ctx().send_to_t(
-          query_path.node_path.clone(),
-          msg::TabletMessage::CancelQuery(msg::CancelQuery {
-            query_id: query_path.query_id.clone(),
-          }),
-        );
-      }
-    }
-
-    // Finally, we go to Done and return the appropriate TableView.
-    let (_, (_, table_view)) = es
-      .trans_table_views
-      .iter()
-      .find(|(trans_table_name, _)| trans_table_name == &es.sql_query.returning)
-      .unwrap();
-    es.state = CoordState::Done;
-    MSQueryCoordAction::Success(table_view.clone())
   }
 
   /// This function accepts the results for the subquery, and then decides either
@@ -393,50 +310,42 @@ impl FullMSCoordES {
     if next_stage_idx < es.sql_query.trans_tables.len() {
       self.process_ms_query_stage(ctx, next_stage_idx)
     } else {
-      if es.all_rms.is_empty() {
-        // If there are no RMs, that means this was purely a read, so we can finish up.
-        self.finish_ms_coord(ctx)
-      } else {
-        // Check that none of the Leaderships in `all_rms` have changed.
-        for rm in &es.all_rms {
-          let orig_lid = es.query_plan.query_leader_map.get(&rm.node_path.sid).unwrap();
-          let cur_lid = ctx.leader_map.get(&rm.node_path.sid.to_gid()).unwrap();
-          if orig_lid != cur_lid {
-            // If a Leadership has changed, we abort and retry this MSCoordES.
-            self.exit_and_clean_up(ctx);
-            return MSQueryCoordAction::NonFatalFailure;
-          }
+      // Check that none of the Leaderships in `all_rms` have changed.
+      for rm in &es.all_rms {
+        let orig_lid = es.query_plan.query_leader_map.get(&rm.node_path.sid).unwrap();
+        let cur_lid = ctx.leader_map.get(&rm.node_path.sid.to_gid()).unwrap();
+        if orig_lid != cur_lid {
+          // If a Leadership has changed, we abort and retry this MSCoordES.
+          self.exit_and_clean_up(ctx);
+          return MSQueryCoordAction::NonFatalFailure;
         }
-
-        // Cancel all RegisteredQueries that are not also an RM in the upcoming Paxos2PC.
-        for registered_query in &es.registered_queries {
-          if !es.all_rms.contains(registered_query) {
-            ctx.ctx().send_to_ct(
-              registered_query.clone().into_ct().node_path,
-              CommonQuery::CancelQuery(msg::CancelQuery {
-                query_id: registered_query.query_id.clone(),
-              }),
-            )
-          }
-        }
-
-        // TODO: remove
-
-        // Otherwise, this transaction had writes, so we start 2PC by sending out Prepared.
-        let sender_path = ctx.mk_query_path(es.query_id.clone());
-        for query_path in &es.all_rms {
-          ctx.ctx().send_to_t(
-            query_path.node_path.clone(),
-            msg::TabletMessage::FinishQueryPrepare(msg::FinishQueryPrepare {
-              sender_path: sender_path.clone(),
-              ms_query_id: query_path.query_id.clone(),
-            }),
-          );
-        }
-
-        es.state = CoordState::Preparing(PreparingState { prepared_rms: HashSet::new() });
-        MSQueryCoordAction::Wait
       }
+
+      // Cancel all RegisteredQueries that are not also an RM in the upcoming Paxos2PC.
+      for registered_query in &es.registered_queries {
+        if !es.all_rms.contains(registered_query) {
+          ctx.ctx().send_to_ct(
+            registered_query.clone().into_ct().node_path,
+            CommonQuery::CancelQuery(msg::CancelQuery {
+              query_id: registered_query.query_id.clone(),
+            }),
+          )
+        }
+      }
+
+      // Finally, we go to Done and return the appropriate TableView.
+      let (_, (_, table_view)) = es
+        .trans_table_views
+        .iter()
+        .find(|(trans_table_name, _)| trans_table_name == &es.sql_query.returning)
+        .unwrap();
+      es.state = CoordState::Done;
+      MSQueryCoordAction::Success(
+        es.all_rms.iter().cloned().collect(),
+        es.sql_query.clone(),
+        table_view.clone(),
+        es.timestamp,
+      )
     }
   }
 
@@ -636,29 +545,6 @@ impl FullMSCoordES {
                   query_id: registered_query.query_id.clone(),
                 }),
               )
-            }
-          }
-          CoordState::Preparing(_) => {
-            // Recall that by now, Prepare should have been sent to all RMs. They need to be
-            // cancelled with FinishQueryAbort (they don't react to CancelQuery). The remaining
-            // `registered_queries` can be cancelled with CancelQuery.
-            for query_path in &es.all_rms {
-              ctx.ctx().send_to_t(
-                query_path.node_path.clone(),
-                msg::TabletMessage::FinishQueryAbort(msg::FinishQueryAbort {
-                  ms_query_id: query_path.query_id.clone(),
-                }),
-              );
-            }
-            for query_path in &es.registered_queries {
-              if !es.all_rms.contains(query_path) {
-                ctx.ctx().send_to_t(
-                  query_path.node_path.clone(),
-                  msg::TabletMessage::CancelQuery(msg::CancelQuery {
-                    query_id: query_path.query_id.clone(),
-                  }),
-                );
-              }
             }
           }
           CoordState::Done => {}
@@ -982,7 +868,7 @@ impl QueryPlanningES {
   }
 
   /// Handles the GossipData changing.
-  pub fn gossip_data_change<T: IOTypes>(
+  pub fn gossip_data_changed<T: IOTypes>(
     &mut self,
     ctx: &mut CoordContext<T>,
   ) -> QueryPlanningAction {

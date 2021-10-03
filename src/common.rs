@@ -243,7 +243,7 @@ pub fn mk_qid<R: Rng>(rng: &mut R) -> QueryId {
   QueryId(bytes)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrigP {
   pub query_id: QueryId,
 }

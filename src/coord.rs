@@ -3,7 +3,9 @@ use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, Clock, GossipData,
   IOTypes, NetworkOut, OrigP, TMStatus, TableSchema, TabletForwardOut,
 };
-use crate::finish_query_tm_es::FinishQueryTMES;
+use crate::finish_query_tm_es::{
+  FinishQueryTMAction, FinishQueryTMES, Paxos2PCTMState, ResponseData,
+};
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
   iast, proc, CNodePath, CQueryPath, CSubNodePath, CTQueryPath, CTSubNodePath, ColName, ColType,
@@ -19,6 +21,7 @@ use crate::ms_query_coord_es::{
 use crate::paxos::LeaderChanged;
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContext};
+use crate::slave::RemoteLeaderChangedPLm;
 use crate::sql_parser::convert_ast;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{
@@ -40,7 +43,7 @@ pub enum CoordForwardMsg {
   ExternalMessage(msg::SlaveExternalReq),
   CoordMessage(msg::CoordMessage),
   GossipData(Arc<GossipData>),
-  RemoteLeaderChanged(msg::RemoteLeaderChanged),
+  RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(LeaderChanged),
 }
 
@@ -62,8 +65,11 @@ struct MSCoordESWrapper {
 /// other members here.
 #[derive(Debug, Default)]
 pub struct Statuses {
-  ms_coord_ess: HashMap<QueryId, MSCoordESWrapper>,
+  // Paxos2PC
   finish_query_tm_ess: HashMap<QueryId, FinishQueryTMES>,
+
+  // TP
+  ms_coord_ess: HashMap<QueryId, MSCoordESWrapper>,
   gr_query_ess: HashMap<QueryId, GRQueryESWrapper>,
   trans_table_read_ess: HashMap<QueryId, TransTableReadESWrapper>,
   tm_statuss: HashMap<QueryId, TMStatus>,
@@ -292,22 +298,46 @@ impl<T: IOTypes> CoordContext<T> {
           }
           msg::CoordMessage::FinishQueryPrepared(prepared) => {
             let query_id = prepared.return_qid.clone();
-            if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
-              let action = ms_coord.es.handle_prepared(self, prepared);
-              self.handle_ms_coord_es_action(statuses, query_id, action);
+            if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
+              let action = finish_query.handle_prepared(self, prepared);
+              self.handle_finish_query_es_action(statuses, query_id, action);
             }
           }
           msg::CoordMessage::FinishQueryAborted(aborted) => {
             let query_id = aborted.return_qid.clone();
-            if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
-              let action = ms_coord.es.handle_aborted(self, aborted);
-              self.handle_ms_coord_es_action(statuses, query_id, action);
+            if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
+              let action = finish_query.handle_aborted(self, aborted);
+              self.handle_finish_query_es_action(statuses, query_id, action);
             }
           }
-          msg::CoordMessage::FinishQueryInformPrepared(_) => panic!(),
-          msg::CoordMessage::FinishQueryWait(_) => panic!(),
+          msg::CoordMessage::FinishQueryInformPrepared(inform_prepared) => {
+            let query_id = inform_prepared.tm.query_id.clone();
+            if !statuses.finish_query_tm_ess.contains_key(&query_id) {
+              // Add in and start a FinishQuerTMES
+              let finish_query_es = map_insert(
+                &mut statuses.finish_query_tm_ess,
+                &query_id,
+                FinishQueryTMES {
+                  response_data: None,
+                  query_id: query_id.clone(),
+                  all_rms: inform_prepared.all_rms,
+                  state: Paxos2PCTMState::Start,
+                },
+              );
+              let action = finish_query_es.start_rec(self);
+              self.handle_finish_query_es_action(statuses, query_id, action);
+            }
+          }
+          msg::CoordMessage::FinishQueryWait(wait) => {
+            let query_id = wait.return_qid.clone();
+            if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
+              let action = finish_query.handle_wait(self, wait);
+              self.handle_finish_query_es_action(statuses, query_id, action);
+            }
+          }
           msg::CoordMessage::MasterQueryPlanningAborted(_) => {
-            panic!(); // In practice, this is never received.
+            // In practice, this is never received.
+            panic!();
           }
           msg::CoordMessage::MasterQueryPlanningSuccess(success) => {
             // Route the response to the appropriate MSCoordES.
@@ -323,9 +353,76 @@ impl<T: IOTypes> CoordContext<T> {
           }
         }
       }
-      CoordForwardMsg::GossipData(_) => panic!(),
-      CoordForwardMsg::RemoteLeaderChanged(_) => panic!(),
-      CoordForwardMsg::LeaderChanged(_) => panic!(),
+      CoordForwardMsg::GossipData(gossip) => {
+        self.gossip = gossip;
+
+        // Inform Top-Level ESs.
+        let query_ids: Vec<QueryId> = statuses.ms_coord_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+          let action = ms_coord.es.gossip_data_changed(self);
+          self.handle_ms_coord_es_action(statuses, query_id, action);
+        }
+      }
+      CoordForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
+        let gid = remote_leader_changed.gid.clone();
+        let lid = remote_leader_changed.lid.clone();
+        self.leader_map.insert(gid.clone(), lid.clone()); // Update the LeadershipId
+
+        // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no response).
+        let query_ids: Vec<QueryId> = statuses.trans_table_read_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
+          if trans_read.sender_gid() == gid {
+            self.exit_and_clean_up(statuses, query_id);
+          }
+        }
+
+        let query_ids: Vec<QueryId> = statuses.ms_coord_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+          let action = ms_coord.es.remote_leader_changed(self, remote_leader_changed.clone());
+          self.handle_ms_coord_es_action(statuses, query_id, action);
+        }
+
+        let query_ids: Vec<QueryId> = statuses.finish_query_tm_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let finish_query_es = statuses.finish_query_tm_ess.get_mut(&query_id).unwrap();
+          let action = finish_query_es.remote_leader_changed(self, remote_leader_changed.clone());
+          self.handle_finish_query_es_action(statuses, query_id, action);
+        }
+
+        // Inform TMStatus
+        if let PaxosGroupId::Slave(sid) = gid {
+          let query_ids: Vec<QueryId> = statuses.tm_statuss.keys().cloned().collect();
+          for query_id in query_ids {
+            let tm_status = statuses.tm_statuss.get_mut(&query_id).unwrap();
+            if let Some(cur_lid) = tm_status.leaderships.get(&sid) {
+              if cur_lid < &lid {
+                // The new Leadership of a remote slave has changed beyond what the TMStatus
+                // had contacted, so that RM will surely not respond. Thus we abort this
+                // whole TMStatus and inform the GRQueryES so that it can retry the stage.
+                let gr_query_id = tm_status.orig_p.query_id.clone();
+                self.exit_and_clean_up(statuses, query_id.clone());
+
+                // Inform the GRQueryES
+                let gr_query = statuses.gr_query_ess.get_mut(&query_id).unwrap();
+                remove_item(&mut gr_query.child_queries, &query_id);
+                let action = gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx());
+                self.handle_gr_query_es_action(statuses, gr_query_id, action);
+              }
+            }
+          }
+        }
+      }
+      CoordForwardMsg::LeaderChanged(_) => {
+        // TODO: change LeadershipId and do this properly
+
+        for (query_id, finish_query_es) in statuses.finish_query_tm_ess.iter_mut() {
+          let action = finish_query_es.leader_changed(self);
+          self.handle_finish_query_es_action(statuses, query_id.clone(), action);
+        }
+      }
     }
   }
 
@@ -481,11 +578,6 @@ impl<T: IOTypes> CoordContext<T> {
     self.handle_trans_read_es_action(statuses, query_id, action);
   }
 
-  // TODO: I feel like we should be able to pull out the TransTableSource lookup
-  // into a function that takes in a generic lambda where the trait bound is defined
-  // in the lambda itself. The function would assume the `query_id` points to a valid
-  // TransTableRead, so it may take in the whole `statuses`.
-
   /// Handles a `query_error` propagated up from a GRQueryES. Recall that the originator
   /// can only be a TransTableReadES and it must exist (since the GRQueryES had existed).
   fn handle_internal_query_error(
@@ -538,24 +630,26 @@ impl<T: IOTypes> CoordContext<T> {
         ms_coord.child_queries.push(tm_status.query_id.clone());
         statuses.tm_statuss.insert(tm_status.query_id.clone(), tm_status);
       }
-      MSQueryCoordAction::Success(result) => {
-        // Send back a success to the External, and ECU the MSCoordES.
-        let ms_coord = statuses.ms_coord_ess.get(&query_id).unwrap();
-        let timestamp = match &ms_coord.es {
-          FullMSCoordES::QueryPlanning(es) => es.timestamp.clone(),
-          FullMSCoordES::Executing(es) => es.timestamp.clone(),
-        };
-        self.network_output.send(
-          &ms_coord.sender_eid,
-          msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
-            msg::ExternalQuerySuccess {
-              request_id: ms_coord.request_id.clone(),
+      MSQueryCoordAction::Success(all_rms, sql_query, table_view, timestamp) => {
+        let ms_coord = statuses.ms_coord_ess.remove(&query_id).unwrap();
+        let finish_query_es = map_insert(
+          &mut statuses.finish_query_tm_ess,
+          &query_id,
+          FinishQueryTMES {
+            response_data: Some(ResponseData {
+              request_id: ms_coord.request_id,
+              sender_eid: ms_coord.sender_eid,
+              sql_query,
+              table_view,
               timestamp,
-              result,
-            },
-          )),
+            }),
+            query_id: query_id.clone(),
+            all_rms,
+            state: Paxos2PCTMState::Start,
+          },
         );
-        self.exit_and_clean_up(statuses, query_id);
+        let action = finish_query_es.start_orig(self);
+        self.handle_finish_query_es_action(statuses, query_id, action);
       }
       MSQueryCoordAction::FatalFailure(payload) => {
         let ms_coord = statuses.ms_coord_ess.get(&query_id).unwrap();
@@ -579,7 +673,7 @@ impl<T: IOTypes> CoordContext<T> {
         let exec = ms_coord.es.to_exec();
         let query_id = mk_qid(&mut self.rand);
         ms_coord.es = FullMSCoordES::QueryPlanning(QueryPlanningES {
-          timestamp: max(self.clock.now(), exec.timestamp),
+          timestamp: Timestamp(max(self.clock.now().0, exec.timestamp.0 + 1)),
           sql_query: exec.sql_query.clone(),
           query_id: query_id.clone(),
           state: QueryPlanningS::Start,
@@ -591,6 +685,66 @@ impl<T: IOTypes> CoordContext<T> {
         // Start executing the new MSCoordES.
         let action = ms_coord.es.start(self);
         self.handle_ms_coord_es_action(statuses, query_id, action);
+      }
+    }
+  }
+
+  /// Handles the actions specified by a GRQueryES.
+  fn handle_finish_query_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: FinishQueryTMAction,
+  ) {
+    match action {
+      FinishQueryTMAction::Wait => {}
+      FinishQueryTMAction::Committed => {
+        // Send back a success to the External and remove the FinishQueryES
+        let es = statuses.finish_query_tm_ess.remove(&query_id).unwrap();
+        if let Some(response_data) = es.response_data {
+          self.network_output.send(
+            &response_data.sender_eid,
+            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
+              msg::ExternalQuerySuccess {
+                request_id: response_data.request_id,
+                timestamp: response_data.timestamp,
+                result: response_data.table_view,
+              },
+            )),
+          );
+        }
+      }
+      FinishQueryTMAction::Aborted => {
+        let es = statuses.finish_query_tm_ess.remove(&query_id).unwrap();
+        if let Some(response_data) = es.response_data {
+          // We should retry the request. We reconstruct a MSCoordESWrapper.
+          let query_id = mk_qid(&mut self.rand);
+          let ms_coord = map_insert(
+            &mut statuses.ms_coord_ess,
+            &query_id,
+            MSCoordESWrapper {
+              request_id: response_data.request_id,
+              sender_eid: response_data.sender_eid,
+              child_queries: vec![],
+              es: FullMSCoordES::QueryPlanning(QueryPlanningES {
+                timestamp: Timestamp(max(self.clock.now().0, response_data.timestamp.0 + 1)),
+                sql_query: response_data.sql_query,
+                query_id: query_id.clone(),
+                state: QueryPlanningS::Start,
+              }),
+            },
+          );
+
+          // Update the QueryId that's stored in the request map.
+          *self.external_request_id_map.get_mut(&ms_coord.request_id).unwrap() = query_id.clone();
+
+          // Start executing the new MSCoordES.
+          let action = ms_coord.es.start(self);
+          self.handle_ms_coord_es_action(statuses, query_id, action);
+        }
+      }
+      FinishQueryTMAction::Exit => {
+        statuses.finish_query_tm_ess.remove(&query_id);
       }
     }
   }

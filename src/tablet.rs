@@ -15,6 +15,9 @@ use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
   construct_kb_expr, does_intersect, evaluate_c_expr, is_true, CExpr, EvalError,
 };
+use crate::finish_query_es::{
+  FinishQueryAction, FinishQueryES, FinishQueryExecuting, OrigTMLeadership, Paxos2PCRMState,
+};
 use crate::gr_query_es::{
   GRExecutionS, GRQueryAction, GRQueryConstructorView, GRQueryES, GRQueryPlan, ReadStage,
   SubqueryComputableSql,
@@ -39,7 +42,9 @@ use crate::server::{
   CommonQuery, ContextConstructor, LocalTable, ServerContext,
 };
 use crate::slave::RemoteLeaderChangedPLm;
-use crate::storage::{commit_to_storage, GenericMVTable, GenericTable, StorageView};
+use crate::storage::{
+  commit_to_storage, compress_updates_views, GenericMVTable, GenericTable, StorageView,
+};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{
   TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
@@ -245,7 +250,7 @@ pub struct TransTableReadESWrapper {
 }
 
 impl TransTableReadESWrapper {
-  fn sender_gid(&self) -> PaxosGroupId {
+  pub fn sender_gid(&self) -> PaxosGroupId {
     self.sender_path.node_path.sid.to_gid()
   }
 }
@@ -290,6 +295,10 @@ pub struct GRQueryESWrapper {
 /// other members here.
 #[derive(Debug, Default)]
 pub struct Statuses {
+  // Paxos2PC
+  finish_query_ess: HashMap<QueryId, FinishQueryES>,
+
+  // TP
   gr_query_ess: HashMap<QueryId, GRQueryESWrapper>,
   table_read_ess: HashMap<QueryId, TableReadESWrapper>,
   trans_table_read_ess: HashMap<QueryId, TransTableReadESWrapper>,
@@ -298,35 +307,8 @@ pub struct Statuses {
   ms_table_read_ess: HashMap<QueryId, MSTableReadESWrapper>,
   ms_table_write_ess: HashMap<QueryId, MSTableWriteESWrapper>,
 
-  // DDL ESs
+  // DDL
   ddl_es: Option<(QueryId, DDLES)>,
-}
-
-impl Statuses {
-  // A convenient polymorphic remove function.
-  fn remove(&mut self, query_id: &QueryId) {
-    if self.gr_query_ess.remove(query_id).is_some() {
-      return;
-    };
-    if self.table_read_ess.remove(query_id).is_some() {
-      return;
-    };
-    if self.trans_table_read_ess.remove(query_id).is_some() {
-      return;
-    };
-    if self.tm_statuss.remove(query_id).is_some() {
-      return;
-    };
-    if self.ms_query_ess.remove(query_id).is_some() {
-      return;
-    };
-    if self.ms_table_read_ess.remove(query_id).is_some() {
-      return;
-    };
-    if self.ms_table_write_ess.remove(query_id).is_some() {
-      return;
-    };
-  }
 }
 
 #[derive(Debug)]
@@ -354,7 +336,7 @@ pub struct VerifyingReadWriteRegion {
   pub m_write_protected: BTreeSet<TableRegion>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ReadWriteRegion {
   pub orig_p: OrigP,
   pub m_read_protected: BTreeSet<TableRegion>,
@@ -433,65 +415,108 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
 //  TabletBundle
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTablePrepared {
-  query_id: QueryId,
-  alter_op: proc::AlterOp,
-  timestamp: Timestamp,
-}
+pub mod plm {
+  use crate::common::TableRegion;
+  use crate::model::common::{proc, CQueryPath, TQueryPath};
+  use crate::model::common::{ColName, QueryId, Timestamp};
+  use crate::storage::GenericTable;
+  use crate::tablet::ReadWriteRegion;
+  use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableCommitted {
-  query_id: QueryId,
-  timestamp: Timestamp,
-}
+  // LockedCols
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableAborted {
-  query_id: QueryId,
-}
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct LockedCols {
+    pub query_id: QueryId,
+    pub timestamp: Timestamp,
+    pub cols: Vec<ColName>,
+  }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTablePrepared {
-  query_id: QueryId,
-  timestamp: Timestamp,
-}
+  // ReadProtected
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableCommitted {
-  query_id: QueryId,
-  timestamp: Timestamp,
-}
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct ReadProtected {
+    pub query_id: QueryId,
+    pub timestamp: Timestamp,
+    pub region: TableRegion,
+  }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableAborted {
-  query_id: QueryId,
-}
+  // FinishQuery
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct LockedCols {
-  query_id: QueryId,
-  timestamp: Timestamp,
-  cols: Vec<ColName>,
-}
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct FinishQueryPrepared {
+    pub query_id: QueryId,
+    pub tm: CQueryPath,
+    pub all_rms: Vec<TQueryPath>,
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ReadProtected {
-  query_id: QueryId,
-  timestamp: Timestamp,
-  region: TableRegion,
+    pub region_lock: ReadWriteRegion,
+    pub timestamp: Timestamp,
+    pub update_view: GenericTable,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct FinishQueryCommitted {
+    pub query_id: QueryId,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct FinishQueryAborted {
+    pub query_id: QueryId,
+  }
+
+  // AlterTable
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct AlterTablePrepared {
+    pub query_id: QueryId,
+    pub alter_op: proc::AlterOp,
+    pub timestamp: Timestamp,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct AlterTableCommitted {
+    pub query_id: QueryId,
+    pub timestamp: Timestamp,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct AlterTableAborted {
+    pub query_id: QueryId,
+  }
+
+  // DropTable
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct DropTablePrepared {
+    pub query_id: QueryId,
+    pub timestamp: Timestamp,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct DropTableCommitted {
+    pub query_id: QueryId,
+    pub timestamp: Timestamp,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct DropTableAborted {
+    pub query_id: QueryId,
+  }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletPLm {
-  AlterTablePrepared(AlterTablePrepared),
-  AlterTableCommitted(AlterTableCommitted),
-  AlterTableAborted(AlterTableAborted),
-  DropTablePrepared(DropTablePrepared),
-  DropTableCommitted(DropTableCommitted),
-  DropTableAborted(DropTableAborted),
-  LockedCols(LockedCols),
-  ReadProtected(ReadProtected),
+  LockedCols(plm::LockedCols),
+  ReadProtected(plm::ReadProtected),
+  FinishQueryPrepared(plm::FinishQueryPrepared),
+  FinishQueryCommitted(plm::FinishQueryCommitted),
+  FinishQueryAborted(plm::FinishQueryAborted),
+  AlterTablePrepared(plm::AlterTablePrepared),
+  AlterTableCommitted(plm::AlterTableCommitted),
+  AlterTableAborted(plm::AlterTableAborted),
+  DropTablePrepared(plm::DropTablePrepared),
+  DropTableCommitted(plm::DropTableCommitted),
+  DropTableAborted(plm::DropTableAborted),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -555,8 +580,9 @@ pub struct TabletContext<T: IOTypes> {
   pub waiting_locked_cols: HashMap<QueryId, RequestedLockedCols>,
   pub inserting_locked_cols: HashMap<QueryId, RequestedLockedCols>,
 
-  // Child Queries
   /// For every `MSQueryES`, this maps its corresponding `root_query_id` to its `query_id`.
+  /// This is for use when a MSTable*ES is constructed. This needs to be updated whenever an
+  /// `MSQueryES` is added or removed.
   pub ms_root_query_map: HashMap<QueryId, QueryId>,
 
   // Paxos
@@ -645,12 +671,6 @@ impl<T: IOTypes> TabletContext<T> {
         for plm in bundle {
           // TODO: This code is only if this is the leader
           match plm {
-            TabletPLm::AlterTablePrepared(_) => panic!(),
-            TabletPLm::AlterTableCommitted(_) => panic!(),
-            TabletPLm::AlterTableAborted(_) => panic!(),
-            TabletPLm::DropTablePrepared(_) => panic!(),
-            TabletPLm::DropTableCommitted(_) => panic!(),
-            TabletPLm::DropTableAborted(_) => panic!(),
             TabletPLm::LockedCols(locked_cols) => {
               // Increase TableSchema LATs
               for col_name in &locked_cols.cols {
@@ -684,6 +704,15 @@ impl<T: IOTypes> TabletContext<T> {
                 self.handle_read_es_action(statuses, query_id, action);
               }
             }
+            TabletPLm::FinishQueryPrepared(_) => panic!(),
+            TabletPLm::FinishQueryCommitted(_) => panic!(),
+            TabletPLm::FinishQueryAborted(_) => panic!(),
+            TabletPLm::AlterTablePrepared(_) => panic!(),
+            TabletPLm::AlterTableCommitted(_) => panic!(),
+            TabletPLm::AlterTableAborted(_) => panic!(),
+            TabletPLm::DropTablePrepared(_) => panic!(),
+            TabletPLm::DropTableCommitted(_) => panic!(),
+            TabletPLm::DropTableAborted(_) => panic!(),
           }
         }
       }
@@ -881,72 +910,93 @@ impl<T: IOTypes> TabletContext<T> {
             self.handle_query_success(statuses, query_success);
           }
           msg::TabletMessage::FinishQueryPrepare(prepare) => {
-            // Recall that an MSQueryES can randomly be aborted due to a DeadlockSafetyWriteAbort.
-            // If it's present, we send back Prepared, and if not, we send back Aborted.
-            if let Some(ms_query_es) = statuses.ms_query_ess.get_mut(&prepare.ms_query_id) {
-              assert!(ms_query_es.pending_queries.is_empty());
-              assert_eq!(prepare.sender_path.query_id, ms_query_es.root_query_path.query_id);
-
-              // The VerifyingReadWriteRegion must also exist, so we move it to prepared_*.
-              let verifying_write = self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
-              assert!(verifying_write.m_waiting_read_protected.is_empty());
-              self.prepared_writes.insert(
-                ms_query_es.timestamp,
-                ReadWriteRegion {
-                  orig_p: verifying_write.orig_p,
-                  m_read_protected: verifying_write.m_read_protected,
-                  m_write_protected: verifying_write.m_write_protected,
-                },
-              );
-
-              // Send back Prepared
-              let return_qid = prepare.sender_path.query_id.clone();
-              let rm_path = self.mk_query_path(prepare.ms_query_id);
-              self.ctx().send_to_c(
-                prepare.sender_path.node_path,
-                msg::CoordMessage::FinishQueryPrepared(msg::FinishQueryPrepared {
-                  return_qid,
-                  rm_path,
-                }),
-              );
+            let query_id = prepare.query_id.clone();
+            if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
+              // If a FinishQueryES already exists, we route the prepare message there.
+              let action = finish_query_es.handle_prepare(self);
+              self.handle_finish_query_es_action(statuses, query_id, action);
             } else {
-              // Send back Aborted. The only reason for the MSQueryES to no longer exist must be
-              // because it was aborted due to a DeadlockSafetyWriteAbort. Thus, we respond to
-              // the Slave as such.
-              let return_qid = prepare.sender_path.query_id.clone();
-              let rm_path = self.mk_query_path(prepare.ms_query_id);
-              self.ctx().send_to_c(
-                prepare.sender_path.node_path,
-                msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
-                  return_qid,
-                  rm_path,
-                  reason: msg::FinishQueryAbortReason::DeadlockSafetyAbortion,
-                }),
-              );
+              if let Some(ms_query_es) = statuses.ms_query_ess.remove(&query_id) {
+                self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
+                debug_assert!(ms_query_es.pending_queries.is_empty());
+
+                let timestamp = ms_query_es.timestamp;
+
+                // Move the VerifyingReadWrite to inserting.
+                let verifying = self.verifying_writes.remove(&timestamp).unwrap();
+                debug_assert!(verifying.m_waiting_read_protected.is_empty());
+                let region_lock = ReadWriteRegion {
+                  orig_p: verifying.orig_p,
+                  m_read_protected: verifying.m_read_protected,
+                  m_write_protected: verifying.m_write_protected,
+                };
+                self.inserting_prepared_writes.insert(timestamp.clone(), region_lock.clone());
+
+                // Construct a FinishQueryES
+                let tm_lid = self.leader_map.get(&prepare.tm.node_path.sid.to_gid()).unwrap();
+                map_insert(
+                  &mut statuses.finish_query_ess,
+                  &query_id,
+                  FinishQueryES::FinishQueryExecuting(FinishQueryExecuting {
+                    query_id: query_id.clone(),
+                    tm: prepare.tm,
+                    all_rms: prepare.all_rms,
+                    region_lock,
+                    timestamp,
+                    update_view: compress_updates_views(&ms_query_es.update_views),
+                    state: Paxos2PCRMState::WaitingInsertingPrepared(OrigTMLeadership {
+                      orig_tm_lid: tm_lid.clone(),
+                    }),
+                  }),
+                );
+              } else {
+                // The MSQueryES might not be present because of a DeadlockSafetyWriteAbort.
+                let this_query_path = self.mk_query_path(prepare.query_id);
+                self.ctx().send_to_c(
+                  prepare.tm.node_path,
+                  msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
+                    return_qid: prepare.tm.query_id,
+                    rm_path: this_query_path,
+                  }),
+                );
+              }
             }
           }
           msg::TabletMessage::FinishQueryAbort(abort) => {
-            if let Some(ms_query_es) = statuses.ms_query_ess.remove(&abort.ms_query_id) {
-              // Recall that in order to get a FinishQueryAbort, the Slave must already have sent a
-              // FinishQueryPrepare. Since the network is FIFO, we must have received it, and since
-              // the MSQueryES exists, we must have responded with Prepared. Recall that we cannot
-              // call `exit_and_clean_up` when MSQueryES is Prepared.
-              self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
-              self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
+            let query_id = abort.query_id.clone();
+            if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
+              let action = finish_query_es.handle_abort(self);
+              self.handle_finish_query_es_action(statuses, query_id, action);
+            } else {
+              if let Some(ms_query_es) = statuses.ms_query_ess.remove(&query_id) {
+                self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
+                debug_assert!(ms_query_es.pending_queries.is_empty());
+                self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
+              }
             }
           }
-          msg::TabletMessage::FinishQueryCheckPrepared(_) => panic!(),
+          msg::TabletMessage::FinishQueryCheckPrepared(check_prepared) => {
+            let query_id = check_prepared.query_id.clone();
+            if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
+              let action = finish_query_es.handle_check_prepared(self, check_prepared);
+              self.handle_finish_query_es_action(statuses, query_id, action);
+            } else {
+              let this_query_path = self.mk_query_path(check_prepared.query_id);
+              self.ctx().send_to_c(
+                check_prepared.tm.node_path,
+                msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
+                  return_qid: check_prepared.tm.query_id,
+                  rm_path: this_query_path,
+                }),
+              );
+            }
+          }
           msg::TabletMessage::FinishQueryCommit(commit) => {
-            // Remove the MSQueryES. It must exist, since we had Prepared.
-            let ms_query_es = statuses.ms_query_ess.remove(&commit.ms_query_id).unwrap();
-
-            // Move the ReadWriteRegion to Committed, and cleanup `ms_root_query_map`.
-            let read_write_region = self.prepared_writes.remove(&ms_query_es.timestamp).unwrap();
-            self.committed_writes.insert(ms_query_es.timestamp.clone(), read_write_region);
-            self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
-
-            // Apply the UpdateViews to the storage container.
-            commit_to_storage(&mut self.storage, &ms_query_es.timestamp, &ms_query_es.update_views);
+            let query_id = commit.query_id.clone();
+            if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
+              let action = finish_query_es.handle_commit(self);
+              self.handle_finish_query_es_action(statuses, query_id, action);
+            }
           }
           msg::TabletMessage::AlterTablePrepare(prepare) => {
             if let Some((_, es)) = &mut statuses.ddl_es {
@@ -1065,8 +1115,8 @@ impl<T: IOTypes> TabletContext<T> {
         }
         self.run_main_loop(statuses);
       }
-      TabletForwardMsg::GossipData(gossip_data) => {
-        self.gossip = gossip_data;
+      TabletForwardMsg::GossipData(gossip) => {
+        self.gossip = gossip;
 
         // Inform Top-Level ESs.
         let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
@@ -1090,7 +1140,9 @@ impl<T: IOTypes> TabletContext<T> {
           self.handle_ms_write_es_action(statuses, query_id, action);
         }
       }
-      TabletForwardMsg::RemoteLeaderChanged(RemoteLeaderChangedPLm { gid, lid }) => {
+      TabletForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
+        let gid = remote_leader_changed.gid.clone();
+        let lid = remote_leader_changed.lid.clone();
         self.leader_map.insert(gid.clone(), lid.clone()); // Update the LeadershipId
 
         // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no response).
@@ -1159,10 +1211,25 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
 
+          // Inform FinishQueryES
+          let query_ids: Vec<QueryId> = statuses.finish_query_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+            let action = finish_query_es.remote_leader_changed(self, remote_leader_changed.clone());
+            self.handle_finish_query_es_action(statuses, query_id.clone(), action);
+          }
+
           // TODO: inform ddl_es
         }
       }
-      TabletForwardMsg::LeaderChanged(_) => panic!(),
+      TabletForwardMsg::LeaderChanged(_) => {
+        // TODO: change LeadershipId and do this properly
+
+        for (query_id, finish_query_es) in statuses.finish_query_ess.iter_mut() {
+          let action = finish_query_es.leader_changed(self);
+          self.handle_finish_query_es_action(statuses, query_id.clone(), action);
+        }
+      }
     }
   }
 
@@ -1581,7 +1648,7 @@ impl<T: IOTypes> TabletContext<T> {
     // Move the RequestedLockedCols to `inserting_*`
     let req = self.waiting_locked_cols.remove(&locked_cols_qid).unwrap();
     self.inserting_locked_cols.insert(locked_cols_qid.clone(), req.clone());
-    self.tablet_bundle.push(TabletPLm::LockedCols(LockedCols {
+    self.tablet_bundle.push(TabletPLm::LockedCols(plm::LockedCols {
       query_id: req.query_id.clone(),
       timestamp: req.timestamp,
       cols: req.cols,
@@ -1646,7 +1713,7 @@ impl<T: IOTypes> TabletContext<T> {
   ) {
     self.remove_read_protected_request(&timestamp, &protect_request.query_id).unwrap();
     btree_multimap_insert(&mut self.inserting_read_protected, &timestamp, protect_request.clone());
-    self.tablet_bundle.push(TabletPLm::ReadProtected(ReadProtected {
+    self.tablet_bundle.push(TabletPLm::ReadProtected(plm::ReadProtected {
       query_id: protect_request.query_id.clone(),
       timestamp,
       region: protect_request.read_region,
@@ -1858,6 +1925,21 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
+  /// Handles the actions specified by a FinishQueryES.
+  fn handle_finish_query_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: FinishQueryAction,
+  ) {
+    match action {
+      FinishQueryAction::Wait => {}
+      FinishQueryAction::Exit => {
+        statuses.finish_query_ess.remove(&query_id);
+      }
+    }
+  }
+
   /// Handles the actions specified by a TransTableReadES.
   fn handle_trans_read_es_action(
     &mut self,
@@ -1961,6 +2043,7 @@ impl<T: IOTypes> TabletContext<T> {
     query_error: msg::QueryError,
   ) {
     let ms_query_es = statuses.ms_query_ess.remove(&query_id).unwrap();
+    self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
 
     // Then, we ECU all ESs in `pending_queries`, and respond with an Abort.
     for query_id in ms_query_es.pending_queries {
@@ -1999,7 +2082,6 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Cleanup the TableContext's
     self.verifying_writes.remove(&ms_query_es.timestamp);
-    self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
   }
 
   /// Handles the actions specified by an MSTableWriteES.
@@ -2221,6 +2303,12 @@ impl<T: IOTypes> TabletContext<T> {
       },
       query_id,
     }
+  }
+
+  /// Returns true iff this is the Leader
+  pub fn is_leader(&self) -> bool {
+    let lid = self.leader_map.get(&self.this_slave_group_id.to_gid()).unwrap();
+    lid.eid == self.this_eid
   }
 }
 

@@ -242,7 +242,7 @@ impl<'a> StorageView for MSStorageView<'a> {
 }
 
 /// Compress the `update_views` by iterating from latest to earliest tier.
-fn compress_updates_views(update_views: &BTreeMap<u32, GenericTable>) -> GenericTable {
+pub fn compress_updates_views(update_views: &BTreeMap<u32, GenericTable>) -> GenericTable {
   let mut snapshot_table = GenericTable::new();
   for (_, generic_table) in update_views.iter() {
     // Iterate over the the UpdateView Rows and insert them into `snapshot_table` if they
@@ -264,13 +264,12 @@ fn compress_updates_views(update_views: &BTreeMap<u32, GenericTable>) -> Generic
   snapshot_table
 }
 
-/// Compress the `update_views` and apply it to `storage` and `timestamp`.
+/// Apple the `compressed_view` to `storage` and `timestamp`.
 pub fn commit_to_storage(
   storage: &mut GenericMVTable,
   timestamp: &Timestamp,
-  update_views: &BTreeMap<u32, GenericTable>,
+  compressed_view: GenericTable,
 ) {
-  let compressed_view = compress_updates_views(update_views);
   for (key, value) in compressed_view {
     // Recall that since MSWriteES does Type Checking, the Compressed View can be applied
     // directory to `storage` without further checks.
