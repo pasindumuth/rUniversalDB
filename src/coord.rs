@@ -96,7 +96,7 @@ pub struct CoordContext<T: IOTypes> {
   pub this_slave_group_id: SlaveGroupId,
   pub this_coord_group_id: CoordGroupId,
   pub sub_node_path: CTSubNodePath, // // Wraps `this_coord_group_id` for expedience
-  pub master_eid: EndpointId,
+  pub this_eid: EndpointId,
 
   /// Gossip
   pub gossip: Arc<GossipData>,
@@ -115,7 +115,7 @@ impl<T: IOTypes> CoordState<T> {
     network_output: T::NetworkOutT,
     this_slave_group_id: SlaveGroupId,
     this_coord_group_id: CoordGroupId,
-    master_eid: EndpointId,
+    this_eid: EndpointId,
     gossip: Arc<GossipData>,
     leader_map: HashMap<PaxosGroupId, LeadershipId>,
   ) -> CoordState<T> {
@@ -127,7 +127,7 @@ impl<T: IOTypes> CoordState<T> {
         this_slave_group_id,
         this_coord_group_id,
         sub_node_path: CTSubNodePath::Coord(CoordGroupId("".to_string())),
-        master_eid,
+        this_eid,
         gossip,
         leader_map,
         external_request_id_map: Default::default(),
@@ -415,12 +415,45 @@ impl<T: IOTypes> CoordContext<T> {
           }
         }
       }
-      CoordForwardMsg::LeaderChanged(_) => {
-        // TODO: change LeadershipId and do this properly
+      CoordForwardMsg::LeaderChanged(leader_changed) => {
+        let this_gid = self.this_slave_group_id.to_gid();
+        self.leader_map.insert(this_gid, leader_changed.lid);
 
-        for (query_id, finish_query_es) in statuses.finish_query_tm_ess.iter_mut() {
-          let action = finish_query_es.leader_changed(self);
-          self.handle_finish_query_es_action(statuses, query_id.clone(), action);
+        if self.is_leader() {
+          // This means this node lost Leadership.
+
+          // Wink away MSCoordESs
+          for (_, ms_coord_es) in statuses.ms_coord_ess.drain() {
+            self.network_output.send(
+              &ms_coord_es.sender_eid,
+              msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+                msg::ExternalQueryAborted {
+                  request_id: ms_coord_es.request_id,
+                  payload: msg::ExternalAbortedData::NodeDied,
+                },
+              )),
+            )
+          }
+
+          // Wink away FinishQueryTMESs
+          for (_, finish_query_es) in statuses.finish_query_tm_ess.drain() {
+            if let Some(response_data) = finish_query_es.response_data {
+              self.network_output.send(
+                &response_data.sender_eid,
+                msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+                  msg::ExternalQueryAborted {
+                    request_id: response_data.request_id,
+                    payload: msg::ExternalAbortedData::NodeDied,
+                  },
+                )),
+              )
+            }
+          }
+
+          // Wink away all TM ESs.
+          statuses.gr_query_ess.clear();
+          statuses.trans_table_read_ess.clear();
+          statuses.tm_statuss.clear();
         }
       }
     }
@@ -743,9 +776,6 @@ impl<T: IOTypes> CoordContext<T> {
           self.handle_ms_coord_es_action(statuses, query_id, action);
         }
       }
-      FinishQueryTMAction::Exit => {
-        statuses.finish_query_tm_ess.remove(&query_id);
-      }
     }
   }
 
@@ -902,5 +932,10 @@ impl<T: IOTypes> CoordContext<T> {
       query_id,
     }
   }
-  // .into_c_query_path()
+
+  /// Returns true iff this is the Leader.
+  pub fn is_leader(&self) -> bool {
+    let lid = self.leader_map.get(&self.this_slave_group_id.to_gid()).unwrap();
+    lid.eid == self.this_eid
+  }
 }

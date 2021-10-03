@@ -415,6 +415,10 @@ pub enum ExternalAbortedData {
   /// This is sent back as a response when a CancelExternalQuery comes in. If the
   /// transaction still exists, we make sure to abort it.
   ConfirmCancel,
+  /// This is send back if the Coord's detects its Node's Leadership changes. This is to make
+  /// sure that in case the Leadership change was spurious (i.e. the current node is still alive),
+  /// the External is not left waiting forever.
+  NodeDied,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

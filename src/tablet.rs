@@ -704,9 +704,24 @@ impl<T: IOTypes> TabletContext<T> {
                 self.handle_read_es_action(statuses, query_id, action);
               }
             }
-            TabletPLm::FinishQueryPrepared(_) => panic!(),
-            TabletPLm::FinishQueryCommitted(_) => panic!(),
-            TabletPLm::FinishQueryAborted(_) => panic!(),
+            TabletPLm::FinishQueryPrepared(prepared) => {
+              let query_id = prepared.query_id;
+              let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+              let action = finish_query_es.handle_prepared_plm(self);
+              self.handle_finish_query_es_action(statuses, query_id, action);
+            }
+            TabletPLm::FinishQueryCommitted(committed) => {
+              let query_id = committed.query_id;
+              let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+              let action = finish_query_es.handle_committed_plm(self);
+              self.handle_finish_query_es_action(statuses, query_id, action);
+            }
+            TabletPLm::FinishQueryAborted(aborted) => {
+              let query_id = aborted.query_id;
+              let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+              let action = finish_query_es.handle_aborted_plm(self);
+              self.handle_finish_query_es_action(statuses, query_id, action);
+            }
             TabletPLm::AlterTablePrepared(_) => panic!(),
             TabletPLm::AlterTableCommitted(_) => panic!(),
             TabletPLm::AlterTableAborted(_) => panic!(),
@@ -1222,12 +1237,44 @@ impl<T: IOTypes> TabletContext<T> {
           // TODO: inform ddl_es
         }
       }
-      TabletForwardMsg::LeaderChanged(_) => {
-        // TODO: change LeadershipId and do this properly
+      TabletForwardMsg::LeaderChanged(leader_changed) => {
+        let this_gid = self.this_slave_group_id.to_gid();
+        self.leader_map.insert(this_gid, leader_changed.lid);
 
-        for (query_id, finish_query_es) in statuses.finish_query_ess.iter_mut() {
+        // Inform FinishQueryES
+        let query_ids: Vec<QueryId> = statuses.finish_query_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
           let action = finish_query_es.leader_changed(self);
           self.handle_finish_query_es_action(statuses, query_id.clone(), action);
+        }
+
+        // Inform FinishQueryES
+        if let Some((query_id, es)) = &mut statuses.ddl_es {
+          // TODO: inform ddl_es properly
+        }
+
+        if self.is_leader() {
+          // This means this node lost Leadership.
+
+          // Wink away all TM ESs.
+          statuses.gr_query_ess.clear();
+          statuses.table_read_ess.clear();
+          statuses.trans_table_read_ess.clear();
+          statuses.tm_statuss.clear();
+          statuses.ms_query_ess.clear();
+          statuses.ms_table_read_ess.clear();
+          statuses.ms_table_write_ess.clear();
+
+          // Wink away all unpersisted Region Isolation Algorithm data
+          self.verifying_writes.clear();
+          self.inserting_prepared_writes.clear();
+          self.waiting_read_protected.clear();
+          self.inserting_read_protected.clear();
+
+          // Wink away all unpersisted Column Locking Algorithm data
+          self.waiting_locked_cols.clear();
+          self.inserting_locked_cols.clear();
         }
       }
     }
@@ -2305,7 +2352,7 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// Returns true iff this is the Leader
+  /// Returns true iff this is the Leader.
   pub fn is_leader(&self) -> bool {
     let lid = self.leader_map.get(&self.this_slave_group_id.to_gid()).unwrap();
     lid.eid == self.this_eid

@@ -46,8 +46,6 @@ pub enum FinishQueryTMAction {
   // This can only happen if there was a badly timed  Leadership change of the RMs
   // (before it could persist the UpdateView). The whole MSQuery should be tried again.
   Aborted,
-  // This is returned if this Leadership changes
-  Exit,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -166,10 +164,6 @@ impl FinishQueryTMES {
       _ => (),
     }
     FinishQueryTMAction::Wait
-  }
-
-  pub fn leader_changed<T: IOTypes>(&mut self, _: &mut CoordContext<T>) -> FinishQueryTMAction {
-    FinishQueryTMAction::Exit
   }
 }
 
