@@ -11,7 +11,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::server::{
   contains_col, evaluate_super_simple_select, mk_eval_error, weak_contains_col, CommonQuery,
-  ContextConstructor,
+  ContextConstructor, ServerContextBase,
 };
 use crate::storage::MSStorageView;
 use crate::tablet::{

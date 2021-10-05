@@ -16,7 +16,8 @@ use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
 use crate::query_converter::convert_to_msquery;
-use crate::server::{CommonQuery, ServerContext};
+use crate::server::ServerContextBase;
+use crate::server::{CommonQuery, SlaveServerContext};
 use crate::sql_parser::convert_ast;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{

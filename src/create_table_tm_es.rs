@@ -1,3 +1,5 @@
+use crate::common::IOTypes;
+use crate::master::{plm, MasterContext, MasterPLm};
 use crate::model::common::{
   ColName, ColType, EndpointId, QueryId, RequestId, SlaveGroupId, TablePath, TabletGroupId,
   TabletKeyRange, Timestamp,
@@ -59,4 +61,61 @@ pub struct CreateTableTMES {
 
   // STMPaxos2PCTM state
   pub state: CreateTableTMS,
+}
+
+#[derive(Debug)]
+pub enum CreateTableTMAction {
+  Wait,
+  Exit,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Implementation
+// -----------------------------------------------------------------------------------------------
+
+impl CreateTableTMES {
+  pub fn handle_prepared_plm<T: IOTypes>(
+    &mut self,
+    ctx: &mut MasterContext<T>,
+  ) -> CreateTableTMAction {
+    CreateTableTMAction::Wait
+  }
+
+  pub fn handle_aborted_plm<T: IOTypes>(
+    &mut self,
+    ctx: &mut MasterContext<T>,
+  ) -> CreateTableTMAction {
+    CreateTableTMAction::Wait
+  }
+
+  pub fn handle_committed_plm<T: IOTypes>(
+    &mut self,
+    ctx: &mut MasterContext<T>,
+  ) -> CreateTableTMAction {
+    CreateTableTMAction::Wait
+  }
+
+  pub fn handle_closed_plm<T: IOTypes>(
+    &mut self,
+    ctx: &mut MasterContext<T>,
+  ) -> CreateTableTMAction {
+    CreateTableTMAction::Wait
+  }
+
+  pub fn starting_insert<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> CreateTableTMAction {
+    match self.state {
+      CreateTableTMS::WaitingInsertTMPrepared => {
+        ctx.master_bundle.push(MasterPLm::CreateTableTMPrepared(plm::CreateTableTMPrepared {
+          query_id: self.query_id.clone(),
+          table_path: self.table_path.clone(),
+          key_cols: self.key_cols.clone(),
+          val_cols: self.val_cols.clone(),
+          shards: self.shards.clone(),
+        }));
+        self.state = CreateTableTMS::InsertTMPreparing;
+      }
+      _ => {}
+    }
+    CreateTableTMAction::Wait
+  }
 }

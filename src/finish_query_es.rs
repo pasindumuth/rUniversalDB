@@ -3,6 +3,7 @@ use crate::common::RemoteLeaderChangedPLm;
 use crate::finish_query_es::Paxos2PCRMState::Follower;
 use crate::model::common::{CQueryPath, LeadershipId, QueryId, TQueryPath, Timestamp};
 use crate::model::message as msg;
+use crate::server::ServerContextBase;
 use crate::storage::{commit_to_storage, GenericTable};
 use crate::tablet::{plm, TabletPLm};
 use crate::tablet::{ReadWriteRegion, TabletContext};

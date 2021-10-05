@@ -21,7 +21,7 @@ use crate::ms_query_coord_es::{
 };
 use crate::paxos::LeaderChanged;
 use crate::query_converter::convert_to_msquery;
-use crate::server::{CommonQuery, ServerContext};
+use crate::server::{CommonQuery, ServerContextBase, SlaveServerContext};
 use crate::sql_parser::convert_ast;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{
@@ -104,7 +104,8 @@ pub struct CoordContext<T: IOTypes> {
   /// Paxos
   pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
 
-  /// External Query Management
+  /// There is an entry here exactly when there is a corresponding `MSCoordES`, and it
+  /// is used to cancel an `MSCoordES` when when a CancelQueryExteral arrives.
   pub external_request_id_map: HashMap<RequestId, QueryId>,
 }
 
@@ -142,8 +143,8 @@ impl<T: IOTypes> CoordState<T> {
 }
 
 impl<T: IOTypes> CoordContext<T> {
-  pub fn ctx(&mut self) -> ServerContext<T> {
-    ServerContext {
+  pub fn ctx(&mut self) -> SlaveServerContext<T> {
+    SlaveServerContext {
       rand: &mut self.rand,
       clock: &mut self.clock,
       network_output: &mut self.network_output,
@@ -194,19 +195,19 @@ impl<T: IOTypes> CoordContext<T> {
             if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
               // ECU the transaction if it exists.
               self.exit_and_clean_up(statuses, query_id.clone());
-            }
 
-            // Recall that we need to respond with an ExternalQueryAborted
-            // to confirm the cancellation.
-            self.network_output.send(
-              &cancel.sender_eid,
-              msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
-                msg::ExternalQueryAborted {
-                  request_id: cancel.request_id,
-                  payload: msg::ExternalAbortedData::ConfirmCancel,
-                },
-              )),
-            );
+              // Recall that we need to respond with an ExternalQueryAborted
+              // to confirm the cancellation.
+              self.network_output.send(
+                &cancel.sender_eid,
+                msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+                  msg::ExternalQueryAborted {
+                    request_id: cancel.request_id,
+                    payload: msg::ExternalAbortedData::ConfirmCancel,
+                  },
+                )),
+              );
+            }
           }
         }
       }
@@ -665,6 +666,7 @@ impl<T: IOTypes> CoordContext<T> {
       }
       MSQueryCoordAction::Success(all_rms, sql_query, table_view, timestamp) => {
         let ms_coord = statuses.ms_coord_ess.remove(&query_id).unwrap();
+        self.external_request_id_map.remove(&ms_coord.request_id);
         let finish_query_es = map_insert(
           &mut statuses.finish_query_tm_ess,
           &query_id,

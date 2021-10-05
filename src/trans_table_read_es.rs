@@ -11,9 +11,10 @@ use crate::model::common::{
 };
 use crate::model::common::{CTQueryPath, Context, QueryId, TierMap, TransTableLocationPrefix};
 use crate::model::message as msg;
+use crate::server::ServerContextBase;
 use crate::server::{
   evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor, LocalTable,
-  ServerContext,
+  SlaveServerContext,
 };
 use crate::tablet::{
   compute_contexts, Executing, QueryReplanningSqlView, SingleSubqueryStatus, SubqueryFinished,
@@ -140,7 +141,7 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
 impl TransTableReadES {
   pub fn start<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut ServerContext<T>,
+    ctx: &mut SlaveServerContext<T>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     self.start_trans_table_read_es(ctx, trans_table_source)
@@ -149,7 +150,7 @@ impl TransTableReadES {
   /// Constructs and returns subqueries.
   fn start_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut ServerContext<T>,
+    ctx: &mut SlaveServerContext<T>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     assert!(matches!(&self.state, &TransExecutionS::Start));
@@ -218,7 +219,7 @@ impl TransTableReadES {
   /// and Exits and Clean Ups this ES.
   pub fn handle_internal_query_error<T: IOTypes>(
     &mut self,
-    ctx: &mut ServerContext<T>,
+    ctx: &mut SlaveServerContext<T>,
     query_error: msg::QueryError,
   ) -> TransTableAction {
     self.exit_and_clean_up(ctx);
@@ -228,7 +229,7 @@ impl TransTableReadES {
   /// Handles a Subquery completing
   pub fn handle_subquery_done<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut ServerContext<T>,
+    ctx: &mut SlaveServerContext<T>,
     trans_table_source: &SourceT,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<TQueryPath>,
@@ -259,7 +260,7 @@ impl TransTableReadES {
   /// Handles a ES finishing with all subqueries results in.
   fn finish_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
     &mut self,
-    _: &mut ServerContext<T>,
+    _: &mut SlaveServerContext<T>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     let executing_state = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
@@ -345,7 +346,7 @@ impl TransTableReadES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, _: &mut ServerContext<T>) {
+  pub fn exit_and_clean_up<T: IOTypes>(&mut self, _: &mut SlaveServerContext<T>) {
     self.state = TransExecutionS::Done
   }
 

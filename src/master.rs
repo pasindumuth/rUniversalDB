@@ -1,4 +1,4 @@
-use crate::alter_table_tm_es::{AlterTableAction, AlterTableTMES, AlterTableTMS};
+use crate::alter_table_tm_es::{AlterTableTMAction, AlterTableTMES, AlterTableTMS};
 use crate::col_usage::{ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, IOTypes, NetworkOut, TableSchema,
@@ -17,7 +17,9 @@ use crate::model::message::{
 };
 use crate::multiversion_map::MVM;
 use crate::paxos::LeaderChanged;
-use crate::server::{CommonQuery, CoreServerContext};
+use crate::server::{
+  weak_contains_col, weak_contains_col_latest, CommonQuery, MasterServerContext,
+};
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -54,7 +56,6 @@ pub mod plm {
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct CreateTableTMPrepared {
     pub query_id: QueryId,
-    pub tablet_group_id: TabletGroupId,
     pub table_path: TablePath,
 
     pub key_cols: Vec<(ColName, ColType)>,
@@ -218,6 +219,9 @@ pub struct MasterContext<T: IOTypes> {
 
   /// Request Management
   pub external_request_id_map: HashMap<RequestId, QueryId>,
+
+  /// Paxos
+  pub master_bundle: Vec<MasterPLm>,
 }
 
 impl<T: IOTypes> MasterState<T> {
@@ -244,6 +248,7 @@ impl<T: IOTypes> MasterState<T> {
         slave_address_config,
         leader_map: Default::default(),
         external_request_id_map: Default::default(),
+        master_bundle: vec![],
       },
       statuses: Default::default(),
     }
@@ -255,20 +260,125 @@ impl<T: IOTypes> MasterState<T> {
 }
 
 impl<T: IOTypes> MasterContext<T> {
-  pub fn ctx(&mut self) -> CoreServerContext<T> {
-    CoreServerContext {
+  pub fn ctx(&mut self) -> MasterServerContext<T> {
+    MasterServerContext {
       rand: &mut self.rand,
       clock: &mut self.clock,
       network_output: &mut self.network_output,
       sharding_config: &mut self.sharding_config,
       tablet_address_config: &mut self.tablet_address_config,
       slave_address_config: &mut self.slave_address_config,
+      leader_map: &mut self.leader_map,
     }
   }
 
   pub fn handle_input(&mut self, statuses: &mut Statuses, master_input: MasterForwardMsg) {
     match master_input {
-      MasterForwardMsg::MasterBundle(_) => {}
+      MasterForwardMsg::MasterBundle(bundle) => {
+        if self.is_leader() {
+          for paxos_log_msg in bundle {
+            match paxos_log_msg {
+              MasterPLm::MasterQueryPlanning(_) => {}
+              // CreateTable
+              MasterPLm::CreateTableTMPrepared(prepared) => {
+                let query_id = prepared.query_id;
+                let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+                es.handle_prepared_plm(self);
+              }
+              MasterPLm::CreateTableTMCommitted(committed) => {
+                let query_id = committed.query_id;
+                let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+                es.handle_committed_plm(self);
+              }
+              MasterPLm::CreateTableTMAborted(aborted) => {
+                let query_id = aborted.query_id;
+                let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+                es.handle_aborted_plm(self);
+              }
+              MasterPLm::CreateTableTMClosed(closed) => {
+                let query_id = closed.query_id;
+                let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+                es.handle_closed_plm(self);
+              }
+              // AlterTable
+              MasterPLm::AlterTableTMPrepared(prepared) => {
+                let query_id = prepared.query_id;
+                let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_prepared_plm(self);
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
+              MasterPLm::AlterTableTMCommitted(committed) => {
+                let query_id = committed.query_id;
+                let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_committed_plm(self);
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
+              MasterPLm::AlterTableTMAborted(aborted) => {
+                let query_id = aborted.query_id;
+                let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_aborted_plm(self);
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
+              MasterPLm::AlterTableTMClosed(closed) => {
+                let query_id = closed.query_id;
+                let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_closed_plm(self);
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
+              // DropTable
+              MasterPLm::DropTableTMPrepared(prepared) => {
+                let query_id = prepared.query_id;
+                let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+                es.handle_prepared_plm(self);
+              }
+              MasterPLm::DropTableTMCommitted(committed) => {
+                let query_id = committed.query_id;
+                let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+                es.handle_committed_plm(self);
+              }
+              MasterPLm::DropTableTMAborted(aborted) => {
+                let query_id = aborted.query_id;
+                let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+                es.handle_aborted_plm(self);
+              }
+              MasterPLm::DropTableTMClosed(closed) => {
+                let query_id = closed.query_id;
+                let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+                es.handle_closed_plm(self);
+              }
+            }
+          }
+
+          // Run the Main Loop
+          self.run_main_loop(statuses);
+
+          // Inform all ESs in WaitingInserting and start inserting a PLm.
+          for (_, es) in &mut statuses.create_table_tm_ess {
+            es.starting_insert(self);
+          }
+          for (_, es) in &mut statuses.alter_table_tm_ess {
+            if let AlterTableTMS::WaitingInsertTMPrepared = &es.state {
+              self.master_bundle.push(MasterPLm::AlterTableTMPrepared(plm::AlterTableTMPrepared {
+                query_id: es.query_id.clone(),
+                table_path: es.table_path.clone(),
+                alter_op: es.alter_op.clone(),
+              }));
+              es.starting_insert(self);
+            }
+          }
+          for (_, es) in &mut statuses.drop_table_tm_ess {
+            if let DropTableTMS::WaitingInsertTMPrepared = &es.state {
+              self.master_bundle.push(MasterPLm::DropTableTMPrepared(plm::DropTableTMPrepared {
+                query_id: es.query_id.clone(),
+                table_path: es.table_path.clone(),
+              }));
+              es.starting_insert(self);
+            }
+          }
+        } else {
+          // TODO: handle Follower case
+        }
+      }
       MasterForwardMsg::MasterExternalReq(message) => {
         match message {
           MasterExternalReq::PerformExternalDDLQuery(external_query) => {
@@ -392,35 +502,110 @@ impl<T: IOTypes> MasterContext<T> {
   fn run_main_loop_once(&mut self, statuses: &mut Statuses) -> bool {
     // First, we accumulate all TablePaths that currently have a a DDL Query running for them.
     let mut tables_being_modified = HashSet::<TablePath>::new();
-    for (_, create_table_es) in &statuses.create_table_tm_ess {
-      if let CreateTableTMS::Start = &create_table_es.state {
+    for (_, es) in &statuses.create_table_tm_ess {
+      if let CreateTableTMS::Start = &es.state {
       } else {
-        tables_being_modified.insert(create_table_es.table_path.clone());
+        tables_being_modified.insert(es.table_path.clone());
       }
     }
 
-    for (_, alter_table_es) in &statuses.alter_table_tm_ess {
-      if let AlterTableTMS::Start = &alter_table_es.state {
+    for (_, es) in &statuses.alter_table_tm_ess {
+      if let AlterTableTMS::Start = &es.state {
       } else {
-        tables_being_modified.insert(alter_table_es.table_path.clone());
+        tables_being_modified.insert(es.table_path.clone());
       }
     }
 
-    for (_, drop_table_es) in &statuses.drop_table_tm_ess {
-      if let DropTableTMS::Start = &drop_table_es.state {
+    for (_, es) in &statuses.drop_table_tm_ess {
+      if let DropTableTMS::Start = &es.state {
       } else {
-        tables_being_modified.insert(drop_table_es.table_path.clone());
+        tables_being_modified.insert(es.table_path.clone());
       }
     }
 
     // Move CreateTableESs forward for TablePaths not in `tables_being_modified`
-    for (_, create_table_es) in &statuses.create_table_tm_ess {
-      if let CreateTableTMS::Start = &create_table_es.state {
-        if !tables_being_modified.contains(&create_table_es.table_path) {
-          // Check table Validity
-          // self.table_generation
-          // Move it forward
-          tables_being_modified.insert(create_table_es.table_path.clone());
+    {
+      let mut ess_to_remove = Vec::<QueryId>::new();
+      for (_, es) in &mut statuses.create_table_tm_ess {
+        if let CreateTableTMS::Start = &es.state {
+          if !tables_being_modified.contains(&es.table_path) {
+            // Check Table Validity
+            if self.table_generation.get_last_version(&es.table_path).is_none() {
+              // If the table does not exist, we move the ES to WaitingInsertTMPrepared.
+              es.state = CreateTableTMS::WaitingInsertTMPrepared;
+              tables_being_modified.insert(es.table_path.clone());
+              continue;
+            }
+
+            // Otherwise, we abort the CreateTableES.
+            ess_to_remove.push(es.query_id.clone())
+          }
+        }
+      }
+      for query_id in ess_to_remove {
+        let es = statuses.create_table_tm_ess.remove(&query_id).unwrap();
+        if let Some(response_data) = &es.response_data {
+          response_invalid_ddl::<T>(&mut self.network_output, response_data);
+        }
+      }
+    }
+
+    // Move AlterTableESs forward for TablePaths not in `tables_being_modified`
+    {
+      let mut ess_to_remove = Vec::<QueryId>::new();
+      for (_, es) in &mut statuses.alter_table_tm_ess {
+        if let AlterTableTMS::Start = &es.state {
+          if !tables_being_modified.contains(&es.table_path) {
+            // Check Column Validity
+            if let Some(gen) = self.table_generation.get_last_version(&es.table_path) {
+              // The Table Exists.
+              let schema = &self.db_schema.get(&(es.table_path.clone(), gen.clone())).unwrap();
+              let contains_col = weak_contains_col_latest(schema, &es.alter_op.col_name);
+              let add_col = es.alter_op.maybe_col_type.is_some();
+              if contains_col && !add_col || !contains_col && add_col {
+                // We have Column Validity, so we move it to WaitingInsertTMPrepared.
+                es.state = AlterTableTMS::WaitingInsertTMPrepared;
+                tables_being_modified.insert(es.table_path.clone());
+                continue;
+              }
+            }
+
+            // We do not have Column Validity, so we abort.
+            ess_to_remove.push(es.query_id.clone())
+          }
+        }
+      }
+      for query_id in ess_to_remove {
+        let es = statuses.alter_table_tm_ess.remove(&query_id).unwrap();
+        if let Some(response_data) = &es.response_data {
+          response_invalid_ddl::<T>(&mut self.network_output, response_data);
+        }
+      }
+    }
+
+    // Move DropTableESs forward for TablePaths not in `tables_being_modified`
+    {
+      let mut ess_to_remove = Vec::<QueryId>::new();
+      for (_, es) in &mut statuses.drop_table_tm_ess {
+        if let DropTableTMS::Start = &es.state {
+          if !tables_being_modified.contains(&es.table_path) {
+            // Check Table Validity
+            if self.table_generation.get_last_version(&es.table_path).is_some() {
+              // If the table exists, we move the ES to WaitingInsertTMPrepared.
+              es.state = DropTableTMS::WaitingInsertTMPrepared;
+              tables_being_modified.insert(es.table_path.clone());
+              continue;
+            }
+
+            // Otherwise, we abort the DropTableES.
+            ess_to_remove.push(es.query_id.clone())
+          }
+        }
+      }
+      for query_id in ess_to_remove {
+        let es = statuses.drop_table_tm_ess.remove(&query_id).unwrap();
+        if let Some(response_data) = &es.response_data {
+          response_invalid_ddl::<T>(&mut self.network_output, response_data);
         }
       }
     }
@@ -480,37 +665,12 @@ impl<T: IOTypes> MasterContext<T> {
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: AlterTableAction,
+    action: AlterTableTMAction,
   ) {
     match action {
-      AlterTableAction::Wait => {}
-      AlterTableAction::Success(new_timestamp) => {
-        // let es = statuses.alter_table_ess.remove(&query_id).unwrap();
-        // self.external_request_id_map.remove(&es.request_id);
-        // // Send off a success message to the Externa.
-        // self.network_output.send(
-        //   &es.sender_eid,
-        //   msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
-        //     msg::ExternalDDLQuerySuccess {
-        //       request_id: es.request_id.clone(),
-        //       timestamp: new_timestamp,
-        //     },
-        //   )),
-        // );
-      }
-      AlterTableAction::ColumnInvalid => {
-        // let es = statuses.alter_table_ess.remove(&query_id).unwrap();
-        // self.external_request_id_map.remove(&es.request_id);
-        // // Send off a failure message to the External.
-        // self.network_output.send(
-        //   &es.sender_eid,
-        //   msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-        //     msg::ExternalDDLQueryAborted {
-        //       request_id: es.request_id.clone(),
-        //       payload: ExternalDDLQueryAbortData::InvalidAlterOp,
-        //     },
-        //   )),
-        // );
+      AlterTableTMAction::Wait => {}
+      AlterTableTMAction::Exit => {
+        statuses.alter_table_tm_ess.remove(&query_id);
       }
     }
   }
@@ -522,4 +682,26 @@ impl<T: IOTypes> MasterContext<T> {
     //   es.exit_and_clean_up(self);
     // }
   }
+
+  /// Returns true iff this is the Leader.
+  pub fn is_leader(&self) -> bool {
+    let lid = self.leader_map.get(&PaxosGroupId::Master).unwrap();
+    lid.eid == self.this_eid
+  }
+}
+
+/// Send `InvalidDDLQuery` to the given `ResponseData`
+fn response_invalid_ddl<T: IOTypes>(
+  network_output: &mut T::NetworkOutT,
+  response_data: &ResponseData,
+) {
+  network_output.send(
+    &response_data.sender_eid,
+    msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+      msg::ExternalDDLQueryAborted {
+        request_id: response_data.request_id.clone(),
+        payload: ExternalDDLQueryAbortData::InvalidDDLQuery,
+      },
+    )),
+  )
 }

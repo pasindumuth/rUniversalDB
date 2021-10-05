@@ -629,8 +629,9 @@ pub struct CancelExternalDDLQuery {
 pub enum ExternalDDLQueryAbortData {
   NonUniqueRequestId,
   ParseError(String),
-  InvalidAlterOp,
+  InvalidDDLQuery,
   ConfirmCancel,
+  NodeDied,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

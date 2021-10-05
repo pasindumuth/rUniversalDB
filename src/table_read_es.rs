@@ -11,9 +11,10 @@ use crate::model::common::{
   TransTableName,
 };
 use crate::model::message as msg;
+use crate::server::ServerContextBase;
 use crate::server::{
   contains_col, evaluate_super_simple_select, mk_eval_error, weak_contains_col, CommonQuery,
-  ContextConstructor, ServerContext,
+  ContextConstructor, SlaveServerContext,
 };
 use crate::storage::SimpleStorageView;
 use crate::tablet::{

@@ -40,7 +40,7 @@ use crate::multiversion_map::MVM;
 use crate::paxos::LeaderChanged;
 use crate::server::{
   are_cols_locked, contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error,
-  CommonQuery, ContextConstructor, LocalTable, ServerContext,
+  CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
 };
 use crate::storage::{
   commit_to_storage, compress_updates_views, GenericMVTable, GenericTable, StorageView,
@@ -620,7 +620,7 @@ impl<T: IOTypes> TabletState<T> {
         this_tablet_group_id,
         sub_node_path: CTSubNodePath::Tablet(TabletGroupId("".to_string())),
         this_eid: EndpointId("".to_string()),
-        gossip: gossip,
+        gossip,
         leader_map: Default::default(),
         storage: GenericMVTable::new(),
         this_table_path,
@@ -653,8 +653,8 @@ impl<T: IOTypes> TabletState<T> {
 }
 
 impl<T: IOTypes> TabletContext<T> {
-  pub fn ctx(&mut self) -> ServerContext<T> {
-    ServerContext {
+  pub fn ctx(&mut self) -> SlaveServerContext<T> {
+    SlaveServerContext {
       rand: &mut self.rand,
       clock: &mut self.clock,
       network_output: &mut self.network_output,
@@ -668,9 +668,9 @@ impl<T: IOTypes> TabletContext<T> {
   fn handle_input(&mut self, statuses: &mut Statuses, tablet_input: TabletForwardMsg) {
     match tablet_input {
       TabletForwardMsg::TabletBundle(bundle) => {
-        for plm in bundle {
+        for paxos_log_msg in bundle {
           // TODO: This code is only if this is the leader
-          match plm {
+          match paxos_log_msg {
             TabletPLm::LockedCols(locked_cols) => {
               // Increase TableSchema LATs
               for col_name in &locked_cols.cols {

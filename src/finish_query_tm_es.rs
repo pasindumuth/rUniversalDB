@@ -5,6 +5,7 @@ use crate::model::common::{
   proc, EndpointId, QueryId, RequestId, TQueryPath, TableView, Timestamp,
 };
 use crate::model::message as msg;
+use crate::server::ServerContextBase;
 use std::collections::{HashMap, HashSet};
 
 // -----------------------------------------------------------------------------------------------

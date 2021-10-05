@@ -9,35 +9,151 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use sqlparser::test_utils::table;
+use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 use std::rc::Rc;
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
-//  Common Server Contexts
+//  Server Context Base
 // -----------------------------------------------------------------------------------------------
 
 /// This is used to present a consistent view of all servers in the system, include
 /// the Tablet, Slave, and Master. Fundamentally, in consists of basic IOTypes and the
 /// network configuration.
-pub struct CoreServerContext<'a, T: IOTypes> {
-  /// IO Objects.
-  pub rand: &'a mut T::RngCoreT,
-  pub clock: &'a mut T::ClockT,
-  pub network_output: &'a mut T::NetworkOutT,
+pub trait ServerContextBase<T: IOTypes> {
+  // Getters
 
-  /// Distribution
-  pub sharding_config: &'a HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: &'a HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: &'a HashMap<SlaveGroupId, Vec<EndpointId>>,
+  fn leader_map<'a>(&'a self) -> &'a HashMap<PaxosGroupId, LeadershipId>;
+  fn this_gid(&self) -> PaxosGroupId;
+  fn network_output<'a>(&'a mut self) -> &'a mut T::NetworkOutT;
+
+  // Send utilities
+
+  fn send_to_slave_leadership(
+    &mut self,
+    payload: msg::SlaveRemotePayload,
+    to_sid: SlaveGroupId,
+    to_lid: LeadershipId,
+  ) {
+    let to_gid = to_sid.to_gid();
+
+    let this_gid = self.this_gid();
+    let this_lid = self.leader_map().get(&this_gid).unwrap();
+
+    let remote_message = msg::RemoteMessage {
+      payload,
+      from_lid: this_lid.clone(),
+      from_gid: this_gid,
+      to_lid: to_lid.clone(),
+      to_gid: to_gid,
+    };
+
+    self.network_output().send(
+      &to_lid.eid,
+      msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteMessage(remote_message)),
+    );
+  }
+
+  fn send_to_slave_common(&mut self, payload: msg::SlaveRemotePayload, to_sid: SlaveGroupId) {
+    let to_lid = self.leader_map().get(&to_sid.to_gid()).unwrap().clone();
+    self.send_to_slave_leadership(payload, to_sid, to_lid);
+  }
+
+  // send_to_c
+
+  fn send_to_c_lid(
+    &mut self,
+    node_path: CNodePath,
+    query: msg::CoordMessage,
+    to_lid: LeadershipId,
+  ) {
+    let CSubNodePath::Coord(cid) = node_path.sub;
+    self.send_to_slave_leadership(
+      msg::SlaveRemotePayload::CoordMessage(cid, query),
+      node_path.sid.clone(),
+      to_lid,
+    );
+  }
+
+  fn send_to_c(&mut self, node_path: CNodePath, query: msg::CoordMessage) {
+    let CSubNodePath::Coord(cid) = node_path.sub;
+    self.send_to_slave_common(
+      msg::SlaveRemotePayload::CoordMessage(cid, query),
+      node_path.sid.clone(),
+    );
+  }
+
+  // send_to_t
+
+  fn send_to_t_lid(
+    &mut self,
+    node_path: TNodePath,
+    query: msg::TabletMessage,
+    to_lid: LeadershipId,
+  ) {
+    let TSubNodePath::Tablet(tid) = node_path.sub;
+    self.send_to_slave_leadership(
+      msg::SlaveRemotePayload::TabletMessage(tid, query),
+      node_path.sid.clone(),
+      to_lid,
+    );
+  }
+
+  fn send_to_t(&mut self, node_path: TNodePath, query: msg::TabletMessage) {
+    let TSubNodePath::Tablet(tid) = node_path.sub;
+    self.send_to_slave_common(
+      msg::SlaveRemotePayload::TabletMessage(tid, query),
+      node_path.sid.clone(),
+    );
+  }
+
+  // send_to_ct
+
+  fn send_to_ct_lid(&mut self, node_path: CTNodePath, query: CommonQuery, to_lid: LeadershipId) {
+    self.send_to_slave_leadership(
+      query.into_remote_payload(node_path.sub),
+      node_path.sid.clone(),
+      to_lid,
+    );
+  }
+
+  fn send_to_ct(&mut self, node_path: CTNodePath, query: CommonQuery) {
+    self.send_to_slave_common(query.into_remote_payload(node_path.sub), node_path.sid.clone());
+  }
+
+  // send_to_master
+
+  fn send_to_master(&mut self, payload: msg::MasterRemotePayload) {
+    let master_gid = PaxosGroupId::Master;
+    let master_lid = self.leader_map().get(&master_gid).unwrap().clone();
+
+    let this_gid = self.this_gid();
+    let this_lid = self.leader_map().get(&this_gid).unwrap();
+
+    let remote_message = msg::RemoteMessage {
+      payload,
+      from_lid: this_lid.clone(),
+      from_gid: this_gid,
+      to_lid: master_lid.clone(),
+      to_gid: master_gid,
+    };
+
+    self.network_output().send(
+      &master_lid.eid,
+      msg::NetworkMessage::Master(msg::MasterMessage::RemoteMessage(remote_message)),
+    );
+  }
 }
 
-impl<'a, T: IOTypes> CoreServerContext<'a, T> {}
+// -----------------------------------------------------------------------------------------------
+//  Slave Server Context
+// -----------------------------------------------------------------------------------------------
 
 /// This is used to present a consistent view of Tablets and Slave to shared ESs so
 /// that they can execute agnotisticly.
-pub struct ServerContext<'a, T: IOTypes> {
+pub struct SlaveServerContext<'a, T: IOTypes> {
   /// IO Objects.
   pub rand: &'a mut T::RngCoreT,
   pub clock: &'a mut T::ClockT,
@@ -54,139 +170,7 @@ pub struct ServerContext<'a, T: IOTypes> {
   pub gossip: &'a mut Arc<GossipData>,
 }
 
-impl<'a, T: IOTypes> ServerContext<'a, T> {
-  pub fn core_ctx(&mut self) -> CoreServerContext<T> {
-    CoreServerContext {
-      rand: &mut self.rand,
-      clock: &mut self.clock,
-      network_output: &mut self.network_output,
-      sharding_config: &self.gossip.sharding_config,
-      tablet_address_config: &self.gossip.tablet_address_config,
-      slave_address_config: &self.gossip.slave_address_config,
-    }
-  }
-
-  pub fn send_to_slave_leadership(
-    &mut self,
-    payload: msg::SlaveRemotePayload,
-    to_sid: SlaveGroupId,
-    to_lid: LeadershipId,
-  ) {
-    let to_gid = to_sid.to_gid();
-
-    let this_gid = PaxosGroupId::Slave(self.this_slave_group_id.clone());
-    let this_lid = self.leader_map.get(&this_gid).unwrap();
-
-    let remote_message = msg::RemoteMessage {
-      payload,
-      from_lid: this_lid.clone(),
-      from_gid: this_gid,
-      to_lid: to_lid.clone(),
-      to_gid: to_gid,
-    };
-
-    self.network_output.send(
-      &to_lid.eid,
-      msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteMessage(remote_message)),
-    );
-  }
-
-  pub fn send_to_slave_common(&mut self, payload: msg::SlaveRemotePayload, to_sid: SlaveGroupId) {
-    let to_lid = self.leader_map.get(&to_sid.to_gid()).unwrap().clone();
-    self.send_to_slave_leadership(payload, to_sid, to_lid);
-  }
-
-  // send_to_c
-
-  pub fn send_to_c_lid(
-    &mut self,
-    node_path: CNodePath,
-    query: msg::CoordMessage,
-    to_lid: LeadershipId,
-  ) {
-    let CSubNodePath::Coord(cid) = node_path.sub;
-    self.send_to_slave_leadership(
-      msg::SlaveRemotePayload::CoordMessage(cid, query),
-      node_path.sid.clone(),
-      to_lid,
-    );
-  }
-
-  pub fn send_to_c(&mut self, node_path: CNodePath, query: msg::CoordMessage) {
-    let CSubNodePath::Coord(cid) = node_path.sub;
-    self.send_to_slave_common(
-      msg::SlaveRemotePayload::CoordMessage(cid, query),
-      node_path.sid.clone(),
-    );
-  }
-
-  // send_to_t
-
-  pub fn send_to_t_lid(
-    &mut self,
-    node_path: TNodePath,
-    query: msg::TabletMessage,
-    to_lid: LeadershipId,
-  ) {
-    let TSubNodePath::Tablet(tid) = node_path.sub;
-    self.send_to_slave_leadership(
-      msg::SlaveRemotePayload::TabletMessage(tid, query),
-      node_path.sid.clone(),
-      to_lid,
-    );
-  }
-
-  pub fn send_to_t(&mut self, node_path: TNodePath, query: msg::TabletMessage) {
-    let TSubNodePath::Tablet(tid) = node_path.sub;
-    self.send_to_slave_common(
-      msg::SlaveRemotePayload::TabletMessage(tid, query),
-      node_path.sid.clone(),
-    );
-  }
-
-  // send_to_ct
-
-  pub fn send_to_ct_lid(
-    &mut self,
-    node_path: CTNodePath,
-    query: CommonQuery,
-    to_lid: LeadershipId,
-  ) {
-    self.send_to_slave_leadership(
-      query.into_remote_payload(node_path.sub),
-      node_path.sid.clone(),
-      to_lid,
-    );
-  }
-
-  pub fn send_to_ct(&mut self, node_path: CTNodePath, query: CommonQuery) {
-    self.send_to_slave_common(query.into_remote_payload(node_path.sub), node_path.sid.clone());
-  }
-
-  // send_to_master
-
-  /// Send a RemotePlayload to the Master Group
-  pub fn send_to_master(&mut self, payload: msg::MasterRemotePayload) {
-    let master_gid = PaxosGroupId::Master;
-    let master_lid = self.leader_map.get(&master_gid).unwrap();
-
-    let this_gid = PaxosGroupId::Slave(self.this_slave_group_id.clone());
-    let this_lid = self.leader_map.get(&this_gid).unwrap();
-
-    let remote_message = msg::RemoteMessage {
-      payload,
-      from_lid: this_lid.clone(),
-      from_gid: this_gid,
-      to_lid: master_lid.clone(),
-      to_gid: master_gid,
-    };
-
-    self.network_output.send(
-      &master_lid.eid,
-      msg::NetworkMessage::Master(msg::MasterMessage::RemoteMessage(remote_message)),
-    );
-  }
-
+impl<'a, T: IOTypes> SlaveServerContext<'a, T> {
   /// Construct a `NodePath` from a `NodeGroupId`.
   /// NOTE: the `tid` must exist in the `gossip` at this point.
   pub fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
@@ -257,6 +241,59 @@ impl<'a, T: IOTypes> ServerContext<'a, T> {
       }
       Err(_) => panic!(),
     }
+  }
+}
+
+impl<'a, T: IOTypes> ServerContextBase<T> for SlaveServerContext<'a, T> {
+  fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
+    self.leader_map
+  }
+
+  /// Gets the `PaxosGroupId` of the Slave.
+  fn this_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.this_slave_group_id.clone())
+  }
+
+  fn network_output(&mut self) -> &mut T::NetworkOutT {
+    self.network_output
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Master Server Context
+// -----------------------------------------------------------------------------------------------
+
+/// This is used to present a consistent view of Master to shared ESs so that they can
+/// execute agnotisticly.
+pub struct MasterServerContext<'a, T: IOTypes> {
+  /// IO Objects.
+  pub rand: &'a mut T::RngCoreT,
+  pub clock: &'a mut T::ClockT,
+  pub network_output: &'a mut T::NetworkOutT,
+
+  /// Distribution
+  pub sharding_config: &'a HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: &'a HashMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: &'a HashMap<SlaveGroupId, Vec<EndpointId>>,
+
+  /// Paxos
+  pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
+}
+
+impl<'a, T: IOTypes> MasterServerContext<'a, T> {}
+
+impl<'a, T: IOTypes> ServerContextBase<T> for MasterServerContext<'a, T> {
+  fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
+    self.leader_map
+  }
+
+  /// Gets the `PaxosGroupId` of the Master.
+  fn this_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Master
+  }
+
+  fn network_output(&mut self) -> &mut T::NetworkOutT {
+    self.network_output
   }
 }
 
@@ -454,6 +491,13 @@ pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Times
 pub fn weak_contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
   lookup_pos(&table_schema.key_cols, col).is_some()
     || table_schema.val_cols.static_read(col, *timestamp).is_some()
+}
+
+/// Computes whether `col` is in `table_schema` at the latest time which `col` had been modified
+/// in the schema. This is not idempotent.
+pub fn weak_contains_col_latest(table_schema: &TableSchema, col: &ColName) -> bool {
+  lookup_pos(&table_schema.key_cols, col).is_some()
+    || table_schema.val_cols.get_last_version(col).is_some()
 }
 
 /// Returns true iff the `col` is either a KeyCol in `table_schema`, or a ValCol

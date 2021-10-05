@@ -12,6 +12,7 @@ use crate::model::message as msg;
 use crate::ms_table_read_es::MSTableReadES;
 use crate::server::{
   contains_col, evaluate_update, mk_eval_error, weak_contains_col, CommonQuery, ContextConstructor,
+  ServerContextBase,
 };
 use crate::storage::{GenericTable, MSStorageView};
 use crate::tablet::{

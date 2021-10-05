@@ -13,7 +13,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::model::message::MasteryQueryPlanningResult;
-use crate::server::{weak_contains_col, CommonQuery};
+use crate::server::{weak_contains_col, CommonQuery, ServerContextBase};
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{HashMap, HashSet};
 
