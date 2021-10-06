@@ -23,6 +23,7 @@ use crate::gr_query_es::{
   GRExecutionS, GRQueryAction, GRQueryConstructorView, GRQueryES, GRQueryPlan, ReadStage,
   SubqueryComputableSql,
 };
+use crate::model::common::proc::DropTable;
 use crate::model::common::{
   proc, CQueryPath, CSubNodePath, CTQueryPath, CTSubNodePath, ColType, ColValN, Context,
   ContextRow, ContextSchema, Gen, LeadershipId, NodeGroupId, PaxosGroupId, TNodePath, TQueryPath,
@@ -731,27 +732,39 @@ impl<T: IOTypes> TabletContext<T> {
               }
               TabletPLm::AlterTablePrepared(_) => {
                 let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                es.handle_prepared_plm(self);
+                let action = es.handle_prepared_plm(self);
+                let query_id = es.query_id.clone();
+                self.handle_alter_table_es_action(statuses, query_id, action);
               }
               TabletPLm::AlterTableCommitted(committed_plm) => {
                 let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                es.handle_committed_plm(self, committed_plm);
+                let action = es.handle_committed_plm(self, committed_plm);
+                let query_id = es.query_id.clone();
+                self.handle_alter_table_es_action(statuses, query_id, action);
               }
               TabletPLm::AlterTableAborted(_) => {
                 let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self);
+                let query_id = es.query_id.clone();
+                self.handle_alter_table_es_action(statuses, query_id, action);
               }
               TabletPLm::DropTablePrepared(_) => {
                 let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                es.handle_prepared_plm(self);
+                let action = es.handle_prepared_plm(self);
+                let query_id = es.query_id.clone();
+                self.handle_drop_table_es_action(statuses, query_id, action);
               }
               TabletPLm::DropTableCommitted(committed_plm) => {
                 let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                es.handle_committed_plm(self, committed_plm);
+                let action = es.handle_committed_plm(self, committed_plm);
+                let query_id = es.query_id.clone();
+                self.handle_drop_table_es_action(statuses, query_id, action);
               }
               TabletPLm::DropTableAborted(_) => {
                 let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self);
+                let query_id = es.query_id.clone();
+                self.handle_drop_table_es_action(statuses, query_id, action);
               }
             }
           }
@@ -773,8 +786,99 @@ impl<T: IOTypes> TabletContext<T> {
             }
             DDLES::Dropped(_) => {}
           }
+
+          // TODO: dispatch bundle for insertion
         } else {
-          // TODO: handle Follower case
+          for paxos_log_msg in bundle {
+            match paxos_log_msg {
+              TabletPLm::LockedCols(locked_cols) => {
+                // Increase TableSchema LATs
+                for col_name in &locked_cols.cols {
+                  if lookup(&self.table_schema.key_cols, col_name).is_none() {
+                    self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp);
+                  }
+                }
+              }
+              TabletPLm::ReadProtected(read_protected) => {
+                btree_multimap_insert(
+                  &mut self.read_protected,
+                  &read_protected.timestamp,
+                  read_protected.region,
+                );
+              }
+              TabletPLm::FinishQueryPrepared(prepared) => {
+                let query_id = prepared.query_id;
+                let timestamp = prepared.timestamp;
+                let region_lock = prepared.region_lock;
+                self.prepared_writes.insert(timestamp.clone(), region_lock.clone());
+                statuses.finish_query_ess.insert(
+                  query_id.clone(),
+                  FinishQueryES::FinishQueryExecuting(FinishQueryExecuting {
+                    query_id,
+                    tm: prepared.tm,
+                    all_rms: prepared.all_rms,
+                    region_lock,
+                    timestamp,
+                    update_view: prepared.update_view,
+                    state: Paxos2PCRMState::Follower,
+                  }),
+                );
+              }
+              TabletPLm::FinishQueryCommitted(committed) => {
+                let query_id = committed.query_id;
+                let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+                let action = finish_query_es.handle_committed_plm(self);
+                self.handle_finish_query_es_action(statuses, query_id, action);
+              }
+              TabletPLm::FinishQueryAborted(aborted) => {
+                let query_id = aborted.query_id;
+                let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+                let action = finish_query_es.handle_aborted_plm(self);
+                self.handle_finish_query_es_action(statuses, query_id, action);
+              }
+              TabletPLm::AlterTablePrepared(prepared) => {
+                debug_assert!(matches!(statuses.ddl_es, DDLES::None));
+                statuses.ddl_es = DDLES::Alter(AlterTableES {
+                  query_id: prepared.query_id,
+                  alter_op: prepared.alter_op,
+                  prepared_timestamp: prepared.timestamp,
+                  state: State::Follower,
+                });
+              }
+              TabletPLm::AlterTableCommitted(committed_plm) => {
+                let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
+                let action = es.handle_committed_plm(self, committed_plm);
+                let query_id = es.query_id.clone();
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
+              TabletPLm::AlterTableAborted(_) => {
+                let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
+                let action = es.handle_aborted_plm(self);
+                let query_id = es.query_id.clone();
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
+              TabletPLm::DropTablePrepared(prepared) => {
+                debug_assert!(matches!(statuses.ddl_es, DDLES::None));
+                statuses.ddl_es = DDLES::Drop(DropTableES {
+                  query_id: prepared.query_id,
+                  prepared_timestamp: prepared.timestamp,
+                  state: State::Follower,
+                });
+              }
+              TabletPLm::DropTableCommitted(committed_plm) => {
+                let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
+                let action = es.handle_committed_plm(self, committed_plm);
+                let query_id = es.query_id.clone();
+                self.handle_drop_table_es_action(statuses, query_id, action);
+              }
+              TabletPLm::DropTableAborted(_) => {
+                let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
+                let action = es.handle_aborted_plm(self);
+                let query_id = es.query_id.clone();
+                self.handle_drop_table_es_action(statuses, query_id, action);
+              }
+            }
+          }
         }
       }
       TabletForwardMsg::TabletMessage(message) => {
@@ -1307,9 +1411,8 @@ impl<T: IOTypes> TabletContext<T> {
           DDLES::Dropped(_) => {}
         }
 
-        if self.is_leader() {
-          // This means this node lost Leadership.
-
+        // Check if this node just lost Leadership
+        if !self.is_leader() {
           // Wink away all TM ESs.
           statuses.gr_query_ess.clear();
           statuses.table_read_ess.clear();

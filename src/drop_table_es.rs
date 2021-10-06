@@ -162,10 +162,12 @@ impl DropTableES {
     DropTableAction::Wait
   }
 
-  pub fn leader_changed<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> DropTableAction {
+  pub fn leader_changed<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> DropTableAction {
     match &self.state {
       State::Follower => {
-        self.state = State::Prepared;
+        if ctx.is_leader() {
+          self.state = State::Prepared;
+        }
         DropTableAction::Wait
       }
       State::WaitingInsertingPrepared => DropTableAction::Aborted,

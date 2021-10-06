@@ -193,10 +193,12 @@ impl AlterTableES {
     AlterTableAction::Wait
   }
 
-  pub fn leader_changed<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> AlterTableAction {
+  pub fn leader_changed<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> AlterTableAction {
     match &self.state {
       State::Follower => {
-        self.state = State::Prepared;
+        if ctx.is_leader() {
+          self.state = State::Prepared;
+        }
         AlterTableAction::Wait
       }
       State::WaitingInsertingPrepared => AlterTableAction::Exit,

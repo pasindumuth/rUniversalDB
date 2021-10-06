@@ -355,15 +355,17 @@ impl AlterTableTMES {
     match &self.state {
       AlterTableTMS::Start => AlterTableTMAction::Wait,
       AlterTableTMS::Follower(follower) => {
-        match follower {
-          Follower::Preparing => {
-            self.advance_to_prepared(ctx);
-          }
-          Follower::Committed(commit_timestamp) => {
-            self.advance_to_committed(ctx, commit_timestamp.clone());
-          }
-          Follower::Aborted => {
-            self.advance_to_aborted(ctx);
+        if ctx.is_leader() {
+          match follower {
+            Follower::Preparing => {
+              self.advance_to_prepared(ctx);
+            }
+            Follower::Committed(commit_timestamp) => {
+              self.advance_to_committed(ctx, commit_timestamp.clone());
+            }
+            Follower::Aborted => {
+              self.advance_to_aborted(ctx);
+            }
           }
         }
         AlterTableTMAction::Wait
