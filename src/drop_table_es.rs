@@ -23,15 +23,14 @@ pub enum DropTableES {
 pub enum DropTableAction {
   /// This tells the parent Server to wait.
   Wait,
+  Exit,
 }
 // -----------------------------------------------------------------------------------------------
 //  Implementation
 // -----------------------------------------------------------------------------------------------
 
 impl DropTableES {
-  pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> DropTableAction {
-    DropTableAction::Wait
-  }
+  // STMPaxos2PC messages
 
   pub fn handle_prepare<T: IOTypes>(
     &mut self,
@@ -54,6 +53,14 @@ impl DropTableES {
     abort: msg::DropTableAbort,
     ctx: &mut TabletContext<T>,
   ) -> DropTableAction {
+    DropTableAction::Wait
+  }
+
+  // STMPaxos2PC PLm Insertions
+
+  // Other
+
+  pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> DropTableAction {
     DropTableAction::Wait
   }
 }

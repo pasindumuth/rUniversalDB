@@ -354,13 +354,13 @@ impl<T: IOTypes> MasterContext<T> {
 
           // Inform all ESs in WaitingInserting and start inserting a PLm.
           for (_, es) in &mut statuses.create_table_tm_ess {
-            es.starting_insert(self);
+            es.start_inserting(self);
           }
           for (_, es) in &mut statuses.alter_table_tm_ess {
-            es.starting_insert(self);
+            es.start_inserting(self);
           }
           for (_, es) in &mut statuses.drop_table_tm_ess {
-            es.starting_insert(self);
+            es.start_inserting(self);
           }
         } else {
           // TODO: handle Follower case

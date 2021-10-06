@@ -102,7 +102,7 @@ impl CreateTableTMES {
     CreateTableTMAction::Wait
   }
 
-  pub fn starting_insert<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> CreateTableTMAction {
+  pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> CreateTableTMAction {
     match self.state {
       CreateTableTMS::WaitingInsertTMPrepared => {
         ctx.master_bundle.push(MasterPLm::CreateTableTMPrepared(plm::CreateTableTMPrepared {

@@ -1,4 +1,4 @@
-use crate::alter_table_es::{AlterTableES, State};
+use crate::alter_table_es::{AlterTableAction, AlterTableES, State};
 use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, collect_update_subqueries,
   node_external_trans_tables, nodes_external_cols, nodes_external_trans_tables, ColUsagePlanner,
@@ -10,8 +10,8 @@ use crate::common::{
   mk_qid, remove_item, Clock, ColBound, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
   PolyColBound, SingleBound, TMStatus, TableRegion, TableSchema,
 };
-use crate::drop_table_es::DropExecuting;
 use crate::drop_table_es::DropTableES;
+use crate::drop_table_es::{DropExecuting, DropTableAction};
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
   construct_kb_expr, does_intersect, evaluate_c_expr, is_true, CExpr, EvalError,
@@ -308,7 +308,7 @@ pub struct Statuses {
   ms_table_write_ess: HashMap<QueryId, MSTableWriteESWrapper>,
 
   // DDL
-  ddl_es: Option<(QueryId, DDLES)>,
+  ddl_es: Option<DDLES>,
 }
 
 #[derive(Debug)]
@@ -668,67 +668,95 @@ impl<T: IOTypes> TabletContext<T> {
   fn handle_input(&mut self, statuses: &mut Statuses, tablet_input: TabletForwardMsg) {
     match tablet_input {
       TabletForwardMsg::TabletBundle(bundle) => {
-        for paxos_log_msg in bundle {
-          // TODO: This code is only if this is the leader
-          match paxos_log_msg {
-            TabletPLm::LockedCols(locked_cols) => {
-              // Increase TableSchema LATs
-              for col_name in &locked_cols.cols {
-                if lookup(&self.table_schema.key_cols, col_name).is_none() {
-                  self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp);
+        if self.is_leader() {
+          for paxos_log_msg in bundle {
+            match paxos_log_msg {
+              TabletPLm::LockedCols(locked_cols) => {
+                // Increase TableSchema LATs
+                for col_name in &locked_cols.cols {
+                  if lookup(&self.table_schema.key_cols, col_name).is_none() {
+                    self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp);
+                  }
+                }
+
+                // Remove RequestedLockedCols and grant GlobalLockedCols
+                let req = self.inserting_locked_cols.remove(&locked_cols.query_id).unwrap();
+                self.grant_global_locked_cols(statuses, req.orig_p, req.query_id);
+              }
+              TabletPLm::ReadProtected(read_protected) => {
+                let req = self
+                  .remove_inserting_read_protected_request(
+                    &read_protected.timestamp,
+                    &read_protected.query_id,
+                  )
+                  .unwrap();
+                btree_multimap_insert(
+                  &mut self.read_protected,
+                  &read_protected.timestamp,
+                  read_protected.region,
+                );
+
+                // Inform the originator.
+                let query_id = req.orig_p.query_id;
+                if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
+                  let action = read.es.global_read_protected(self, req.query_id);
+                  self.handle_read_es_action(statuses, query_id, action);
                 }
               }
-
-              // Remove RequestedLockedCols and grant GlobalLockedCols
-              let req = self.inserting_locked_cols.remove(&locked_cols.query_id).unwrap();
-              self.grant_global_locked_cols(statuses, req.orig_p, req.query_id);
-            }
-            TabletPLm::ReadProtected(read_protected) => {
-              let req = self
-                .remove_inserting_read_protected_request(
-                  &read_protected.timestamp,
-                  &read_protected.query_id,
-                )
-                .unwrap();
-              btree_multimap_insert(
-                &mut self.read_protected,
-                &read_protected.timestamp,
-                read_protected.region,
-              );
-
-              // Inform the originator.
-              let query_id = req.orig_p.query_id;
-              if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
-                // TableReadES
-                let action = read.es.global_read_protected(self, req.query_id);
-                self.handle_read_es_action(statuses, query_id, action);
+              TabletPLm::FinishQueryPrepared(prepared) => {
+                let query_id = prepared.query_id;
+                let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+                let action = finish_query_es.handle_prepared_plm(self);
+                self.handle_finish_query_es_action(statuses, query_id, action);
               }
+              TabletPLm::FinishQueryCommitted(committed) => {
+                let query_id = committed.query_id;
+                let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+                let action = finish_query_es.handle_committed_plm(self);
+                self.handle_finish_query_es_action(statuses, query_id, action);
+              }
+              TabletPLm::FinishQueryAborted(aborted) => {
+                let query_id = aborted.query_id;
+                let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+                let action = finish_query_es.handle_aborted_plm(self);
+                self.handle_finish_query_es_action(statuses, query_id, action);
+              }
+              TabletPLm::AlterTablePrepared(_) => {
+                let es = cast!(DDLES::Alter, statuses.ddl_es.as_mut().unwrap()).unwrap();
+                es.handle_prepared_plm(self);
+              }
+              TabletPLm::AlterTableCommitted(committed_plm) => {
+                let es = cast!(DDLES::Alter, statuses.ddl_es.as_mut().unwrap()).unwrap();
+                es.handle_committed_plm(self, committed_plm);
+              }
+              TabletPLm::AlterTableAborted(_) => {
+                let es = cast!(DDLES::Alter, statuses.ddl_es.as_mut().unwrap()).unwrap();
+                es.handle_aborted_plm(self);
+              }
+              TabletPLm::DropTablePrepared(_) => panic!(),
+              TabletPLm::DropTableCommitted(_) => panic!(),
+              TabletPLm::DropTableAborted(_) => panic!(),
             }
-            TabletPLm::FinishQueryPrepared(prepared) => {
-              let query_id = prepared.query_id;
-              let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-              let action = finish_query_es.handle_prepared_plm(self);
-              self.handle_finish_query_es_action(statuses, query_id, action);
-            }
-            TabletPLm::FinishQueryCommitted(committed) => {
-              let query_id = committed.query_id;
-              let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-              let action = finish_query_es.handle_committed_plm(self);
-              self.handle_finish_query_es_action(statuses, query_id, action);
-            }
-            TabletPLm::FinishQueryAborted(aborted) => {
-              let query_id = aborted.query_id;
-              let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-              let action = finish_query_es.handle_aborted_plm(self);
-              self.handle_finish_query_es_action(statuses, query_id, action);
-            }
-            TabletPLm::AlterTablePrepared(_) => panic!(),
-            TabletPLm::AlterTableCommitted(_) => panic!(),
-            TabletPLm::AlterTableAborted(_) => panic!(),
-            TabletPLm::DropTablePrepared(_) => panic!(),
-            TabletPLm::DropTableCommitted(_) => panic!(),
-            TabletPLm::DropTableAborted(_) => panic!(),
           }
+
+          // Run the Main Loop
+          self.run_main_loop(statuses);
+
+          // Inform all ESs in WaitingInserting and start inserting a PLm.
+          for (_, es) in &mut statuses.finish_query_ess {
+            es.start_inserting(self);
+          }
+          match &mut statuses.ddl_es {
+            None => {}
+            Some(DDLES::Alter(es)) => {
+              es.start_inserting(self);
+            }
+            Some(DDLES::Drop(es)) => {
+              es.start_inserting(self);
+            }
+          }
+        } else {
+          // TODO: handle Follower case
         }
       }
       TabletForwardMsg::TabletMessage(message) => {
@@ -1014,9 +1042,9 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
           msg::TabletMessage::AlterTablePrepare(prepare) => {
-            if let Some((_, es)) = &mut statuses.ddl_es {
+            if let Some(es) = &mut statuses.ddl_es {
               let alter_table_es = cast!(DDLES::Alter, es).unwrap();
-              alter_table_es.handle_prepare(prepare, self);
+              alter_table_es.handle_prepare(self);
             } else {
               // Construct the `preparing_timestamp`
               let mut timestamp = self.clock.now();
@@ -1033,21 +1061,18 @@ impl<T: IOTypes> TabletContext<T> {
 
               // Construct an AlterTableES set it to `ddl_es`.
               let query_id = prepare.query_id;
-              statuses.ddl_es = Some((
-                query_id.clone(),
-                DDLES::Alter(AlterTableES {
-                  query_id,
-                  alter_op: prepare.alter_op,
-                  prepare_timestamp: timestamp,
-                  state: State::WaitingInsertingPrepared,
-                }),
-              ));
+              statuses.ddl_es = Some(DDLES::Alter(AlterTableES {
+                query_id,
+                alter_op: prepare.alter_op,
+                prepared_timestamp: timestamp,
+                state: State::WaitingInsertingPrepared,
+              }));
             }
           }
           msg::TabletMessage::AlterTableAbort(abort) => {
-            if let Some((_, es)) = &mut statuses.ddl_es {
+            if let Some(es) = &mut statuses.ddl_es {
               let alter_table_es = cast!(DDLES::Alter, es).unwrap();
-              alter_table_es.handle_abort(abort, self);
+              alter_table_es.handle_abort(self);
             } else {
               // Send back a `CloseConfirm` to the Master.
 
@@ -1060,9 +1085,9 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
           msg::TabletMessage::AlterTableCommit(commit) => {
-            if let Some((_, es)) = &mut statuses.ddl_es {
+            if let Some(es) = &mut statuses.ddl_es {
               let alter_table_es = cast!(DDLES::Alter, es).unwrap();
-              alter_table_es.handle_commit(commit, self);
+              alter_table_es.handle_commit(self, commit);
             } else {
               // Send back a `CloseConfirm` to the Master.
               let payload =
@@ -1074,7 +1099,7 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
           msg::TabletMessage::DropTablePrepare(prepare) => {
-            if let Some((_, es)) = &mut statuses.ddl_es {
+            if let Some(es) = &mut statuses.ddl_es {
               let drop_table_es = cast!(DDLES::Drop, es).unwrap();
               drop_table_es.handle_prepare(prepare, self);
             } else {
@@ -1090,18 +1115,15 @@ impl<T: IOTypes> TabletContext<T> {
 
               // Construct an DropTableES set it to `ddl_es`.
               let query_id = prepare.query_id;
-              statuses.ddl_es = Some((
-                query_id.clone(),
-                DDLES::Drop(DropTableES::DropExecuting(DropExecuting {
-                  query_id,
-                  prepare_timestamp: timestamp,
-                  state: State::WaitingInsertingPrepared,
-                })),
-              ));
+              statuses.ddl_es = Some(DDLES::Drop(DropTableES::DropExecuting(DropExecuting {
+                query_id,
+                prepare_timestamp: timestamp,
+                state: State::WaitingInsertingPrepared,
+              })));
             }
           }
           msg::TabletMessage::DropTableAbort(abort) => {
-            if let Some((_, es)) = &mut statuses.ddl_es {
+            if let Some(es) = &mut statuses.ddl_es {
               let drop_table_es = cast!(DDLES::Drop, es).unwrap();
               drop_table_es.handle_abort(abort, self);
             } else {
@@ -1115,7 +1137,7 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
           msg::TabletMessage::DropTableCommit(commit) => {
-            if let Some((_, es)) = &mut statuses.ddl_es {
+            if let Some(es) = &mut statuses.ddl_es {
               let drop_table_es = cast!(DDLES::Drop, es).unwrap();
               drop_table_es.handle_commit(commit, self);
             } else {
@@ -1240,7 +1262,16 @@ impl<T: IOTypes> TabletContext<T> {
             self.handle_finish_query_es_action(statuses, query_id.clone(), action);
           }
 
-          // TODO: inform ddl_es
+          match &mut statuses.ddl_es {
+            None => {}
+            Some(DDLES::Alter(es)) => {
+              es.leader_changed(self);
+            }
+            Some(DDLES::Drop(_)) => {
+              // TODO: Get this in
+              unimplemented!()
+            }
+          }
 
           // Run Main Loop
           self.run_main_loop(statuses);
@@ -1259,7 +1290,7 @@ impl<T: IOTypes> TabletContext<T> {
         }
 
         // Inform FinishQueryES
-        if let Some((query_id, es)) = &mut statuses.ddl_es {
+        if let Some(es) = &mut statuses.ddl_es {
           // TODO: inform ddl_es properly
         }
 
@@ -1538,13 +1569,13 @@ impl<T: IOTypes> TabletContext<T> {
           self.grant_local_locked_cols(statuses, query_id);
           return true;
         }
-        Some((_, ddl_es)) => {
+        Some(ddl_es) => {
           // When a DDL ES is present, we must verify the `req` does not conflict.
           match ddl_es {
             DDLES::Alter(es) => {
               let mut conflicts = false;
               for col_name in &req.cols {
-                if &es.alter_op.col_name == col_name && req.timestamp >= es.prepare_timestamp {
+                if &es.alter_op.col_name == col_name && req.timestamp >= es.prepared_timestamp {
                   conflicts = true;
                 }
               }
@@ -1981,7 +2012,37 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// Handles the actions specified by a FinishQueryES.
+  /// Handles the actions produced by a AlterTableES.
+  fn handle_drop_table_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    _: QueryId,
+    action: DropTableAction,
+  ) {
+    match action {
+      DropTableAction::Wait => {}
+      DropTableAction::Exit => {
+        statuses.ddl_es = None;
+      }
+    }
+  }
+
+  /// Handles the actions produced by a AlterTableES.
+  fn handle_alter_table_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    _: QueryId,
+    action: AlterTableAction,
+  ) {
+    match action {
+      AlterTableAction::Wait => {}
+      AlterTableAction::Exit => {
+        statuses.ddl_es = None;
+      }
+    }
+  }
+
+  /// Handles the actions produced by a FinishQueryES.
   fn handle_finish_query_es_action(
     &mut self,
     statuses: &mut Statuses,
@@ -1996,7 +2057,7 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// Handles the actions specified by a TransTableReadES.
+  /// Handles the actions produced by a TransTableReadES.
   fn handle_trans_read_es_action(
     &mut self,
     statuses: &mut Statuses,
@@ -2043,7 +2104,7 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// Handles the actions specified by a TableReadES.
+  /// Handles the actions produced by a TableReadES.
   fn handle_read_es_action(
     &mut self,
     statuses: &mut Statuses,
@@ -2140,7 +2201,7 @@ impl<T: IOTypes> TabletContext<T> {
     self.verifying_writes.remove(&ms_query_es.timestamp);
   }
 
-  /// Handles the actions specified by an MSTableWriteES.
+  /// Handles the actions produced by an MSTableWriteES.
   fn handle_ms_write_es_action(
     &mut self,
     statuses: &mut Statuses,
@@ -2190,7 +2251,7 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// Handles the actions specified by an MSTableReadES.
+  /// Handles the actions produced by an MSTableReadES.
   fn handle_ms_read_es_action(
     &mut self,
     statuses: &mut Statuses,
@@ -2239,7 +2300,7 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  /// Handles the actions specified by a GRQueryES.
+  /// Handles the actions produced by a GRQueryES.
   fn handle_gr_query_es_action(
     &mut self,
     statuses: &mut Statuses,

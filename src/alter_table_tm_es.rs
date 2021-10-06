@@ -204,7 +204,7 @@ impl AlterTableTMES {
           query_id: self.query_id.clone(),
         }),
       );
-      aborted.rms_remaining.insert(rm);
+      rms_remaining.insert(rm);
     }
 
     self.state = AlterTableTMS::Aborted(Aborted { rms_remaining });
@@ -336,7 +336,7 @@ impl AlterTableTMES {
 
   // Other
 
-  pub fn starting_insert<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> AlterTableTMAction {
+  pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> AlterTableTMAction {
     match &self.state {
       AlterTableTMS::WaitingInsertTMPrepared => {
         ctx.master_bundle.push(MasterPLm::AlterTableTMPrepared(plm::AlterTableTMPrepared {

@@ -77,7 +77,7 @@ impl DropTableTMES {
     DropTableTMAction::Wait
   }
 
-  pub fn starting_insert<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> DropTableTMAction {
+  pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> DropTableTMAction {
     match self.state {
       DropTableTMS::WaitingInsertTMPrepared => {
         ctx.master_bundle.push(MasterPLm::DropTableTMPrepared(plm::DropTableTMPrepared {
