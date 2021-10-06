@@ -1050,10 +1050,11 @@ impl<T: IOTypes> TabletContext<T> {
               alter_table_es.handle_abort(abort, self);
             } else {
               // Send back a `CloseConfirm` to the Master.
+
               let payload =
                 msg::MasterRemotePayload::AlterTableCloseConfirm(msg::AlterTableCloseConfirm {
                   query_id: abort.query_id,
-                  tablet_group_id: self.this_tablet_group_id.clone(),
+                  rm: self.mk_node_path(),
                 });
               self.ctx().send_to_master(payload);
             }
@@ -1067,7 +1068,7 @@ impl<T: IOTypes> TabletContext<T> {
               let payload =
                 msg::MasterRemotePayload::AlterTableCloseConfirm(msg::AlterTableCloseConfirm {
                   query_id: commit.query_id,
-                  tablet_group_id: self.this_tablet_group_id.clone(),
+                  rm: self.mk_node_path(),
                 });
               self.ctx().send_to_master(payload);
             }
@@ -2349,15 +2350,17 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
+  /// Construct NodePath of this Tablet.
+  pub fn mk_node_path(&self) -> TNodePath {
+    TNodePath {
+      sid: self.this_slave_group_id.clone(),
+      sub: TSubNodePath::Tablet(self.this_tablet_group_id.clone()),
+    }
+  }
+
   /// Construct QueryPath for a given `query_id` that belongs to this Tablet.
   pub fn mk_query_path(&self, query_id: QueryId) -> TQueryPath {
-    TQueryPath {
-      node_path: TNodePath {
-        sid: self.this_slave_group_id.clone(),
-        sub: TSubNodePath::Tablet(self.this_tablet_group_id.clone()),
-      },
-      query_id,
-    }
+    TQueryPath { node_path: self.mk_node_path(), query_id }
   }
 
   /// Returns true iff this is the Leader.

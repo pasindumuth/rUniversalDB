@@ -2,8 +2,8 @@ use crate::col_usage::FrozenColUsageNode;
 use crate::common::{GossipData, QueryPlan};
 use crate::model::common::{
   proc, CQueryPath, CSubNodePath, CTQueryPath, ColName, ColType, Context, CoordGroupId, EndpointId,
-  Gen, LeadershipId, NodeGroupId, PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath,
-  TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
+  Gen, LeadershipId, NodeGroupId, PaxosGroupId, QueryId, RequestId, SlaveGroupId, TNodePath,
+  TQueryPath, TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
   TransTableName,
 };
 use serde::{Deserialize, Serialize};
@@ -468,7 +468,7 @@ pub struct AlterTablePrepare {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTablePrepared {
   pub query_id: QueryId,
-  pub tablet_group_id: TabletGroupId,
+  pub rm: TNodePath,
   pub timestamp: Timestamp,
 }
 
@@ -493,8 +493,7 @@ pub struct AlterTableCommit {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableCloseConfirm {
   pub query_id: QueryId,
-  /// The responding Tablet
-  pub tablet_group_id: TabletGroupId,
+  pub rm: TNodePath,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -632,6 +631,7 @@ pub enum ExternalDDLQueryAbortData {
   InvalidDDLQuery,
   ConfirmCancel,
   NodeDied,
+  Unknown,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

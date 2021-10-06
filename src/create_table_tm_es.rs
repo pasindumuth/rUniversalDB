@@ -17,7 +17,7 @@ pub struct ResponseData {
 
 #[derive(Debug)]
 pub enum TMClosedState {
-  Committed,
+  Committed(Timestamp),
   Aborted,
 }
 

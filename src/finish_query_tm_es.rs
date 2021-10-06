@@ -162,7 +162,7 @@ impl FinishQueryTMES {
           }
         }
       }
-      _ => (),
+      _ => {}
     }
     FinishQueryTMAction::Wait
   }

@@ -64,9 +64,9 @@ impl FinishQueryES {
         Paxos2PCRMState::Prepared => {
           es.send_prepared(ctx);
         }
-        _ => (),
+        _ => {}
       },
-      _ => (),
+      _ => {}
     }
     FinishQueryAction::Wait
   }
@@ -107,9 +107,9 @@ impl FinishQueryES {
             query_id: es.query_id.clone(),
           }));
         }
-        _ => (),
+        _ => {}
       },
-      _ => (),
+      _ => {}
     }
     FinishQueryAction::Wait
   }
@@ -127,7 +127,7 @@ impl FinishQueryES {
         Paxos2PCRMState::InsertingCommitted => es.send_prepared(ctx),
         Paxos2PCRMState::InsertingPrepareAborted => es.send_wait(ctx),
         Paxos2PCRMState::InsertingAborted => es.send_prepared(ctx),
-        _ => (),
+        _ => {}
       },
       FinishQueryES::Committed => {
         let this_query_path = ctx.mk_query_path(check_prepared.query_id.clone());
@@ -178,9 +178,9 @@ impl FinishQueryES {
           ctx.prepared_writes.insert(es.timestamp.clone(), region_lock);
           es.state = Paxos2PCRMState::InsertingAborted;
         }
-        _ => (),
+        _ => {}
       },
-      _ => (),
+      _ => {}
     }
     FinishQueryAction::Wait
   }
@@ -195,9 +195,9 @@ impl FinishQueryES {
           ctx.prepared_writes.remove(&es.timestamp).unwrap();
           *self = FinishQueryES::Aborted;
         }
-        _ => (),
+        _ => {}
       },
-      _ => (),
+      _ => {}
     }
     FinishQueryAction::Wait
   }
@@ -214,9 +214,9 @@ impl FinishQueryES {
           ctx.committed_writes.insert(es.timestamp.clone(), region_lock);
           *self = FinishQueryES::Committed;
         }
-        _ => (),
+        _ => {}
       },
-      _ => (),
+      _ => {}
     }
     FinishQueryAction::Wait
   }
@@ -237,9 +237,9 @@ impl FinishQueryES {
             update_view: es.update_view.clone(),
           }));
         }
-        _ => (),
+        _ => {}
       },
-      _ => (),
+      _ => {}
     }
     FinishQueryAction::Wait
   }
@@ -257,9 +257,9 @@ impl FinishQueryES {
             es.send_inform_prepared(ctx);
           }
         }
-        _ => (),
+        _ => {}
       },
-      _ => (),
+      _ => {}
     }
     FinishQueryAction::Wait
   }

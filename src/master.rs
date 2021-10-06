@@ -18,7 +18,7 @@ use crate::model::message::{
 use crate::multiversion_map::MVM;
 use crate::paxos::LeaderChanged;
 use crate::server::{
-  weak_contains_col, weak_contains_col_latest, CommonQuery, MasterServerContext,
+  weak_contains_col, weak_contains_col_latest, CommonQuery, MasterServerContext, ServerContextBase,
 };
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use rand::RngCore;
@@ -308,9 +308,9 @@ impl<T: IOTypes> MasterContext<T> {
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               MasterPLm::AlterTableTMCommitted(committed) => {
-                let query_id = committed.query_id;
+                let query_id = committed.query_id.clone();
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self);
+                let action = es.handle_committed_plm(self, committed);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               MasterPLm::AlterTableTMAborted(aborted) => {
@@ -357,23 +357,10 @@ impl<T: IOTypes> MasterContext<T> {
             es.starting_insert(self);
           }
           for (_, es) in &mut statuses.alter_table_tm_ess {
-            if let AlterTableTMS::WaitingInsertTMPrepared = &es.state {
-              self.master_bundle.push(MasterPLm::AlterTableTMPrepared(plm::AlterTableTMPrepared {
-                query_id: es.query_id.clone(),
-                table_path: es.table_path.clone(),
-                alter_op: es.alter_op.clone(),
-              }));
-              es.starting_insert(self);
-            }
+            es.starting_insert(self);
           }
           for (_, es) in &mut statuses.drop_table_tm_ess {
-            if let DropTableTMS::WaitingInsertTMPrepared = &es.state {
-              self.master_bundle.push(MasterPLm::DropTableTMPrepared(plm::DropTableTMPrepared {
-                query_id: es.query_id.clone(),
-                table_path: es.table_path.clone(),
-              }));
-              es.starting_insert(self);
-            }
+            es.starting_insert(self);
           }
         } else {
           // TODO: handle Follower case
@@ -687,6 +674,27 @@ impl<T: IOTypes> MasterContext<T> {
   pub fn is_leader(&self) -> bool {
     let lid = self.leader_map.get(&PaxosGroupId::Master).unwrap();
     lid.eid == self.this_eid
+  }
+
+  /// Broadcast GossipData
+  pub fn broadcast_gossip(&mut self) {
+    let gossip_data = GossipData {
+      gen: self.gen.clone(),
+      db_schema: self.db_schema.clone(),
+      table_generation: self.table_generation.clone(),
+      sharding_config: self.sharding_config.clone(),
+      tablet_address_config: self.tablet_address_config.clone(),
+      slave_address_config: self.slave_address_config.clone(),
+    };
+    let sids: Vec<SlaveGroupId> = self.slave_address_config.keys().cloned().collect();
+    for sid in sids {
+      self.ctx().send_to_slave_common(
+        msg::SlaveRemotePayload::MasterGossip(msg::MasterGossip {
+          gossip_data: gossip_data.clone(),
+        }),
+        sid,
+      )
+    }
   }
 }
 
