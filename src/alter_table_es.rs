@@ -28,7 +28,6 @@ pub struct AlterTableES {
 }
 
 pub enum AlterTableAction {
-  /// This tells the parent Server to wait.
   Wait,
   Exit,
 }

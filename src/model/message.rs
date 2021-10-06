@@ -561,16 +561,14 @@ pub struct DropTablePrepare {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DropTablePrepared {
   pub query_id: QueryId,
-  /// The responding Tablet
-  pub tablet_group_id: TabletGroupId,
+  pub rm: TNodePath,
   pub timestamp: Timestamp,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DropTableAborted {
   pub query_id: QueryId,
-  /// The responding Tablet
-  pub tablet_group_id: TabletGroupId,
+  pub rm: TNodePath,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -589,8 +587,7 @@ pub struct DropTableCommit {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DropTableCloseConfirm {
   pub query_id: QueryId,
-  /// The responding Tablet
-  pub tablet_group_id: TabletGroupId,
+  pub rm: TNodePath,
 }
 
 // -------------------------------------------------------------------------------------------------

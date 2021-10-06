@@ -10,8 +10,8 @@ use crate::common::{
   mk_qid, remove_item, Clock, ColBound, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
   PolyColBound, SingleBound, TMStatus, TableRegion, TableSchema,
 };
+use crate::drop_table_es::DropTableAction;
 use crate::drop_table_es::DropTableES;
-use crate::drop_table_es::{DropExecuting, DropTableAction};
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
   construct_kb_expr, does_intersect, evaluate_c_expr, is_true, CExpr, EvalError,
@@ -308,13 +308,21 @@ pub struct Statuses {
   ms_table_write_ess: HashMap<QueryId, MSTableWriteESWrapper>,
 
   // DDL
-  ddl_es: Option<DDLES>,
+  ddl_es: DDLES,
 }
 
 #[derive(Debug)]
 pub enum DDLES {
+  None,
   Alter(AlterTableES),
   Drop(DropTableES),
+  Dropped(Timestamp),
+}
+
+impl Default for DDLES {
+  fn default() -> Self {
+    DDLES::None
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -722,20 +730,29 @@ impl<T: IOTypes> TabletContext<T> {
                 self.handle_finish_query_es_action(statuses, query_id, action);
               }
               TabletPLm::AlterTablePrepared(_) => {
-                let es = cast!(DDLES::Alter, statuses.ddl_es.as_mut().unwrap()).unwrap();
+                let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
                 es.handle_prepared_plm(self);
               }
               TabletPLm::AlterTableCommitted(committed_plm) => {
-                let es = cast!(DDLES::Alter, statuses.ddl_es.as_mut().unwrap()).unwrap();
+                let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
                 es.handle_committed_plm(self, committed_plm);
               }
               TabletPLm::AlterTableAborted(_) => {
-                let es = cast!(DDLES::Alter, statuses.ddl_es.as_mut().unwrap()).unwrap();
+                let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
                 es.handle_aborted_plm(self);
               }
-              TabletPLm::DropTablePrepared(_) => panic!(),
-              TabletPLm::DropTableCommitted(_) => panic!(),
-              TabletPLm::DropTableAborted(_) => panic!(),
+              TabletPLm::DropTablePrepared(_) => {
+                let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
+                es.handle_prepared_plm(self);
+              }
+              TabletPLm::DropTableCommitted(committed_plm) => {
+                let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
+                es.handle_committed_plm(self, committed_plm);
+              }
+              TabletPLm::DropTableAborted(_) => {
+                let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
+                es.handle_aborted_plm(self);
+              }
             }
           }
 
@@ -747,13 +764,14 @@ impl<T: IOTypes> TabletContext<T> {
             es.start_inserting(self);
           }
           match &mut statuses.ddl_es {
-            None => {}
-            Some(DDLES::Alter(es)) => {
+            DDLES::None => {}
+            DDLES::Alter(es) => {
               es.start_inserting(self);
             }
-            Some(DDLES::Drop(es)) => {
+            DDLES::Drop(es) => {
               es.start_inserting(self);
             }
+            DDLES::Dropped(_) => {}
           }
         } else {
           // TODO: handle Follower case
@@ -1042,10 +1060,10 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
           msg::TabletMessage::AlterTablePrepare(prepare) => {
-            if let Some(es) = &mut statuses.ddl_es {
-              let alter_table_es = cast!(DDLES::Alter, es).unwrap();
-              alter_table_es.handle_prepare(self);
+            if let DDLES::Alter(es) = &mut statuses.ddl_es {
+              es.handle_prepare(self);
             } else {
+              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Construct the `preparing_timestamp`
               let mut timestamp = self.clock.now();
               timestamp =
@@ -1061,21 +1079,20 @@ impl<T: IOTypes> TabletContext<T> {
 
               // Construct an AlterTableES set it to `ddl_es`.
               let query_id = prepare.query_id;
-              statuses.ddl_es = Some(DDLES::Alter(AlterTableES {
+              statuses.ddl_es = DDLES::Alter(AlterTableES {
                 query_id,
                 alter_op: prepare.alter_op,
                 prepared_timestamp: timestamp,
                 state: State::WaitingInsertingPrepared,
-              }));
+              });
             }
           }
           msg::TabletMessage::AlterTableAbort(abort) => {
-            if let Some(es) = &mut statuses.ddl_es {
-              let alter_table_es = cast!(DDLES::Alter, es).unwrap();
-              alter_table_es.handle_abort(self);
+            if let DDLES::Alter(es) = &mut statuses.ddl_es {
+              es.handle_abort(self);
             } else {
+              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
-
               let payload =
                 msg::MasterRemotePayload::AlterTableCloseConfirm(msg::AlterTableCloseConfirm {
                   query_id: abort.query_id,
@@ -1085,10 +1102,10 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
           msg::TabletMessage::AlterTableCommit(commit) => {
-            if let Some(es) = &mut statuses.ddl_es {
-              let alter_table_es = cast!(DDLES::Alter, es).unwrap();
-              alter_table_es.handle_commit(self, commit);
+            if let DDLES::Alter(es) = &mut statuses.ddl_es {
+              es.handle_commit(self, commit);
             } else {
+              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
               let payload =
                 msg::MasterRemotePayload::AlterTableCloseConfirm(msg::AlterTableCloseConfirm {
@@ -1099,10 +1116,10 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
           msg::TabletMessage::DropTablePrepare(prepare) => {
-            if let Some(es) = &mut statuses.ddl_es {
-              let drop_table_es = cast!(DDLES::Drop, es).unwrap();
-              drop_table_es.handle_prepare(prepare, self);
+            if let DDLES::Drop(es) = &mut statuses.ddl_es {
+              es.handle_prepare(self);
             } else {
+              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Construct the `preparing_timestamp`
               let mut timestamp = self.clock.now();
               timestamp = max(timestamp, self.table_schema.val_cols.get_latest_lat());
@@ -1115,37 +1132,37 @@ impl<T: IOTypes> TabletContext<T> {
 
               // Construct an DropTableES set it to `ddl_es`.
               let query_id = prepare.query_id;
-              statuses.ddl_es = Some(DDLES::Drop(DropTableES::DropExecuting(DropExecuting {
+              statuses.ddl_es = DDLES::Drop(DropTableES {
                 query_id,
-                prepare_timestamp: timestamp,
+                prepared_timestamp: timestamp,
                 state: State::WaitingInsertingPrepared,
-              })));
+              });
             }
           }
           msg::TabletMessage::DropTableAbort(abort) => {
-            if let Some(es) = &mut statuses.ddl_es {
-              let drop_table_es = cast!(DDLES::Drop, es).unwrap();
-              drop_table_es.handle_abort(abort, self);
+            if let DDLES::Drop(es) = &mut statuses.ddl_es {
+              es.handle_abort(self);
             } else {
+              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
               let payload =
                 msg::MasterRemotePayload::DropTableCloseConfirm(msg::DropTableCloseConfirm {
                   query_id: abort.query_id,
-                  tablet_group_id: self.this_tablet_group_id.clone(),
+                  rm: self.mk_node_path(),
                 });
               self.ctx().send_to_master(payload);
             }
           }
           msg::TabletMessage::DropTableCommit(commit) => {
-            if let Some(es) = &mut statuses.ddl_es {
-              let drop_table_es = cast!(DDLES::Drop, es).unwrap();
-              drop_table_es.handle_commit(commit, self);
+            if let DDLES::Drop(es) = &mut statuses.ddl_es {
+              es.handle_commit(self, commit);
             } else {
+              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
               let payload =
                 msg::MasterRemotePayload::DropTableCloseConfirm(msg::DropTableCloseConfirm {
                   query_id: commit.query_id,
-                  tablet_group_id: self.this_tablet_group_id.clone(),
+                  rm: self.mk_node_path(),
                 });
               self.ctx().send_to_master(payload);
             }
@@ -1262,17 +1279,6 @@ impl<T: IOTypes> TabletContext<T> {
             self.handle_finish_query_es_action(statuses, query_id.clone(), action);
           }
 
-          match &mut statuses.ddl_es {
-            None => {}
-            Some(DDLES::Alter(es)) => {
-              es.leader_changed(self);
-            }
-            Some(DDLES::Drop(_)) => {
-              // TODO: Get this in
-              unimplemented!()
-            }
-          }
-
           // Run Main Loop
           self.run_main_loop(statuses);
         }
@@ -1289,9 +1295,16 @@ impl<T: IOTypes> TabletContext<T> {
           self.handle_finish_query_es_action(statuses, query_id.clone(), action);
         }
 
-        // Inform FinishQueryES
-        if let Some(es) = &mut statuses.ddl_es {
-          // TODO: inform ddl_es properly
+        // Inform DDLESs
+        match &mut statuses.ddl_es {
+          DDLES::None => {}
+          DDLES::Alter(es) => {
+            es.leader_changed(self);
+          }
+          DDLES::Drop(es) => {
+            es.leader_changed(self);
+          }
+          DDLES::Dropped(_) => {}
         }
 
         if self.is_leader() {
@@ -1561,56 +1574,50 @@ impl<T: IOTypes> TabletContext<T> {
         return true;
       }
 
-      // Next, we see if we can grant LocalLockedCols.
+      // Next, we see if we can grant LocalLockedCols. When there is no DDL ES, we can always
+      // grant LocalLockedCols. Otherwise, we must verify the `req` does not conflict.
       match &statuses.ddl_es {
-        None => {
-          // Here, there is no DDL; we can always grant LocalLockedCols.
+        DDLES::None => {
+          // Grant LocalLockedCols
           let query_id = req.query_id.clone();
           self.grant_local_locked_cols(statuses, query_id);
           return true;
         }
-        Some(ddl_es) => {
-          // When a DDL ES is present, we must verify the `req` does not conflict.
-          match ddl_es {
-            DDLES::Alter(es) => {
-              let mut conflicts = false;
-              for col_name in &req.cols {
-                if &es.alter_op.col_name == col_name && req.timestamp >= es.prepared_timestamp {
-                  conflicts = true;
-                }
-              }
-              if !conflicts {
-                // Grant LocalLockedCols
-                let query_id = req.query_id.clone();
-                self.grant_local_locked_cols(statuses, query_id);
-                return true;
-              }
+        DDLES::Alter(es) => {
+          let mut conflicts = false;
+          for col_name in &req.cols {
+            if &es.alter_op.col_name == col_name && req.timestamp >= es.prepared_timestamp {
+              conflicts = true;
             }
-            DDLES::Drop(es) => match es {
-              DropTableES::Committed(dropped_timestamp) => {
-                if &req.timestamp < dropped_timestamp {
-                  // Grant LocalLockedCols
-                  let query_id = req.query_id.clone();
-                  self.grant_local_locked_cols(statuses, query_id);
-                } else {
-                  // Grant TableDropped
-                  let orig_p = req.orig_p.clone();
-                  let query_id = req.query_id.clone();
-                  self.waiting_locked_cols.remove(&query_id);
-                  self.grant_table_dropped(statuses, orig_p);
-                }
-                return true;
-              }
-              DropTableES::DropExecuting(exec) => {
-                if req.timestamp < exec.prepare_timestamp {
-                  // Grant LocalLockedCols
-                  let query_id = req.query_id.clone();
-                  self.grant_local_locked_cols(statuses, query_id);
-                  return true;
-                }
-              }
-            },
           }
+          if !conflicts {
+            // Grant LocalLockedCols
+            let query_id = req.query_id.clone();
+            self.grant_local_locked_cols(statuses, query_id);
+            return true;
+          }
+        }
+        DDLES::Drop(es) => {
+          if req.timestamp < es.prepared_timestamp {
+            // Grant LocalLockedCols
+            let query_id = req.query_id.clone();
+            self.grant_local_locked_cols(statuses, query_id);
+            return true;
+          }
+        }
+        DDLES::Dropped(dropped_timestamp) => {
+          if &req.timestamp < dropped_timestamp {
+            // Grant LocalLockedCols
+            let query_id = req.query_id.clone();
+            self.grant_local_locked_cols(statuses, query_id);
+          } else {
+            // Grant TableDropped
+            let orig_p = req.orig_p.clone();
+            let query_id = req.query_id.clone();
+            self.waiting_locked_cols.remove(&query_id);
+            self.grant_table_dropped(statuses, orig_p);
+          }
+          return true;
         }
       }
     }
@@ -2021,8 +2028,11 @@ impl<T: IOTypes> TabletContext<T> {
   ) {
     match action {
       DropTableAction::Wait => {}
-      DropTableAction::Exit => {
-        statuses.ddl_es = None;
+      DropTableAction::Aborted => {
+        statuses.ddl_es = DDLES::None;
+      }
+      DropTableAction::Committed(timestamp) => {
+        statuses.ddl_es = DDLES::Dropped(timestamp);
       }
     }
   }
@@ -2037,7 +2047,7 @@ impl<T: IOTypes> TabletContext<T> {
     match action {
       AlterTableAction::Wait => {}
       AlterTableAction::Exit => {
-        statuses.ddl_es = None;
+        statuses.ddl_es = DDLES::None;
       }
     }
   }
