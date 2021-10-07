@@ -16,6 +16,7 @@ pub mod finish_query_es;
 pub mod finish_query_tm_es;
 pub mod gr_query_es;
 pub mod master;
+pub mod master_query_planning_es;
 pub mod model;
 pub mod ms_query_coord_es;
 pub mod ms_table_read_es;

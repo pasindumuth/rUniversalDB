@@ -1,11 +1,10 @@
 use crate::col_usage::{
-  collect_table_paths, iterate_stage_ms_query, node_external_trans_tables, ColUsagePlanner,
-  FrozenColUsageNode, GeneralStage,
+  collect_table_paths, compute_all_tier_maps, compute_query_plan_data, iterate_stage_ms_query,
+  node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode, GeneralStage,
 };
 use crate::common::RemoteLeaderChangedPLm;
 use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
 use crate::coord::CoordContext;
-use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
   proc, CTQueryPath, ColName, Context, ContextRow, EndpointId, Gen, LeadershipId, NodeGroupId,
   PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
@@ -606,7 +605,7 @@ pub enum QueryPlanningAction {
 
 impl QueryPlanningES {
   pub fn start<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> QueryPlanningAction {
-    assert!(matches!(&self.state, QueryPlanningS::Start));
+    debug_assert!(matches!(&self.state, QueryPlanningS::Start));
 
     // First, we see if all TablePaths are in the GossipData
     for table_path in collect_table_paths(&self.sql_query) {
@@ -617,27 +616,21 @@ impl QueryPlanningES {
     }
 
     // Next, we check that we are not trying to modify a Key Column in an Update.
-    let mut attempted_key_col_update = false;
-    'outer: for (_, stage) in &self.sql_query.trans_tables {
+    for (_, stage) in &self.sql_query.trans_tables {
       match stage {
-        MSQueryStage::SuperSimpleSelect(_) => {}
-        MSQueryStage::Update(query) => {
+        proc::MSQueryStage::SuperSimpleSelect(_) => {}
+        proc::MSQueryStage::Update(query) => {
           // The TablePath exists, from the above.
           let gen = ctx.gossip.table_generation.static_read(&query.table, self.timestamp).unwrap();
           let schema = ctx.gossip.db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
           for (col_name, _) in &query.assignment {
             if lookup(&schema.key_cols, col_name).is_some() {
-              attempted_key_col_update = true;
-              break 'outer;
+              // If so, we return an InvalidUpdate to the External.
+              return QueryPlanningAction::Failed(msg::ExternalAbortedData::InvalidUpdate);
             }
           }
         }
       }
-    }
-
-    if attempted_key_col_update {
-      // If so, we return an InvalidUpdate to the External.
-      return QueryPlanningAction::Failed(msg::ExternalAbortedData::InvalidUpdate);
     }
 
     // Next, we see if all required columns in Select and Update queries are present.
@@ -722,73 +715,9 @@ impl QueryPlanningES {
     ctx: &mut CoordContext<T>,
     col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
   ) -> QueryPlanningAction {
-    // Compute `all_tier_maps
-
-    // The Tier should be where every Read query should be reading from, except
-    // if the current stage is an Update, which should be one Tier ahead (i.e.
-    // lower) for that TablePath.
-    let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
-    let mut cur_tier_map = HashMap::<TablePath, u32>::new();
-    for (_, stage) in &self.sql_query.trans_tables {
-      match stage {
-        proc::MSQueryStage::SuperSimpleSelect(_) => {}
-        proc::MSQueryStage::Update(update) => {
-          cur_tier_map.insert(update.table.clone(), 0);
-        }
-      }
-    }
-    for (trans_table_name, stage) in self.sql_query.trans_tables.iter().rev() {
-      all_tier_maps.insert(trans_table_name.clone(), TierMap { map: cur_tier_map.clone() });
-      match stage {
-        proc::MSQueryStage::SuperSimpleSelect(_) => {}
-        proc::MSQueryStage::Update(update) => {
-          *cur_tier_map.get_mut(&update.table).unwrap() += 1;
-        }
-      }
-    }
-
-    // Compute `table_location_map` and `extra_req_cols`.
-    let mut table_location_map = HashMap::<TablePath, Gen>::new();
-    let mut extra_req_cols = HashMap::<TablePath, Vec<ColName>>::new();
-    iterate_stage_ms_query(
-      &mut |stage: GeneralStage| match stage {
-        GeneralStage::SuperSimpleSelect(query) => {
-          if let proc::TableRef::TablePath(table_path) = &query.from {
-            let gen = ctx.gossip.table_generation.static_read(&table_path, self.timestamp).unwrap();
-            table_location_map.insert(table_path.clone(), gen.clone());
-
-            // Recall there might already be required columns for this TablePath.
-            if !extra_req_cols.contains_key(&table_path) {
-              extra_req_cols.insert(table_path.clone(), Vec::new());
-            }
-            let req_cols = extra_req_cols.get_mut(&table_path).unwrap();
-            for col_name in &query.projection {
-              if !req_cols.contains(col_name) {
-                req_cols.push(col_name.clone());
-              }
-            }
-          }
-        }
-        GeneralStage::Update(query) => {
-          let gen = ctx.gossip.table_generation.static_read(&query.table, self.timestamp).unwrap();
-          table_location_map.insert(query.table.clone(), gen.clone());
-
-          // Recall there might already be required columns for this TablePath.
-          if !extra_req_cols.contains_key(&query.table) {
-            extra_req_cols.insert(query.table.clone(), Vec::new());
-          }
-          let req_cols = extra_req_cols.get_mut(&query.table).unwrap();
-          for (col_name, _) in &query.assignment {
-            if !req_cols.contains(col_name) {
-              req_cols.push(col_name.clone());
-            }
-          }
-        }
-      },
-      &self.sql_query,
-    );
-
-    // Finish
+    let all_tier_maps = compute_all_tier_maps(&self.sql_query);
+    let (table_location_map, extra_req_cols) =
+      compute_query_plan_data(&self.sql_query, &ctx.gossip.table_generation, self.timestamp);
     self.state = QueryPlanningS::Done;
     QueryPlanningAction::Success(CoordQueryPlan {
       all_tier_maps,

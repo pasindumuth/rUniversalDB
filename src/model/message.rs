@@ -406,13 +406,6 @@ pub struct ExternalQueryAborted {
 // -------------------------------------------------------------------------------------------------
 // PCSA Messages
 
-// TODO remove this.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum FrozenColUsageTree {
-  ColUsageNodes(Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>),
-  ColUsageNode((Vec<ColName>, FrozenColUsageNode)),
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformMasterQueryPlanning {
   pub sender_path: CQueryPath,
@@ -442,7 +435,7 @@ pub struct MasterQueryPlan {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasteryQueryPlanningResult {
   MasterQueryPlan(MasterQueryPlan),
-  TablePathDNE(Vec<ColName>),
+  TablePathDNE(Vec<TablePath>),
   /// This is returned if one of the Update queries tried modifiying a KeyCol.
   InvalidUpdate,
   RequiredColumnDNE(Vec<ColName>),

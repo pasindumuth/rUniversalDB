@@ -1,7 +1,7 @@
 use crate::common::TableSchema;
 use crate::model::common::{
   iast, proc, ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
-  Timestamp, TransTableName,
+  TierMap, Timestamp, TransTableName,
 };
 use crate::multiversion_map::MVM;
 use crate::server::{contains_col, weak_contains_col};
@@ -420,6 +420,7 @@ pub fn iterate_stage_ms_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
 //  QueryPlanning helpers
 // -----------------------------------------------------------------------------------------------
 
+/// Gather every reference to a `TablePath` found in the `query`.
 pub fn collect_table_paths(query: &proc::MSQuery) -> HashSet<TablePath> {
   let mut table_paths = HashSet::<TablePath>::new();
   iterate_stage_ms_query(
@@ -436,6 +437,84 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> HashSet<TablePath> {
     query,
   );
   table_paths
+}
+
+/// Compute the all TierMaps for the `MSQueryES`.
+///
+/// The Tier should be where every Read query should be reading from, except
+/// if the current stage is an Update, which should be one Tier ahead (i.e.
+/// lower) for that TablePath.
+pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> HashMap<TransTableName, TierMap> {
+  let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
+  let mut cur_tier_map = HashMap::<TablePath, u32>::new();
+  for (_, stage) in &ms_query.trans_tables {
+    match stage {
+      proc::MSQueryStage::SuperSimpleSelect(_) => {}
+      proc::MSQueryStage::Update(update) => {
+        cur_tier_map.insert(update.table.clone(), 0);
+      }
+    }
+  }
+  for (trans_table_name, stage) in ms_query.trans_tables.iter().rev() {
+    all_tier_maps.insert(trans_table_name.clone(), TierMap { map: cur_tier_map.clone() });
+    match stage {
+      proc::MSQueryStage::SuperSimpleSelect(_) => {}
+      proc::MSQueryStage::Update(update) => {
+        *cur_tier_map.get_mut(&update.table).unwrap() += 1;
+      }
+    }
+  }
+  all_tier_maps
+}
+
+/// Compute miscellaneoud data related to QueryPlanning. This can be shared between
+/// the Master and MSCoordESs.
+pub fn compute_query_plan_data(
+  ms_query: &proc::MSQuery,
+  table_generation: &MVM<TablePath, Gen>,
+  timestamp: Timestamp,
+) -> (HashMap<TablePath, Gen>, HashMap<TablePath, Vec<ColName>>) {
+  let mut table_location_map = HashMap::<TablePath, Gen>::new();
+  let mut extra_req_cols = HashMap::<TablePath, Vec<ColName>>::new();
+  iterate_stage_ms_query(
+    &mut |stage: GeneralStage| match stage {
+      GeneralStage::SuperSimpleSelect(query) => {
+        if let proc::TableRef::TablePath(table_path) = &query.from {
+          let gen = table_generation.static_read(&table_path, timestamp).unwrap();
+          table_location_map.insert(table_path.clone(), gen.clone());
+
+          // Recall there might already be required columns for this TablePath.
+          if !extra_req_cols.contains_key(&table_path) {
+            extra_req_cols.insert(table_path.clone(), Vec::new());
+          }
+          let req_cols = extra_req_cols.get_mut(&table_path).unwrap();
+          for col_name in &query.projection {
+            if !req_cols.contains(col_name) {
+              req_cols.push(col_name.clone());
+            }
+          }
+        }
+      }
+      GeneralStage::Update(query) => {
+        let gen = table_generation.static_read(&query.table, timestamp).unwrap();
+        table_location_map.insert(query.table.clone(), gen.clone());
+
+        // Recall there might already be required columns for this TablePath.
+        if !extra_req_cols.contains_key(&query.table) {
+          extra_req_cols.insert(query.table.clone(), Vec::new());
+        }
+        let req_cols = extra_req_cols.get_mut(&query.table).unwrap();
+        for (col_name, _) in &query.assignment {
+          if !req_cols.contains(col_name) {
+            req_cols.push(col_name.clone());
+          }
+        }
+      }
+    },
+    ms_query,
+  );
+
+  (table_location_map, extra_req_cols)
 }
 
 // -----------------------------------------------------------------------------------------------

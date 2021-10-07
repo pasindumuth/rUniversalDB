@@ -1,20 +1,26 @@
 use crate::alter_table_tm_es::{AlterTableTMAction, AlterTableTMES, AlterTableTMS};
-use crate::col_usage::{ColUsagePlanner, FrozenColUsageNode};
+use crate::col_usage::{
+  collect_table_paths, compute_all_tier_maps, compute_query_plan_data, iterate_stage_ms_query,
+  ColUsagePlanner, FrozenColUsageNode, GeneralStage,
+};
 use crate::common::{
   btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, IOTypes, NetworkOut, TableSchema,
 };
 use crate::common::{map_insert, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTableTMES, CreateTableTMS, ResponseData};
 use crate::drop_table_tm_es::{DropTableTMAction, DropTableTMES, DropTableTMS};
+use crate::master_query_planning_es::{
+  master_query_planning, MasterQueryPlanningAction, MasterQueryPlanningES, MasterQueryPlanningS,
+};
 use crate::model::common::proc::{AlterTable, TableRef};
 use crate::model::common::{
   proc, CQueryPath, ColName, EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId, RequestId,
-  SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
+  SlaveGroupId, SlaveQueryPath, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::model::message::{
-  ExternalDDLQueryAbortData, FrozenColUsageTree, MasterExternalReq, MasterMessage,
-  MasterRemotePayload,
+  ExternalDDLQueryAbortData, MasterExternalReq, MasterMessage, MasterRemotePayload,
 };
 use crate::multiversion_map::MVM;
 use crate::paxos::LeaderChanged;
@@ -157,24 +163,6 @@ pub enum MasterForwardMsg {
   MasterRemotePayload(msg::MasterRemotePayload),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(LeaderChanged),
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Master MasterQueryPlanningES
-// -----------------------------------------------------------------------------------------------
-
-#[derive(Debug)]
-enum MasterQueryPlanningS {
-  WaitingInserting,
-  Inserting,
-}
-
-#[derive(Debug)]
-struct MasterQueryPlanningES {
-  sender_path: CQueryPath,
-  query_id: QueryId,
-  timestamp: Timestamp,
-  ms_query: proc::MSQuery,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -457,9 +445,12 @@ impl<T: IOTypes> MasterContext<T> {
       }
       MasterForwardMsg::MasterRemotePayload(payload) => match payload {
         MasterRemotePayload::RemoteLeaderChanged(_) => {}
-        MasterRemotePayload::PerformMasterQueryPlanning(_) => {}
+        MasterRemotePayload::PerformMasterQueryPlanning(query_planning) => {
+          let action = master_query_planning(self, query_planning.clone());
+          self.handle_query_planning_action(statuses, query_planning.clone(), action);
+        }
         MasterRemotePayload::CancelMasterQueryPlanning(_) => {}
-        // Create
+        // CreateTable
         MasterRemotePayload::CreateTablePrepared(_) => {}
         MasterRemotePayload::CreateTableAborted(_) => {}
         MasterRemotePayload::CreateTableCloseConfirm(_) => {}
@@ -527,8 +518,7 @@ impl<T: IOTypes> MasterContext<T> {
         }
       }
       MasterForwardMsg::LeaderChanged(leader_changed) => {
-        let this_gid = self.this_slave_group_id.to_gid();
-        self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
+        self.leader_map.insert(PaxosGroupId::Master, leader_changed.lid); // Update the LeadershipId
 
         // TODO: add create
 
@@ -695,53 +685,6 @@ impl<T: IOTypes> MasterContext<T> {
     return false;
   }
 
-  /// For each node in the `frozen_col_usage_tree`, we take the union of `safe_present_cols`
-  /// and `external_col`, and then increase their lat to the `timestamp`. This makes computing
-  /// a FrozelColUsageTree at this Timestamp idemptotent.
-  fn freeze_schema(&mut self, frozen_col_usage_tree: &FrozenColUsageTree, timestamp: Timestamp) {
-    fn freeze_schema_r(
-      db_schema: &mut HashMap<TablePath, TableSchema>,
-      node: &FrozenColUsageNode,
-      timestamp: Timestamp,
-    ) {
-      match &node.table_ref {
-        TableRef::TablePath(table_path) => {
-          let table_schema = db_schema.get_mut(table_path).unwrap();
-          for col in &node.safe_present_cols {
-            // Update the LAT for non-Key Columns.
-            if lookup(&table_schema.key_cols, col).is_none() {
-              table_schema.val_cols.update_lat(col, timestamp);
-            }
-          }
-          for col in &node.external_cols {
-            // Recall that no External Column should be a Key Column.
-            assert!(lookup(&table_schema.key_cols, col).is_none());
-            table_schema.val_cols.update_lat(col, timestamp);
-          }
-        }
-        TableRef::TransTableName(_) => {}
-      }
-
-      // Recurse through the child nodes.
-      for child in &node.children {
-        for (_, (_, node)) in child {
-          freeze_schema_r(db_schema, node, timestamp);
-        }
-      }
-    }
-    //
-    // match frozen_col_usage_tree {
-    //   FrozenColUsageTree::ColUsageNodes(nodes) => {
-    //     for (_, (_, node)) in nodes {
-    //       freeze_schema_r(&mut self.db_schema, node, timestamp);
-    //     }
-    //   }
-    //   FrozenColUsageTree::ColUsageNode((_, node)) => {
-    //     freeze_schema_r(&mut self.db_schema, node, timestamp);
-    //   }
-    // }
-  }
-
   /// Handles the actions specified by a AlterTableES.
   fn handle_alter_table_es_action(
     &mut self,
@@ -772,12 +715,38 @@ impl<T: IOTypes> MasterContext<T> {
     }
   }
 
-  /// Removes the `query_id` from the Master, cleaning up any remaining resources as well.
-  fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
-    // if let Some(mut es) = statuses.alter_table_ess.remove(&query_id) {
-    //   self.external_request_id_map.remove(&es.request_id);
-    //   es.exit_and_clean_up(self);
-    // }
+  /// Handles the actions specified by the MasterQueryPlanning Algorithm.
+  fn handle_query_planning_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_planning: msg::PerformMasterQueryPlanning,
+    action: MasterQueryPlanningAction,
+  ) {
+    match action {
+      MasterQueryPlanningAction::Wait => {
+        btree_map_insert(
+          &mut statuses.planning_ess,
+          &query_planning.query_id.clone(),
+          MasterQueryPlanningES {
+            sender_path: query_planning.sender_path,
+            query_id: query_planning.query_id,
+            timestamp: query_planning.timestamp,
+            ms_query: query_planning.ms_query,
+            state: MasterQueryPlanningS::WaitingInserting,
+          },
+        );
+      }
+      MasterQueryPlanningAction::Respond(result) => {
+        self.ctx().send_to_c(
+          query_planning.sender_path.node_path,
+          msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
+            return_qid: query_planning.sender_path.query_id,
+            query_id: query_planning.query_id,
+            result,
+          }),
+        );
+      }
+    }
   }
 
   /// Returns true iff this is the Leader.
