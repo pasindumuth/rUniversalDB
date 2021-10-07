@@ -5,7 +5,7 @@ use crate::common::{
 };
 use crate::common::{map_insert, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTableTMES, CreateTableTMS, ResponseData};
-use crate::drop_table_tm_es::{DropTableTMES, DropTableTMS};
+use crate::drop_table_tm_es::{DropTableTMAction, DropTableTMES, DropTableTMS};
 use crate::model::common::proc::{AlterTable, TableRef};
 use crate::model::common::{
   proc, CQueryPath, ColName, EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId, RequestId,
@@ -14,6 +14,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::model::message::{
   ExternalDDLQueryAbortData, FrozenColUsageTree, MasterExternalReq, MasterMessage,
+  MasterRemotePayload,
 };
 use crate::multiversion_map::MVM;
 use crate::paxos::LeaderChanged;
@@ -329,22 +330,26 @@ impl<T: IOTypes> MasterContext<T> {
               MasterPLm::DropTableTMPrepared(prepared) => {
                 let query_id = prepared.query_id;
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                es.handle_prepared_plm(self);
+                let action = es.handle_prepared_plm(self);
+                self.handle_drop_table_es_action(statuses, query_id, action);
               }
               MasterPLm::DropTableTMCommitted(committed) => {
-                let query_id = committed.query_id;
+                let query_id = committed.query_id.clone();
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                es.handle_committed_plm(self);
+                let action = es.handle_committed_plm(self, committed);
+                self.handle_drop_table_es_action(statuses, query_id, action);
               }
               MasterPLm::DropTableTMAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self);
+                self.handle_drop_table_es_action(statuses, query_id, action);
               }
               MasterPLm::DropTableTMClosed(closed) => {
                 let query_id = closed.query_id;
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                es.handle_closed_plm(self);
+                let action = es.handle_closed_plm(self);
+                self.handle_drop_table_es_action(statuses, query_id, action);
               }
             }
           }
@@ -450,9 +455,99 @@ impl<T: IOTypes> MasterContext<T> {
         // Run Main Loop
         self.run_main_loop(statuses);
       }
-      MasterForwardMsg::MasterRemotePayload(_) => {}
-      MasterForwardMsg::RemoteLeaderChanged(_) => {}
-      MasterForwardMsg::LeaderChanged(_) => {}
+      MasterForwardMsg::MasterRemotePayload(payload) => match payload {
+        MasterRemotePayload::RemoteLeaderChanged(_) => {}
+        MasterRemotePayload::PerformMasterQueryPlanning(_) => {}
+        MasterRemotePayload::CancelMasterQueryPlanning(_) => {}
+        // Create
+        MasterRemotePayload::CreateTablePrepared(_) => {}
+        MasterRemotePayload::CreateTableAborted(_) => {}
+        MasterRemotePayload::CreateTableCloseConfirm(_) => {}
+        // AlterTable
+        MasterRemotePayload::AlterTablePrepared(prepared) => {
+          let query_id = prepared.query_id.clone();
+          let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+          let action = es.handle_prepared(self, prepared);
+          self.handle_alter_table_es_action(statuses, query_id, action);
+        }
+        MasterRemotePayload::AlterTableAborted(aborted) => {
+          let query_id = aborted.query_id.clone();
+          let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+          let action = es.handle_aborted(self);
+          self.handle_alter_table_es_action(statuses, query_id, action);
+        }
+        MasterRemotePayload::AlterTableCloseConfirm(closed) => {
+          let query_id = closed.query_id.clone();
+          let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+          let action = es.handle_close_confirmed(self, closed);
+          self.handle_alter_table_es_action(statuses, query_id, action);
+        }
+        // Drop
+        MasterRemotePayload::DropTablePrepared(prepared) => {
+          let query_id = prepared.query_id.clone();
+          let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+          let action = es.handle_prepared(self, prepared);
+          self.handle_drop_table_es_action(statuses, query_id, action);
+        }
+        MasterRemotePayload::DropTableAborted(aborted) => {
+          let query_id = aborted.query_id.clone();
+          let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+          let action = es.handle_aborted(self);
+          self.handle_drop_table_es_action(statuses, query_id, action);
+        }
+        MasterRemotePayload::DropTableCloseConfirm(closed) => {
+          let query_id = closed.query_id.clone();
+          let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+          let action = es.handle_close_confirmed(self, closed);
+          self.handle_drop_table_es_action(statuses, query_id, action);
+        }
+        MasterRemotePayload::MasterGossipRequest(_) => {}
+      },
+      MasterForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
+        let gid = remote_leader_changed.gid.clone();
+        let lid = remote_leader_changed.lid.clone();
+        self.leader_map.insert(gid.clone(), lid.clone()); // Update the LeadershipId
+
+        // TODO: add create
+
+        // AlterTable
+        let query_ids: Vec<QueryId> = statuses.alter_table_tm_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+          let action = es.remote_leader_changed(self, remote_leader_changed.clone());
+          self.handle_alter_table_es_action(statuses, query_id, action);
+        }
+
+        // DropTable
+        let query_ids: Vec<QueryId> = statuses.drop_table_tm_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+          let action = es.remote_leader_changed(self, remote_leader_changed.clone());
+          self.handle_drop_table_es_action(statuses, query_id, action);
+        }
+      }
+      MasterForwardMsg::LeaderChanged(leader_changed) => {
+        let this_gid = self.this_slave_group_id.to_gid();
+        self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
+
+        // TODO: add create
+
+        // AlterTable
+        let query_ids: Vec<QueryId> = statuses.alter_table_tm_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+          let action = es.leader_changed(self);
+          self.handle_alter_table_es_action(statuses, query_id, action);
+        }
+
+        // DropTable
+        let query_ids: Vec<QueryId> = statuses.drop_table_tm_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+          let action = es.leader_changed(self);
+          self.handle_drop_table_es_action(statuses, query_id, action);
+        }
+      }
     }
   }
 
@@ -658,6 +753,21 @@ impl<T: IOTypes> MasterContext<T> {
       AlterTableTMAction::Wait => {}
       AlterTableTMAction::Exit => {
         statuses.alter_table_tm_ess.remove(&query_id);
+      }
+    }
+  }
+
+  /// Handles the actions specified by a AlterTableES.
+  fn handle_drop_table_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: DropTableTMAction,
+  ) {
+    match action {
+      DropTableTMAction::Wait => {}
+      DropTableTMAction::Exit => {
+        statuses.drop_table_tm_ess.remove(&query_id);
       }
     }
   }

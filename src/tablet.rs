@@ -1389,7 +1389,7 @@ impl<T: IOTypes> TabletContext<T> {
       }
       TabletForwardMsg::LeaderChanged(leader_changed) => {
         let this_gid = self.this_slave_group_id.to_gid();
-        self.leader_map.insert(this_gid, leader_changed.lid);
+        self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
 
         // Inform FinishQueryES
         let query_ids: Vec<QueryId> = statuses.finish_query_ess.keys().cloned().collect();
@@ -1431,6 +1431,9 @@ impl<T: IOTypes> TabletContext<T> {
           // Wink away all unpersisted Column Locking Algorithm data
           self.waiting_locked_cols.clear();
           self.inserting_locked_cols.clear();
+
+          // Clear TabletBundle
+          self.tablet_bundle = Vec::new();
         }
       }
     }
