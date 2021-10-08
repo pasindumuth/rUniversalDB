@@ -1,9 +1,11 @@
+use crate::alter_table_es::State;
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, Clock, CoordForwardOut,
   GossipData, IOTypes, NetworkOut, OrigP, RemoteLeaderChangedPLm, TMStatus, TabletForwardOut,
 };
 use crate::coord::CoordForwardMsg;
+use crate::create_table_es::{CreateTableAction, CreateTableES};
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
   iast, proc, CTQueryPath, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, LeadershipId,
@@ -20,10 +22,11 @@ use crate::ms_query_coord_es::{
 };
 use crate::paxos::LeaderChanged;
 use crate::query_converter::convert_to_msquery;
-use crate::server::ServerContextBase;
 use crate::server::{CommonQuery, SlaveServerContext};
+use crate::server::{MainSlaveServerContext, ServerContextBase};
 use crate::sql_parser::convert_ast;
-use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
+use crate::sql_parser::DDLQuery::Create;
+use crate::tablet::{GRQueryESWrapper, TabletForwardMsg, TransTableReadESWrapper};
 use crate::trans_table_read_es::{
   TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
 };
@@ -82,6 +85,13 @@ pub mod plm {
   }
 }
 
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+pub struct SlaveBundle {
+  remote_leader_changes: Vec<RemoteLeaderChangedPLm>,
+  gossip_data: Option<GossipData>,
+  pub plms: Vec<SlavePLm>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlavePLm {
   CreateTablePrepared(plm::CreateTablePrepared),
@@ -112,7 +122,7 @@ pub enum SlaveForwardMsg {
 /// other members here.
 #[derive(Debug, Default)]
 pub struct Statuses {
-  create_table_ess: HashMap<QueryId, GRQueryESWrapper>,
+  create_table_ess: HashMap<QueryId, CreateTableES>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -138,6 +148,7 @@ pub struct SlaveContext<T: IOTypes> {
 
   /// Metadata
   pub this_slave_group_id: SlaveGroupId,
+  pub this_eid: EndpointId,
 
   /// Gossip
   pub gossip: Arc<GossipData>,
@@ -146,7 +157,7 @@ pub struct SlaveContext<T: IOTypes> {
   pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
 
   /// Paxos
-  pub master_bundle: Vec<SlavePLm>,
+  pub slave_bundle: SlaveBundle,
 }
 
 impl<T: IOTypes> SlaveState<T> {
@@ -168,9 +179,10 @@ impl<T: IOTypes> SlaveState<T> {
         coord_forward_output,
         coord_positions: vec![],
         this_slave_group_id,
+        this_eid: EndpointId("".to_string()),
         gossip,
         leader_map: Default::default(),
-        master_bundle: vec![],
+        slave_bundle: SlaveBundle::default(),
       },
       statuses: Default::default(),
     }
@@ -182,6 +194,14 @@ impl<T: IOTypes> SlaveState<T> {
 }
 
 impl<T: IOTypes> SlaveContext<T> {
+  pub fn ctx(&mut self) -> MainSlaveServerContext<T> {
+    MainSlaveServerContext {
+      network_output: &mut self.network_output,
+      this_slave_group_id: &self.this_slave_group_id,
+      leader_map: &self.leader_map,
+    }
+  }
+
   /// Handles all messages, coming from Tablets, the Slave, External, etc.
   pub fn handle_incoming_message(&mut self, _: &mut Statuses, message: msg::SlaveMessage) {
     match message {
@@ -202,7 +222,77 @@ impl<T: IOTypes> SlaveContext<T> {
   /// Handles inputs the Slave Backend.
   fn handle_input(&mut self, statuses: &mut Statuses, slave_input: SlaveForwardMsg) {
     match slave_input {
-      SlaveForwardMsg::SlaveBundle(_) => {}
+      SlaveForwardMsg::SlaveBundle(bundle) => {
+        if self.is_leader() {
+          for paxos_log_msg in bundle {
+            match paxos_log_msg {
+              SlavePLm::CreateTablePrepared(prepared) => {
+                let query_id = prepared.query_id;
+                let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_prepared_plm(self);
+                self.handle_create_table_es_action(statuses, query_id, action);
+              }
+              SlavePLm::CreateTableCommitted(committed) => {
+                let query_id = committed.query_id;
+                let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_committed_plm(self);
+                self.handle_create_table_es_action(statuses, query_id, action);
+              }
+              SlavePLm::CreateTableAborted(aborted) => {
+                let query_id = aborted.query_id;
+                let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_aborted_plm(self);
+                self.handle_create_table_es_action(statuses, query_id, action);
+              }
+              SlavePLm::Gossip(_) => {}
+              SlavePLm::RemoteLeaderChanged(_) => {}
+            }
+          }
+
+          // Inform all ESs in WaitingInserting and start inserting a PLm.
+          for (_, es) in &mut statuses.create_table_ess {
+            es.start_inserting(self);
+          }
+
+          // TODO: dispatch bundle for insertion
+        } else {
+          for paxos_log_msg in bundle {
+            match paxos_log_msg {
+              SlavePLm::CreateTablePrepared(prepared) => {
+                let query_id = prepared.query_id;
+                map_insert(
+                  &mut statuses.create_table_ess,
+                  &query_id.clone(),
+                  CreateTableES {
+                    query_id,
+                    tablet_group_id: prepared.tablet_group_id,
+                    table_path: prepared.table_path,
+                    gen: prepared.gen,
+                    key_range: prepared.key_range,
+                    key_cols: prepared.key_cols,
+                    val_cols: prepared.val_cols,
+                    state: State::Follower,
+                  },
+                );
+              }
+              SlavePLm::CreateTableCommitted(committed) => {
+                let query_id = committed.query_id;
+                let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_committed_plm(self);
+                self.handle_create_table_es_action(statuses, query_id, action);
+              }
+              SlavePLm::CreateTableAborted(aborted) => {
+                let query_id = aborted.query_id;
+                let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_aborted_plm(self);
+                self.handle_create_table_es_action(statuses, query_id, action);
+              }
+              SlavePLm::Gossip(_) => {}
+              SlavePLm::RemoteLeaderChanged(_) => {}
+            }
+          }
+        }
+      }
       SlaveForwardMsg::SlaveExternalReq(request) => {
         // Compute the hash of the request Id.
         let request_id = match &request {
@@ -218,10 +308,122 @@ impl<T: IOTypes> SlaveContext<T> {
         let cid = self.coord_positions.get(coord_index as usize).unwrap();
         self.coord_forward_output.forward(cid, CoordForwardMsg::ExternalMessage(request));
       }
-      SlaveForwardMsg::SlaveRemotePayload(_) => {}
-      SlaveForwardMsg::GossipData(_) => {}
-      SlaveForwardMsg::RemoteLeaderChanged(_) => {}
-      SlaveForwardMsg::LeaderChanged(_) => {}
+      SlaveForwardMsg::SlaveRemotePayload(payload) => match payload {
+        SlaveRemotePayload::RemoteLeaderChanged(_) => {}
+        SlaveRemotePayload::CreateTablePrepare(prepare) => {
+          let query_id = prepare.query_id;
+          if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
+            let action = es.handle_prepare(self);
+            self.handle_create_table_es_action(statuses, query_id, action);
+          } else {
+            map_insert(
+              &mut statuses.create_table_ess,
+              &query_id.clone(),
+              CreateTableES {
+                query_id,
+                tablet_group_id: prepare.tablet_group_id,
+                table_path: prepare.table_path,
+                gen: prepare.gen,
+                key_range: prepare.key_range,
+                key_cols: prepare.key_cols,
+                val_cols: prepare.val_cols,
+                state: State::WaitingInsertingPrepared,
+              },
+            );
+          }
+        }
+        SlaveRemotePayload::CreateTableCommit(commit) => {
+          let query_id = commit.query_id;
+          if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
+            let action = es.handle_commit(self);
+            self.handle_create_table_es_action(statuses, query_id, action);
+          } else {
+            // Send back a `CloseConfirm` to the Master.
+            let sid = self.this_slave_group_id.clone();
+            self.ctx().send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
+              msg::CreateTableCloseConfirm { query_id, sid },
+            ));
+          }
+        }
+        SlaveRemotePayload::CreateTableAbort(abort) => {
+          let query_id = abort.query_id;
+          if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
+            let action = es.handle_abort(self);
+            self.handle_create_table_es_action(statuses, query_id, action);
+          } else {
+            // Send back a `CloseConfirm` to the Master.
+            let sid = self.this_slave_group_id.clone();
+            self.ctx().send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
+              msg::CreateTableCloseConfirm { query_id, sid },
+            ));
+          }
+        }
+        SlaveRemotePayload::MasterGossip(master_gossip) => {
+          let incoming_gossip = master_gossip.gossip_data;
+          if self.gossip.gen < incoming_gossip.gen {
+            if let Some(cur_next_gossip) = &self.slave_bundle.gossip_data {
+              // Check if there is an existing GossipData about to be inserted.
+              if cur_next_gossip.gen < incoming_gossip.gen {
+                self.slave_bundle.gossip_data = Some(incoming_gossip);
+              }
+            } else {
+              self.slave_bundle.gossip_data = Some(incoming_gossip);
+            }
+          }
+        }
+        SlaveRemotePayload::TabletMessage(tid, tablet_msg) => {
+          self.tablet_forward_output.forward(&tid, TabletForwardMsg::TabletMessage(tablet_msg))
+        }
+        SlaveRemotePayload::CoordMessage(cid, coord_msg) => {
+          self.coord_forward_output.forward(&cid, CoordForwardMsg::CoordMessage(coord_msg))
+        }
+      },
+      SlaveForwardMsg::GossipData(gossip) => {
+        self.gossip = gossip;
+      }
+      SlaveForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
+        let gid = remote_leader_changed.gid.clone();
+        let lid = remote_leader_changed.lid.clone();
+        self.leader_map.insert(gid.clone(), lid.clone()); // Update the LeadershipId
+      }
+      SlaveForwardMsg::LeaderChanged(leader_changed) => {
+        let this_gid = self.this_slave_group_id.to_gid();
+        self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
+
+        // Inform CreateQueryES
+        let query_ids: Vec<QueryId> = statuses.create_table_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let create_query_es = statuses.create_table_ess.get_mut(&query_id).unwrap();
+          let action = create_query_es.leader_changed(self);
+          self.handle_create_table_es_action(statuses, query_id.clone(), action);
+        }
+
+        if !self.is_leader() {
+          // Clear SlaveBundle
+          self.slave_bundle = SlaveBundle::default();
+        }
+      }
     }
+  }
+
+  /// Handles the actions produced by a CreateTableES.
+  fn handle_create_table_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: CreateTableAction,
+  ) {
+    match action {
+      CreateTableAction::Wait => {}
+      CreateTableAction::Exit => {
+        statuses.create_table_ess.remove(&query_id);
+      }
+    }
+  }
+
+  /// Returns true iff this is the Leader.
+  pub fn is_leader(&self) -> bool {
+    let lid = self.leader_map.get(&self.this_slave_group_id.to_gid()).unwrap();
+    lid.eid == self.this_eid
   }
 }

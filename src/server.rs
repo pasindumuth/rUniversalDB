@@ -260,6 +260,37 @@ impl<'a, T: IOTypes> ServerContextBase<T> for SlaveServerContext<'a, T> {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  Main Slave Server Context
+// -----------------------------------------------------------------------------------------------
+
+/// This is used to easily use the `ServerContextBase` methods in the Slave thread.
+pub struct MainSlaveServerContext<'a, T: IOTypes> {
+  /// IO Objects.
+  pub network_output: &'a mut T::NetworkOutT,
+
+  /// Metadata
+  pub this_slave_group_id: &'a SlaveGroupId,
+
+  /// Paxos
+  pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
+}
+
+impl<'a, T: IOTypes> ServerContextBase<T> for MainSlaveServerContext<'a, T> {
+  fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
+    self.leader_map
+  }
+
+  /// Gets the `PaxosGroupId` of the Slave.
+  fn this_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.this_slave_group_id.clone())
+  }
+
+  fn network_output(&mut self) -> &mut T::NetworkOutT {
+    self.network_output
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Master Server Context
 // -----------------------------------------------------------------------------------------------
 
@@ -267,14 +298,7 @@ impl<'a, T: IOTypes> ServerContextBase<T> for SlaveServerContext<'a, T> {
 /// execute agnotisticly.
 pub struct MasterServerContext<'a, T: IOTypes> {
   /// IO Objects.
-  pub rand: &'a mut T::RngCoreT,
-  pub clock: &'a mut T::ClockT,
   pub network_output: &'a mut T::NetworkOutT,
-
-  /// Distribution
-  pub sharding_config: &'a HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: &'a HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: &'a HashMap<SlaveGroupId, Vec<EndpointId>>,
 
   /// Paxos
   pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,

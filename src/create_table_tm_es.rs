@@ -193,7 +193,7 @@ impl CreateTableTMES {
         sid.clone(),
         msg::SlaveRemotePayload::CreateTablePrepare(msg::CreateTablePrepare {
           query_id: self.query_id.clone(),
-          tid: tid.clone(),
+          tablet_group_id: tid.clone(),
           table_path: self.table_path.clone(),
           gen: gen.clone(),
           key_range: key_range.clone(),
@@ -464,7 +464,7 @@ impl CreateTableTMES {
               sid.clone(),
               msg::SlaveRemotePayload::CreateTablePrepare(msg::CreateTablePrepare {
                 query_id: self.query_id.clone(),
-                tid: tid.clone(),
+                tablet_group_id: tid.clone(),
                 table_path: self.table_path.clone(),
                 gen: gen.clone(),
                 key_range: key_range.clone(),

@@ -1192,12 +1192,10 @@ impl<T: IOTypes> TabletContext<T> {
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
-              let payload =
-                msg::MasterRemotePayload::AlterTableCloseConfirm(msg::AlterTableCloseConfirm {
-                  query_id: abort.query_id,
-                  rm: self.mk_node_path(),
-                });
-              self.ctx().send_to_master(payload);
+              let rm = self.mk_node_path();
+              self.ctx().send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
+                msg::AlterTableCloseConfirm { query_id: abort.query_id, rm },
+              ));
             }
           }
           msg::TabletMessage::AlterTableCommit(commit) => {
@@ -1206,12 +1204,10 @@ impl<T: IOTypes> TabletContext<T> {
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
-              let payload =
-                msg::MasterRemotePayload::AlterTableCloseConfirm(msg::AlterTableCloseConfirm {
-                  query_id: commit.query_id,
-                  rm: self.mk_node_path(),
-                });
-              self.ctx().send_to_master(payload);
+              let rm = self.mk_node_path();
+              self.ctx().send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
+                msg::AlterTableCloseConfirm { query_id: commit.query_id, rm },
+              ));
             }
           }
           msg::TabletMessage::DropTablePrepare(prepare) => {
@@ -1244,12 +1240,10 @@ impl<T: IOTypes> TabletContext<T> {
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
-              let payload =
-                msg::MasterRemotePayload::DropTableCloseConfirm(msg::DropTableCloseConfirm {
-                  query_id: abort.query_id,
-                  rm: self.mk_node_path(),
-                });
-              self.ctx().send_to_master(payload);
+              let rm = self.mk_node_path();
+              self.ctx().send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
+                msg::DropTableCloseConfirm { query_id: abort.query_id, rm },
+              ));
             }
           }
           msg::TabletMessage::DropTableCommit(commit) => {
@@ -1258,12 +1252,10 @@ impl<T: IOTypes> TabletContext<T> {
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
-              let payload =
-                msg::MasterRemotePayload::DropTableCloseConfirm(msg::DropTableCloseConfirm {
-                  query_id: commit.query_id,
-                  rm: self.mk_node_path(),
-                });
-              self.ctx().send_to_master(payload);
+              let rm = self.mk_node_path();
+              self.ctx().send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
+                msg::DropTableCloseConfirm { query_id: commit.query_id, rm },
+              ));
             }
           }
         }

@@ -254,12 +254,7 @@ impl<T: IOTypes> MasterState<T> {
 impl<T: IOTypes> MasterContext<T> {
   pub fn ctx(&mut self) -> MasterServerContext<T> {
     MasterServerContext {
-      rand: &mut self.rand,
-      clock: &mut self.clock,
       network_output: &mut self.network_output,
-      sharding_config: &mut self.sharding_config,
-      tablet_address_config: &mut self.tablet_address_config,
-      slave_address_config: &mut self.slave_address_config,
       leader_map: &mut self.leader_map,
     }
   }
@@ -387,6 +382,8 @@ impl<T: IOTypes> MasterContext<T> {
               ms_query: es.ms_query.clone(),
             }));
           }
+
+          // TODO: dispatch bundle for insertion
         } else {
           // TODO: handle Follower case
         }
