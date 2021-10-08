@@ -1,5 +1,5 @@
 use crate::common::{Clock, GossipData, IOTypes, NetworkOut, RemoteLeaderChangedPLm};
-use crate::create_table_tm_es::{ResponseData, TMClosedState};
+use crate::create_table_tm_es::ResponseData;
 use crate::master::{plm, MasterContext, MasterPLm};
 use crate::model::common::{
   proc, EndpointId, Gen, QueryId, RequestId, TNodePath, TSubNodePath, TablePath, TabletGroupId,
@@ -33,14 +33,20 @@ pub struct Preparing {
 pub struct Committed {
   /// The `Timestamp`s at which to commit.
   commit_timestamp: Timestamp,
-  /// The set of RMs that still have not prepared.
+  /// The set of RMs that still have not committed.
   rms_remaining: HashSet<TNodePath>,
 }
 
 #[derive(Debug)]
 pub struct Aborted {
-  /// The set of RMs that still have not prepared.
+  /// The set of RMs that still have not aborted.
   rms_remaining: HashSet<TNodePath>,
+}
+
+#[derive(Debug)]
+pub enum InsertingTMClosed {
+  Committed(Timestamp),
+  Aborted,
 }
 
 #[derive(Debug)]
@@ -54,7 +60,7 @@ pub enum AlterTableTMS {
   Committed(Committed),
   InsertingTMAborted,
   Aborted(Aborted),
-  InsertingTMClosed(TMClosedState),
+  InsertingTMClosed(InsertingTMClosed),
 }
 
 #[derive(Debug)]
@@ -139,7 +145,7 @@ impl AlterTableTMES {
             ctx.master_bundle.push(MasterPLm::AlterTableTMClosed(plm::AlterTableTMClosed {
               query_id: self.query_id.clone(),
             }));
-            self.state = AlterTableTMS::InsertingTMClosed(TMClosedState::Committed(
+            self.state = AlterTableTMS::InsertingTMClosed(InsertingTMClosed::Committed(
               committed.commit_timestamp,
             ));
           }
@@ -153,7 +159,7 @@ impl AlterTableTMES {
             ctx.master_bundle.push(MasterPLm::AlterTableTMClosed(plm::AlterTableTMClosed {
               query_id: self.query_id.clone(),
             }));
-            self.state = AlterTableTMS::InsertingTMClosed(TMClosedState::Aborted);
+            self.state = AlterTableTMS::InsertingTMClosed(InsertingTMClosed::Aborted);
           }
         }
       }
@@ -397,8 +403,8 @@ impl AlterTableTMES {
       }
       AlterTableTMS::InsertingTMClosed(tm_closed) => {
         self.state = AlterTableTMS::Follower(match tm_closed {
-          TMClosedState::Committed(timestamp) => Follower::Committed(timestamp.clone()),
-          TMClosedState::Aborted => Follower::Aborted,
+          InsertingTMClosed::Committed(timestamp) => Follower::Committed(timestamp.clone()),
+          InsertingTMClosed::Aborted => Follower::Aborted,
         });
         self.maybe_respond_dead(ctx);
         AlterTableTMAction::Wait

@@ -1,5 +1,5 @@
 use crate::common::{Clock, IOTypes, NetworkOut, RemoteLeaderChangedPLm};
-use crate::create_table_tm_es::{ResponseData, TMClosedState};
+use crate::create_table_tm_es::ResponseData;
 use crate::master::{plm, MasterContext, MasterPLm};
 use crate::model::common::{
   EndpointId, QueryId, RequestId, TNodePath, TSubNodePath, TablePath, TabletGroupId, Timestamp,
@@ -31,14 +31,20 @@ pub struct Preparing {
 pub struct Committed {
   /// The `Timestamp`s at which to commit.
   commit_timestamp: Timestamp,
-  /// The set of RMs that still have not prepared.
+  /// The set of RMs that still have not committed.
   rms_remaining: HashSet<TNodePath>,
 }
 
 #[derive(Debug)]
 pub struct Aborted {
-  /// The set of RMs that still have not prepared.
+  /// The set of RMs that still have not aborted.
   rms_remaining: HashSet<TNodePath>,
+}
+
+#[derive(Debug)]
+pub enum InsertingTMClosed {
+  Committed(Timestamp),
+  Aborted,
 }
 
 #[derive(Debug)]
@@ -52,7 +58,7 @@ pub enum DropTableTMS {
   Committed(Committed),
   InsertingTMAborted,
   Aborted(Aborted),
-  InsertingTMClosed(TMClosedState),
+  InsertingTMClosed(InsertingTMClosed),
 }
 
 #[derive(Debug)]
@@ -136,8 +142,9 @@ impl DropTableTMES {
             ctx.master_bundle.push(MasterPLm::DropTableTMClosed(plm::DropTableTMClosed {
               query_id: self.query_id.clone(),
             }));
-            self.state =
-              DropTableTMS::InsertingTMClosed(TMClosedState::Committed(committed.commit_timestamp));
+            self.state = DropTableTMS::InsertingTMClosed(InsertingTMClosed::Committed(
+              committed.commit_timestamp,
+            ));
           }
         }
       }
@@ -149,7 +156,7 @@ impl DropTableTMES {
             ctx.master_bundle.push(MasterPLm::DropTableTMClosed(plm::DropTableTMClosed {
               query_id: self.query_id.clone(),
             }));
-            self.state = DropTableTMS::InsertingTMClosed(TMClosedState::Aborted);
+            self.state = DropTableTMS::InsertingTMClosed(InsertingTMClosed::Aborted);
           }
         }
       }
@@ -379,8 +386,8 @@ impl DropTableTMES {
       }
       DropTableTMS::InsertingTMClosed(tm_closed) => {
         self.state = DropTableTMS::Follower(match tm_closed {
-          TMClosedState::Committed(timestamp) => Follower::Committed(timestamp.clone()),
-          TMClosedState::Aborted => Follower::Aborted,
+          InsertingTMClosed::Committed(timestamp) => Follower::Committed(timestamp.clone()),
+          InsertingTMClosed::Aborted => Follower::Aborted,
         });
         self.maybe_respond_dead(ctx);
         DropTableTMAction::Wait

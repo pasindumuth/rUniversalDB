@@ -56,7 +56,7 @@ pub trait ServerContextBase<T: IOTypes> {
     );
   }
 
-  fn send_to_slave_common(&mut self, payload: msg::SlaveRemotePayload, to_sid: SlaveGroupId) {
+  fn send_to_slave_common(&mut self, to_sid: SlaveGroupId, payload: msg::SlaveRemotePayload) {
     let to_lid = self.leader_map().get(&to_sid.to_gid()).unwrap().clone();
     self.send_to_slave_leadership(payload, to_sid, to_lid);
   }
@@ -80,8 +80,8 @@ pub trait ServerContextBase<T: IOTypes> {
   fn send_to_c(&mut self, node_path: CNodePath, query: msg::CoordMessage) {
     let CSubNodePath::Coord(cid) = node_path.sub;
     self.send_to_slave_common(
-      msg::SlaveRemotePayload::CoordMessage(cid, query),
       node_path.sid.clone(),
+      msg::SlaveRemotePayload::CoordMessage(cid, query),
     );
   }
 
@@ -104,8 +104,8 @@ pub trait ServerContextBase<T: IOTypes> {
   fn send_to_t(&mut self, node_path: TNodePath, query: msg::TabletMessage) {
     let TSubNodePath::Tablet(tid) = node_path.sub;
     self.send_to_slave_common(
-      msg::SlaveRemotePayload::TabletMessage(tid, query),
       node_path.sid.clone(),
+      msg::SlaveRemotePayload::TabletMessage(tid, query),
     );
   }
 
@@ -120,7 +120,7 @@ pub trait ServerContextBase<T: IOTypes> {
   }
 
   fn send_to_ct(&mut self, node_path: CTNodePath, query: CommonQuery) {
-    self.send_to_slave_common(query.into_remote_payload(node_path.sub), node_path.sid.clone());
+    self.send_to_slave_common(node_path.sid.clone(), query.into_remote_payload(node_path.sub));
   }
 
   // send_to_master
