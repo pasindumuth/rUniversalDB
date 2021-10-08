@@ -1,15 +1,17 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  rvec, Clock, GossipData, IOTypes, NetworkOut, TableSchema, TabletForwardOut,
+  rvec, Clock, CoordForwardOut, GossipData, IOTypes, NetworkOut, TableSchema, TabletForwardOut,
 };
+use runiversal::coord::CoordForwardMsg;
 use runiversal::model::common::{
-  EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
+  CoordGroupId, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
+  Timestamp,
 };
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
 use runiversal::slave::SlaveState;
-use runiversal::tablet::TabletState;
+use runiversal::tablet::{TabletForwardMsg, TabletState};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Formatter, Result};
@@ -55,7 +57,7 @@ struct TestTabletForwardOut {
 }
 
 impl TabletForwardOut for TestTabletForwardOut {
-  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: msg::TabletMessage) {
+  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletForwardMsg) {
     self
       .tablet_states
       .borrow_mut()
@@ -63,13 +65,28 @@ impl TabletForwardOut for TestTabletForwardOut {
       .unwrap()
       .get_mut(tablet_group_id)
       .unwrap()
-      .handle_incoming_message(msg);
+      .handle_input(msg);
   }
 }
 
 impl Debug for TestTabletForwardOut {
   fn fmt(&self, f: &mut Formatter) -> Result {
     write!(f, "TestTabletForwardOut")
+  }
+}
+
+/// A simple interface for pushing messages from the Slave to the Tablets.
+struct TestCoordForwardOut {}
+
+impl CoordForwardOut for TestCoordForwardOut {
+  fn forward(&mut self, coord_group_id: &CoordGroupId, msg: CoordForwardMsg) {
+    panic!() // TODO: do this right
+  }
+}
+
+impl Debug for TestCoordForwardOut {
+  fn fmt(&self, f: &mut Formatter) -> Result {
+    write!(f, "TestCoordForwardOut")
   }
 }
 
@@ -81,6 +98,7 @@ impl IOTypes for TestIOTypes {
   type ClockT = TestClock;
   type NetworkOutT = TestNetworkOut;
   type TabletForwardOutT = TestTabletForwardOut;
+  type CoordForwardOutT = TestCoordForwardOut;
 }
 
 impl Debug for TestIOTypes {
@@ -186,9 +204,9 @@ impl Simulation {
           clock.clone(),
           network_out.clone(),
           TestTabletForwardOut { tablet_states: sim.tablet_states.clone(), from_eid: eid.clone() },
+          TestCoordForwardOut {},
           gossip.clone(),
           sid.clone(),
-          EndpointId("".to_string()),
         ),
       );
       sim.tablet_states.borrow_mut().insert(eid.clone(), Default::default());

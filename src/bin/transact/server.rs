@@ -1,10 +1,15 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{Clock, GossipData, IOTypes, NetworkOut, TabletForwardOut};
-use runiversal::model::common::{EndpointId, Gen, SlaveGroupId, TabletGroupId, Timestamp};
+use runiversal::common::{
+  Clock, CoordForwardOut, GossipData, IOTypes, NetworkOut, TabletForwardOut,
+};
+use runiversal::coord::CoordForwardMsg;
+use runiversal::model::common::{
+  CoordGroupId, EndpointId, Gen, SlaveGroupId, TabletGroupId, Timestamp,
+};
 use runiversal::model::message as msg;
 use runiversal::slave::SlaveState;
-use runiversal::tablet::TabletState;
+use runiversal::tablet::{TabletForwardMsg, TabletState};
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -40,12 +45,20 @@ impl NetworkOut for ProdNetworkOut {
 /// A simple interface for pushing messages from the Slave to
 /// the Tablets.
 struct ProdTabletForwardOut {
-  tablet_map: HashMap<TabletGroupId, Sender<msg::TabletMessage>>,
+  tablet_map: HashMap<TabletGroupId, Sender<TabletForwardMsg>>,
 }
 
 impl TabletForwardOut for ProdTabletForwardOut {
-  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: msg::TabletMessage) {
+  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletForwardMsg) {
     self.tablet_map.get(tablet_group_id).unwrap().send(msg).unwrap();
+  }
+}
+
+struct ProdCoordForwardOut {}
+
+impl CoordForwardOut for ProdCoordForwardOut {
+  fn forward(&mut self, coord_group_id: &CoordGroupId, msg: CoordForwardMsg) {
+    panic!() // TODO: do this right
   }
 }
 
@@ -56,6 +69,7 @@ impl IOTypes for ProdIOTypes {
   type ClockT = ProdClock;
   type NetworkOutT = ProdNetworkOut;
   type TabletForwardOutT = ProdTabletForwardOut;
+  type CoordForwardOutT = ProdCoordForwardOut;
 }
 
 pub fn start_server(
@@ -87,7 +101,7 @@ pub fn start_server(
   });
 
   // Create the Tablets
-  let mut tablet_map = HashMap::<TabletGroupId, Sender<msg::TabletMessage>>::new();
+  let mut tablet_map = HashMap::<TabletGroupId, Sender<TabletForwardMsg>>::new();
   for tablet_group_id in vec!["t1", "t2", "t3"] {
     // Create the seed for the Tablet's RNG. We use the Slave's
     // RNG to create a random seed.
@@ -111,11 +125,10 @@ pub fn start_server(
         gossip,
         SlaveGroupId("".to_string()),
         TabletGroupId("".to_string()),
-        EndpointId("".to_string()),
       );
       loop {
         let tablet_msg = to_tablet_receiver.recv().unwrap();
-        tablet.handle_incoming_message(tablet_msg);
+        tablet.handle_input(tablet_msg);
       }
     });
   }
@@ -126,9 +139,9 @@ pub fn start_server(
     clock,
     network_output,
     ProdTabletForwardOut { tablet_map },
+    ProdCoordForwardOut {},
     gossip.clone(),
     SlaveGroupId("".to_string()),
-    EndpointId("".to_string()),
   );
   loop {
     // Receive data from the `to_server_receiver` and update the SlaveState accordingly.

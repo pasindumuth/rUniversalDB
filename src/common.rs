@@ -1,11 +1,13 @@
 use crate::col_usage::FrozenColUsageNode;
+use crate::coord::CoordForwardMsg;
 use crate::model::common::{
-  proc, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColType, EndpointId, Gen, LeadershipId,
-  NodeGroupId, PaxosGroupId, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
+  proc, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColType, CoordGroupId, EndpointId, Gen,
+  LeadershipId, NodeGroupId, PaxosGroupId, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
   TabletGroupId, TabletKeyRange, TierMap, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
+use crate::tablet::TabletForwardMsg;
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -27,7 +29,11 @@ pub trait NetworkOut {
 }
 
 pub trait TabletForwardOut {
-  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: msg::TabletMessage);
+  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletForwardMsg);
+}
+
+pub trait CoordForwardOut {
+  fn forward(&mut self, coord_group_id: &CoordGroupId, msg: CoordForwardMsg);
 }
 
 pub trait IOTypes {
@@ -35,6 +41,7 @@ pub trait IOTypes {
   type ClockT: Clock + Debug;
   type NetworkOutT: NetworkOut + Debug;
   type TabletForwardOutT: TabletForwardOut + Debug;
+  type CoordForwardOutT: CoordForwardOut + Debug;
 }
 
 // -----------------------------------------------------------------------------------------------

@@ -654,11 +654,6 @@ impl<T: IOTypes> TabletState<T> {
   pub fn handle_input(&mut self, coord_input: TabletForwardMsg) {
     self.tablet_context.handle_input(&mut self.statuses, coord_input);
   }
-
-  // TODO: remove
-  pub fn handle_incoming_message(&mut self, message: msg::TabletMessage) {
-    // self.tablet_context.handle_incoming_message(&mut self.statuses, message);
-  }
 }
 
 impl<T: IOTypes> TabletContext<T> {
