@@ -50,13 +50,6 @@ pub mod plm {
   };
   use serde::{Deserialize, Serialize};
 
-  // Gossip
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct Gossip {
-    pub ms_query: GossipData,
-  }
-
   // CreateTable
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -116,6 +109,24 @@ pub enum SlaveForwardMsg {
   GossipData(Arc<GossipData>),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(LeaderChanged),
+  SlaveBackMessage(SlaveBackMessage),
+}
+
+// -----------------------------------------------------------------------------------------------
+//  SlaveReceivedMsg
+// -----------------------------------------------------------------------------------------------
+
+/// Messages send from Tablets to the Slave
+pub enum SlaveBackMessage {
+  TabletBundle(TabletGroupId, TabletBundle),
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Full Slave Input
+// -----------------------------------------------------------------------------------------------
+pub enum FullSlaveInput {
+  SlaveMessage(msg::SlaveMessage),
+  SlaveBackMessage(SlaveBackMessage),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -155,17 +166,19 @@ pub struct SlaveContext<T: IOTypes> {
   pub this_gid: PaxosGroupId, // self.this_slave_group_id.to_gid()
   pub this_eid: EndpointId,
 
-  /// Gossip
+  // Gossip
   pub gossip: Arc<GossipData>,
 
-  /// LeaderMap
+  // LeaderMap
   pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
 
-  /// NetworkDriver
+  // NetworkDriver
   pub network_driver: NetworkDriver<msg::SlaveRemotePayload>,
 
-  /// Paxos
+  // Paxos
   pub slave_bundle: SlaveBundle,
+  /// After a `SharedPaxosBundle` is inserted, this is cleared.
+  pub tablet_bundles: HashMap<TabletGroupId, TabletBundle>,
   pub paxos_driver: PaxosDriver<SharedPaxosBundle>,
 }
 
@@ -200,14 +213,29 @@ impl<T: IOTypes> SlaveState<T> {
         leader_map,
         network_driver: NetworkDriver::new(all_gids),
         slave_bundle: SlaveBundle::default(),
-        paxos_driver: PaxosDriver {},
+        tablet_bundles: Default::default(),
+        paxos_driver: PaxosDriver { bundle: SharedPaxosBundle::default() },
       },
       statuses: Default::default(),
     }
   }
 
+  // TODO: stop using this in favor of `handle_full_input`
   pub fn handle_incoming_message(&mut self, message: msg::SlaveMessage) {
     self.slave_context.handle_incoming_message(&mut self.statuses, message);
+  }
+
+  pub fn handle_full_input(&mut self, input: FullSlaveInput) {
+    match input {
+      FullSlaveInput::SlaveMessage(message) => {
+        self.slave_context.handle_incoming_message(&mut self.statuses, message);
+      }
+      FullSlaveInput::SlaveBackMessage(message) => {
+        /// Handles messages that were send from the Tablets back to the Slave.
+        let forward_msg = SlaveForwardMsg::SlaveBackMessage(message);
+        self.slave_context.handle_input(&mut self.statuses, forward_msg);
+      }
+    }
   }
 }
 
@@ -336,6 +364,18 @@ impl<T: IOTypes> SlaveContext<T> {
   /// Handles inputs the Slave Backend.
   fn handle_input(&mut self, statuses: &mut Statuses, slave_input: SlaveForwardMsg) {
     match slave_input {
+      SlaveForwardMsg::SlaveBackMessage(slave_back_msg) => match slave_back_msg {
+        SlaveBackMessage::TabletBundle(tid, tablet_bundle) => {
+          self.tablet_bundles.insert(tid, tablet_bundle);
+          if self.tablet_bundles.len() == self.tablet_forward_output.num_tablets() {
+            let shared_bundle = SharedPaxosBundle {
+              slave: std::mem::replace(&mut self.slave_bundle, SlaveBundle::default()),
+              tablet: std::mem::replace(&mut self.tablet_bundles, HashMap::default()),
+            };
+            self.paxos_driver.insert_bundle(shared_bundle);
+          }
+        }
+      },
       SlaveForwardMsg::SlaveBundle(bundle) => {
         if self.is_leader() {
           for paxos_log_msg in bundle {
@@ -365,8 +405,6 @@ impl<T: IOTypes> SlaveContext<T> {
           for (_, es) in &mut statuses.create_table_ess {
             es.start_inserting(self);
           }
-
-          // TODO: dispatch bundle for insertion
         } else {
           for paxos_log_msg in bundle {
             match paxos_log_msg {

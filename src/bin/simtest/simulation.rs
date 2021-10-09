@@ -1,7 +1,8 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  rvec, Clock, CoordForwardOut, GossipData, IOTypes, NetworkOut, TableSchema, TabletForwardOut,
+  rvec, Clock, CoordForwardOut, GossipData, IOTypes, NetworkOut, SlaveForwardOut, TableSchema,
+  TabletForwardOut,
 };
 use runiversal::coord::CoordForwardMsg;
 use runiversal::model::common::{
@@ -10,7 +11,7 @@ use runiversal::model::common::{
 };
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
-use runiversal::slave::SlaveState;
+use runiversal::slave::{SlaveBackMessage, SlaveState};
 use runiversal::tablet::{TabletForwardMsg, TabletState};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -71,6 +72,10 @@ impl TabletForwardOut for TestTabletForwardOut {
   fn all_tids(&self) -> Vec<TabletGroupId> {
     panic!() // TODO: do this right
   }
+
+  fn num_tablets(&self) -> usize {
+    panic!() // TODO: do this right
+  }
 }
 
 impl Debug for TestTabletForwardOut {
@@ -78,6 +83,8 @@ impl Debug for TestTabletForwardOut {
     write!(f, "TestTabletForwardOut")
   }
 }
+
+// CoordForwardOut
 
 /// A simple interface for pushing messages from the Slave to the Tablets.
 struct TestCoordForwardOut {}
@@ -98,6 +105,22 @@ impl Debug for TestCoordForwardOut {
   }
 }
 
+// SlaveForwardOut
+
+struct TestSlaveForwardOut {}
+
+impl SlaveForwardOut for TestSlaveForwardOut {
+  fn forward(&mut self, msg: SlaveBackMessage) {
+    panic!() // TODO: do this right
+  }
+}
+
+impl Debug for TestSlaveForwardOut {
+  fn fmt(&self, f: &mut Formatter) -> Result {
+    write!(f, "TestSlaveForwardOut")
+  }
+}
+
 /// IOTypes for testing purposes.
 struct TestIOTypes {}
 
@@ -107,6 +130,7 @@ impl IOTypes for TestIOTypes {
   type NetworkOutT = TestNetworkOut;
   type TabletForwardOutT = TestTabletForwardOut;
   type CoordForwardOutT = TestCoordForwardOut;
+  type SlaveForwardOutT = TestSlaveForwardOut;
 }
 
 impl Debug for TestIOTypes {
@@ -227,6 +251,7 @@ impl Simulation {
             XorShiftRng::from_seed(seed),
             clock.clone(),
             network_out.clone(),
+            TestSlaveForwardOut {},
             gossip.clone(),
             sid.clone(),
             tid.clone(),

@@ -7,6 +7,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
+use crate::slave::SlaveBackMessage;
 use crate::tablet::TabletForwardMsg;
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
@@ -32,6 +33,8 @@ pub trait TabletForwardOut {
   fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletForwardMsg);
 
   fn all_tids(&self) -> Vec<TabletGroupId>;
+
+  fn num_tablets(&self) -> usize;
 }
 
 pub trait CoordForwardOut {
@@ -40,12 +43,18 @@ pub trait CoordForwardOut {
   fn all_cids(&self) -> Vec<CoordGroupId>;
 }
 
+/// An interface for other Threads to forward data back to the Slave.
+pub trait SlaveForwardOut {
+  fn forward(&mut self, msg: SlaveBackMessage);
+}
+
 pub trait IOTypes {
   type RngCoreT: RngCore + Debug;
   type ClockT: Clock + Debug;
   type NetworkOutT: NetworkOut + Debug;
   type TabletForwardOutT: TabletForwardOut + Debug;
   type CoordForwardOutT: CoordForwardOut + Debug;
+  type SlaveForwardOutT: SlaveForwardOut + Debug;
 }
 
 // -----------------------------------------------------------------------------------------------

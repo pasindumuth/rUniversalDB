@@ -4,12 +4,12 @@ use crate::col_usage::{
   node_external_trans_tables, nodes_external_cols, nodes_external_trans_tables, ColUsagePlanner,
   FrozenColUsageNode,
 };
-use crate::common::RemoteLeaderChangedPLm;
 use crate::common::{
   btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
   mk_qid, remove_item, Clock, ColBound, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
   PolyColBound, SingleBound, TMStatus, TableRegion, TableSchema,
 };
+use crate::common::{RemoteLeaderChangedPLm, SlaveForwardOut};
 use crate::drop_table_es::DropTableAction;
 use crate::drop_table_es::DropTableES;
 use crate::expression::{
@@ -43,6 +43,7 @@ use crate::server::{
   are_cols_locked, contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error,
   CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
 };
+use crate::slave::SlaveBackMessage;
 use crate::storage::{
   commit_to_storage, compress_updates_views, GenericMVTable, GenericTable, StorageView,
 };
@@ -558,6 +559,7 @@ pub struct TabletContext<T: IOTypes> {
   pub rand: T::RngCoreT,
   pub clock: T::ClockT,
   pub network_output: T::NetworkOutT,
+  pub slave_forward_output: T::SlaveForwardOutT,
 
   /// Metadata
   pub this_slave_group_id: SlaveGroupId,
@@ -605,6 +607,7 @@ impl<T: IOTypes> TabletState<T> {
     rand: T::RngCoreT,
     clock: T::ClockT,
     network_output: T::NetworkOutT,
+    slave_forward_output: T::SlaveForwardOutT,
     gossip: Arc<GossipData>,
     this_slave_group_id: SlaveGroupId,
     this_tablet_group_id: TabletGroupId,
@@ -627,6 +630,7 @@ impl<T: IOTypes> TabletState<T> {
         rand,
         clock,
         network_output,
+        slave_forward_output,
         this_slave_group_id,
         this_tablet_group_id,
         sub_node_path: CTSubNodePath::Tablet(TabletGroupId("".to_string())),
@@ -784,7 +788,10 @@ impl<T: IOTypes> TabletContext<T> {
             DDLES::Dropped(_) => {}
           }
 
-          // TODO: dispatch bundle for insertion
+          // Dispatch the TabletBundle for insertion and start a new one.
+          let tid = self.this_tablet_group_id.clone();
+          let tablet_bundle = std::mem::replace(&mut self.tablet_bundle, Vec::default());
+          self.slave_forward_output.forward(SlaveBackMessage::TabletBundle(tid, tablet_bundle));
         } else {
           for paxos_log_msg in bundle {
             match paxos_log_msg {
