@@ -102,10 +102,9 @@ impl DropTableTMES {
             for timestamp in &preparing.prepared_timestamps {
               timestamp_hint = max(timestamp_hint, *timestamp);
             }
-            ctx.master_bundle.push(MasterPLm::DropTableTMCommitted(plm::DropTableTMCommitted {
-              query_id: self.query_id.clone(),
-              timestamp_hint,
-            }));
+            ctx.master_bundle.plms.push(MasterPLm::DropTableTMCommitted(
+              plm::DropTableTMCommitted { query_id: self.query_id.clone(), timestamp_hint },
+            ));
             self.state = DropTableTMS::InsertingTMCommitted;
           }
         }
@@ -118,7 +117,7 @@ impl DropTableTMES {
   pub fn handle_aborted<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> DropTableTMAction {
     match &mut self.state {
       DropTableTMS::Preparing(_) => {
-        ctx.master_bundle.push(MasterPLm::DropTableTMAborted(plm::DropTableTMAborted {
+        ctx.master_bundle.plms.push(MasterPLm::DropTableTMAborted(plm::DropTableTMAborted {
           query_id: self.query_id.clone(),
         }));
         self.state = DropTableTMS::InsertingTMAborted;
@@ -139,7 +138,7 @@ impl DropTableTMES {
           committed.rms_remaining.remove(&closed.rm);
           if committed.rms_remaining.is_empty() {
             // All RMs have committed
-            ctx.master_bundle.push(MasterPLm::DropTableTMClosed(plm::DropTableTMClosed {
+            ctx.master_bundle.plms.push(MasterPLm::DropTableTMClosed(plm::DropTableTMClosed {
               query_id: self.query_id.clone(),
             }));
             self.state = DropTableTMS::InsertingTMClosed(InsertingTMClosed::Committed(
@@ -153,7 +152,7 @@ impl DropTableTMES {
           aborted.rms_remaining.remove(&closed.rm);
           if aborted.rms_remaining.is_empty() {
             // All RMs have aborted
-            ctx.master_bundle.push(MasterPLm::DropTableTMClosed(plm::DropTableTMClosed {
+            ctx.master_bundle.plms.push(MasterPLm::DropTableTMClosed(plm::DropTableTMClosed {
               query_id: self.query_id.clone(),
             }));
             self.state = DropTableTMS::InsertingTMClosed(InsertingTMClosed::Aborted);
@@ -329,7 +328,7 @@ impl DropTableTMES {
   pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> DropTableTMAction {
     match &self.state {
       DropTableTMS::WaitingInsertTMPrepared => {
-        ctx.master_bundle.push(MasterPLm::DropTableTMPrepared(plm::DropTableTMPrepared {
+        ctx.master_bundle.plms.push(MasterPLm::DropTableTMPrepared(plm::DropTableTMPrepared {
           query_id: self.query_id.clone(),
           table_path: self.table_path.clone(),
         }));

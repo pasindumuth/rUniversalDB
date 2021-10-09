@@ -105,10 +105,9 @@ impl AlterTableTMES {
             for timestamp in &preparing.prepared_timestamps {
               timestamp_hint = max(timestamp_hint, *timestamp);
             }
-            ctx.master_bundle.push(MasterPLm::AlterTableTMCommitted(plm::AlterTableTMCommitted {
-              query_id: self.query_id.clone(),
-              timestamp_hint,
-            }));
+            ctx.master_bundle.plms.push(MasterPLm::AlterTableTMCommitted(
+              plm::AlterTableTMCommitted { query_id: self.query_id.clone(), timestamp_hint },
+            ));
             self.state = AlterTableTMS::InsertingTMCommitted;
           }
         }
@@ -121,7 +120,7 @@ impl AlterTableTMES {
   pub fn handle_aborted<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> AlterTableTMAction {
     match &mut self.state {
       AlterTableTMS::Preparing(_) => {
-        ctx.master_bundle.push(MasterPLm::AlterTableTMAborted(plm::AlterTableTMAborted {
+        ctx.master_bundle.plms.push(MasterPLm::AlterTableTMAborted(plm::AlterTableTMAborted {
           query_id: self.query_id.clone(),
         }));
         self.state = AlterTableTMS::InsertingTMAborted;
@@ -142,7 +141,7 @@ impl AlterTableTMES {
           committed.rms_remaining.remove(&closed.rm);
           if committed.rms_remaining.is_empty() {
             // All RMs have committed
-            ctx.master_bundle.push(MasterPLm::AlterTableTMClosed(plm::AlterTableTMClosed {
+            ctx.master_bundle.plms.push(MasterPLm::AlterTableTMClosed(plm::AlterTableTMClosed {
               query_id: self.query_id.clone(),
             }));
             self.state = AlterTableTMS::InsertingTMClosed(InsertingTMClosed::Committed(
@@ -156,7 +155,7 @@ impl AlterTableTMES {
           aborted.rms_remaining.remove(&closed.rm);
           if aborted.rms_remaining.is_empty() {
             // All RMs have aborted
-            ctx.master_bundle.push(MasterPLm::AlterTableTMClosed(plm::AlterTableTMClosed {
+            ctx.master_bundle.plms.push(MasterPLm::AlterTableTMClosed(plm::AlterTableTMClosed {
               query_id: self.query_id.clone(),
             }));
             self.state = AlterTableTMS::InsertingTMClosed(InsertingTMClosed::Aborted);
@@ -345,7 +344,7 @@ impl AlterTableTMES {
   pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> AlterTableTMAction {
     match &self.state {
       AlterTableTMS::WaitingInsertTMPrepared => {
-        ctx.master_bundle.push(MasterPLm::AlterTableTMPrepared(plm::AlterTableTMPrepared {
+        ctx.master_bundle.plms.push(MasterPLm::AlterTableTMPrepared(plm::AlterTableTMPrepared {
           query_id: self.query_id.clone(),
           table_path: self.table_path.clone(),
           alter_op: self.alter_op.clone(),

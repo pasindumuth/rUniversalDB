@@ -1,4 +1,6 @@
-use crate::alter_table_tm_es::{AlterTableTMAction, AlterTableTMES, AlterTableTMS};
+use crate::alter_table_tm_es::{
+  AlterTableTMAction, AlterTableTMES, AlterTableTMS, Follower as AlterFollower,
+};
 use crate::col_usage::{
   collect_table_paths, compute_all_tier_maps, compute_query_plan_data, iterate_stage_ms_query,
   ColUsagePlanner, FrozenColUsageNode, GeneralStage,
@@ -8,9 +10,11 @@ use crate::common::{
 };
 use crate::common::{map_insert, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{
-  CreateTableTMAction, CreateTableTMES, CreateTableTMS, ResponseData,
+  CreateTableTMAction, CreateTableTMES, CreateTableTMS, Follower as CreateFollower, ResponseData,
 };
-use crate::drop_table_tm_es::{DropTableTMAction, DropTableTMES, DropTableTMS};
+use crate::drop_table_tm_es::{
+  DropTableTMAction, DropTableTMES, DropTableTMS, Follower as DropFollower,
+};
 use crate::master_query_planning_es::{
   master_query_planning, master_query_planning_post, MasterQueryPlanningAction,
   MasterQueryPlanningES,
@@ -26,7 +30,8 @@ use crate::model::message::{
   ExternalDDLQueryAbortData, MasterExternalReq, MasterMessage, MasterRemotePayload,
 };
 use crate::multiversion_map::MVM;
-use crate::paxos::LeaderChanged;
+use crate::network_driver::{NetworkDriver, NetworkDriverContext};
+use crate::paxos::{LeaderChanged, PLEntry, PaxosDriver};
 use crate::server::{
   weak_contains_col, weak_contains_col_latest, CommonQuery, MasterServerContext, ServerContextBase,
 };
@@ -40,6 +45,7 @@ use sqlparser::test_utils::table;
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
+use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
 //  MasterPLm
@@ -139,6 +145,12 @@ pub mod plm {
   }
 }
 
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+pub struct MasterBundle {
+  remote_leader_changes: Vec<RemoteLeaderChangedPLm>,
+  pub plms: Vec<MasterPLm>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterPLm {
   MasterQueryPlanning(plm::MasterQueryPlanning),
@@ -188,7 +200,7 @@ pub struct MasterState<T: IOTypes> {
 
 #[derive(Debug)]
 pub struct MasterContext<T: IOTypes> {
-  /// IO Objects.
+  // IO Objects.
   pub rand: T::RngCoreT,
   pub clock: T::ClockT,
   pub network_output: T::NetworkOutT,
@@ -196,12 +208,12 @@ pub struct MasterContext<T: IOTypes> {
   /// Metadata
   pub this_eid: EndpointId,
 
-  /// Database Schema
+  // Database Schema
   pub gen: Gen,
   pub db_schema: HashMap<(TablePath, Gen), TableSchema>,
   pub table_generation: MVM<TablePath, Gen>,
 
-  /// Distribution
+  // Distribution
   pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
@@ -209,11 +221,15 @@ pub struct MasterContext<T: IOTypes> {
   /// LeaderMap
   pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
 
+  /// NetworkDriver
+  pub network_driver: NetworkDriver<msg::MasterRemotePayload>,
+
   /// Request Management
   pub external_request_id_map: HashMap<RequestId, QueryId>,
 
-  /// Paxos
-  pub master_bundle: Vec<MasterPLm>,
+  // Paxos
+  pub master_bundle: MasterBundle,
+  pub paxos_driver: PaxosDriver<MasterBundle>,
 }
 
 impl<T: IOTypes> MasterState<T> {
@@ -226,6 +242,11 @@ impl<T: IOTypes> MasterState<T> {
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
     slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
   ) -> MasterState<T> {
+    let mut leader_map = HashMap::<PaxosGroupId, LeadershipId>::new();
+    for (sid, eids) in &slave_address_config {
+      leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
+    }
+    let all_gids = leader_map.keys().cloned().collect();
     MasterState {
       context: MasterContext {
         rand,
@@ -238,16 +259,18 @@ impl<T: IOTypes> MasterState<T> {
         sharding_config,
         tablet_address_config,
         slave_address_config,
-        leader_map: Default::default(),
+        leader_map,
+        network_driver: NetworkDriver::new(all_gids),
         external_request_id_map: Default::default(),
-        master_bundle: vec![],
+        master_bundle: MasterBundle::default(),
+        paxos_driver: PaxosDriver { bundle: MasterBundle::default() },
       },
       statuses: Default::default(),
     }
   }
 
   pub fn handle_incoming_message(&mut self, message: msg::MasterMessage) {
-    // self.context.handle_incoming_message(&mut self.statuses, message);
+    self.context.handle_incoming_message(&mut self.statuses, message);
   }
 }
 
@@ -256,6 +279,66 @@ impl<T: IOTypes> MasterContext<T> {
     MasterServerContext {
       network_output: &mut self.network_output,
       leader_map: &mut self.leader_map,
+    }
+  }
+
+  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::MasterMessage) {
+    match message {
+      MasterMessage::MasterExternalReq(request) => {
+        if self.is_leader() {
+          self.handle_input(statuses, MasterForwardMsg::MasterExternalReq(request))
+        }
+      }
+      MasterMessage::RemoteMessage(remote_message) => {
+        if self.is_leader() {
+          // Pass the message through the NetworkDriver
+          let maybe_delivered = self.network_driver.receive(
+            NetworkDriverContext {
+              this_gid: &PaxosGroupId::Master,
+              this_eid: &self.this_eid,
+              leader_map: &self.leader_map,
+              remote_leader_changes: &mut self.master_bundle.remote_leader_changes,
+            },
+            remote_message,
+          );
+          if let Some(payload) = maybe_delivered {
+            // Deliver if the message passed through
+            self.handle_input(statuses, MasterForwardMsg::MasterRemotePayload(payload));
+          }
+        }
+      }
+      MasterMessage::PaxosMessage(paxos_message) => {
+        if let Some(shared_bundle) = self.paxos_driver.handle_paxos_message(paxos_message) {
+          match shared_bundle {
+            PLEntry::Bundle(master_bundle) => {
+              // Dispatch RemoteLeaderChanges
+              for remote_change in master_bundle.remote_leader_changes.clone() {
+                let forward_msg = MasterForwardMsg::RemoteLeaderChanged(remote_change.clone());
+                self.handle_input(statuses, forward_msg);
+              }
+
+              // Dispatch the PaxosBundles
+              self.handle_input(statuses, MasterForwardMsg::MasterBundle(master_bundle.plms));
+
+              // Dispatch any messages that were buffered in the NetworkDriver.
+              // Note: we must do this after RemoteLeaderChanges. Also note that there will
+              // be no payloads in the NetworkBuffer if this nodes is a Follower.
+              for remote_change in master_bundle.remote_leader_changes {
+                let payloads = self
+                  .network_driver
+                  .deliver_blocked_messages(remote_change.gid, remote_change.lid);
+                for payload in payloads {
+                  self.handle_input(statuses, MasterForwardMsg::MasterRemotePayload(payload));
+                }
+              }
+            }
+            PLEntry::LeaderChanged(leader_changed) => {
+              // Forward to Master Backend
+              self.handle_input(statuses, MasterForwardMsg::LeaderChanged(leader_changed.clone()));
+            }
+          }
+        }
+      }
     }
   }
 
@@ -376,16 +459,126 @@ impl<T: IOTypes> MasterContext<T> {
 
           // For every MasterQueryPlanningES, we add a PLm
           for (_, es) in &mut statuses.planning_ess {
-            self.master_bundle.push(MasterPLm::MasterQueryPlanning(plm::MasterQueryPlanning {
-              query_id: es.query_id.clone(),
-              timestamp: es.timestamp.clone(),
-              ms_query: es.ms_query.clone(),
-            }));
+            self.master_bundle.plms.push(MasterPLm::MasterQueryPlanning(
+              plm::MasterQueryPlanning {
+                query_id: es.query_id.clone(),
+                timestamp: es.timestamp.clone(),
+                ms_query: es.ms_query.clone(),
+              },
+            ));
           }
 
-          // TODO: dispatch bundle for insertion
+          // Dispatch the Master for insertion and start a new one.
+          let master_bundle = std::mem::replace(&mut self.master_bundle, MasterBundle::default());
+          self.paxos_driver.insert_bundle(master_bundle);
         } else {
-          // TODO: handle Follower case
+          for paxos_log_msg in bundle {
+            match paxos_log_msg {
+              MasterPLm::MasterQueryPlanning(planning_plm) => {
+                master_query_planning_post(self, planning_plm);
+              }
+              // CreateTable
+              MasterPLm::CreateTableTMPrepared(prepared) => {
+                let query_id = prepared.query_id;
+                btree_map_insert(
+                  &mut statuses.create_table_tm_ess,
+                  &query_id.clone(),
+                  CreateTableTMES {
+                    response_data: None,
+                    query_id: query_id,
+                    table_path: prepared.table_path,
+                    key_cols: prepared.key_cols,
+                    val_cols: prepared.val_cols,
+                    shards: prepared.shards,
+                    state: CreateTableTMS::Follower(CreateFollower::Preparing),
+                  },
+                );
+              }
+              MasterPLm::CreateTableTMCommitted(committed) => {
+                let query_id = committed.query_id;
+                let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_committed_plm(self);
+                self.handle_create_table_es_action(statuses, query_id, action);
+              }
+              MasterPLm::CreateTableTMAborted(aborted) => {
+                let query_id = aborted.query_id;
+                let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_aborted_plm(self);
+                self.handle_create_table_es_action(statuses, query_id, action);
+              }
+              MasterPLm::CreateTableTMClosed(closed) => {
+                let query_id = closed.query_id.clone();
+                let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_closed_plm(self, closed);
+                self.handle_create_table_es_action(statuses, query_id, action);
+              }
+              // AlterTable
+              MasterPLm::AlterTableTMPrepared(prepared) => {
+                let query_id = prepared.query_id;
+                btree_map_insert(
+                  &mut statuses.alter_table_tm_ess,
+                  &query_id.clone(),
+                  AlterTableTMES {
+                    response_data: None,
+                    query_id: query_id,
+                    table_path: prepared.table_path,
+                    alter_op: prepared.alter_op,
+                    state: AlterTableTMS::Follower(AlterFollower::Preparing),
+                  },
+                );
+              }
+              MasterPLm::AlterTableTMCommitted(committed) => {
+                let query_id = committed.query_id.clone();
+                let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_committed_plm(self, committed);
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
+              MasterPLm::AlterTableTMAborted(aborted) => {
+                let query_id = aborted.query_id;
+                let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_aborted_plm(self);
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
+              MasterPLm::AlterTableTMClosed(closed) => {
+                let query_id = closed.query_id;
+                let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_closed_plm(self);
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
+              // DropTable
+              MasterPLm::DropTableTMPrepared(prepared) => {
+                let query_id = prepared.query_id;
+                btree_map_insert(
+                  &mut statuses.drop_table_tm_ess,
+                  &query_id.clone(),
+                  DropTableTMES {
+                    response_data: None,
+                    query_id: query_id,
+                    table_path: prepared.table_path,
+                    state: DropTableTMS::Follower(DropFollower::Preparing),
+                  },
+                );
+              }
+              MasterPLm::DropTableTMCommitted(committed) => {
+                let query_id = committed.query_id.clone();
+                let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_committed_plm(self, committed);
+                self.handle_drop_table_es_action(statuses, query_id, action);
+              }
+              MasterPLm::DropTableTMAborted(aborted) => {
+                let query_id = aborted.query_id;
+                let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_aborted_plm(self);
+                self.handle_drop_table_es_action(statuses, query_id, action);
+              }
+              MasterPLm::DropTableTMClosed(closed) => {
+                let query_id = closed.query_id;
+                let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_closed_plm(self);
+                self.handle_drop_table_es_action(statuses, query_id, action);
+              }
+            }
+          }
         }
       }
       MasterForwardMsg::MasterExternalReq(message) => {
@@ -635,7 +828,7 @@ impl<T: IOTypes> MasterContext<T> {
           statuses.planning_ess.clear();
 
           // Clear MasterBundle
-          self.master_bundle = Vec::new();
+          self.master_bundle = MasterBundle::default();
         }
       }
     }

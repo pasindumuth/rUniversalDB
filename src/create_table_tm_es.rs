@@ -110,7 +110,7 @@ impl CreateTableTMES {
         if preparing.rms_remaining.remove(&prepared.sid) {
           if preparing.rms_remaining.is_empty() {
             // All RMs have prepared
-            ctx.master_bundle.push(MasterPLm::CreateTableTMCommitted(
+            ctx.master_bundle.plms.push(MasterPLm::CreateTableTMCommitted(
               plm::CreateTableTMCommitted { query_id: self.query_id.clone() },
             ));
             self.state = CreateTableTMS::InsertingTMCommitted;
@@ -125,7 +125,7 @@ impl CreateTableTMES {
   pub fn handle_aborted<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> CreateTableTMAction {
     match &self.state {
       CreateTableTMS::Preparing(_) => {
-        ctx.master_bundle.push(MasterPLm::CreateTableTMAborted(plm::CreateTableTMAborted {
+        ctx.master_bundle.plms.push(MasterPLm::CreateTableTMAborted(plm::CreateTableTMAborted {
           query_id: self.query_id.clone(),
         }));
         self.state = CreateTableTMS::InsertingTMAborted;
@@ -146,7 +146,7 @@ impl CreateTableTMES {
           if committed.rms_remaining.is_empty() {
             // All RMs have closed
             let timestamp_hint = ctx.clock.now();
-            ctx.master_bundle.push(MasterPLm::CreateTableTMClosed(plm::CreateTableTMClosed {
+            ctx.master_bundle.plms.push(MasterPLm::CreateTableTMClosed(plm::CreateTableTMClosed {
               query_id: self.query_id.clone(),
               timestamp_hint: Some(timestamp_hint),
             }));
@@ -158,7 +158,7 @@ impl CreateTableTMES {
         if aborted.rms_remaining.remove(&closed.sid) {
           if aborted.rms_remaining.is_empty() {
             // All RMs have closed
-            ctx.master_bundle.push(MasterPLm::CreateTableTMClosed(plm::CreateTableTMClosed {
+            ctx.master_bundle.plms.push(MasterPLm::CreateTableTMClosed(plm::CreateTableTMClosed {
               query_id: self.query_id.clone(),
               timestamp_hint: None,
             }));
@@ -381,7 +381,7 @@ impl CreateTableTMES {
   pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> CreateTableTMAction {
     match self.state {
       CreateTableTMS::WaitingInsertTMPrepared => {
-        ctx.master_bundle.push(MasterPLm::CreateTableTMPrepared(plm::CreateTableTMPrepared {
+        ctx.master_bundle.plms.push(MasterPLm::CreateTableTMPrepared(plm::CreateTableTMPrepared {
           query_id: self.query_id.clone(),
           table_path: self.table_path.clone(),
           key_cols: self.key_cols.clone(),

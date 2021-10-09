@@ -161,18 +161,18 @@ pub struct SlaveContext<T: IOTypes> {
   /// Maps integer values to Coords for the purpose of routing External requests.
   pub coord_positions: Vec<CoordGroupId>,
 
-  /// Metadata
+  // Metadata
   pub this_slave_group_id: SlaveGroupId,
   pub this_gid: PaxosGroupId, // self.this_slave_group_id.to_gid()
   pub this_eid: EndpointId,
 
-  // Gossip
+  /// Gossip
   pub gossip: Arc<GossipData>,
 
-  // LeaderMap
+  /// LeaderMap
   pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
 
-  // NetworkDriver
+  /// NetworkDriver
   pub network_driver: NetworkDriver<msg::SlaveRemotePayload>,
 
   // Paxos
