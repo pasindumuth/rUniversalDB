@@ -14,12 +14,10 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
-use crate::model::message::{
-  GeneralQuery, QueryError, SlaveExternalReq, SlaveMessage, SlaveRemotePayload,
-};
 use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
+use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::LeaderChanged;
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, SlaveServerContext};
@@ -148,6 +146,7 @@ pub struct SlaveContext<T: IOTypes> {
 
   /// Metadata
   pub this_slave_group_id: SlaveGroupId,
+  pub this_gid: PaxosGroupId, // self.this_slave_group_id.to_gid()
   pub this_eid: EndpointId,
 
   /// Gossip
@@ -155,6 +154,9 @@ pub struct SlaveContext<T: IOTypes> {
 
   /// LeaderMap
   pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
+
+  /// NetworkDriver
+  pub network_driver: NetworkDriver<msg::SlaveRemotePayload>,
 
   /// Paxos
   pub slave_bundle: SlaveBundle,
@@ -170,6 +172,12 @@ impl<T: IOTypes> SlaveState<T> {
     gossip: Arc<GossipData>,
     this_slave_group_id: SlaveGroupId,
   ) -> SlaveState<T> {
+    let this_gid = this_slave_group_id.to_gid();
+    let mut leader_map = HashMap::<PaxosGroupId, LeadershipId>::new();
+    for (sid, eids) in &gossip.slave_address_config {
+      leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
+    }
+    let all_gids = leader_map.keys().cloned().collect();
     SlaveState {
       slave_context: SlaveContext {
         rand,
@@ -179,9 +187,11 @@ impl<T: IOTypes> SlaveState<T> {
         coord_forward_output,
         coord_positions: vec![],
         this_slave_group_id,
+        this_gid,
         this_eid: EndpointId("".to_string()),
         gossip,
-        leader_map: Default::default(),
+        leader_map,
+        network_driver: NetworkDriver::new(all_gids),
         slave_bundle: SlaveBundle::default(),
       },
       statuses: Default::default(),
@@ -203,19 +213,32 @@ impl<T: IOTypes> SlaveContext<T> {
   }
 
   /// Handles all messages, coming from Tablets, the Slave, External, etc.
-  pub fn handle_incoming_message(&mut self, _: &mut Statuses, message: msg::SlaveMessage) {
+  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::SlaveMessage) {
     match message {
-      SlaveMessage::ExternalMessage(_) => {}
-      SlaveMessage::RemoteMessage(remote_message) => match remote_message.payload {
-        SlaveRemotePayload::RemoteLeaderChanged(_) => {}
-        SlaveRemotePayload::CreateTablePrepare(_) => {}
-        SlaveRemotePayload::CreateTableCommit(_) => {}
-        SlaveRemotePayload::CreateTableAbort(_) => {}
-        SlaveRemotePayload::MasterGossip(_) => {}
-        SlaveRemotePayload::TabletMessage(_, _) => {}
-        SlaveRemotePayload::CoordMessage(_, _) => {}
-      },
-      SlaveMessage::PaxosMessage(_) => {}
+      msg::SlaveMessage::ExternalMessage(request) => {
+        if self.is_leader() {
+          self.handle_input(statuses, SlaveForwardMsg::SlaveExternalReq(request))
+        }
+      }
+      msg::SlaveMessage::RemoteMessage(remote_message) => {
+        if self.is_leader() {
+          // Pass the message through the NetworkDriver
+          let maybe_delivered = self.network_driver.receive(
+            NetworkDriverContext {
+              this_gid: &self.this_gid,
+              this_eid: &self.this_eid,
+              leader_map: &self.leader_map,
+              remote_leader_changes: &mut self.slave_bundle.remote_leader_changes,
+            },
+            remote_message,
+          );
+          if let Some(payload) = maybe_delivered {
+            // Deliver if the message passed through
+            self.handle_input(statuses, SlaveForwardMsg::SlaveRemotePayload(payload));
+          }
+        }
+      }
+      msg::SlaveMessage::PaxosMessage(_) => {}
     }
   }
 
@@ -296,8 +319,8 @@ impl<T: IOTypes> SlaveContext<T> {
       SlaveForwardMsg::SlaveExternalReq(request) => {
         // Compute the hash of the request Id.
         let request_id = match &request {
-          SlaveExternalReq::PerformExternalQuery(perform) => perform.request_id.clone(),
-          SlaveExternalReq::CancelExternalQuery(cancel) => cancel.request_id.clone(),
+          msg::SlaveExternalReq::PerformExternalQuery(perform) => perform.request_id.clone(),
+          msg::SlaveExternalReq::CancelExternalQuery(cancel) => cancel.request_id.clone(),
         };
         let mut hasher = DefaultHasher::new();
         request_id.hash(&mut hasher);
@@ -309,8 +332,8 @@ impl<T: IOTypes> SlaveContext<T> {
         self.coord_forward_output.forward(cid, CoordForwardMsg::ExternalMessage(request));
       }
       SlaveForwardMsg::SlaveRemotePayload(payload) => match payload {
-        SlaveRemotePayload::RemoteLeaderChanged(_) => {}
-        SlaveRemotePayload::CreateTablePrepare(prepare) => {
+        msg::SlaveRemotePayload::RemoteLeaderChanged(_) => {}
+        msg::SlaveRemotePayload::CreateTablePrepare(prepare) => {
           let query_id = prepare.query_id;
           if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
             let action = es.handle_prepare(self);
@@ -332,7 +355,7 @@ impl<T: IOTypes> SlaveContext<T> {
             );
           }
         }
-        SlaveRemotePayload::CreateTableCommit(commit) => {
+        msg::SlaveRemotePayload::CreateTableCommit(commit) => {
           let query_id = commit.query_id;
           if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
             let action = es.handle_commit(self);
@@ -345,7 +368,7 @@ impl<T: IOTypes> SlaveContext<T> {
             ));
           }
         }
-        SlaveRemotePayload::CreateTableAbort(abort) => {
+        msg::SlaveRemotePayload::CreateTableAbort(abort) => {
           let query_id = abort.query_id;
           if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
             let action = es.handle_abort(self);
@@ -358,7 +381,7 @@ impl<T: IOTypes> SlaveContext<T> {
             ));
           }
         }
-        SlaveRemotePayload::MasterGossip(master_gossip) => {
+        msg::SlaveRemotePayload::MasterGossip(master_gossip) => {
           let incoming_gossip = master_gossip.gossip_data;
           if self.gossip.gen < incoming_gossip.gen {
             if let Some(cur_next_gossip) = &self.slave_bundle.gossip_data {
@@ -371,10 +394,10 @@ impl<T: IOTypes> SlaveContext<T> {
             }
           }
         }
-        SlaveRemotePayload::TabletMessage(tid, tablet_msg) => {
+        msg::SlaveRemotePayload::TabletMessage(tid, tablet_msg) => {
           self.tablet_forward_output.forward(&tid, TabletForwardMsg::TabletMessage(tablet_msg))
         }
-        SlaveRemotePayload::CoordMessage(cid, coord_msg) => {
+        msg::SlaveRemotePayload::CoordMessage(cid, coord_msg) => {
           self.coord_forward_output.forward(&cid, CoordForwardMsg::CoordMessage(coord_msg))
         }
       },
