@@ -67,6 +67,10 @@ impl TabletForwardOut for TestTabletForwardOut {
       .unwrap()
       .handle_input(msg);
   }
+
+  fn all_tids(&self) -> Vec<TabletGroupId> {
+    panic!() // TODO: do this right
+  }
 }
 
 impl Debug for TestTabletForwardOut {
@@ -80,6 +84,10 @@ struct TestCoordForwardOut {}
 
 impl CoordForwardOut for TestCoordForwardOut {
   fn forward(&mut self, coord_group_id: &CoordGroupId, msg: CoordForwardMsg) {
+    panic!() // TODO: do this right
+  }
+
+  fn all_cids(&self) -> Vec<CoordGroupId> {
     panic!() // TODO: do this right
   }
 }

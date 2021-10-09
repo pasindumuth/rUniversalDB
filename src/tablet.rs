@@ -532,8 +532,10 @@ pub enum TabletPLm {
 //  TabletForwardMsg
 // -----------------------------------------------------------------------------------------------
 
+pub type TabletBundle = Vec<TabletPLm>;
+
 pub enum TabletForwardMsg {
-  TabletBundle(Vec<TabletPLm>),
+  TabletBundle(TabletBundle),
   TabletMessage(msg::TabletMessage),
   GossipData(Arc<GossipData>),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
@@ -595,7 +597,7 @@ pub struct TabletContext<T: IOTypes> {
   pub ms_root_query_map: HashMap<QueryId, QueryId>,
 
   // Paxos
-  pub tablet_bundle: Vec<TabletPLm>,
+  pub tablet_bundle: TabletBundle,
 }
 
 impl<T: IOTypes> TabletState<T> {

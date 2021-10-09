@@ -52,12 +52,20 @@ impl TabletForwardOut for ProdTabletForwardOut {
   fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletForwardMsg) {
     self.tablet_map.get(tablet_group_id).unwrap().send(msg).unwrap();
   }
+
+  fn all_tids(&self) -> Vec<TabletGroupId> {
+    panic!() // TODO: do this right
+  }
 }
 
 struct ProdCoordForwardOut {}
 
 impl CoordForwardOut for ProdCoordForwardOut {
   fn forward(&mut self, coord_group_id: &CoordGroupId, msg: CoordForwardMsg) {
+    panic!() // TODO: do this right
+  }
+
+  fn all_cids(&self) -> Vec<CoordGroupId> {
     panic!() // TODO: do this right
   }
 }

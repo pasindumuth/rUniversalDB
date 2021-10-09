@@ -30,10 +30,14 @@ pub trait NetworkOut {
 
 pub trait TabletForwardOut {
   fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletForwardMsg);
+
+  fn all_tids(&self) -> Vec<TabletGroupId>;
 }
 
 pub trait CoordForwardOut {
   fn forward(&mut self, coord_group_id: &CoordGroupId, msg: CoordForwardMsg);
+
+  fn all_cids(&self) -> Vec<CoordGroupId>;
 }
 
 pub trait IOTypes {

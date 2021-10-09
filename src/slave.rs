@@ -18,13 +18,13 @@ use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::LeaderChanged;
+use crate::paxos::{LeaderChanged, PLEntry, PaxosDriver};
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, SlaveServerContext};
 use crate::server::{MainSlaveServerContext, ServerContextBase};
 use crate::sql_parser::convert_ast;
 use crate::sql_parser::DDLQuery::Create;
-use crate::tablet::{GRQueryESWrapper, TabletForwardMsg, TransTableReadESWrapper};
+use crate::tablet::{GRQueryESWrapper, TabletBundle, TabletForwardMsg, TransTableReadESWrapper};
 use crate::trans_table_read_es::{
   TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
 };
@@ -95,14 +95,20 @@ pub enum SlavePLm {
   CreateTablePrepared(plm::CreateTablePrepared),
   CreateTableCommitted(plm::CreateTableCommitted),
   CreateTableAborted(plm::CreateTableAborted),
-  Gossip(plm::Gossip),
-  RemoteLeaderChanged(RemoteLeaderChangedPLm),
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Shared Paxos
+// -----------------------------------------------------------------------------------------------
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+pub struct SharedPaxosBundle {
+  slave: SlaveBundle,
+  tablet: HashMap<TabletGroupId, TabletBundle>,
 }
 
 // -----------------------------------------------------------------------------------------------
 //  SlaveForwardMsg
 // -----------------------------------------------------------------------------------------------
-
 pub enum SlaveForwardMsg {
   SlaveBundle(Vec<SlavePLm>),
   SlaveExternalReq(msg::SlaveExternalReq),
@@ -160,6 +166,7 @@ pub struct SlaveContext<T: IOTypes> {
 
   /// Paxos
   pub slave_bundle: SlaveBundle,
+  pub paxos_driver: PaxosDriver<SharedPaxosBundle>,
 }
 
 impl<T: IOTypes> SlaveState<T> {
@@ -193,6 +200,7 @@ impl<T: IOTypes> SlaveState<T> {
         leader_map,
         network_driver: NetworkDriver::new(all_gids),
         slave_bundle: SlaveBundle::default(),
+        paxos_driver: PaxosDriver {},
       },
       statuses: Default::default(),
     }
@@ -238,7 +246,90 @@ impl<T: IOTypes> SlaveContext<T> {
           }
         }
       }
-      msg::SlaveMessage::PaxosMessage(_) => {}
+      msg::SlaveMessage::PaxosMessage(paxos_message) => {
+        if let Some(shared_bundle) = self.paxos_driver.handle_paxos_message(paxos_message) {
+          match shared_bundle {
+            PLEntry::Bundle(shared_bundle) => {
+              let all_tids = self.tablet_forward_output.all_tids();
+              let all_cids = self.coord_forward_output.all_cids();
+              let slave_bundle = shared_bundle.slave;
+
+              // We buffer the SlaveForwardMsgs and execute them at the end.
+              let mut slave_forward_msgs = Vec::<SlaveForwardMsg>::new();
+
+              // Dispatch RemoteLeaderChanges
+              for remote_change in slave_bundle.remote_leader_changes.clone() {
+                let forward_msg = SlaveForwardMsg::RemoteLeaderChanged(remote_change.clone());
+                slave_forward_msgs.push(forward_msg);
+                for tid in &all_tids {
+                  let forward_msg = TabletForwardMsg::RemoteLeaderChanged(remote_change.clone());
+                  self.tablet_forward_output.forward(&tid, forward_msg);
+                }
+                for cid in &all_cids {
+                  let forward_msg = CoordForwardMsg::RemoteLeaderChanged(remote_change.clone());
+                  self.coord_forward_output.forward(&cid, forward_msg);
+                }
+              }
+
+              // Dispatch GossipData
+              if let Some(gossip_data) = slave_bundle.gossip_data {
+                let gossip = Arc::new(gossip_data);
+                slave_forward_msgs.push(SlaveForwardMsg::GossipData(gossip.clone()));
+                for tid in &all_tids {
+                  let forward_msg = TabletForwardMsg::GossipData(gossip.clone());
+                  self.tablet_forward_output.forward(&tid, forward_msg);
+                }
+                for cid in &all_cids {
+                  let forward_msg = CoordForwardMsg::GossipData(gossip.clone());
+                  self.coord_forward_output.forward(&cid, forward_msg);
+                }
+              }
+
+              // Dispatch the PaxosBundles
+              slave_forward_msgs.push(SlaveForwardMsg::SlaveBundle(slave_bundle.plms));
+              for (tid, tablet_bundle) in shared_bundle.tablet {
+                let forward_msg = TabletForwardMsg::TabletBundle(tablet_bundle);
+                self.tablet_forward_output.forward(&tid, forward_msg);
+              }
+
+              // Dispatch any messages that were buffered in the NetworkDriver.
+              // Note: we must do this after RemoteLeaderChanges. Also note that there will
+              // be no payloads in the NetworkBuffer if this nodes is a Follower.
+              for remote_change in slave_bundle.remote_leader_changes {
+                let payloads = self
+                  .network_driver
+                  .deliver_blocked_messages(remote_change.gid, remote_change.lid);
+                for payload in payloads {
+                  slave_forward_msgs.push(SlaveForwardMsg::SlaveRemotePayload(payload))
+                }
+              }
+
+              // Forward to Slave Backend
+              for forward_msg in slave_forward_msgs {
+                self.handle_input(statuses, forward_msg);
+              }
+            }
+            PLEntry::LeaderChanged(leader_changed) => {
+              // Forward the LeaderChanged to all Tablets.
+              let all_tids = self.tablet_forward_output.all_tids();
+              for tid in all_tids {
+                let forward_msg = TabletForwardMsg::LeaderChanged(leader_changed.clone());
+                self.tablet_forward_output.forward(&tid, forward_msg);
+              }
+
+              // Forward the LeaderChanged to all Coords.
+              let all_tids = self.coord_forward_output.all_cids();
+              for cid in all_tids {
+                let forward_msg = CoordForwardMsg::LeaderChanged(leader_changed.clone());
+                self.coord_forward_output.forward(&cid, forward_msg);
+              }
+
+              // Forward to Slave Backend
+              self.handle_input(statuses, SlaveForwardMsg::LeaderChanged(leader_changed.clone()));
+            }
+          }
+        }
+      }
     }
   }
 
@@ -267,8 +358,6 @@ impl<T: IOTypes> SlaveContext<T> {
                 let action = es.handle_aborted_plm(self);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
-              SlavePLm::Gossip(_) => {}
-              SlavePLm::RemoteLeaderChanged(_) => {}
             }
           }
 
@@ -310,8 +399,6 @@ impl<T: IOTypes> SlaveContext<T> {
                 let action = es.handle_aborted_plm(self);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
-              SlavePLm::Gossip(_) => {}
-              SlavePLm::RemoteLeaderChanged(_) => {}
             }
           }
         }
@@ -420,6 +507,9 @@ impl<T: IOTypes> SlaveContext<T> {
           let action = create_query_es.leader_changed(self);
           self.handle_create_table_es_action(statuses, query_id.clone(), action);
         }
+
+        // Inform the NetworkDriver
+        self.network_driver.leader_changed();
 
         if !self.is_leader() {
           // Clear SlaveBundle
