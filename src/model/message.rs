@@ -1,11 +1,13 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::common::{GossipData, QueryPlan};
+use crate::master::MasterBundle;
 use crate::model::common::{
   proc, CQueryPath, CSubNodePath, CTQueryPath, ColName, ColType, Context, CoordGroupId, EndpointId,
   Gen, LeadershipId, NodeGroupId, PaxosGroupId, QueryId, RequestId, SlaveGroupId, TNodePath,
   TQueryPath, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
   TransTableLocationPrefix, TransTableName,
 };
+use crate::slave::SharedPaxosBundle;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -34,7 +36,7 @@ pub enum MasterExternalReq {
 pub enum MasterMessage {
   MasterExternalReq(MasterExternalReq),
   RemoteMessage(RemoteMessage<MasterRemotePayload>),
-  PaxosMessage(PaxosMessage),
+  PaxosDriverMessage(PaxosDriverMessage<MasterBundle>),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -51,7 +53,7 @@ pub enum SlaveExternalReq {
 pub enum SlaveMessage {
   ExternalMessage(SlaveExternalReq),
   RemoteMessage(RemoteMessage<SlaveRemotePayload>),
-  PaxosMessage(PaxosMessage),
+  PaxosDriverMessage(PaxosDriverMessage<SharedPaxosBundle>),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -77,13 +79,6 @@ pub struct RemoteMessage<PayloadT> {
   pub to_lid: LeadershipId,
   pub to_gid: PaxosGroupId,
 }
-
-// -------------------------------------------------------------------------------------------------
-// PaxosMessage
-// -------------------------------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum PaxosMessage {}
 
 // -------------------------------------------------------------------------------------------------
 //  MasterRemotePayload
@@ -186,6 +181,104 @@ pub enum CoordMessage {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RemoteLeaderChanged {}
+
+// -------------------------------------------------------------------------------------------------
+// PaxosMessage
+// -------------------------------------------------------------------------------------------------
+
+pub type Rnd = u32;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Prepare {
+  pub crnd: Rnd,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Promise<ValT> {
+  pub rnd: Rnd,
+  pub vrnd: Rnd,
+  pub vval: ValT,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Accept<ValT> {
+  pub crnd: Rnd,
+  pub cval: ValT,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Learn {
+  pub vrnd: Rnd,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum PaxosMessage<ValT> {
+  Prepare(Prepare),
+  Promise(Promise<ValT>),
+  Accept(Accept<ValT>),
+  Learn(Learn),
+}
+
+// -------------------------------------------------------------------------------------------------
+// PaxosDriverMessage
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LeaderChanged {
+  pub lid: LeadershipId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum PLEntry<BundleT> {
+  Bundle(BundleT),
+  LeaderChanged(LeaderChanged),
+}
+
+pub type PLIndex = u128;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MultiPaxosMessage<BundleT> {
+  paxos_log_index: PLIndex,
+  paxos_message: PaxosMessage<PLEntry<BundleT>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NextIndexRequest {
+  sender_eid: EndpointId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NextIndexResponse {
+  responder_eid: EndpointId,
+  next_index: PLIndex,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct IsLeader {
+  leadership_id: LeadershipId,
+  should_learned: Vec<(PLIndex, Rnd)>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LogSyncRequest {
+  sender_eid: EndpointId,
+  next_index: PLIndex,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LogSyncResponse<BundleT> {
+  learned: Vec<(PLIndex, PLEntry<BundleT>)>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum PaxosDriverMessage<BundleT> {
+  MultiPaxosMessage(MultiPaxosMessage<BundleT>),
+  NextIndexRequest(NextIndexRequest),
+  NextIndexResponse(NextIndexResponse),
+  IsLeader(IsLeader),
+  LogSyncRequest(LogSyncRequest),
+  LogSyncResponse(LogSyncResponse<BundleT>),
+}
 
 // -------------------------------------------------------------------------------------------------
 //  Transaction PCSA Messages

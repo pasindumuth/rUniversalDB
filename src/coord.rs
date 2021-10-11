@@ -19,7 +19,6 @@ use crate::model::message as msg;
 use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
-use crate::paxos::LeaderChanged;
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContextBase, SlaveServerContext};
 use crate::sql_parser::convert_ast;
@@ -44,7 +43,7 @@ pub enum CoordForwardMsg {
   CoordMessage(msg::CoordMessage),
   GossipData(Arc<GossipData>),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
-  LeaderChanged(LeaderChanged),
+  LeaderChanged(msg::LeaderChanged),
 }
 
 // -----------------------------------------------------------------------------------------------

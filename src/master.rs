@@ -31,7 +31,7 @@ use crate::model::message::{
 };
 use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::{LeaderChanged, PLEntry, PaxosDriver};
+use crate::paxos::PaxosDriver;
 use crate::server::{
   weak_contains_col, weak_contains_col_latest, CommonQuery, MasterServerContext, ServerContextBase,
 };
@@ -177,7 +177,7 @@ pub enum MasterForwardMsg {
   MasterExternalReq(msg::MasterExternalReq),
   MasterRemotePayload(msg::MasterRemotePayload),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
-  LeaderChanged(LeaderChanged),
+  LeaderChanged(msg::LeaderChanged),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -307,10 +307,10 @@ impl<T: IOTypes> MasterContext<T> {
           }
         }
       }
-      MasterMessage::PaxosMessage(paxos_message) => {
-        if let Some(shared_bundle) = self.paxos_driver.handle_paxos_message(paxos_message) {
+      MasterMessage::PaxosDriverMessage(paxos_message) => {
+        for shared_bundle in self.paxos_driver.handle_paxos_message(paxos_message) {
           match shared_bundle {
-            PLEntry::Bundle(master_bundle) => {
+            msg::PLEntry::Bundle(master_bundle) => {
               // Dispatch RemoteLeaderChanges
               for remote_change in master_bundle.remote_leader_changes.clone() {
                 let forward_msg = MasterForwardMsg::RemoteLeaderChanged(remote_change.clone());
@@ -332,7 +332,7 @@ impl<T: IOTypes> MasterContext<T> {
                 }
               }
             }
-            PLEntry::LeaderChanged(leader_changed) => {
+            msg::PLEntry::LeaderChanged(leader_changed) => {
               // Forward to Master Backend
               self.handle_input(statuses, MasterForwardMsg::LeaderChanged(leader_changed.clone()));
             }
@@ -485,7 +485,7 @@ impl<T: IOTypes> MasterContext<T> {
                   &query_id.clone(),
                   CreateTableTMES {
                     response_data: None,
-                    query_id: query_id,
+                    query_id,
                     table_path: prepared.table_path,
                     key_cols: prepared.key_cols,
                     val_cols: prepared.val_cols,
@@ -520,7 +520,7 @@ impl<T: IOTypes> MasterContext<T> {
                   &query_id.clone(),
                   AlterTableTMES {
                     response_data: None,
-                    query_id: query_id,
+                    query_id,
                     table_path: prepared.table_path,
                     alter_op: prepared.alter_op,
                     state: AlterTableTMS::Follower(AlterFollower::Preparing),
@@ -553,7 +553,7 @@ impl<T: IOTypes> MasterContext<T> {
                   &query_id.clone(),
                   DropTableTMES {
                     response_data: None,
-                    query_id: query_id,
+                    query_id,
                     table_path: prepared.table_path,
                     state: DropTableTMS::Follower(DropFollower::Preparing),
                   },

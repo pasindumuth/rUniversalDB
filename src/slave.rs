@@ -18,7 +18,7 @@ use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::{LeaderChanged, PLEntry, PaxosDriver};
+use crate::paxos::PaxosDriver;
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, SlaveServerContext};
 use crate::server::{MainSlaveServerContext, ServerContextBase};
@@ -108,7 +108,7 @@ pub enum SlaveForwardMsg {
   SlaveRemotePayload(msg::SlaveRemotePayload),
   GossipData(Arc<GossipData>),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
-  LeaderChanged(LeaderChanged),
+  LeaderChanged(msg::LeaderChanged),
   SlaveBackMessage(SlaveBackMessage),
 }
 
@@ -274,10 +274,10 @@ impl<T: IOTypes> SlaveContext<T> {
           }
         }
       }
-      msg::SlaveMessage::PaxosMessage(paxos_message) => {
-        if let Some(shared_bundle) = self.paxos_driver.handle_paxos_message(paxos_message) {
+      msg::SlaveMessage::PaxosDriverMessage(paxos_message) => {
+        for shared_bundle in self.paxos_driver.handle_paxos_message(paxos_message) {
           match shared_bundle {
-            PLEntry::Bundle(shared_bundle) => {
+            msg::PLEntry::Bundle(shared_bundle) => {
               let all_tids = self.tablet_forward_output.all_tids();
               let all_cids = self.coord_forward_output.all_cids();
               let slave_bundle = shared_bundle.slave;
@@ -337,7 +337,7 @@ impl<T: IOTypes> SlaveContext<T> {
                 self.handle_input(statuses, forward_msg);
               }
             }
-            PLEntry::LeaderChanged(leader_changed) => {
+            msg::PLEntry::LeaderChanged(leader_changed) => {
               // Forward the LeaderChanged to all Tablets.
               let all_tids = self.tablet_forward_output.all_tids();
               for tid in all_tids {

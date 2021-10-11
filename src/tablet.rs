@@ -34,11 +34,10 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::model::message::SlaveMessage::PaxosMessage;
+use crate::model::message::SlaveMessage::PaxosDriverMessage;
 use crate::ms_table_read_es::{MSReadExecutionS, MSTableReadAction, MSTableReadES};
 use crate::ms_table_write_es::{MSTableWriteAction, MSTableWriteES, MSWriteExecutionS};
 use crate::multiversion_map::MVM;
-use crate::paxos::LeaderChanged;
 use crate::server::{
   are_cols_locked, contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error,
   CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
@@ -540,7 +539,7 @@ pub enum TabletForwardMsg {
   TabletMessage(msg::TabletMessage),
   GossipData(Arc<GossipData>),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
-  LeaderChanged(LeaderChanged),
+  LeaderChanged(msg::LeaderChanged),
 }
 
 // -----------------------------------------------------------------------------------------------
