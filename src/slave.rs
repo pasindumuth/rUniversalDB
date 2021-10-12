@@ -2,7 +2,8 @@ use crate::alter_table_es::State;
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, Clock, CoordForwardOut,
-  GossipData, IOTypes, NetworkOut, OrigP, RemoteLeaderChangedPLm, TMStatus, TabletForwardOut, UUID,
+  GossipData, IOTypes, NetworkOut, OrigP, RemoteLeaderChangedPLm, SlaveTimerOut, TMStatus,
+  TabletForwardOut, UUID,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_es::{CreateTableAction, CreateTableES};
@@ -18,7 +19,7 @@ use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::{PaxosContextBase, PaxosDriver};
+use crate::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, SlaveServerContext};
 use crate::server::{MainSlaveServerContext, ServerContextBase};
@@ -106,12 +107,18 @@ pub struct SharedPaxosBundle {
 pub struct SlavePaxosContext<'a, T: IOTypes> {
   /// IO Objects.
   pub network_output: &'a mut T::NetworkOutT,
+  pub rand: &'a mut T::RngCoreT,
+  pub slave_timer_output: &'a mut T::SlaveTimerOutT,
   pub this_eid: &'a EndpointId,
 }
 
 impl<'a, T: IOTypes> PaxosContextBase<T, SharedPaxosBundle> for SlavePaxosContext<'a, T> {
   fn network_output(&mut self) -> &mut T::NetworkOutT {
     self.network_output
+  }
+
+  fn rand(&mut self) -> &mut T::RngCoreT {
+    self.rand
   }
 
   fn this_eid(&self) -> &EndpointId {
@@ -122,6 +129,10 @@ impl<'a, T: IOTypes> PaxosContextBase<T, SharedPaxosBundle> for SlavePaxosContex
     self
       .network_output
       .send(eid, msg::NetworkMessage::Slave(msg::SlaveMessage::PaxosDriverMessage(message)));
+  }
+
+  fn defer(&mut self, defer_time: u128, timer_event: PaxosTimerEvent) {
+    self.slave_timer_output.defer(defer_time, SlaveTimerInput::PaxosTimerEvent(timer_event));
   }
 }
 
@@ -152,7 +163,7 @@ pub enum SlaveBackMessage {
 
 /// Messages deferred by the Slave to be run on the Slave.
 pub enum SlaveTimerInput {
-  RetryInsert(UUID),
+  PaxosTimerEvent(PaxosTimerEvent),
 }
 
 pub enum FullSlaveInput {
@@ -190,6 +201,7 @@ pub struct SlaveContext<T: IOTypes> {
   pub network_output: T::NetworkOutT,
   pub tablet_forward_output: T::TabletForwardOutT,
   pub coord_forward_output: T::CoordForwardOutT,
+  pub slave_timer_output: T::SlaveTimerOutT,
   /// Maps integer values to Coords for the purpose of routing External requests.
   pub coord_positions: Vec<CoordGroupId>,
 
@@ -221,6 +233,7 @@ impl<T: IOTypes> SlaveState<T> {
     network_output: T::NetworkOutT,
     tablet_forward_output: T::TabletForwardOutT,
     coord_forward_output: T::CoordForwardOutT,
+    slave_timer_output: T::SlaveTimerOutT,
     gossip: Arc<GossipData>,
     this_slave_group_id: SlaveGroupId,
   ) -> SlaveState<T> {
@@ -237,6 +250,7 @@ impl<T: IOTypes> SlaveState<T> {
         network_output,
         tablet_forward_output,
         coord_forward_output,
+        slave_timer_output,
         coord_positions: vec![],
         this_slave_group_id,
         this_gid,
@@ -311,9 +325,11 @@ impl<T: IOTypes> SlaveContext<T> {
         }
       }
       msg::SlaveMessage::PaxosDriverMessage(paxos_message) => {
-        let bundles = self.paxos_driver.handle_paxos_message::<T>(
+        let bundles = self.paxos_driver.handle_paxos_message::<T, _>(
           &mut SlavePaxosContext {
             network_output: &mut self.network_output,
+            rand: &mut self.rand,
+            slave_timer_output: &mut self.slave_timer_output,
             this_eid: &self.this_eid,
           },
           paxos_message,
@@ -415,9 +431,11 @@ impl<T: IOTypes> SlaveContext<T> {
               slave: std::mem::replace(&mut self.slave_bundle, SlaveBundle::default()),
               tablet: std::mem::replace(&mut self.tablet_bundles, HashMap::default()),
             };
-            self.paxos_driver.insert_bundle::<T>(
+            self.paxos_driver.insert_bundle::<T, _>(
               &mut SlavePaxosContext {
                 network_output: &mut self.network_output,
+                rand: &mut self.rand,
+                slave_timer_output: &mut self.slave_timer_output,
                 this_eid: &self.this_eid,
               },
               shared_bundle,
@@ -426,8 +444,16 @@ impl<T: IOTypes> SlaveContext<T> {
         }
       },
       SlaveForwardMsg::SlaveTimerInput(timer_input) => match timer_input {
-        SlaveTimerInput::RetryInsert(uuid) => {
-          self.paxos_driver.retry_insert(uuid);
+        SlaveTimerInput::PaxosTimerEvent(timer_event) => {
+          self.paxos_driver.timer_event::<T, _>(
+            &mut SlavePaxosContext {
+              network_output: &mut self.network_output,
+              rand: &mut self.rand,
+              slave_timer_output: &mut self.slave_timer_output,
+              this_eid: &self.this_eid,
+            },
+            timer_event,
+          );
         }
       },
       SlaveForwardMsg::SlaveBundle(bundle) => {

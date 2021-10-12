@@ -256,7 +256,7 @@ pub struct LogSyncRequest {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LogSyncResponse<BundleT> {
-  pub learned: Vec<(PLIndex, PLEntry<BundleT>)>,
+  pub learned: Vec<(PLIndex, Rnd, PLEntry<BundleT>)>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

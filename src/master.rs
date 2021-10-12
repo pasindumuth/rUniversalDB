@@ -6,8 +6,8 @@ use crate::col_usage::{
   ColUsagePlanner, FrozenColUsageNode, GeneralStage,
 };
 use crate::common::{
-  btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, IOTypes, NetworkOut, TableSchema,
-  UUID,
+  btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, IOTypes, MasterTimerOut,
+  NetworkOut, TableSchema, UUID,
 };
 use crate::common::{map_insert, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{
@@ -32,7 +32,7 @@ use crate::model::message::{
 };
 use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::{PaxosContextBase, PaxosDriver};
+use crate::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use crate::server::{
   weak_contains_col, weak_contains_col_latest, CommonQuery, MasterServerContext, ServerContextBase,
 };
@@ -180,12 +180,18 @@ pub enum MasterPLm {
 pub struct MasterPaxosContext<'a, T: IOTypes> {
   /// IO Objects.
   pub network_output: &'a mut T::NetworkOutT,
+  pub rand: &'a mut T::RngCoreT,
+  pub master_timer_output: &'a mut T::MasterTimerOutT,
   pub this_eid: &'a EndpointId,
 }
 
 impl<'a, T: IOTypes> PaxosContextBase<T, MasterBundle> for MasterPaxosContext<'a, T> {
   fn network_output(&mut self) -> &mut T::NetworkOutT {
     self.network_output
+  }
+
+  fn rand(&mut self) -> &mut T::RngCoreT {
+    self.rand
   }
 
   fn this_eid(&self) -> &EndpointId {
@@ -196,6 +202,10 @@ impl<'a, T: IOTypes> PaxosContextBase<T, MasterBundle> for MasterPaxosContext<'a
     self
       .network_output
       .send(eid, msg::NetworkMessage::Master(msg::MasterMessage::PaxosDriverMessage(message)));
+  }
+
+  fn defer(&mut self, defer_time: u128, timer_event: PaxosTimerEvent) {
+    self.master_timer_output.defer(defer_time, MasterTimerInput::PaxosTimerEvent(timer_event));
   }
 }
 
@@ -218,7 +228,7 @@ pub enum MasterForwardMsg {
 
 /// Messages deferred by the Slave to be run on the Slave.
 pub enum MasterTimerInput {
-  RetryInsert(UUID),
+  PaxosTimerEvent(PaxosTimerEvent),
 }
 
 pub enum FullMasterInput {
@@ -250,6 +260,7 @@ pub struct MasterContext<T: IOTypes> {
   pub rand: T::RngCoreT,
   pub clock: T::ClockT,
   pub network_output: T::NetworkOutT,
+  pub master_timer_output: T::MasterTimerOutT,
 
   /// Metadata
   pub this_eid: EndpointId,
@@ -283,6 +294,7 @@ impl<T: IOTypes> MasterState<T> {
     rand: T::RngCoreT,
     clock: T::ClockT,
     network_output: T::NetworkOutT,
+    master_timer_output: T::MasterTimerOutT,
     db_schema: HashMap<(TablePath, Gen), TableSchema>,
     sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
@@ -298,6 +310,7 @@ impl<T: IOTypes> MasterState<T> {
         rand,
         clock,
         network_output,
+        master_timer_output,
         this_eid: EndpointId("".to_string()),
         gen: Gen(0),
         db_schema,
@@ -367,9 +380,11 @@ impl<T: IOTypes> MasterContext<T> {
         }
       }
       MasterMessage::PaxosDriverMessage(paxos_message) => {
-        let bundles = self.paxos_driver.handle_paxos_message::<T>(
+        let bundles = self.paxos_driver.handle_paxos_message::<T, _>(
           &mut MasterPaxosContext {
             network_output: &mut self.network_output,
+            rand: &mut self.rand,
+            master_timer_output: &mut self.master_timer_output,
             this_eid: &self.this_eid,
           },
           paxos_message,
@@ -411,8 +426,16 @@ impl<T: IOTypes> MasterContext<T> {
   pub fn handle_input(&mut self, statuses: &mut Statuses, master_input: MasterForwardMsg) {
     match master_input {
       MasterForwardMsg::MasterTimerInput(timer_input) => match timer_input {
-        MasterTimerInput::RetryInsert(uuid) => {
-          self.paxos_driver.retry_insert(uuid);
+        MasterTimerInput::PaxosTimerEvent(timer_event) => {
+          self.paxos_driver.timer_event::<T, _>(
+            &mut MasterPaxosContext {
+              network_output: &mut self.network_output,
+              rand: &mut self.rand,
+              master_timer_output: &mut self.master_timer_output,
+              this_eid: &self.this_eid,
+            },
+            timer_event,
+          );
         }
       },
       MasterForwardMsg::MasterBundle(bundle) => {
@@ -541,9 +564,11 @@ impl<T: IOTypes> MasterContext<T> {
 
           // Dispatch the Master for insertion and start a new one.
           let master_bundle = std::mem::replace(&mut self.master_bundle, MasterBundle::default());
-          self.paxos_driver.insert_bundle::<T>(
+          self.paxos_driver.insert_bundle::<T, _>(
             &mut MasterPaxosContext {
               network_output: &mut self.network_output,
+              rand: &mut self.rand,
+              master_timer_output: &mut self.master_timer_output,
               this_eid: &self.this_eid,
             },
             master_bundle,

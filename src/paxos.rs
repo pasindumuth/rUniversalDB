@@ -1,10 +1,11 @@
 use crate::common::{mk_uuid, IOTypes, NetworkOut, UUID};
-use crate::model::common::{EndpointId, Gen, LeadershipId};
+use crate::model::common::{EndpointId, Gen, LeadershipId, Timestamp};
 use crate::model::message as msg;
 use crate::model::message::{
-  MultiPaxosMessage, PLEntry, PLIndex, PaxosDriverMessage, PaxosMessage, Rnd,
+  LeaderChanged, MultiPaxosMessage, PLEntry, PLIndex, PaxosDriverMessage, PaxosMessage, Rnd,
 };
 use crate::server::ServerContextBase;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, HashMap};
@@ -26,6 +27,8 @@ pub struct Proposal<BundleT> {
 #[derive(Debug)]
 pub struct ProposerState<BundleT> {
   proposals: HashMap<Crnd, Proposal<BundleT>>,
+  /// This is the maximum key in `proposals`, or 0 otherwise.
+  latest_crnd: u32,
 }
 
 #[derive(Debug)]
@@ -49,8 +52,18 @@ pub struct PaxosInstance<BundleT> {
 
   /// The learned value for the PaxosInstance. This could be through any means,
   /// including Paxos and LogSyncResponse.
-  learned_val: Option<PLEntry<BundleT>>,
+  learned_rndval: Option<(Vrnd, PLEntry<BundleT>)>,
 }
+
+// -----------------------------------------------------------------------------------------------
+//  Constants
+// -----------------------------------------------------------------------------------------------
+
+const HEARTBEAT_THRESHOLD: u32 = 5;
+const HEARTBEAT_PRIOD: u128 = 1;
+const NEXT_INDEX_PERIOD: u128 = 1;
+const RETRY_DEFER_TIME: u128 = 1;
+const PROPOSAL_INCREMENT: u32 = 1000;
 
 // -----------------------------------------------------------------------------------------------
 //  PaxosContextBase
@@ -59,10 +72,23 @@ pub struct PaxosInstance<BundleT> {
 pub trait PaxosContextBase<T: IOTypes, BundleT> {
   /// Getters
   fn network_output(&mut self) -> &mut T::NetworkOutT;
+  fn rand(&mut self) -> &mut T::RngCoreT;
   fn this_eid(&self) -> &EndpointId;
 
   /// Methods
   fn send(&mut self, eid: &EndpointId, message: msg::PaxosDriverMessage<BundleT>);
+  fn defer(&mut self, defer_time: Timestamp, timer_event: PaxosTimerEvent);
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Timer Events
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum PaxosTimerEvent {
+  RetryInsert(UUID),
+  LeaderHeartbeat,
+  NextIndex,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -108,7 +134,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     }
   }
 
-  pub fn min_complete_index(&self) -> u128 {
+  fn min_complete_index(&self) -> u128 {
     // We start with `next_index` since the minimum in `remote_next_indices`
     // is certainly <= to this.
     let mut min_index = self.next_index;
@@ -118,12 +144,19 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     min_index
   }
 
+  fn is_leader<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+    &self,
+    ctx: &mut PaxosContextBaseT,
+  ) -> bool {
+    &self.leader.eid == ctx.this_eid()
+  }
+
   fn deliver_learned_entries(&mut self) -> Vec<PLEntry<BundleT>> {
     // Collect all newly learned entries
     let mut new_entries = Vec::<PLEntry<BundleT>>::new();
     loop {
       if let Some(paxos_instance) = self.paxos_instances.get(&self.next_index) {
-        if let Some(learned_val) = &paxos_instance.learned_val {
+        if let Some((_, learned_val)) = &paxos_instance.learned_rndval {
           new_entries.push(learned_val.clone());
           self.next_index += 1;
           continue;
@@ -154,15 +187,17 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     return new_entries;
   }
 
-  pub fn handle_paxos_message<T: IOTypes>(
+  // Message Handler
+
+  pub fn handle_paxos_message<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
     &mut self,
-    ctx: &mut PaxosContextBase<T, BundleT>,
+    ctx: &mut PaxosContextBaseT,
     message: msg::PaxosDriverMessage<BundleT>,
   ) -> Vec<msg::PLEntry<BundleT>> {
     match message {
       PaxosDriverMessage::MultiPaxosMessage(multi) => {
         if let msg::PaxosMessage::Prepare(_) = multi.paxos_message {
-          if multi.sender_eid != self.leader.eid && self.leader_heartbeat < 5 {
+          if multi.sender_eid != self.leader.eid && self.leader_heartbeat < HEARTBEAT_THRESHOLD {
             // If we get a `Prepare` message from a non-leader, and the leader still seems
             // to be alive, we drop the message. This is just a simple technique we use to reduce
             // the rate of spurious leadership changes.
@@ -180,10 +215,10 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
           self.paxos_instances.insert(
             multi.index.clone(),
             PaxosInstance {
-              proposer_state: ProposerState { proposals: Default::default() },
+              proposer_state: ProposerState { proposals: Default::default(), latest_crnd: 0 },
               acceptor_state: AcceptorState { rnd: 0, vrnd_vval: None },
               learner_state: LearnerState { learned: Default::default(), learned_vrnd: None },
-              learned_val: None,
+              learned_rndval: None,
             },
           );
         }
@@ -268,10 +303,10 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
               }
 
               // Check if the newly accepted value is >= to a learned vrnd
-              if paxos_instance.learned_val.is_none() {
+              if paxos_instance.learned_rndval.is_none() {
                 if let Some(vrnd) = paxos_instance.learner_state.learned_vrnd {
                   if vrnd <= accept.crnd.clone() {
-                    paxos_instance.learned_val = Some(accept.cval.clone());
+                    paxos_instance.learned_rndval = Some((vrnd, accept.cval.clone()));
                     return self.deliver_learned_entries();
                   }
                 }
@@ -297,10 +332,10 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
               }
 
               // Check if the newly learned value is <= to an accepted vrnd already
-              if paxos_instance.learned_val.is_none() {
+              if paxos_instance.learned_rndval.is_none() {
                 if let Some((vrnd, vval)) = &paxos_instance.acceptor_state.vrnd_vval {
                   if learn.vrnd <= vrnd.clone() {
-                    paxos_instance.learned_val = Some(vval.clone());
+                    paxos_instance.learned_rndval = Some((learn.vrnd, vval.clone()));
                     return self.deliver_learned_entries();
                   }
                 }
@@ -330,13 +365,13 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
                 paxos_instance.learner_state.learned_vrnd = Some(vrnd);
               }
 
-              let learned = paxos_instance.learner_state.learned_vrnd.unwrap();
+              let learned_rnd = paxos_instance.learner_state.learned_vrnd.unwrap();
 
               // Check if the newly learned value is <= to an accepted vrnd already
-              if paxos_instance.learned_val.is_none() {
+              if paxos_instance.learned_rndval.is_none() {
                 if let Some((vrnd, vval)) = &paxos_instance.acceptor_state.vrnd_vval {
-                  if learned <= vrnd.clone() {
-                    paxos_instance.learned_val = Some(vval.clone());
+                  if learned_rnd <= vrnd.clone() {
+                    paxos_instance.learned_rndval = Some((learned_rnd, vval.clone()));
                   }
                 }
               }
@@ -368,7 +403,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
         }
       }
       PaxosDriverMessage::LogSyncRequest(request) => {
-        let mut learned = Vec::<(PLIndex, PLEntry<BundleT>)>::new();
+        let mut learned = Vec::<(PLIndex, Rnd, PLEntry<BundleT>)>::new();
         for index in request.next_index..self.next_index {
           // Note that `index` will exist in `paxos_instances` because the only way it would not
           // is if a sufficiently high NextIndexResponse had arrived, which cannot be, since those
@@ -376,8 +411,8 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
           let paxos_instance = self.paxos_instances.get(&index).unwrap();
           // Note that `paxos_instance` has already learned a value, since `self.next_index` is
           // beyond `index` already.
-          let learned_val = paxos_instance.learned_val.clone().unwrap();
-          learned.push((index, learned_val))
+          let (vrnd, vval) = paxos_instance.learned_rndval.clone().unwrap();
+          learned.push((index, vrnd, vval))
         }
         ctx.send(
           &request.sender_eid,
@@ -386,7 +421,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
       }
       PaxosDriverMessage::LogSyncResponse(response) => {
         // Learn all values sent here
-        for (index, vval) in response.learned {
+        for (index, vrnd, vval) in response.learned {
           // We guard with `self.index`, since all indicies prior are already learned.
           if index >= self.next_index {
             // Create a PaxosInstance if it does not exist already
@@ -394,17 +429,17 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
               self.paxos_instances.insert(
                 index.clone(),
                 PaxosInstance {
-                  proposer_state: ProposerState { proposals: Default::default() },
+                  proposer_state: ProposerState { proposals: Default::default(), latest_crnd: 0 },
                   acceptor_state: AcceptorState { rnd: 0, vrnd_vval: None },
                   learner_state: LearnerState { learned: Default::default(), learned_vrnd: None },
-                  learned_val: None,
+                  learned_rndval: None,
                 },
               );
             }
 
             // Get PaxosInstance
             let paxos_instance = self.paxos_instances.get_mut(&index).unwrap();
-            paxos_instance.learned_val = Some(vval);
+            paxos_instance.learned_rndval = Some((vrnd, vval));
           }
         }
 
@@ -436,26 +471,163 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     Vec::new()
   }
 
-  pub fn retry_insert(&mut self, uuid: UUID) {
-    if let Some((cur_uuid, cur_bundle)) = &self.next_insert {
-      if cur_uuid == &uuid {
-        // TODO: implement
+  // Bundle Insertion
+
+  pub fn insert_bundle<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+    &mut self,
+    ctx: &mut PaxosContextBaseT,
+    bundle: BundleT,
+  ) {
+    // We guard for the case that this node is the leader and that there is not already
+    // something that is attempting to be inserted.
+    if self.is_leader(ctx) && self.next_insert.is_none() {
+      let uuid = mk_uuid(ctx.rand());
+      self.next_insert = Some((uuid.clone(), bundle.clone()));
+
+      // Schedule a retry in 1 ms.
+      ctx.defer(RETRY_DEFER_TIME, PaxosTimerEvent::RetryInsert(uuid));
+
+      // Propose the bundle at the next index.
+      self.propose_next_index(ctx, PLEntry::Bundle(bundle));
+    }
+  }
+
+  fn propose_next_index<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+    &mut self,
+    ctx: &mut PaxosContextBaseT,
+    entry: PLEntry<BundleT>,
+  ) {
+    // Create a PaxosInstance if it does not exist already and start inserting.
+    if !self.paxos_instances.contains_key(&self.next_index) {
+      self.paxos_instances.insert(
+        self.next_index.clone(),
+        PaxosInstance {
+          proposer_state: ProposerState { proposals: Default::default(), latest_crnd: 0 },
+          acceptor_state: AcceptorState { rnd: 0, vrnd_vval: None },
+          learner_state: LearnerState { learned: Default::default(), learned_vrnd: None },
+          learned_rndval: None,
+        },
+      );
+    }
+
+    // Get PaxosInstance
+    let paxos_instance = self.paxos_instances.get_mut(&self.next_index).unwrap();
+
+    // Compute next proposal number.
+    let latest_rnd = paxos_instance.proposer_state.latest_crnd;
+    let next_rnd = (ctx.rand().next_u32() % PROPOSAL_INCREMENT) + latest_rnd;
+
+    // Update the ProposerState
+    paxos_instance
+      .proposer_state
+      .proposals
+      .insert(next_rnd, Proposal { crnd: next_rnd, cval: entry.clone(), promises: vec![] });
+    paxos_instance.proposer_state.latest_crnd = next_rnd;
+
+    // Send out Prepare
+    let this_eid = ctx.this_eid().clone();
+    for eid in &self.paxos_nodes {
+      ctx.send(
+        &eid,
+        msg::PaxosDriverMessage::MultiPaxosMessage(msg::MultiPaxosMessage {
+          sender_eid: this_eid.clone(),
+          index: self.next_index.clone(),
+          paxos_message: msg::PaxosMessage::Prepare(msg::Prepare { crnd: next_rnd }),
+        }),
+      );
+    }
+  }
+
+  // Timer Events
+
+  pub fn timer_event<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+    &mut self,
+    ctx: &mut PaxosContextBaseT,
+    event: PaxosTimerEvent,
+  ) {
+    match event {
+      PaxosTimerEvent::RetryInsert(uuid) => {
+        self.retry_insert(ctx, uuid);
+      }
+      PaxosTimerEvent::LeaderHeartbeat => {
+        self.leader_heartbeat(ctx);
+      }
+      PaxosTimerEvent::NextIndex => {
+        self.next_index_timer(ctx);
       }
     }
   }
 
-  pub fn insert_bundle<T: IOTypes>(
+  fn retry_insert<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
     &mut self,
-    ctx: &mut PaxosContextBase<T, BundleT>,
-    bundle: BundleT,
+    ctx: &mut PaxosContextBaseT,
+    uuid: UUID,
   ) {
-    if self.is_leader(ctx) {
-      let entry = PLEntry::Bundle(bundle);
-      // let uuid = mk_uuid()
+    if let Some((cur_uuid, cur_bundle)) = &self.next_insert {
+      if cur_uuid == &uuid {
+        // Here, since `next_insert` has the same UUID, we nothing could have been
+        // inserted in the meanwhile.
+
+        // Schedule another retry in 1 ms.
+        ctx.defer(RETRY_DEFER_TIME, PaxosTimerEvent::RetryInsert(uuid));
+
+        // Propose the bundle at the next index.
+        self.propose_next_index(ctx, PLEntry::Bundle(cur_bundle.clone()));
+      }
     }
   }
 
-  fn is_leader<T: IOTypes>(&self, ctx: &mut PaxosContextBase<T, BundleT>) -> bool {
-    &self.leader.eid == ctx.this_eid()
+  fn leader_heartbeat<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+    &mut self,
+    ctx: &mut PaxosContextBaseT,
+  ) {
+    if self.is_leader(ctx) {
+      // Send out IsLeader to each PaxosNode.
+      for eid in &self.paxos_nodes {
+        let mut should_learned = Vec::<(PLIndex, Rnd)>::new();
+        for index in *self.remote_next_indices.get(eid).unwrap()..self.next_index {
+          // Note that `index` will exist in the `paxos_instances` and there will surely be a
+          // learned value (since it is less than `self.next_index`).
+          let paxos_instance = self.paxos_instances.get(&index).unwrap();
+          let (vrnd, _) = paxos_instance.learned_rndval.clone().unwrap();
+          should_learned.push((index.clone(), vrnd));
+        }
+        ctx.send(
+          &eid,
+          msg::PaxosDriverMessage::IsLeader(msg::IsLeader {
+            leadership_id: self.leader.clone(),
+            should_learned,
+          }),
+        );
+      }
+    } else {
+      // Increment Heartbeat counter
+      self.leader_heartbeat += 1;
+      if self.leader_heartbeat > HEARTBEAT_THRESHOLD {
+        // This node tries proposing itself as the leader.
+        let gen = Gen(self.leader.gen.0 + 1);
+        let eid = ctx.this_eid().clone();
+        self.propose_next_index(
+          ctx,
+          PLEntry::LeaderChanged(LeaderChanged { lid: LeadershipId { gen, eid } }),
+        );
+      }
+    }
+  }
+
+  fn next_index_timer<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+    &mut self,
+    ctx: &mut PaxosContextBaseT,
+  ) {
+    // Send out NextIndexRequest
+    let this_eid = ctx.this_eid().clone();
+    for eid in &self.paxos_nodes {
+      ctx.send(
+        &eid,
+        msg::PaxosDriverMessage::NextIndexRequest(msg::NextIndexRequest {
+          sender_eid: this_eid.clone(),
+        }),
+      );
+    }
   }
 }

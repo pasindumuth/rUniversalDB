@@ -71,11 +71,11 @@ impl TabletForwardOut for TestTabletForwardOut {
   }
 
   fn all_tids(&self) -> Vec<TabletGroupId> {
-    panic!() // TODO: do this right
+    self.tablet_states.borrow().get(&self.from_eid).unwrap().keys().cloned().collect()
   }
 
   fn num_tablets(&self) -> usize {
-    panic!() // TODO: do this right
+    self.tablet_states.borrow().get(&self.from_eid).unwrap().len()
   }
 }
 
@@ -272,6 +272,7 @@ impl Simulation {
           network_out.clone(),
           TestTabletForwardOut { tablet_states: sim.tablet_states.clone(), from_eid: eid.clone() },
           TestCoordForwardOut {},
+          TestSlaveTimerOut {},
           gossip.clone(),
           sid.clone(),
         ),
