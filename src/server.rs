@@ -25,9 +25,9 @@ use std::sync::Arc;
 pub trait ServerContextBase<T: IOTypes> {
   // Getters
 
-  fn leader_map<'a>(&'a self) -> &'a HashMap<PaxosGroupId, LeadershipId>;
+  fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId>;
   fn this_gid(&self) -> PaxosGroupId;
-  fn network_output<'a>(&'a mut self) -> &'a mut T::NetworkOutT;
+  fn network_output(&mut self) -> &mut T::NetworkOutT;
 
   // Send utilities
 
@@ -47,7 +47,7 @@ pub trait ServerContextBase<T: IOTypes> {
       from_lid: this_lid.clone(),
       from_gid: this_gid,
       to_lid: to_lid.clone(),
-      to_gid: to_gid,
+      to_gid,
     };
 
     self.network_output().send(
@@ -303,8 +303,6 @@ pub struct MasterServerContext<'a, T: IOTypes> {
   /// Paxos
   pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
 }
-
-impl<'a, T: IOTypes> MasterServerContext<'a, T> {}
 
 impl<'a, T: IOTypes> ServerContextBase<T> for MasterServerContext<'a, T> {
   fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {

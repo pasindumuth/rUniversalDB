@@ -1,5 +1,6 @@
 use crate::col_usage::FrozenColUsageNode;
 use crate::coord::CoordForwardMsg;
+use crate::master::MasterTimerInput;
 use crate::model::common::{
   proc, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColType, CoordGroupId, EndpointId, Gen,
   LeadershipId, NodeGroupId, PaxosGroupId, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
@@ -7,7 +8,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
-use crate::slave::SlaveBackMessage;
+use crate::slave::{SlaveBackMessage, SlaveTimerInput};
 use crate::tablet::TabletForwardMsg;
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
@@ -48,6 +49,16 @@ pub trait SlaveForwardOut {
   fn forward(&mut self, msg: SlaveBackMessage);
 }
 
+/// An interface for a Slave to perform a time-deferred task in the future
+pub trait SlaveTimerOut {
+  fn defer(&mut self, defer_time: Timestamp, msg: SlaveTimerInput);
+}
+
+/// An interface for a Master to perform a time-deferred task in the future
+pub trait MasterTimerOut {
+  fn defer(&mut self, defer_time: Timestamp, msg: MasterTimerInput);
+}
+
 pub trait IOTypes {
   type RngCoreT: RngCore + Debug;
   type ClockT: Clock + Debug;
@@ -55,6 +66,8 @@ pub trait IOTypes {
   type TabletForwardOutT: TabletForwardOut + Debug;
   type CoordForwardOutT: CoordForwardOut + Debug;
   type SlaveForwardOutT: SlaveForwardOut + Debug;
+  type SlaveTimerOutT: SlaveTimerOut + Debug;
+  type MasterTimerOutT: MasterTimerOut + Debug;
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -134,6 +147,10 @@ pub fn btree_multimap_remove<K: Ord, V: Ord>(
     }
   }
 }
+
+/// A basic UUID type
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct UUID(String);
 
 // -----------------------------------------------------------------------------------------------
 //  Table Schema
@@ -232,6 +249,10 @@ pub fn mk_tid<R: Rng>(rng: &mut R) -> TabletGroupId {
 
 pub fn mk_sid<R: Rng>(rng: &mut R) -> SlaveGroupId {
   SlaveGroupId(rand_string(rng))
+}
+
+pub fn mk_uuid<R: Rng>(rng: &mut R) -> UUID {
+  UUID(rand_string(rng))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

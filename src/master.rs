@@ -7,6 +7,7 @@ use crate::col_usage::{
 };
 use crate::common::{
   btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, IOTypes, NetworkOut, TableSchema,
+  UUID,
 };
 use crate::common::{map_insert, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{
@@ -31,7 +32,7 @@ use crate::model::message::{
 };
 use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::PaxosDriver;
+use crate::paxos::{PaxosContextBase, PaxosDriver};
 use crate::server::{
   weak_contains_col, weak_contains_col_latest, CommonQuery, MasterServerContext, ServerContextBase,
 };
@@ -145,6 +146,10 @@ pub mod plm {
   }
 }
 
+// -----------------------------------------------------------------------------------------------
+//  MasterBundle
+// -----------------------------------------------------------------------------------------------
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub struct MasterBundle {
   remote_leader_changes: Vec<RemoteLeaderChangedPLm>,
@@ -169,6 +174,32 @@ pub enum MasterPLm {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  MasterPaxosContext
+// -----------------------------------------------------------------------------------------------
+
+pub struct MasterPaxosContext<'a, T: IOTypes> {
+  /// IO Objects.
+  pub network_output: &'a mut T::NetworkOutT,
+  pub this_eid: &'a EndpointId,
+}
+
+impl<'a, T: IOTypes> PaxosContextBase<T, MasterBundle> for MasterPaxosContext<'a, T> {
+  fn network_output(&mut self) -> &mut T::NetworkOutT {
+    self.network_output
+  }
+
+  fn this_eid(&self) -> &EndpointId {
+    self.this_eid
+  }
+
+  fn send(&mut self, eid: &EndpointId, message: msg::PaxosDriverMessage<MasterBundle>) {
+    self
+      .network_output
+      .send(eid, msg::NetworkMessage::Master(msg::MasterMessage::PaxosDriverMessage(message)));
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  MasterForwardMsg
 // -----------------------------------------------------------------------------------------------
 
@@ -178,6 +209,21 @@ pub enum MasterForwardMsg {
   MasterRemotePayload(msg::MasterRemotePayload),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(msg::LeaderChanged),
+  MasterTimerInput(MasterTimerInput),
+}
+
+// -----------------------------------------------------------------------------------------------
+//  FullMasterInput
+// -----------------------------------------------------------------------------------------------
+
+/// Messages deferred by the Slave to be run on the Slave.
+pub enum MasterTimerInput {
+  RetryInsert(UUID),
+}
+
+pub enum FullMasterInput {
+  MasterMessage(msg::MasterMessage),
+  MasterTimerInput(MasterTimerInput),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -263,14 +309,27 @@ impl<T: IOTypes> MasterState<T> {
         network_driver: NetworkDriver::new(all_gids),
         external_request_id_map: Default::default(),
         master_bundle: MasterBundle::default(),
-        paxos_driver: PaxosDriver { bundle: MasterBundle::default() },
+        paxos_driver: PaxosDriver::new(),
       },
       statuses: Default::default(),
     }
   }
 
+  // TODO: stop using this in favor of `handle_full_input`
   pub fn handle_incoming_message(&mut self, message: msg::MasterMessage) {
     self.context.handle_incoming_message(&mut self.statuses, message);
+  }
+
+  pub fn handle_full_input(&mut self, input: FullMasterInput) {
+    match input {
+      FullMasterInput::MasterMessage(message) => {
+        self.context.handle_incoming_message(&mut self.statuses, message);
+      }
+      FullMasterInput::MasterTimerInput(timer_input) => {
+        let forward_msg = MasterForwardMsg::MasterTimerInput(timer_input);
+        self.context.handle_input(&mut self.statuses, forward_msg);
+      }
+    }
   }
 }
 
@@ -308,7 +367,14 @@ impl<T: IOTypes> MasterContext<T> {
         }
       }
       MasterMessage::PaxosDriverMessage(paxos_message) => {
-        for shared_bundle in self.paxos_driver.handle_paxos_message(paxos_message) {
+        let bundles = self.paxos_driver.handle_paxos_message::<T>(
+          &mut MasterPaxosContext {
+            network_output: &mut self.network_output,
+            this_eid: &self.this_eid,
+          },
+          paxos_message,
+        );
+        for shared_bundle in bundles {
           match shared_bundle {
             msg::PLEntry::Bundle(master_bundle) => {
               // Dispatch RemoteLeaderChanges
@@ -344,6 +410,11 @@ impl<T: IOTypes> MasterContext<T> {
 
   pub fn handle_input(&mut self, statuses: &mut Statuses, master_input: MasterForwardMsg) {
     match master_input {
+      MasterForwardMsg::MasterTimerInput(timer_input) => match timer_input {
+        MasterTimerInput::RetryInsert(uuid) => {
+          self.paxos_driver.retry_insert(uuid);
+        }
+      },
       MasterForwardMsg::MasterBundle(bundle) => {
         if self.is_leader() {
           for paxos_log_msg in bundle {
@@ -470,7 +541,13 @@ impl<T: IOTypes> MasterContext<T> {
 
           // Dispatch the Master for insertion and start a new one.
           let master_bundle = std::mem::replace(&mut self.master_bundle, MasterBundle::default());
-          self.paxos_driver.insert_bundle(master_bundle);
+          self.paxos_driver.insert_bundle::<T>(
+            &mut MasterPaxosContext {
+              network_output: &mut self.network_output,
+              this_eid: &self.this_eid,
+            },
+            master_bundle,
+          );
         } else {
           for paxos_log_msg in bundle {
             match paxos_log_msg {

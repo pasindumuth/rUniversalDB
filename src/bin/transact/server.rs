@@ -1,14 +1,16 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  Clock, CoordForwardOut, GossipData, IOTypes, NetworkOut, SlaveForwardOut, TabletForwardOut,
+  Clock, CoordForwardOut, GossipData, IOTypes, MasterTimerOut, NetworkOut, SlaveForwardOut,
+  SlaveTimerOut, TabletForwardOut,
 };
 use runiversal::coord::CoordForwardMsg;
+use runiversal::master::MasterTimerInput;
 use runiversal::model::common::{
   CoordGroupId, EndpointId, Gen, SlaveGroupId, TabletGroupId, Timestamp,
 };
 use runiversal::model::message as msg;
-use runiversal::slave::{SlaveBackMessage, SlaveState};
+use runiversal::slave::{SlaveBackMessage, SlaveState, SlaveTimerInput};
 use runiversal::tablet::{TabletForwardMsg, TabletState};
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -86,6 +88,28 @@ impl SlaveForwardOut for ProdSlaveForwardOut {
   }
 }
 
+// SlaveTimerOut
+
+struct ProdSlaveTimerOut {}
+
+impl SlaveTimerOut for ProdSlaveTimerOut {
+  fn defer(&mut self, defer_time: Timestamp, msg: SlaveTimerInput) {
+    panic!() // TODO: do this right
+  }
+}
+
+// MasterTimerOut
+
+struct ProdMasterTimerOut {}
+
+impl MasterTimerOut for ProdMasterTimerOut {
+  fn defer(&mut self, defer_time: Timestamp, msg: MasterTimerInput) {
+    panic!() // TODO: do this right
+  }
+}
+
+// ProdIOTypes
+
 struct ProdIOTypes {}
 
 impl IOTypes for ProdIOTypes {
@@ -95,6 +119,8 @@ impl IOTypes for ProdIOTypes {
   type TabletForwardOutT = ProdTabletForwardOut;
   type CoordForwardOutT = ProdCoordForwardOut;
   type SlaveForwardOutT = ProdSlaveForwardOut;
+  type SlaveTimerOutT = ProdSlaveTimerOut;
+  type MasterTimerOutT = ProdMasterTimerOut;
 }
 
 pub fn start_server(

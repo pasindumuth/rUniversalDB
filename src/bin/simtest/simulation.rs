@@ -1,17 +1,18 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  rvec, Clock, CoordForwardOut, GossipData, IOTypes, NetworkOut, SlaveForwardOut, TableSchema,
-  TabletForwardOut,
+  rvec, Clock, CoordForwardOut, GossipData, IOTypes, MasterTimerOut, NetworkOut, SlaveForwardOut,
+  SlaveTimerOut, TableSchema, TabletForwardOut,
 };
 use runiversal::coord::CoordForwardMsg;
+use runiversal::master::MasterTimerInput;
 use runiversal::model::common::{
   CoordGroupId, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
   Timestamp,
 };
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
-use runiversal::slave::{SlaveBackMessage, SlaveState};
+use runiversal::slave::{SlaveBackMessage, SlaveState, SlaveTimerInput};
 use runiversal::tablet::{TabletForwardMsg, TabletState};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -121,6 +122,38 @@ impl Debug for TestSlaveForwardOut {
   }
 }
 
+// SlaveTimerOut
+
+struct TestSlaveTimerOut {}
+
+impl SlaveTimerOut for TestSlaveTimerOut {
+  fn defer(&mut self, defer_time: Timestamp, msg: SlaveTimerInput) {
+    panic!() // TODO: do this right
+  }
+}
+
+impl Debug for TestSlaveTimerOut {
+  fn fmt(&self, f: &mut Formatter) -> Result {
+    write!(f, "TestSlaveTimerOut")
+  }
+}
+
+// MasterTimerOut
+
+struct TestMasterTimerOut {}
+
+impl MasterTimerOut for TestMasterTimerOut {
+  fn defer(&mut self, defer_time: Timestamp, msg: MasterTimerInput) {
+    panic!() // TODO: do this right
+  }
+}
+
+impl Debug for TestMasterTimerOut {
+  fn fmt(&self, f: &mut Formatter) -> Result {
+    write!(f, "TestMasterTimerOut")
+  }
+}
+
 /// IOTypes for testing purposes.
 struct TestIOTypes {}
 
@@ -131,6 +164,8 @@ impl IOTypes for TestIOTypes {
   type TabletForwardOutT = TestTabletForwardOut;
   type CoordForwardOutT = TestCoordForwardOut;
   type SlaveForwardOutT = TestSlaveForwardOut;
+  type SlaveTimerOutT = TestSlaveTimerOut;
+  type MasterTimerOutT = TestMasterTimerOut;
 }
 
 impl Debug for TestIOTypes {

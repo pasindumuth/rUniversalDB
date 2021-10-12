@@ -196,8 +196,7 @@ pub struct Prepare {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Promise<ValT> {
   pub rnd: Rnd,
-  pub vrnd: Rnd,
-  pub vval: ValT,
+  pub vrnd_vval: Option<(Rnd, ValT)>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -238,46 +237,47 @@ pub type PLIndex = u128;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MultiPaxosMessage<BundleT> {
-  paxos_log_index: PLIndex,
-  paxos_message: PaxosMessage<PLEntry<BundleT>>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct NextIndexRequest {
-  sender_eid: EndpointId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct NextIndexResponse {
-  responder_eid: EndpointId,
-  next_index: PLIndex,
+  pub sender_eid: EndpointId,
+  pub index: PLIndex,
+  pub paxos_message: PaxosMessage<PLEntry<BundleT>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct IsLeader {
-  leadership_id: LeadershipId,
-  should_learned: Vec<(PLIndex, Rnd)>,
+  pub leadership_id: LeadershipId,
+  pub should_learned: Vec<(PLIndex, Rnd)>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LogSyncRequest {
-  sender_eid: EndpointId,
-  next_index: PLIndex,
+  pub sender_eid: EndpointId,
+  pub next_index: PLIndex,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LogSyncResponse<BundleT> {
-  learned: Vec<(PLIndex, PLEntry<BundleT>)>,
+  pub learned: Vec<(PLIndex, PLEntry<BundleT>)>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NextIndexRequest {
+  pub sender_eid: EndpointId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NextIndexResponse {
+  pub responder_eid: EndpointId,
+  pub next_index: PLIndex,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum PaxosDriverMessage<BundleT> {
   MultiPaxosMessage(MultiPaxosMessage<BundleT>),
-  NextIndexRequest(NextIndexRequest),
-  NextIndexResponse(NextIndexResponse),
   IsLeader(IsLeader),
   LogSyncRequest(LogSyncRequest),
   LogSyncResponse(LogSyncResponse<BundleT>),
+  NextIndexRequest(NextIndexRequest),
+  NextIndexResponse(NextIndexResponse),
 }
 
 // -------------------------------------------------------------------------------------------------

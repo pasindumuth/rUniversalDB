@@ -2,7 +2,7 @@ use crate::alter_table_es::State;
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, Clock, CoordForwardOut,
-  GossipData, IOTypes, NetworkOut, OrigP, RemoteLeaderChangedPLm, TMStatus, TabletForwardOut,
+  GossipData, IOTypes, NetworkOut, OrigP, RemoteLeaderChangedPLm, TMStatus, TabletForwardOut, UUID,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_es::{CreateTableAction, CreateTableES};
@@ -18,7 +18,7 @@ use crate::ms_query_coord_es::{
   FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::PaxosDriver;
+use crate::paxos::{PaxosContextBase, PaxosDriver};
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, SlaveServerContext};
 use crate::server::{MainSlaveServerContext, ServerContextBase};
@@ -100,6 +100,32 @@ pub struct SharedPaxosBundle {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  SlavePaxosContext
+// -----------------------------------------------------------------------------------------------
+
+pub struct SlavePaxosContext<'a, T: IOTypes> {
+  /// IO Objects.
+  pub network_output: &'a mut T::NetworkOutT,
+  pub this_eid: &'a EndpointId,
+}
+
+impl<'a, T: IOTypes> PaxosContextBase<T, SharedPaxosBundle> for SlavePaxosContext<'a, T> {
+  fn network_output(&mut self) -> &mut T::NetworkOutT {
+    self.network_output
+  }
+
+  fn this_eid(&self) -> &EndpointId {
+    self.this_eid
+  }
+
+  fn send(&mut self, eid: &EndpointId, message: msg::PaxosDriverMessage<SharedPaxosBundle>) {
+    self
+      .network_output
+      .send(eid, msg::NetworkMessage::Slave(msg::SlaveMessage::PaxosDriverMessage(message)));
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  SlaveForwardMsg
 // -----------------------------------------------------------------------------------------------
 pub enum SlaveForwardMsg {
@@ -109,11 +135,14 @@ pub enum SlaveForwardMsg {
   GossipData(Arc<GossipData>),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(msg::LeaderChanged),
+
+  // Internal
   SlaveBackMessage(SlaveBackMessage),
+  SlaveTimerInput(SlaveTimerInput),
 }
 
 // -----------------------------------------------------------------------------------------------
-//  SlaveReceivedMsg
+//  Full Slave Input
 // -----------------------------------------------------------------------------------------------
 
 /// Messages send from Tablets to the Slave
@@ -121,12 +150,15 @@ pub enum SlaveBackMessage {
   TabletBundle(TabletGroupId, TabletBundle),
 }
 
-// -----------------------------------------------------------------------------------------------
-//  Full Slave Input
-// -----------------------------------------------------------------------------------------------
+/// Messages deferred by the Slave to be run on the Slave.
+pub enum SlaveTimerInput {
+  RetryInsert(UUID),
+}
+
 pub enum FullSlaveInput {
   SlaveMessage(msg::SlaveMessage),
   SlaveBackMessage(SlaveBackMessage),
+  SlaveTimerInput(SlaveTimerInput),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -145,7 +177,7 @@ pub struct Statuses {
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct SlaveState<T: IOTypes> {
-  slave_context: SlaveContext<T>,
+  context: SlaveContext<T>,
   statuses: Statuses,
 }
 
@@ -199,7 +231,7 @@ impl<T: IOTypes> SlaveState<T> {
     }
     let all_gids = leader_map.keys().cloned().collect();
     SlaveState {
-      slave_context: SlaveContext {
+      context: SlaveContext {
         rand,
         clock,
         network_output,
@@ -214,7 +246,7 @@ impl<T: IOTypes> SlaveState<T> {
         network_driver: NetworkDriver::new(all_gids),
         slave_bundle: SlaveBundle::default(),
         tablet_bundles: Default::default(),
-        paxos_driver: PaxosDriver { bundle: SharedPaxosBundle::default() },
+        paxos_driver: PaxosDriver::new(),
       },
       statuses: Default::default(),
     }
@@ -222,18 +254,22 @@ impl<T: IOTypes> SlaveState<T> {
 
   // TODO: stop using this in favor of `handle_full_input`
   pub fn handle_incoming_message(&mut self, message: msg::SlaveMessage) {
-    self.slave_context.handle_incoming_message(&mut self.statuses, message);
+    self.context.handle_incoming_message(&mut self.statuses, message);
   }
 
   pub fn handle_full_input(&mut self, input: FullSlaveInput) {
     match input {
       FullSlaveInput::SlaveMessage(message) => {
-        self.slave_context.handle_incoming_message(&mut self.statuses, message);
+        self.context.handle_incoming_message(&mut self.statuses, message);
       }
       FullSlaveInput::SlaveBackMessage(message) => {
         /// Handles messages that were send from the Tablets back to the Slave.
         let forward_msg = SlaveForwardMsg::SlaveBackMessage(message);
-        self.slave_context.handle_input(&mut self.statuses, forward_msg);
+        self.context.handle_input(&mut self.statuses, forward_msg);
+      }
+      FullSlaveInput::SlaveTimerInput(timer_input) => {
+        let forward_msg = SlaveForwardMsg::SlaveTimerInput(timer_input);
+        self.context.handle_input(&mut self.statuses, forward_msg);
       }
     }
   }
@@ -275,7 +311,14 @@ impl<T: IOTypes> SlaveContext<T> {
         }
       }
       msg::SlaveMessage::PaxosDriverMessage(paxos_message) => {
-        for shared_bundle in self.paxos_driver.handle_paxos_message(paxos_message) {
+        let bundles = self.paxos_driver.handle_paxos_message::<T>(
+          &mut SlavePaxosContext {
+            network_output: &mut self.network_output,
+            this_eid: &self.this_eid,
+          },
+          paxos_message,
+        );
+        for shared_bundle in bundles {
           match shared_bundle {
             msg::PLEntry::Bundle(shared_bundle) => {
               let all_tids = self.tablet_forward_output.all_tids();
@@ -372,8 +415,19 @@ impl<T: IOTypes> SlaveContext<T> {
               slave: std::mem::replace(&mut self.slave_bundle, SlaveBundle::default()),
               tablet: std::mem::replace(&mut self.tablet_bundles, HashMap::default()),
             };
-            self.paxos_driver.insert_bundle(shared_bundle);
+            self.paxos_driver.insert_bundle::<T>(
+              &mut SlavePaxosContext {
+                network_output: &mut self.network_output,
+                this_eid: &self.this_eid,
+              },
+              shared_bundle,
+            );
           }
+        }
+      },
+      SlaveForwardMsg::SlaveTimerInput(timer_input) => match timer_input {
+        SlaveTimerInput::RetryInsert(uuid) => {
+          self.paxos_driver.retry_insert(uuid);
         }
       },
       SlaveForwardMsg::SlaveBundle(bundle) => {
