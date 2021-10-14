@@ -109,6 +109,16 @@ pub struct CoordContext<T: IOTypes> {
 }
 
 impl<T: IOTypes> CoordState<T> {
+  pub fn new(coord_context: CoordContext<T>) -> CoordState<T> {
+    CoordState { coord_context, statuses: Default::default() }
+  }
+
+  pub fn handle_input(&mut self, coord_input: CoordForwardMsg) {
+    self.coord_context.handle_input(&mut self.statuses, coord_input);
+  }
+}
+
+impl<T: IOTypes> CoordContext<T> {
   pub fn new(
     rand: T::RngCoreT,
     clock: T::ClockT,
@@ -118,30 +128,21 @@ impl<T: IOTypes> CoordState<T> {
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
     leader_map: HashMap<PaxosGroupId, LeadershipId>,
-  ) -> CoordState<T> {
-    CoordState {
-      coord_context: CoordContext {
-        rand,
-        clock,
-        network_output,
-        this_slave_group_id,
-        this_coord_group_id,
-        sub_node_path: CTSubNodePath::Coord(CoordGroupId("".to_string())),
-        this_eid,
-        gossip,
-        leader_map,
-        external_request_id_map: Default::default(),
-      },
-      statuses: Default::default(),
+  ) -> CoordContext<T> {
+    CoordContext {
+      rand,
+      clock,
+      network_output,
+      this_slave_group_id,
+      this_coord_group_id: this_coord_group_id.clone(),
+      sub_node_path: CTSubNodePath::Coord(this_coord_group_id),
+      this_eid,
+      gossip,
+      leader_map,
+      external_request_id_map: Default::default(),
     }
   }
 
-  pub fn handle_input(&mut self, coord_input: CoordForwardMsg) {
-    self.coord_context.handle_input(&mut self.statuses, coord_input);
-  }
-}
-
-impl<T: IOTypes> CoordContext<T> {
   pub fn ctx(&mut self) -> SlaveServerContext<T> {
     SlaveServerContext {
       rand: &mut self.rand,

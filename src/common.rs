@@ -9,7 +9,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
 use crate::slave::{SlaveBackMessage, SlaveTimerInput};
-use crate::tablet::TabletForwardMsg;
+use crate::tablet::{TabletCreateHelper, TabletForwardMsg};
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ use std::hash::Hash;
 //  IOTypes
 // -----------------------------------------------------------------------------------------------
 
+/// An interface for reading the time in milliseconds.
 pub trait Clock {
   fn now(&mut self) -> Timestamp;
 }
@@ -36,6 +37,8 @@ pub trait TabletForwardOut {
   fn all_tids(&self) -> Vec<TabletGroupId>;
 
   fn num_tablets(&self) -> usize;
+
+  fn create_tablet(&mut self, helper: TabletCreateHelper);
 }
 
 pub trait CoordForwardOut {
@@ -199,6 +202,7 @@ pub struct GossipData {
   pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
+  pub master_address_config: Vec<EndpointId>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -245,6 +249,10 @@ pub fn mk_qid<R: Rng>(rng: &mut R) -> QueryId {
 
 pub fn mk_tid<R: Rng>(rng: &mut R) -> TabletGroupId {
   TabletGroupId(rand_string(rng))
+}
+
+pub fn mk_cid<R: Rng>(rng: &mut R) -> CoordGroupId {
+  CoordGroupId(rand_string(rng))
 }
 
 pub fn mk_sid<R: Rng>(rng: &mut R) -> SlaveGroupId {

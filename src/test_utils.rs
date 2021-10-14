@@ -1,5 +1,5 @@
 use crate::model::common::{
-  ColName, ColVal, SlaveGroupId, TablePath, TabletGroupId, TransTableName,
+  ColName, ColVal, EndpointId, SlaveGroupId, TablePath, TabletGroupId, TransTableName,
 };
 
 pub fn cn(s: &str) -> ColName {
@@ -16,6 +16,10 @@ pub fn cvi(i: i32) -> ColVal {
 
 pub fn mk_sid(id: &str) -> SlaveGroupId {
   SlaveGroupId(id.to_string())
+}
+
+pub fn mk_eid(id: &str) -> EndpointId {
+  EndpointId(id.to_string())
 }
 
 pub fn mk_tid(id: &str) -> TabletGroupId {

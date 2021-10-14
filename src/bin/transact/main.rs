@@ -1,8 +1,13 @@
+#![feature(map_first_last)]
+
 mod server;
 
 use crate::server::start_server;
-use runiversal::model::common::EndpointId;
+use runiversal::model::common::{EndpointId, SlaveGroupId};
+use runiversal::model::message as msg;
 use runiversal::net::{recv, send};
+use runiversal::slave::FullSlaveInput;
+use runiversal::test_utils as tu;
 use std::collections::{HashMap, LinkedList};
 use std::env;
 use std::net::{TcpListener, TcpStream};
@@ -37,7 +42,7 @@ const SERVER_PORT: u32 = 1610;
 
 fn handle_conn(
   net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
-  to_server_sender: &Sender<(EndpointId, Vec<u8>)>,
+  to_server_sender: &Sender<FullSlaveInput>,
   stream: TcpStream,
 ) -> EndpointId {
   let endpoint_id = EndpointId(stream.peer_addr().unwrap().ip().to_string());
@@ -45,11 +50,11 @@ fn handle_conn(
   // Setup FromNetwork Thread
   {
     let to_server_sender = to_server_sender.clone();
-    let endpoint_id = endpoint_id.clone();
     let stream = stream.try_clone().unwrap();
     thread::spawn(move || loop {
-      let val_in = recv(&stream);
-      to_server_sender.send((endpoint_id.clone(), val_in)).unwrap();
+      let data = recv(&stream);
+      let slave_msg: msg::SlaveMessage = rmp_serde::from_read_ref(&data).unwrap();
+      to_server_sender.send(FullSlaveInput::SlaveMessage(slave_msg)).unwrap();
     });
   }
 
@@ -71,7 +76,7 @@ fn handle_conn(
 fn handle_self_conn(
   endpoint_id: &EndpointId,
   net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
-  to_server_sender: &Sender<(EndpointId, Vec<u8>)>,
+  to_server_sender: &Sender<FullSlaveInput>,
 ) {
   // This is the FromServer Queue.
   let (from_server_sender, from_server_receiver) = mpsc::channel();
@@ -80,11 +85,11 @@ fn handle_self_conn(
   net_conn_map.insert(endpoint_id.clone(), from_server_sender);
 
   // Setup Self Connection Thread
-  let endpoint_id = endpoint_id.clone();
   let to_server_sender = to_server_sender.clone();
   thread::spawn(move || loop {
     let data = from_server_receiver.recv().unwrap();
-    to_server_sender.send((endpoint_id.clone(), data)).unwrap();
+    let slave_msg: msg::SlaveMessage = rmp_serde::from_read_ref(&data).unwrap();
+    to_server_sender.send(FullSlaveInput::SlaveMessage(slave_msg)).unwrap();
   });
 }
 
@@ -93,18 +98,26 @@ fn main() {
 
   // Removes the program name argument.
   args.pop_front();
-  // Pop the seed
+
+  // Pop the Slave Index
   let slave_index = args
     .pop_front()
-    .expect("A slave index should be provided.")
+    .expect("A transact index should be provided.")
     .parse::<u32>()
-    .expect("The slave index couldn't be parsed as a string.");
+    .expect("The transact index couldn't be parsed as a string.");
+  println!("Starting Slave: {:?}", slave_index);
+
   // Pop the IP address
-  let cur_ip = args.pop_front().expect("The endpoint_id of the current slave should be provided.");
+  let this_ip =
+    args.pop_front().expect("The EndpointId of the current transact should be provided.");
+
+  // Pop the IP address
+  let this_sid =
+    args.pop_front().expect("The SlaveGroupId of the current transact should be provided.");
 
   // The mpsc channel for sending data to the Server Thread from all FromNetwork Threads.
-  let (to_server_sender, to_server_receiver) = mpsc::channel();
-  // The map mapping the IP addresses to an FromServer Queue, used to
+  let (to_server_sender, to_server_receiver) = mpsc::channel::<FullSlaveInput>();
+  // The map mapping the IP addresses to a FromServer Queue, used to
   // communicate with the ToNetwork Threads to send data out.
   let net_conn_map = Arc::new(Mutex::new(HashMap::<EndpointId, Sender<Vec<u8>>>::new()));
 
@@ -112,9 +125,9 @@ fn main() {
   {
     let to_server_sender = to_server_sender.clone();
     let net_conn_map = net_conn_map.clone();
-    let cur_ip = cur_ip.clone();
+    let this_ip = this_ip.clone();
     thread::spawn(move || {
-      let listener = TcpListener::bind(format!("{}:{}", &cur_ip, SERVER_PORT)).unwrap();
+      let listener = TcpListener::bind(format!("{}:{}", &this_ip, SERVER_PORT)).unwrap();
       for stream in listener.incoming() {
         let stream = stream.unwrap();
         let endpoint_id = handle_conn(&net_conn_map, &to_server_sender, stream);
@@ -131,9 +144,35 @@ fn main() {
   }
 
   // Handle self-connection
-  let endpoint_id = EndpointId(cur_ip);
-  handle_self_conn(&endpoint_id, &net_conn_map, &to_server_sender);
+  let this_eid = EndpointId(this_ip);
+  handle_self_conn(&this_eid, &net_conn_map, &to_server_sender);
 
   // Start the server
-  start_server(to_server_receiver, &net_conn_map, slave_index);
+  start_server(
+    to_server_sender,
+    to_server_receiver,
+    &net_conn_map,
+    this_eid,
+    SlaveGroupId(this_sid),
+    mk_slave_address_config(),
+    mk_master_address_config(),
+  );
+}
+
+pub fn mk_slave_address_config() -> HashMap<SlaveGroupId, Vec<EndpointId>> {
+  vec![
+    (tu::mk_sid("s0"), vec![tu::mk_eid("e0")]),
+    (tu::mk_sid("s1"), vec![tu::mk_eid("e1")]),
+    (tu::mk_sid("s2"), vec![tu::mk_eid("e2")]),
+    (tu::mk_sid("s3"), vec![tu::mk_eid("e3")]),
+    (tu::mk_sid("s4"), vec![tu::mk_eid("e4")]),
+  ]
+  .into_iter()
+  .collect()
+}
+
+pub fn mk_master_address_config() -> Vec<EndpointId> {
+  vec![tu::mk_eid("e0"), tu::mk_eid("e1"), tu::mk_eid("e2"), tu::mk_eid("e3"), tu::mk_eid("e4")]
+    .into_iter()
+    .collect()
 }

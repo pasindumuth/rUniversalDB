@@ -243,6 +243,7 @@ impl<T: IOTypes> SlaveState<T> {
       leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
     }
     let all_gids = leader_map.keys().cloned().collect();
+    let paxos_nodes = gossip.slave_address_config.get(&this_slave_group_id).unwrap().clone();
     SlaveState {
       context: SlaveContext {
         rand,
@@ -260,10 +261,14 @@ impl<T: IOTypes> SlaveState<T> {
         network_driver: NetworkDriver::new(all_gids),
         slave_bundle: SlaveBundle::default(),
         tablet_bundles: Default::default(),
-        paxos_driver: PaxosDriver::new(),
+        paxos_driver: PaxosDriver::new(paxos_nodes),
       },
       statuses: Default::default(),
     }
+  }
+
+  pub fn new2(slave_context: SlaveContext<T>) -> SlaveState<T> {
+    SlaveState { context: slave_context, statuses: Default::default() }
   }
 
   // TODO: stop using this in favor of `handle_full_input`
@@ -290,6 +295,41 @@ impl<T: IOTypes> SlaveState<T> {
 }
 
 impl<T: IOTypes> SlaveContext<T> {
+  pub fn new(
+    rand: T::RngCoreT,
+    clock: T::ClockT,
+    network_output: T::NetworkOutT,
+    tablet_forward_output: T::TabletForwardOutT,
+    coord_forward_output: T::CoordForwardOutT,
+    slave_timer_output: T::SlaveTimerOutT,
+    coord_positions: Vec<CoordGroupId>,
+    this_slave_group_id: SlaveGroupId,
+    this_eid: EndpointId,
+    gossip: Arc<GossipData>,
+    leader_map: HashMap<PaxosGroupId, LeadershipId>,
+  ) -> SlaveContext<T> {
+    let all_gids = leader_map.keys().cloned().collect();
+    let paxos_nodes = gossip.slave_address_config.get(&this_slave_group_id).unwrap().clone();
+    SlaveContext {
+      rand,
+      clock,
+      network_output,
+      tablet_forward_output,
+      coord_forward_output,
+      slave_timer_output,
+      coord_positions,
+      this_slave_group_id: this_slave_group_id.clone(),
+      this_gid: this_slave_group_id.to_gid(),
+      this_eid,
+      gossip,
+      leader_map,
+      network_driver: NetworkDriver::new(all_gids),
+      slave_bundle: Default::default(),
+      tablet_bundles: Default::default(),
+      paxos_driver: PaxosDriver::new(paxos_nodes),
+    }
+  }
+
   pub fn ctx(&mut self) -> MainSlaveServerContext<T> {
     MainSlaveServerContext {
       network_output: &mut self.network_output,

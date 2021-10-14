@@ -543,13 +543,37 @@ pub enum TabletForwardMsg {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  Misc
+// -----------------------------------------------------------------------------------------------
+
+pub struct TabletCreateHelper {
+  pub rand_seed: [u8; 16],
+
+  /// Metadata
+  pub this_slave_group_id: SlaveGroupId,
+  pub this_tablet_group_id: TabletGroupId,
+  pub this_eid: EndpointId,
+
+  /// Gossip
+  pub gossip: Arc<GossipData>,
+
+  /// LeaderMap
+  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
+
+  // Storage
+  pub this_table_path: TablePath,
+  pub this_table_key_range: TabletKeyRange,
+  pub table_schema: TableSchema,
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Tablet State
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct TabletState<T: IOTypes> {
-  tablet_context: TabletContext<T>,
-  statuses: Statuses,
+  pub tablet_context: TabletContext<T>,
+  pub statuses: Statuses,
 }
 
 #[derive(Debug)]
@@ -631,8 +655,8 @@ impl<T: IOTypes> TabletState<T> {
         network_output,
         slave_forward_output,
         this_slave_group_id,
-        this_tablet_group_id,
-        sub_node_path: CTSubNodePath::Tablet(TabletGroupId("".to_string())),
+        this_tablet_group_id: this_tablet_group_id.clone(),
+        sub_node_path: CTSubNodePath::Tablet(this_tablet_group_id),
         this_eid: EndpointId("".to_string()),
         gossip,
         leader_map: Default::default(),
@@ -656,12 +680,52 @@ impl<T: IOTypes> TabletState<T> {
     }
   }
 
+  pub fn new2(tablet_context: TabletContext<T>) -> TabletState<T> {
+    TabletState { tablet_context, statuses: Default::default() }
+  }
+
   pub fn handle_input(&mut self, coord_input: TabletForwardMsg) {
     self.tablet_context.handle_input(&mut self.statuses, coord_input);
   }
 }
 
 impl<T: IOTypes> TabletContext<T> {
+  pub fn new(
+    rand: T::RngCoreT,
+    clock: T::ClockT,
+    network_output: T::NetworkOutT,
+    slave_forward_output: T::SlaveForwardOutT,
+    helper: TabletCreateHelper,
+  ) -> TabletContext<T> {
+    TabletContext::<T> {
+      rand,
+      clock,
+      network_output,
+      slave_forward_output,
+      this_slave_group_id: helper.this_slave_group_id,
+      this_tablet_group_id: helper.this_tablet_group_id.clone(),
+      sub_node_path: CTSubNodePath::Tablet(helper.this_tablet_group_id),
+      this_eid: helper.this_eid,
+      gossip: helper.gossip,
+      leader_map: helper.leader_map,
+      storage: GenericMVTable::new(),
+      this_table_path: helper.this_table_path,
+      this_table_key_range: helper.this_table_key_range,
+      table_schema: helper.table_schema,
+      verifying_writes: Default::default(),
+      inserting_prepared_writes: Default::default(),
+      prepared_writes: Default::default(),
+      committed_writes: Default::default(),
+      waiting_read_protected: Default::default(),
+      inserting_read_protected: Default::default(),
+      read_protected: Default::default(),
+      waiting_locked_cols: Default::default(),
+      inserting_locked_cols: Default::default(),
+      ms_root_query_map: Default::default(),
+      tablet_bundle: vec![],
+    }
+  }
+
   pub fn ctx(&mut self) -> SlaveServerContext<T> {
     SlaveServerContext {
       rand: &mut self.rand,

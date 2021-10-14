@@ -274,6 +274,7 @@ pub struct MasterContext<T: IOTypes> {
   pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
+  pub master_address_config: Vec<EndpointId>,
 
   /// LeaderMap
   pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
@@ -318,11 +319,12 @@ impl<T: IOTypes> MasterState<T> {
         sharding_config,
         tablet_address_config,
         slave_address_config,
+        master_address_config: vec![],
         leader_map,
         network_driver: NetworkDriver::new(all_gids),
         external_request_id_map: Default::default(),
         master_bundle: MasterBundle::default(),
-        paxos_driver: PaxosDriver::new(),
+        paxos_driver: PaxosDriver::new(vec![]),
       },
       statuses: Default::default(),
     }
@@ -1140,6 +1142,7 @@ impl<T: IOTypes> MasterContext<T> {
       sharding_config: self.sharding_config.clone(),
       tablet_address_config: self.tablet_address_config.clone(),
       slave_address_config: self.slave_address_config.clone(),
+      master_address_config: self.master_address_config.clone(),
     };
     let sids: Vec<SlaveGroupId> = self.slave_address_config.keys().cloned().collect();
     for sid in sids {

@@ -13,7 +13,7 @@ use runiversal::model::common::{
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
 use runiversal::slave::{SlaveBackMessage, SlaveState, SlaveTimerInput};
-use runiversal::tablet::{TabletForwardMsg, TabletState};
+use runiversal::tablet::{TabletCreateHelper, TabletForwardMsg, TabletState};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Formatter, Result};
@@ -76,6 +76,10 @@ impl TabletForwardOut for TestTabletForwardOut {
 
   fn num_tablets(&self) -> usize {
     self.tablet_states.borrow().get(&self.from_eid).unwrap().len()
+  }
+
+  fn create_tablet(&mut self, helper: TabletCreateHelper) {
+    unimplemented!()
   }
 }
 
@@ -261,6 +265,7 @@ impl Simulation {
         sharding_config: sharding_config.clone(),
         tablet_address_config: tablet_address_config.clone(),
         slave_address_config: slave_address_config.clone(),
+        master_address_config: vec![],
       });
       let mut seed = [0; 16];
       sim.rng.fill_bytes(&mut seed);

@@ -121,14 +121,19 @@ pub struct PaxosDriver<BundleT> {
 }
 
 impl<BundleT: Clone> PaxosDriver<BundleT> {
-  pub fn new() -> PaxosDriver<BundleT> {
-    // TODO: do this right
+  /// Constructs a `PaxosDriver` for a Slave that is part of the initial system bootstrap.
+  pub fn new(paxos_nodes: Vec<EndpointId>) -> PaxosDriver<BundleT> {
+    let mut remote_next_indices = HashMap::<EndpointId, PLIndex>::new();
+    for node in &paxos_nodes {
+      remote_next_indices.insert(node.clone(), 0);
+    }
+    let leader_eid = paxos_nodes[0].clone();
     PaxosDriver {
-      paxos_nodes: vec![],
-      remote_next_indices: Default::default(),
+      paxos_nodes,
+      remote_next_indices,
       next_index: 0,
       paxos_instances: Default::default(),
-      leader: LeadershipId { gen: Gen(0), eid: EndpointId("".to_string()) },
+      leader: LeadershipId { gen: Gen(0), eid: leader_eid },
       leader_heartbeat: 0,
       next_insert: None,
     }

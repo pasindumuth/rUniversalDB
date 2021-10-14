@@ -1,12 +1,15 @@
 use crate::alter_table_es::State;
-use crate::common::{IOTypes, NetworkOut, RemoteLeaderChangedPLm};
+use crate::common::{IOTypes, NetworkOut, RemoteLeaderChangedPLm, TableSchema, TabletForwardOut};
 use crate::model::common::{
   proc, ColName, ColType, Gen, QueryId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
+use crate::multiversion_map::MVM;
 use crate::server::ServerContextBase;
 use crate::slave::SlaveContext;
 use crate::slave::{plm, SlavePLm};
+use crate::tablet::TabletCreateHelper;
+use rand::RngCore;
 use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------------------------
@@ -130,7 +133,24 @@ impl CreateTableES {
 
   /// Create a Tablet as specified by this ES
   fn create_table<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) {
-    // TODO: create the Tablet
+    // Construct the Tablet
+    let mut rand_seed = [0; 16];
+    ctx.rand.fill_bytes(&mut rand_seed);
+    let helper = TabletCreateHelper {
+      rand_seed,
+      this_slave_group_id: ctx.this_slave_group_id.clone(),
+      this_tablet_group_id: self.tablet_group_id.clone(),
+      this_eid: ctx.this_eid.clone(),
+      gossip: ctx.gossip.clone(),
+      leader_map: ctx.leader_map.clone(),
+      this_table_path: self.table_path.clone(),
+      this_table_key_range: self.key_range.clone(),
+      table_schema: TableSchema {
+        key_cols: self.key_cols.clone(),
+        val_cols: MVM::init(self.val_cols.clone().into_iter().collect()),
+      },
+    };
+    ctx.tablet_forward_output.create_tablet(helper);
   }
 
   pub fn handle_committed_plm<T: IOTypes>(

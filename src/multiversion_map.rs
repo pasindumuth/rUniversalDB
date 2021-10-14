@@ -18,8 +18,12 @@ where
     MVM { map: HashMap::new() }
   }
 
-  pub fn init(init_map: HashMap<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>) -> MVM<K, V> {
-    MVM { map: init_map }
+  pub fn init(init_vals: HashMap<K, V>) -> MVM<K, V> {
+    let mut map = HashMap::<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>::new();
+    for (key, value) in init_vals {
+      map.insert(key, (0, vec![(0, Some(value))]));
+    }
+    MVM { map }
   }
 
   pub fn write(&mut self, key: &K, value: Option<V>, timestamp: Timestamp) -> Result<(), String> {
