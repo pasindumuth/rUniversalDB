@@ -1,6 +1,6 @@
 use crate::col_usage::{collect_top_level_cols, FrozenColUsageNode};
 use crate::common::{
-  btree_multimap_insert, lookup, mk_qid, IOTypes, KeyBound, OrigP, QueryESResult, QueryPlan,
+  btree_multimap_insert, lookup, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan,
   TableRegion,
 };
 use crate::expression::{compress_row_region, is_true};
@@ -75,7 +75,7 @@ pub enum TableAction {
 // -----------------------------------------------------------------------------------------------
 
 impl TableReadES {
-  pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
+  pub fn start<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) -> TableAction {
     // First, we lock the columns that the QueryPlan requires certain properties of.
     assert!(matches!(self.state, ExecutionS::Start));
 
@@ -89,6 +89,7 @@ impl TableReadES {
     }
 
     let locked_cols_qid = ctx.add_requested_locked_columns(
+      io_ctx,
       OrigP::new(self.query_id.clone()),
       self.timestamp.clone(),
       all_cols.into_iter().collect(),
@@ -102,7 +103,7 @@ impl TableReadES {
   /// `extra_req_cols` are preset.
   ///
   /// Note: this does *not* required columns to be locked.
-  fn does_query_plan_align<T: IOTypes>(&self, ctx: &TabletContext<T>) -> bool {
+  fn does_query_plan_align(&self, ctx: &TabletContext) -> bool {
     // First, check that `external_cols are absent.
     for col in &self.query_plan.col_usage_node.external_cols {
       // Since the `key_cols` are static, no query plan should have one of
@@ -133,15 +134,19 @@ impl TableReadES {
   }
 
   /// Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
-  fn check_gossip_data<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
+  fn check_gossip_data<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> TableAction {
     for (table_path, gen) in &self.query_plan.table_location_map {
       if !ctx.gossip.sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
         // If not, we go to GossipDataWaiting
         self.state = ExecutionS::GossipDataWaiting;
 
         // Request a GossipData from the Master to help stimulate progress.
-        let this_sender_path = ctx.ctx().mk_this_query_path(self.query_id.clone());
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+        let this_sender_path = ctx.ctx(io_ctx).mk_this_query_path(self.query_id.clone());
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
           msg::MasterGossipRequest { sender_path: this_sender_path },
         ));
 
@@ -150,24 +155,29 @@ impl TableReadES {
     }
 
     // We start locking the regions.
-    self.start_table_read_es(ctx)
+    self.start_table_read_es(ctx, io_ctx)
   }
 
-  fn common_locked_cols<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
+  fn common_locked_cols<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> TableAction {
     // Now, we check whether the TableSchema aligns with the QueryPlan.
     if !self.does_query_plan_align(ctx) {
       self.state = ExecutionS::Done;
       TableAction::QueryError(msg::QueryError::InvalidQueryPlan)
     } else {
       // If it aligns, we verify is GossipData is recent enough.
-      self.check_gossip_data(ctx)
+      self.check_gossip_data(ctx, io_ctx)
     }
   }
 
   /// Handle Columns being locked
-  pub fn local_locked_cols<T: IOTypes>(
+  pub fn local_locked_cols<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     locked_cols_qid: QueryId,
   ) -> TableAction {
     let locking = cast!(ExecutionS::ColumnsLocking, &self.state).unwrap();
@@ -175,12 +185,13 @@ impl TableReadES {
 
     // Since this is only a LockedLockedCols, we amend `waiting_global_locks`.
     self.waiting_global_locks.insert(locked_cols_qid);
-    self.common_locked_cols(ctx)
+    self.common_locked_cols(ctx, io_ctx)
   }
 
-  fn remote_waiting_global_lock<T: IOTypes>(
+  fn remote_waiting_global_lock<IO: CoreIOCtx>(
     &mut self,
-    _: &mut TabletContext<T>,
+    _: &mut TabletContext,
+    io_ctx: &mut IO,
     query_id: &QueryId,
   ) -> TableAction {
     self.waiting_global_locks.remove(query_id);
@@ -195,33 +206,42 @@ impl TableReadES {
   }
 
   /// Handle GlobalLockedCols
-  pub fn global_locked_cols<T: IOTypes>(
+  pub fn global_locked_cols<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     locked_cols_qid: QueryId,
   ) -> TableAction {
     if let ExecutionS::ColumnsLocking(locking) = &self.state {
       assert_eq!(locking.locked_cols_qid, locked_cols_qid);
-      self.common_locked_cols(ctx)
+      self.common_locked_cols(ctx, io_ctx)
     } else {
       // Here, note that LocalLockedCols must have previously been provided because
       // GlobalLockedCols required a PL insertion.
-      self.remote_waiting_global_lock(ctx, &locked_cols_qid)
+      self.remote_waiting_global_lock(ctx, io_ctx, &locked_cols_qid)
     }
   }
 
   /// Here, the column locking request results in us realizing the table has been dropped.
-  pub fn table_dropped<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> TableAction {
+  pub fn table_dropped<IO: CoreIOCtx>(
+    &mut self,
+    _: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> TableAction {
     assert!(cast!(ExecutionS::ColumnsLocking, &self.state).is_ok());
     self.state = ExecutionS::Done;
     TableAction::QueryError(msg::QueryError::InvalidQueryPlan)
   }
 
   /// Here, we GossipData gets delivered.
-  pub fn gossip_data_changed<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
+  pub fn gossip_data_changed<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> TableAction {
     if let ExecutionS::GossipDataWaiting = self.state {
       // Verify is GossipData is now recent enough.
-      self.check_gossip_data(ctx)
+      self.check_gossip_data(ctx, io_ctx)
     } else {
       // Do nothing
       TableAction::Wait
@@ -229,7 +249,11 @@ impl TableReadES {
   }
 
   /// Processes the Start state of TableReadES.
-  fn start_table_read_es<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
+  fn start_table_read_es<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> TableAction {
     // Setup ability to compute a tight Keybound for every ContextRow.
     let keybound_computer = ContextKeyboundComputer::new(
       &self.sql_query.selection,
@@ -261,7 +285,7 @@ impl TableReadES {
     col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
 
     // Move the TableReadES to the Pending state with the given ReadRegion.
-    let protect_qid = mk_qid(&mut ctx.rand);
+    let protect_qid = mk_qid(io_ctx.rand());
     let col_region = Vec::from_iter(col_region.into_iter());
     let read_region = TableRegion { col_region, row_region };
     self.state = ExecutionS::Pending(Pending {
@@ -284,14 +308,15 @@ impl TableReadES {
   }
 
   /// Handle ReadRegion protection
-  pub fn local_read_protected<T: IOTypes>(
+  pub fn local_read_protected<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     protect_qid: QueryId,
   ) -> TableAction {
     self.waiting_global_locks.insert(protect_qid);
     let pending = cast!(ExecutionS::Pending, &self.state).unwrap();
-    let gr_query_statuses = match compute_subqueries::<T, _, _>(
+    let gr_query_statuses = match compute_subqueries(
       GRQueryConstructorView {
         root_query_path: &self.root_query_path,
         timestamp: &self.timestamp,
@@ -300,7 +325,7 @@ impl TableReadES {
         query_id: &self.query_id,
         context: &self.context,
       },
-      &mut ctx.rand,
+      io_ctx.rand(),
       StorageLocalTable::new(
         &ctx.table_schema,
         &self.timestamp,
@@ -317,7 +342,7 @@ impl TableReadES {
 
     if gr_query_statuses.is_empty() {
       // Since there are no subqueries, we can go straight to finishing the ES.
-      self.finish_table_read_es(ctx)
+      self.finish_table_read_es(ctx, io_ctx)
     } else {
       // Here, we have computed all GRQueryESs, and we can now add them to Executing.
       let mut subqueries = Vec::<SingleSubqueryStatus>::new();
@@ -341,30 +366,33 @@ impl TableReadES {
   }
 
   /// Handle getting GlobalReadProtected
-  pub fn global_read_protected<T: IOTypes>(
+  pub fn global_read_protected<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     query_id: QueryId,
   ) -> TableAction {
-    self.remote_waiting_global_lock(ctx, &query_id)
+    self.remote_waiting_global_lock(ctx, io_ctx, &query_id)
   }
 
   /// This is called if a subquery fails. This simply responds to the sender
   /// and Exits and Clean Ups this ES. This is also called when a Deadlock Safety
   /// Abortion happens.
-  pub fn handle_internal_query_error<T: IOTypes>(
+  pub fn handle_internal_query_error<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     query_error: msg::QueryError,
   ) -> TableAction {
-    self.exit_and_clean_up(ctx);
+    self.exit_and_clean_up(ctx, io_ctx);
     TableAction::QueryError(query_error)
   }
 
   /// Handles a Subquery completing
-  pub fn handle_subquery_done<T: IOTypes>(
+  pub fn handle_subquery_done<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<TQueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
@@ -386,12 +414,16 @@ impl TableReadES {
     if executing_state.completed < executing_state.subqueries.len() {
       TableAction::Wait
     } else {
-      self.finish_table_read_es(ctx)
+      self.finish_table_read_es(ctx, io_ctx)
     }
   }
 
   /// Handles a ES finishing with all subqueries results in.
-  fn finish_table_read_es<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> TableAction {
+  fn finish_table_read_es<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> TableAction {
     let executing_state = cast!(ExecutionS::Executing, &mut self.state).unwrap();
 
     // Compute children.
@@ -480,7 +512,7 @@ impl TableReadES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, _: &mut TabletContext<T>) {
+  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, io_ctx: &mut IO) {
     self.state = ExecutionS::Done;
   }
 }

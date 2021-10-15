@@ -2,7 +2,7 @@ use crate::col_usage::{
   collect_select_subqueries, collect_update_subqueries, node_external_trans_tables,
   nodes_external_trans_tables, FrozenColUsageNode,
 };
-use crate::common::{lookup, lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
+use crate::common::{lookup, lookup_pos, mk_qid, CoreIOCtx, OrigP, QueryPlan, TMStatus};
 use crate::model::common::{
   proc, CQueryPath, CTQueryPath, CTSubNodePath, ColName, Context, ContextRow, ContextSchema, Gen,
   LeadershipId, NodeGroupId, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
@@ -202,14 +202,14 @@ pub enum TransTableIdx {
 
 impl GRQueryES {
   /// Starts the GRQueryES from its initial state.
-  pub fn start<T: IOTypes>(&mut self, ctx: &mut SlaveServerContext<T>) -> GRQueryAction {
+  pub fn start<IO: CoreIOCtx>(&mut self, ctx: &mut SlaveServerContext<IO>) -> GRQueryAction {
     self.advance(ctx)
   }
 
   /// This is called when the TMStatus has completed successfully.
-  pub fn handle_tm_success<T: IOTypes>(
+  pub fn handle_tm_success<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut SlaveServerContext<T>,
+    ctx: &mut SlaveServerContext<IO>,
     tm_qid: QueryId,
     new_rms: HashSet<TQueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
@@ -238,9 +238,9 @@ impl GRQueryES {
   }
 
   /// This is called when the TMStatus has completed unsuccessfully.
-  pub fn handle_tm_aborted<T: IOTypes>(
+  pub fn handle_tm_aborted<IO: CoreIOCtx>(
     &mut self,
-    _: &mut SlaveServerContext<T>,
+    _: &mut SlaveServerContext<IO>,
     aborted_data: msg::AbortedData,
   ) -> GRQueryAction {
     match aborted_data {
@@ -254,22 +254,22 @@ impl GRQueryES {
 
   /// This is called when one of the remote node's Leadership changes beyond the
   /// LeadershipId that we had sent a PerformQuery to.
-  pub fn handle_tm_remote_leadership_changed<T: IOTypes>(
+  pub fn handle_tm_remote_leadership_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut SlaveServerContext<T>,
+    ctx: &mut SlaveServerContext<IO>,
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &self.state).unwrap();
     self.process_gr_query_stage(ctx, read_stage.stage_idx)
   }
 
   /// This Exits and Cleans up this GRQueryES.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, _: &mut SlaveServerContext<T>) {
+  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut SlaveServerContext<IO>) {
     self.state = GRExecutionS::Done;
   }
 
   /// This advanced the Stage of the GRQueryES. If there is no next Stage, then we
   /// return Done, containing the result and signaling that the GRQueryES is complete.
-  fn advance<T: IOTypes>(&mut self, ctx: &mut SlaveServerContext<T>) -> GRQueryAction {
+  fn advance<IO: CoreIOCtx>(&mut self, ctx: &mut SlaveServerContext<IO>) -> GRQueryAction {
     // Compute the next stage
     let next_stage_idx = match &self.state {
       GRExecutionS::Start => 0,
@@ -306,9 +306,9 @@ impl GRQueryES {
 
   /// This function moves the GRQueryES to the Stage indicated by `stage_idx`.
   /// (Note the index must be valid (i.e. be an actual stage)).
-  fn process_gr_query_stage<T: IOTypes>(
+  fn process_gr_query_stage<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut SlaveServerContext<T>,
+    ctx: &mut SlaveServerContext<IO>,
     stage_idx: usize,
   ) -> GRQueryAction {
     assert!(stage_idx < self.query_plan.col_usage_nodes.len());
@@ -441,8 +441,8 @@ impl GRQueryES {
     };
 
     // Construct the TMStatus
-    let tm_qid = mk_qid(ctx.rand);
-    let child_qid = mk_qid(&mut ctx.rand);
+    let tm_qid = mk_qid(ctx.io_ctx.rand());
+    let child_qid = mk_qid(ctx.io_ctx.rand());
     let mut tm_status = TMStatus {
       query_id: tm_qid.clone(),
       child_query_id: child_qid.clone(),

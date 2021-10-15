@@ -1,5 +1,5 @@
 use crate::alter_table_es::State;
-use crate::common::{IOTypes, NetworkOut, RemoteLeaderChangedPLm, TableSchema, TabletForwardOut};
+use crate::common::{RemoteLeaderChangedPLm, SlaveIOCtx, TableSchema};
 use crate::model::common::{
   proc, ColName, ColType, Gen, QueryId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
@@ -42,11 +42,15 @@ pub enum CreateTableAction {
 impl CreateTableES {
   // STMPaxos2PC messages
 
-  pub fn handle_prepare<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> CreateTableAction {
+  pub fn handle_prepare<IO: SlaveIOCtx>(
+    &mut self,
+    ctx: &mut SlaveContext,
+    io_ctx: &mut IO,
+  ) -> CreateTableAction {
     match &self.state {
       State::Prepared => {
         let sid = ctx.this_slave_group_id.clone();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::CreateTablePrepared(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTablePrepared(
           msg::CreateTablePrepared { query_id: self.query_id.clone(), sid },
         ));
       }
@@ -55,7 +59,7 @@ impl CreateTableES {
     CreateTableAction::Wait
   }
 
-  pub fn handle_commit<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> CreateTableAction {
+  pub fn handle_commit(&mut self, ctx: &mut SlaveContext) -> CreateTableAction {
     match &self.state {
       State::Prepared => {
         ctx.slave_bundle.plms.push(SlavePLm::CreateTableCommitted(plm::CreateTableCommitted {
@@ -68,11 +72,15 @@ impl CreateTableES {
     CreateTableAction::Wait
   }
 
-  pub fn handle_abort<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> CreateTableAction {
+  pub fn handle_abort<IO: SlaveIOCtx>(
+    &mut self,
+    ctx: &mut SlaveContext,
+    io_ctx: &mut IO,
+  ) -> CreateTableAction {
     match &self.state {
       State::WaitingInsertingPrepared => {
         let sid = ctx.this_slave_group_id.clone();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
           msg::CreateTableCloseConfirm { query_id: self.query_id.clone(), sid },
         ));
         CreateTableAction::Exit
@@ -97,14 +105,15 @@ impl CreateTableES {
 
   // STMPaxos2PC PLm Insertions
 
-  pub fn handle_prepared_plm<T: IOTypes>(
+  pub fn handle_prepared_plm<IO: SlaveIOCtx>(
     &mut self,
-    ctx: &mut SlaveContext<T>,
+    ctx: &mut SlaveContext,
+    io_ctx: &mut IO,
   ) -> CreateTableAction {
     match &self.state {
       State::InsertingPrepared => {
         let sid = ctx.this_slave_group_id.clone();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::CreateTablePrepared(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTablePrepared(
           msg::CreateTablePrepared { query_id: self.query_id.clone(), sid },
         ));
         self.state = State::Prepared;
@@ -117,12 +126,16 @@ impl CreateTableES {
     CreateTableAction::Wait
   }
 
-  pub fn handle_aborted_plm<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> CreateTableAction {
+  pub fn handle_aborted_plm<IO: SlaveIOCtx>(
+    &mut self,
+    ctx: &mut SlaveContext,
+    io_ctx: &mut IO,
+  ) -> CreateTableAction {
     match &self.state {
       State::Follower => CreateTableAction::Exit,
       State::InsertingAborted => {
         let sid = ctx.this_slave_group_id.clone();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
           msg::CreateTableCloseConfirm { query_id: self.query_id.clone(), sid },
         ));
         CreateTableAction::Exit
@@ -132,10 +145,10 @@ impl CreateTableES {
   }
 
   /// Create a Tablet as specified by this ES
-  fn create_table<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) {
+  fn create_table<IO: SlaveIOCtx>(&mut self, ctx: &mut SlaveContext, io_ctx: &mut IO) {
     // Construct the Tablet
     let mut rand_seed = [0; 16];
-    ctx.rand.fill_bytes(&mut rand_seed);
+    io_ctx.rand().fill_bytes(&mut rand_seed);
     let helper = TabletCreateHelper {
       rand_seed,
       this_slave_group_id: ctx.this_slave_group_id.clone(),
@@ -150,24 +163,25 @@ impl CreateTableES {
         val_cols: MVM::init(self.val_cols.clone().into_iter().collect()),
       },
     };
-    ctx.tablet_forward_output.create_tablet(helper);
+    io_ctx.create_tablet(helper);
   }
 
-  pub fn handle_committed_plm<T: IOTypes>(
+  pub fn handle_committed_plm<IO: SlaveIOCtx>(
     &mut self,
-    ctx: &mut SlaveContext<T>,
+    ctx: &mut SlaveContext,
+    io_ctx: &mut IO,
   ) -> CreateTableAction {
     match &self.state {
       State::Follower => {
-        self.create_table(ctx);
+        self.create_table(ctx, io_ctx);
         CreateTableAction::Exit
       }
       State::InsertingCommitted => {
         let sid = ctx.this_slave_group_id.clone();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
           msg::CreateTableCloseConfirm { query_id: self.query_id.clone(), sid },
         ));
-        self.create_table(ctx);
+        self.create_table(ctx, io_ctx);
         CreateTableAction::Exit
       }
       _ => CreateTableAction::Wait,
@@ -176,7 +190,7 @@ impl CreateTableES {
 
   // Other
 
-  pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> CreateTableAction {
+  pub fn start_inserting<IO: SlaveIOCtx>(&mut self, ctx: &mut SlaveContext) -> CreateTableAction {
     match &self.state {
       State::WaitingInsertingPrepared => {
         ctx.slave_bundle.plms.push(SlavePLm::CreateTablePrepared(plm::CreateTablePrepared {
@@ -195,7 +209,7 @@ impl CreateTableES {
     CreateTableAction::Wait
   }
 
-  pub fn leader_changed<T: IOTypes>(&mut self, ctx: &mut SlaveContext<T>) -> CreateTableAction {
+  pub fn leader_changed<IO: SlaveIOCtx>(&mut self, ctx: &mut SlaveContext) -> CreateTableAction {
     match &self.state {
       State::Follower => {
         if ctx.is_leader() {

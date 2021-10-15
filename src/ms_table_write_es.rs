@@ -1,6 +1,6 @@
 use crate::col_usage::collect_top_level_cols;
 use crate::common::{
-  lookup, map_insert, mk_qid, IOTypes, KeyBound, OrigP, QueryESResult, QueryPlan, TableRegion,
+  lookup, map_insert, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, TableRegion,
 };
 use crate::expression::{compress_row_region, is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
@@ -76,7 +76,11 @@ pub enum MSTableWriteAction {
 // -----------------------------------------------------------------------------------------------
 
 impl MSTableWriteES {
-  pub fn start<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> MSTableWriteAction {
+  pub fn start<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> MSTableWriteAction {
     // First, we lock the columns that the QueryPlan requires certain properties of.
     assert!(matches!(self.state, MSWriteExecutionS::Start));
 
@@ -90,6 +94,7 @@ impl MSTableWriteES {
     }
 
     let locked_cols_qid = ctx.add_requested_locked_columns(
+      io_ctx,
       OrigP::new(self.query_id.clone()),
       self.timestamp.clone(),
       all_cols.into_iter().collect(),
@@ -103,7 +108,7 @@ impl MSTableWriteES {
   /// `extra_req_cols` are preset.
   ///
   /// Note: this does *not* required columns to be locked.
-  fn does_query_plan_align<T: IOTypes>(&self, ctx: &TabletContext<T>) -> bool {
+  fn does_query_plan_align(&self, ctx: &TabletContext) -> bool {
     // First, check that `external_cols are absent.
     for col in &self.query_plan.col_usage_node.external_cols {
       // Since the `key_cols` are static, no query plan should have one of
@@ -134,15 +139,19 @@ impl MSTableWriteES {
   }
 
   // Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
-  fn check_gossip_data<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> MSTableWriteAction {
+  fn check_gossip_data<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> MSTableWriteAction {
     for (table_path, gen) in &self.query_plan.table_location_map {
       if !ctx.gossip.sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
         // If not, we go to GossipDataWaiting
         self.state = MSWriteExecutionS::GossipDataWaiting;
 
         // Request a GossipData from the Master to help stimulate progress.
-        let this_sender_path = ctx.ctx().mk_this_query_path(self.query_id.clone());
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+        let this_sender_path = ctx.ctx(io_ctx).mk_this_query_path(self.query_id.clone());
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
           msg::MasterGossipRequest { sender_path: this_sender_path },
         ));
 
@@ -151,13 +160,14 @@ impl MSTableWriteES {
     }
 
     // We start locking the regions.
-    self.start_ms_table_write_es(ctx)
+    self.start_ms_table_write_es(ctx, io_ctx)
   }
 
   /// Handle Columns being locked
-  pub fn local_locked_cols<T: IOTypes>(
+  pub fn local_locked_cols<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     locked_cols_qid: QueryId,
   ) -> MSTableWriteAction {
     let locking = cast!(MSWriteExecutionS::ColumnsLocking, &self.state).unwrap();
@@ -168,25 +178,26 @@ impl MSTableWriteES {
       MSTableWriteAction::QueryError(msg::QueryError::InvalidQueryPlan)
     } else {
       // If it aligns, we verify is GossipData is recent enough.
-      self.check_gossip_data(ctx)
+      self.check_gossip_data(ctx, io_ctx)
     }
   }
 
   /// Here, the column locking request results in us realizing the table has been dropped.
-  pub fn table_dropped<T: IOTypes>(&mut self, _: &mut TabletContext<T>) -> MSTableWriteAction {
+  pub fn table_dropped(&mut self, _: &mut TabletContext) -> MSTableWriteAction {
     assert!(cast!(MSWriteExecutionS::ColumnsLocking, &self.state).is_ok());
     self.state = MSWriteExecutionS::Done;
     MSTableWriteAction::QueryError(msg::QueryError::InvalidQueryPlan)
   }
 
   /// Here, we GossipData gets delivered.
-  pub fn gossip_data_changed<T: IOTypes>(
+  pub fn gossip_data_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
   ) -> MSTableWriteAction {
     if let MSWriteExecutionS::GossipDataWaiting = self.state {
       // Verify is GossipData is now recent enough.
-      self.check_gossip_data(ctx)
+      self.check_gossip_data(ctx, io_ctx)
     } else {
       // Do nothing
       MSTableWriteAction::Wait
@@ -194,9 +205,10 @@ impl MSTableWriteES {
   }
 
   /// Starts the Execution state
-  fn start_ms_table_write_es<T: IOTypes>(
+  fn start_ms_table_write_es<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
   ) -> MSTableWriteAction {
     // Setup ability to compute a tight Keybound for every ContextRow.
     let keybound_computer = ContextKeyboundComputer::new(
@@ -242,7 +254,7 @@ impl MSTableWriteES {
       let read_region = TableRegion { col_region, row_region };
 
       // Move the MSTableWriteES to the Pending state with the given ReadRegion.
-      let protect_qid = mk_qid(&mut ctx.rand);
+      let protect_qid = mk_qid(io_ctx.rand());
       self.state = MSWriteExecutionS::Pending(Pending {
         read_region: read_region.clone(),
         query_id: protect_qid.clone(),
@@ -262,14 +274,15 @@ impl MSTableWriteES {
   }
 
   /// Handle ReadRegion protection
-  pub fn local_read_protected<T: IOTypes>(
+  pub fn local_read_protected<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     ms_query_es: &mut MSQueryES,
     _: QueryId,
   ) -> MSTableWriteAction {
     let pending = cast!(MSWriteExecutionS::Pending, &self.state).unwrap();
-    let gr_query_statuses = match compute_subqueries::<T, _, _>(
+    let gr_query_statuses = match compute_subqueries(
       GRQueryConstructorView {
         root_query_path: &self.root_query_path,
         timestamp: &self.timestamp,
@@ -278,7 +291,7 @@ impl MSTableWriteES {
         query_id: &self.query_id,
         context: &self.context,
       },
-      &mut ctx.rand,
+      io_ctx.rand(),
       StorageLocalTable::new(
         &ctx.table_schema,
         &self.timestamp,
@@ -301,7 +314,7 @@ impl MSTableWriteES {
 
     if gr_query_statuses.is_empty() {
       // Since there are no subqueries, we can go straight to finishing the ES.
-      self.finish_ms_table_write_es(ctx, ms_query_es)
+      self.finish_ms_table_write_es(ctx, io_ctx, ms_query_es)
     } else {
       // Here, we have to evaluate subqueries. Thus, we go to Executing and return
       // SendSubqueries to the parent server.
@@ -326,19 +339,21 @@ impl MSTableWriteES {
   }
 
   /// This is called if a subquery fails.
-  pub fn handle_internal_query_error<T: IOTypes>(
+  pub fn handle_internal_query_error<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     query_error: msg::QueryError,
   ) -> MSTableWriteAction {
-    self.exit_and_clean_up(ctx);
+    self.exit_and_clean_up(ctx, io_ctx);
     MSTableWriteAction::QueryError(query_error)
   }
 
   /// Handles a Subquery completing.
-  pub fn handle_subquery_done<T: IOTypes>(
+  pub fn handle_subquery_done<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     ms_query_es: &mut MSQueryES,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<TQueryPath>,
@@ -361,14 +376,15 @@ impl MSTableWriteES {
     if executing_state.completed < executing_state.subqueries.len() {
       MSTableWriteAction::Wait
     } else {
-      self.finish_ms_table_write_es(ctx, ms_query_es)
+      self.finish_ms_table_write_es(ctx, io_ctx, ms_query_es)
     }
   }
 
   /// Handles a ES finishing with all subqueries results in.
-  pub fn finish_ms_table_write_es<T: IOTypes>(
+  pub fn finish_ms_table_write_es<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     ms_query_es: &mut MSQueryES,
   ) -> MSTableWriteAction {
     let executing_state = cast!(MSWriteExecutionS::Executing, &mut self.state).unwrap();
@@ -504,7 +520,7 @@ impl MSTableWriteES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, _: &mut TabletContext<T>) {
+  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {
     self.state = MSWriteExecutionS::Done;
   }
 }

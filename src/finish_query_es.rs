@@ -1,4 +1,4 @@
-use crate::common::IOTypes;
+use crate::common::CoreIOCtx;
 use crate::common::RemoteLeaderChangedPLm;
 use crate::finish_query_es::Paxos2PCRMState::Follower;
 use crate::model::common::{CQueryPath, LeadershipId, QueryId, TQueryPath, Timestamp};
@@ -58,11 +58,15 @@ pub enum FinishQueryAction {
 impl FinishQueryES {
   // Paxos2PC messages
 
-  pub fn handle_prepare<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> FinishQueryAction {
+  pub fn handle_prepare<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> FinishQueryAction {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &es.state {
         Paxos2PCRMState::Prepared => {
-          es.send_prepared(ctx);
+          es.send_prepared(ctx, io_ctx);
         }
         _ => {}
       },
@@ -71,7 +75,7 @@ impl FinishQueryES {
     FinishQueryAction::Wait
   }
 
-  pub fn handle_abort<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> FinishQueryAction {
+  pub fn handle_abort(&mut self, ctx: &mut TabletContext) -> FinishQueryAction {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &es.state {
         Paxos2PCRMState::WaitingInsertingPrepared(_) => {
@@ -98,7 +102,7 @@ impl FinishQueryES {
     }
   }
 
-  pub fn handle_commit<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> FinishQueryAction {
+  pub fn handle_commit(&mut self, ctx: &mut TabletContext) -> FinishQueryAction {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &es.state {
         Paxos2PCRMState::Prepared => {
@@ -114,24 +118,25 @@ impl FinishQueryES {
     FinishQueryAction::Wait
   }
 
-  pub fn handle_check_prepared<T: IOTypes>(
+  pub fn handle_check_prepared<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     check_prepared: msg::FinishQueryCheckPrepared,
   ) -> FinishQueryAction {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &es.state {
-        Paxos2PCRMState::WaitingInsertingPrepared(_) => es.send_wait(ctx),
-        Paxos2PCRMState::InsertingPrepared(_) => es.send_wait(ctx),
-        Paxos2PCRMState::Prepared => es.send_prepared(ctx),
-        Paxos2PCRMState::InsertingCommitted => es.send_prepared(ctx),
-        Paxos2PCRMState::InsertingPrepareAborted => es.send_wait(ctx),
-        Paxos2PCRMState::InsertingAborted => es.send_prepared(ctx),
+        Paxos2PCRMState::WaitingInsertingPrepared(_) => es.send_wait(ctx, io_ctx),
+        Paxos2PCRMState::InsertingPrepared(_) => es.send_wait(ctx, io_ctx),
+        Paxos2PCRMState::Prepared => es.send_prepared(ctx, io_ctx),
+        Paxos2PCRMState::InsertingCommitted => es.send_prepared(ctx, io_ctx),
+        Paxos2PCRMState::InsertingPrepareAborted => es.send_wait(ctx, io_ctx),
+        Paxos2PCRMState::InsertingAborted => es.send_prepared(ctx, io_ctx),
         _ => {}
       },
       FinishQueryES::Committed => {
         let this_query_path = ctx.mk_query_path(check_prepared.query_id.clone());
-        ctx.ctx().send_to_c(
+        ctx.ctx(io_ctx).send_to_c(
           check_prepared.tm.node_path.clone(),
           msg::CoordMessage::FinishQueryPrepared(msg::FinishQueryPrepared {
             return_qid: check_prepared.tm.query_id.clone(),
@@ -141,7 +146,7 @@ impl FinishQueryES {
       }
       FinishQueryES::Aborted => {
         let this_query_path = ctx.mk_query_path(check_prepared.query_id.clone());
-        ctx.ctx().send_to_c(
+        ctx.ctx(io_ctx).send_to_c(
           check_prepared.tm.node_path.clone(),
           msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
             return_qid: check_prepared.tm.query_id.clone(),
@@ -155,18 +160,19 @@ impl FinishQueryES {
 
   // Paxos2PC PLm Insertions
 
-  pub fn handle_prepared_plm<T: IOTypes>(
+  pub fn handle_prepared_plm<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
   ) -> FinishQueryAction {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &es.state {
         Paxos2PCRMState::InsertingPrepared(exec_state) => {
           let cur_tm_lid = ctx.leader_map.get(&es.tm.node_path.sid.to_gid()).unwrap();
           if &exec_state.orig_tm_lid != cur_tm_lid {
-            es.send_inform_prepared(ctx);
+            es.send_inform_prepared(ctx, io_ctx);
           } else {
-            es.send_prepared(ctx);
+            es.send_prepared(ctx, io_ctx);
           }
 
           let region_lock = ctx.inserting_prepared_writes.remove(&es.timestamp).unwrap();
@@ -185,10 +191,7 @@ impl FinishQueryES {
     FinishQueryAction::Wait
   }
 
-  pub fn handle_aborted_plm<T: IOTypes>(
-    &mut self,
-    ctx: &mut TabletContext<T>,
-  ) -> FinishQueryAction {
+  pub fn handle_aborted_plm(&mut self, ctx: &mut TabletContext) -> FinishQueryAction {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &es.state {
         Paxos2PCRMState::Follower | Paxos2PCRMState::InsertingAborted => {
@@ -202,10 +205,7 @@ impl FinishQueryES {
     FinishQueryAction::Wait
   }
 
-  pub fn handle_committed_plm<T: IOTypes>(
-    &mut self,
-    ctx: &mut TabletContext<T>,
-  ) -> FinishQueryAction {
+  pub fn handle_committed_plm(&mut self, ctx: &mut TabletContext) -> FinishQueryAction {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &es.state {
         Paxos2PCRMState::Follower | Paxos2PCRMState::InsertingCommitted => {
@@ -223,7 +223,7 @@ impl FinishQueryES {
 
   // Other
 
-  pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> FinishQueryAction {
+  pub fn start_inserting(&mut self, ctx: &mut TabletContext) -> FinishQueryAction {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &es.state {
         Paxos2PCRMState::WaitingInsertingPrepared(orig_leadership) => {
@@ -244,9 +244,10 @@ impl FinishQueryES {
     FinishQueryAction::Wait
   }
 
-  pub fn remote_leader_changed<T: IOTypes>(
+  pub fn remote_leader_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     remote_leader_changed: RemoteLeaderChangedPLm,
   ) -> FinishQueryAction {
     match self {
@@ -254,7 +255,7 @@ impl FinishQueryES {
         Paxos2PCRMState::Prepared => {
           if remote_leader_changed.gid == es.tm.node_path.sid.to_gid() {
             // The TM Leadership changed
-            es.send_inform_prepared(ctx);
+            es.send_inform_prepared(ctx, io_ctx);
           }
         }
         _ => {}
@@ -264,13 +265,17 @@ impl FinishQueryES {
     FinishQueryAction::Wait
   }
 
-  pub fn leader_changed<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> FinishQueryAction {
+  pub fn leader_changed<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> FinishQueryAction {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &mut es.state {
         Paxos2PCRMState::Follower => {
           if ctx.is_leader() {
             // This node gained Leadership
-            es.send_inform_prepared(ctx);
+            es.send_inform_prepared(ctx, io_ctx);
             es.state = Paxos2PCRMState::Prepared;
           }
           FinishQueryAction::Wait
@@ -312,9 +317,9 @@ impl FinishQueryES {
 
 impl FinishQueryExecuting {
   /// Send a `FinishQueryPrepared` to the TM
-  fn send_prepared<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
+  fn send_prepared<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) {
     let this_query_path = ctx.mk_query_path(self.query_id.clone());
-    ctx.ctx().send_to_c(
+    ctx.ctx(io_ctx).send_to_c(
       self.tm.node_path.clone(),
       msg::CoordMessage::FinishQueryPrepared(msg::FinishQueryPrepared {
         return_qid: self.tm.query_id.clone(),
@@ -324,8 +329,8 @@ impl FinishQueryExecuting {
   }
 
   /// Send a `FinishQueryInformPrepared` to the TM
-  fn send_inform_prepared<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
-    ctx.ctx().send_to_c(
+  fn send_inform_prepared<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) {
+    ctx.ctx(io_ctx).send_to_c(
       self.tm.node_path.clone(),
       msg::CoordMessage::FinishQueryInformPrepared(msg::FinishQueryInformPrepared {
         tm: self.tm.clone(),
@@ -335,9 +340,9 @@ impl FinishQueryExecuting {
   }
 
   /// Send a `FinishQueryWait` to the TM
-  fn send_wait<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) {
+  fn send_wait<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) {
     let this_query_path = ctx.mk_query_path(self.query_id.clone());
-    ctx.ctx().send_to_c(
+    ctx.ctx(io_ctx).send_to_c(
       self.tm.node_path.clone(),
       msg::CoordMessage::FinishQueryWait(msg::FinishQueryWait {
         return_qid: self.tm.query_id.clone(),

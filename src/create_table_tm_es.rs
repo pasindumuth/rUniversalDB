@@ -1,4 +1,4 @@
-use crate::common::{Clock, IOTypes, NetworkOut, RemoteLeaderChangedPLm, TableSchema};
+use crate::common::{MasterIOCtx, RemoteLeaderChangedPLm, TableSchema};
 use crate::master::MasterPLm::CreateTableTMPrepared;
 use crate::master::{plm, MasterContext, MasterPLm};
 use crate::model::common::{
@@ -100,9 +100,10 @@ pub enum CreateTableTMAction {
 impl CreateTableTMES {
   // STMPaxos2PC messages
 
-  pub fn handle_prepared<T: IOTypes>(
+  pub fn handle_prepared<IO: MasterIOCtx>(
     &mut self,
-    ctx: &mut MasterContext<T>,
+    ctx: &mut MasterContext,
+    _: &mut IO,
     prepared: msg::CreateTablePrepared,
   ) -> CreateTableTMAction {
     match &mut self.state {
@@ -122,7 +123,11 @@ impl CreateTableTMES {
     CreateTableTMAction::Wait
   }
 
-  pub fn handle_aborted<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> CreateTableTMAction {
+  pub fn handle_aborted<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    _: &mut IO,
+  ) -> CreateTableTMAction {
     match &self.state {
       CreateTableTMS::Preparing(_) => {
         ctx.master_bundle.plms.push(MasterPLm::CreateTableTMAborted(plm::CreateTableTMAborted {
@@ -135,9 +140,10 @@ impl CreateTableTMES {
     CreateTableTMAction::Wait
   }
 
-  pub fn handle_close_confirmed<T: IOTypes>(
+  pub fn handle_close_confirmed<IO: MasterIOCtx>(
     &mut self,
-    ctx: &mut MasterContext<T>,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
     closed: msg::CreateTableCloseConfirm,
   ) -> CreateTableTMAction {
     match &mut self.state {
@@ -145,7 +151,7 @@ impl CreateTableTMES {
         if committed.rms_remaining.remove(&closed.sid) {
           if committed.rms_remaining.is_empty() {
             // All RMs have closed
-            let timestamp_hint = ctx.clock.now();
+            let timestamp_hint = io_ctx.now();
             ctx.master_bundle.plms.push(MasterPLm::CreateTableTMClosed(plm::CreateTableTMClosed {
               query_id: self.query_id.clone(),
               timestamp_hint: Some(timestamp_hint),
@@ -174,7 +180,7 @@ impl CreateTableTMES {
   // STMPaxos2PC PLm Insertions
 
   /// Recompute the Gen of the Table that we are trying to create.
-  fn compute_gen<T: IOTypes>(&self, ctx: &mut MasterContext<T>) -> Gen {
+  fn compute_gen<IO: MasterIOCtx>(&self, ctx: &mut MasterContext, _: &mut IO) -> Gen {
     if let Some(gen) = ctx.table_generation.get_last_present_version(&self.table_path) {
       Gen(gen.0 + 1)
     } else {
@@ -183,13 +189,13 @@ impl CreateTableTMES {
   }
 
   /// Change state to `Preparing` and broadcast `CreateTablePrepare` to the RMs.
-  fn advance_to_prepared<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) {
+  fn advance_to_prepared<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     // The RMs are just the shards. Each shard should be in its own Slave.
     let mut rms_remaining = HashSet::<SlaveGroupId>::new();
-    let gen = self.compute_gen(ctx);
+    let gen = self.compute_gen(ctx, io_ctx);
     for (key_range, tid, sid) in &self.shards {
       rms_remaining.insert(sid.clone());
-      ctx.ctx().send_to_slave_common(
+      ctx.ctx(io_ctx).send_to_slave_common(
         sid.clone(),
         msg::SlaveRemotePayload::CreateTablePrepare(msg::CreateTablePrepare {
           query_id: self.query_id.clone(),
@@ -206,13 +212,14 @@ impl CreateTableTMES {
     self.state = CreateTableTMS::Preparing(Preparing { rms_remaining });
   }
 
-  pub fn handle_prepared_plm<T: IOTypes>(
+  pub fn handle_prepared_plm<IO: MasterIOCtx>(
     &mut self,
-    ctx: &mut MasterContext<T>,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
   ) -> CreateTableTMAction {
     match &self.state {
       CreateTableTMS::InsertTMPreparing => {
-        self.advance_to_prepared(ctx);
+        self.advance_to_prepared(ctx, io_ctx);
       }
       _ => {}
     }
@@ -220,11 +227,11 @@ impl CreateTableTMES {
   }
 
   /// Change state to `Aborted` and broadcast `CreateTableAbort` to the RMs.
-  fn advance_to_aborted<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) {
+  fn advance_to_aborted<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     let mut rms_remaining = HashSet::<SlaveGroupId>::new();
     for (_, _, sid) in &self.shards {
       rms_remaining.insert(sid.clone());
-      ctx.ctx().send_to_slave_common(
+      ctx.ctx(io_ctx).send_to_slave_common(
         sid.clone(),
         msg::SlaveRemotePayload::CreateTableAbort(msg::CreateTableAbort {
           query_id: self.query_id.clone(),
@@ -235,9 +242,10 @@ impl CreateTableTMES {
     self.state = CreateTableTMS::Aborted(Aborted { rms_remaining });
   }
 
-  pub fn handle_aborted_plm<T: IOTypes>(
+  pub fn handle_aborted_plm<IO: MasterIOCtx>(
     &mut self,
-    ctx: &mut MasterContext<T>,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
   ) -> CreateTableTMAction {
     match &self.state {
       CreateTableTMS::Start => {}
@@ -248,7 +256,7 @@ impl CreateTableTMES {
         // Respond to the External
         if let Some(response_data) = &self.response_data {
           ctx.external_request_id_map.remove(&response_data.request_id);
-          ctx.network_output.send(
+          io_ctx.send(
             &response_data.sender_eid,
             msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
               msg::ExternalDDLQueryAborted {
@@ -259,7 +267,7 @@ impl CreateTableTMES {
           )
         }
 
-        self.advance_to_aborted(ctx);
+        self.advance_to_aborted(ctx, io_ctx);
       }
       _ => {}
     }
@@ -267,12 +275,12 @@ impl CreateTableTMES {
   }
 
   /// Change state to `Committed` and broadcast `CreateTableCommit` to the RMs.
-  fn advance_to_committed<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) {
+  fn advance_to_committed<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     // The RMs are just the shards. Each shard should be in its own Slave.
     let mut rms_remaining = HashSet::<SlaveGroupId>::new();
     for (_, _, sid) in &self.shards {
       rms_remaining.insert(sid.clone());
-      ctx.ctx().send_to_slave_common(
+      ctx.ctx(io_ctx).send_to_slave_common(
         sid.clone(),
         msg::SlaveRemotePayload::CreateTableCommit(msg::CreateTableCommit {
           query_id: self.query_id.clone(),
@@ -283,16 +291,17 @@ impl CreateTableTMES {
     self.state = CreateTableTMS::Committed(Committed { rms_remaining });
   }
 
-  pub fn handle_committed_plm<T: IOTypes>(
+  pub fn handle_committed_plm<IO: MasterIOCtx>(
     &mut self,
-    ctx: &mut MasterContext<T>,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
   ) -> CreateTableTMAction {
     match &mut self.state {
       CreateTableTMS::Follower(_) => {
         self.state = CreateTableTMS::Follower(Follower::Committed);
       }
       CreateTableTMS::InsertingTMCommitted => {
-        self.advance_to_committed(ctx);
+        self.advance_to_committed(ctx, io_ctx);
       }
       _ => {}
     }
@@ -301,13 +310,14 @@ impl CreateTableTMES {
 
   /// Create the Table and return the `Timestamp` at which the Table has been created
   /// (based on the `timestamp_hint` and from GossipData).
-  fn apply_create<T: IOTypes>(
+  fn apply_create<IO: MasterIOCtx>(
     &mut self,
-    ctx: &mut MasterContext<T>,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
     timestamp_hint: Timestamp,
   ) -> Timestamp {
     let commit_timestamp = max(timestamp_hint, ctx.table_generation.get_lat(&self.table_path) + 1);
-    let gen = self.compute_gen(ctx);
+    let gen = self.compute_gen(ctx, io_ctx);
 
     // Update `table_generation`
     ctx.table_generation.write(&self.table_path, Some(gen.clone()), commit_timestamp);
@@ -337,26 +347,27 @@ impl CreateTableTMES {
     commit_timestamp
   }
 
-  pub fn handle_closed_plm<T: IOTypes>(
+  pub fn handle_closed_plm<IO: MasterIOCtx>(
     &mut self,
-    ctx: &mut MasterContext<T>,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
     closed: plm::CreateTableTMClosed,
   ) -> CreateTableTMAction {
     match &self.state {
       CreateTableTMS::Follower(_) => {
         if let Some(timestamp_hint) = closed.timestamp_hint {
-          self.apply_create(ctx, timestamp_hint);
+          self.apply_create(ctx, io_ctx, timestamp_hint);
         }
         CreateTableTMAction::Exit
       }
       CreateTableTMS::InsertingTMClosed(_) => {
         if let Some(timestamp_hint) = closed.timestamp_hint {
-          let commit_timestamp = self.apply_create(ctx, timestamp_hint);
+          let commit_timestamp = self.apply_create(ctx, io_ctx, timestamp_hint);
 
           // Respond to the External
           if let Some(response_data) = &self.response_data {
             ctx.external_request_id_map.remove(&response_data.request_id);
-            ctx.network_output.send(
+            io_ctx.send(
               &response_data.sender_eid,
               msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
                 msg::ExternalDDLQuerySuccess {
@@ -368,7 +379,7 @@ impl CreateTableTMES {
           }
 
           // Broadcast a GossipData
-          ctx.broadcast_gossip();
+          ctx.broadcast_gossip(io_ctx);
         }
         CreateTableTMAction::Exit
       }
@@ -378,7 +389,11 @@ impl CreateTableTMES {
 
   // Other
 
-  pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> CreateTableTMAction {
+  pub fn start_inserting<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    _: &mut IO,
+  ) -> CreateTableTMAction {
     match self.state {
       CreateTableTMS::WaitingInsertTMPrepared => {
         ctx.master_bundle.plms.push(MasterPLm::CreateTableTMPrepared(plm::CreateTableTMPrepared {
@@ -395,48 +410,52 @@ impl CreateTableTMES {
     CreateTableTMAction::Wait
   }
 
-  pub fn leader_changed<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) -> CreateTableTMAction {
+  pub fn leader_changed<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
+  ) -> CreateTableTMAction {
     match &self.state {
       CreateTableTMS::Start => CreateTableTMAction::Wait,
       CreateTableTMS::Follower(follower) => {
         if ctx.is_leader() {
           match follower {
             Follower::Preparing => {
-              self.advance_to_prepared(ctx);
+              self.advance_to_prepared(ctx, io_ctx);
             }
             Follower::Committed => {
-              self.advance_to_committed(ctx);
+              self.advance_to_committed(ctx, io_ctx);
             }
             Follower::Aborted => {
-              self.advance_to_aborted(ctx);
+              self.advance_to_aborted(ctx, io_ctx);
             }
           }
         }
         CreateTableTMAction::Wait
       }
       CreateTableTMS::WaitingInsertTMPrepared => {
-        self.maybe_respond_dead(ctx);
+        self.maybe_respond_dead(ctx, io_ctx);
         CreateTableTMAction::Exit
       }
       CreateTableTMS::InsertTMPreparing => {
-        self.maybe_respond_dead(ctx);
+        self.maybe_respond_dead(ctx, io_ctx);
         CreateTableTMAction::Exit
       }
       CreateTableTMS::Preparing(_)
       | CreateTableTMS::InsertingTMCommitted
       | CreateTableTMS::InsertingTMAborted => {
         self.state = CreateTableTMS::Follower(Follower::Preparing);
-        self.maybe_respond_dead(ctx);
+        self.maybe_respond_dead(ctx, io_ctx);
         CreateTableTMAction::Wait
       }
       CreateTableTMS::Committed(_) => {
         self.state = CreateTableTMS::Follower(Follower::Committed);
-        self.maybe_respond_dead(ctx);
+        self.maybe_respond_dead(ctx, io_ctx);
         CreateTableTMAction::Wait
       }
       CreateTableTMS::Aborted(_) => {
         self.state = CreateTableTMS::Follower(Follower::Aborted);
-        self.maybe_respond_dead(ctx);
+        self.maybe_respond_dead(ctx, io_ctx);
         CreateTableTMAction::Wait
       }
       CreateTableTMS::InsertingTMClosed(closed) => {
@@ -444,23 +463,24 @@ impl CreateTableTMES {
           InsertingTMClosed::Committed => Follower::Committed,
           InsertingTMClosed::Aborted => Follower::Aborted,
         });
-        self.maybe_respond_dead(ctx);
+        self.maybe_respond_dead(ctx, io_ctx);
         CreateTableTMAction::Wait
       }
     }
   }
 
-  pub fn remote_leader_changed<T: IOTypes>(
+  pub fn remote_leader_changed<IO: MasterIOCtx>(
     &mut self,
-    ctx: &mut MasterContext<T>,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
     remote_leader_changed: RemoteLeaderChangedPLm,
   ) -> CreateTableTMAction {
     match &self.state {
       CreateTableTMS::Preparing(preparing) => {
-        let gen = self.compute_gen(ctx);
+        let gen = self.compute_gen(ctx, io_ctx);
         for (key_range, tid, sid) in &self.shards {
           if preparing.rms_remaining.contains(sid) && sid.to_gid() == remote_leader_changed.gid {
-            ctx.ctx().send_to_slave_common(
+            ctx.ctx(io_ctx).send_to_slave_common(
               sid.clone(),
               msg::SlaveRemotePayload::CreateTablePrepare(msg::CreateTablePrepare {
                 query_id: self.query_id.clone(),
@@ -478,7 +498,7 @@ impl CreateTableTMES {
       CreateTableTMS::Committed(committed) => {
         for (_, _, sid) in &self.shards {
           if committed.rms_remaining.contains(sid) && sid.to_gid() == remote_leader_changed.gid {
-            ctx.ctx().send_to_slave_common(
+            ctx.ctx(io_ctx).send_to_slave_common(
               sid.clone(),
               msg::SlaveRemotePayload::CreateTableCommit(msg::CreateTableCommit {
                 query_id: self.query_id.clone(),
@@ -490,7 +510,7 @@ impl CreateTableTMES {
       CreateTableTMS::Aborted(aborted) => {
         for (_, _, sid) in &self.shards {
           if aborted.rms_remaining.contains(sid) && sid.to_gid() == remote_leader_changed.gid {
-            ctx.ctx().send_to_slave_common(
+            ctx.ctx(io_ctx).send_to_slave_common(
               sid.clone(),
               msg::SlaveRemotePayload::CreateTableAbort(msg::CreateTableAbort {
                 query_id: self.query_id.clone(),
@@ -504,10 +524,10 @@ impl CreateTableTMES {
     CreateTableTMAction::Wait
   }
 
-  fn maybe_respond_dead<T: IOTypes>(&mut self, ctx: &mut MasterContext<T>) {
+  fn maybe_respond_dead<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     if let Some(response_data) = &self.response_data {
       ctx.external_request_id_map.remove(&response_data.request_id);
-      ctx.network_output.send(
+      io_ctx.send(
         &response_data.sender_eid,
         msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
           msg::ExternalDDLQueryAborted {

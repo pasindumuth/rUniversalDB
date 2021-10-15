@@ -2,7 +2,7 @@ use crate::col_usage::{
   collect_table_paths, compute_all_tier_maps, compute_query_plan_data, iterate_stage_ms_query,
   ColUsagePlanner, FrozenColUsageNode, GeneralStage,
 };
-use crate::common::{btree_map_insert, lookup, IOTypes, TableSchema};
+use crate::common::{btree_map_insert, lookup, MasterIOCtx, TableSchema};
 use crate::master::{plm, MasterContext};
 use crate::model::common::{
   proc, CQueryPath, ColName, QueryId, TablePath, Timestamp, TransTableName,
@@ -43,8 +43,8 @@ pub enum MasterQueryPlanningAction {
 }
 
 /// Handle an incoming `PerformMasterQueryPlanning` message.
-pub fn master_query_planning<T: IOTypes>(
-  ctx: &MasterContext<T>,
+pub fn master_query_planning(
+  ctx: &MasterContext,
   planning_msg: msg::PerformMasterQueryPlanning,
 ) -> MasterQueryPlanningAction {
   let table_paths = collect_table_paths(&planning_msg.ms_query);
@@ -172,11 +172,7 @@ pub fn master_query_planning<T: IOTypes>(
 /// Checks if the LATs of all `ColName`s in `safe_present_cols` and `external_cols` are higher
 /// that `timestamp` for all `FrozenColUsageNode`s under `node`, where that node refers to a
 /// Table (as opposed to a TransTable).
-fn check_node_lats<T: IOTypes>(
-  ctx: &MasterContext<T>,
-  node: &FrozenColUsageNode,
-  timestamp: Timestamp,
-) -> bool {
+fn check_node_lats(ctx: &MasterContext, node: &FrozenColUsageNode, timestamp: Timestamp) -> bool {
   match &node.table_ref {
     proc::TableRef::TablePath(table_path) => {
       let gen = ctx.table_generation.static_read(table_path, timestamp).unwrap();
@@ -204,8 +200,8 @@ fn check_node_lats<T: IOTypes>(
 }
 
 /// Same as above, except we do it for every `FrozenColUsageNode` in `nodes`.
-fn check_nodes_lats<T: IOTypes>(
-  ctx: &MasterContext<T>,
+fn check_nodes_lats(
+  ctx: &MasterContext,
   nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
   timestamp: Timestamp,
 ) -> bool {
@@ -230,8 +226,8 @@ enum PostReqColHelper {
 }
 
 /// Handle an incoming `PerformMasterQueryPlanning` message.
-pub fn master_query_planning_post<T: IOTypes>(
-  ctx: &mut MasterContext<T>,
+pub fn master_query_planning_post(
+  ctx: &mut MasterContext,
   planning_plm: plm::MasterQueryPlanning,
 ) -> msg::MasteryQueryPlanningResult {
   let table_paths = collect_table_paths(&planning_plm.ms_query);
@@ -342,11 +338,7 @@ pub fn master_query_planning_post<T: IOTypes>(
 /// Checks if the LATs of all `ColName`s in `safe_present_cols` and `external_cols` are higher
 /// that `timestamp` for all `FrozenColUsageNode`s under `node`, where that node refers to a
 /// Table (as opposed to a TransTable).
-fn increase_node_lats<T: IOTypes>(
-  ctx: &mut MasterContext<T>,
-  node: &FrozenColUsageNode,
-  timestamp: Timestamp,
-) {
+fn increase_node_lats(ctx: &mut MasterContext, node: &FrozenColUsageNode, timestamp: Timestamp) {
   match &node.table_ref {
     proc::TableRef::TablePath(table_path) => {
       let gen = ctx.table_generation.static_read(table_path, timestamp).unwrap();
@@ -369,8 +361,8 @@ fn increase_node_lats<T: IOTypes>(
 }
 
 /// Same as above, except we do it for every `FrozenColUsageNode` in `nodes`.
-fn increase_nodes_lats<T: IOTypes>(
-  ctx: &mut MasterContext<T>,
+fn increase_nodes_lats(
+  ctx: &mut MasterContext,
   nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
   timestamp: Timestamp,
 ) {

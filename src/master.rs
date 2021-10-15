@@ -6,8 +6,7 @@ use crate::col_usage::{
   ColUsagePlanner, FrozenColUsageNode, GeneralStage,
 };
 use crate::common::{
-  btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, IOTypes, MasterTimerOut,
-  NetworkOut, TableSchema, UUID,
+  btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, MasterIOCtx, TableSchema, UUID,
 };
 use crate::common::{map_insert, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{
@@ -177,21 +176,19 @@ pub enum MasterPLm {
 //  MasterPaxosContext
 // -----------------------------------------------------------------------------------------------
 
-pub struct MasterPaxosContext<'a, T: IOTypes> {
-  /// IO Objects.
-  pub network_output: &'a mut T::NetworkOutT,
-  pub rand: &'a mut T::RngCoreT,
-  pub master_timer_output: &'a mut T::MasterTimerOutT,
+pub struct MasterPaxosContext<'a, IO: MasterIOCtx> {
+  /// IO
+  pub io_ctx: &'a mut IO,
+
+  // Metadata
   pub this_eid: &'a EndpointId,
 }
 
-impl<'a, T: IOTypes> PaxosContextBase<T, MasterBundle> for MasterPaxosContext<'a, T> {
-  fn network_output(&mut self) -> &mut T::NetworkOutT {
-    self.network_output
-  }
+impl<'a, IO: MasterIOCtx> PaxosContextBase<MasterBundle> for MasterPaxosContext<'a, IO> {
+  type RngCoreT = IO::RngCoreT;
 
-  fn rand(&mut self) -> &mut T::RngCoreT {
-    self.rand
+  fn rand(&mut self) -> &mut Self::RngCoreT {
+    self.io_ctx.rand()
   }
 
   fn this_eid(&self) -> &EndpointId {
@@ -200,12 +197,12 @@ impl<'a, T: IOTypes> PaxosContextBase<T, MasterBundle> for MasterPaxosContext<'a
 
   fn send(&mut self, eid: &EndpointId, message: msg::PaxosDriverMessage<MasterBundle>) {
     self
-      .network_output
+      .io_ctx
       .send(eid, msg::NetworkMessage::Master(msg::MasterMessage::PaxosDriverMessage(message)));
   }
 
   fn defer(&mut self, defer_time: u128, timer_event: PaxosTimerEvent) {
-    self.master_timer_output.defer(defer_time, MasterTimerInput::PaxosTimerEvent(timer_event));
+    self.io_ctx.defer(defer_time, MasterTimerInput::PaxosTimerEvent(timer_event));
   }
 }
 
@@ -249,19 +246,13 @@ pub struct Statuses {
 }
 
 #[derive(Debug)]
-pub struct MasterState<T: IOTypes> {
-  context: MasterContext<T>,
+pub struct MasterState {
+  context: MasterContext,
   statuses: Statuses,
 }
 
 #[derive(Debug)]
-pub struct MasterContext<T: IOTypes> {
-  // IO Objects.
-  pub rand: T::RngCoreT,
-  pub clock: T::ClockT,
-  pub network_output: T::NetworkOutT,
-  pub master_timer_output: T::MasterTimerOutT,
-
+pub struct MasterContext {
   /// Metadata
   pub this_eid: EndpointId,
 
@@ -290,17 +281,13 @@ pub struct MasterContext<T: IOTypes> {
   pub paxos_driver: PaxosDriver<MasterBundle>,
 }
 
-impl<T: IOTypes> MasterState<T> {
+impl MasterState {
   pub fn new(
-    rand: T::RngCoreT,
-    clock: T::ClockT,
-    network_output: T::NetworkOutT,
-    master_timer_output: T::MasterTimerOutT,
     db_schema: HashMap<(TablePath, Gen), TableSchema>,
     sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
     tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
     slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
-  ) -> MasterState<T> {
+  ) -> MasterState {
     let mut leader_map = HashMap::<PaxosGroupId, LeadershipId>::new();
     for (sid, eids) in &slave_address_config {
       leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
@@ -308,10 +295,6 @@ impl<T: IOTypes> MasterState<T> {
     let all_gids = leader_map.keys().cloned().collect();
     MasterState {
       context: MasterContext {
-        rand,
-        clock,
-        network_output,
-        master_timer_output,
         this_eid: EndpointId("".to_string()),
         gen: Gen(0),
         db_schema,
@@ -330,37 +313,34 @@ impl<T: IOTypes> MasterState<T> {
     }
   }
 
-  // TODO: stop using this in favor of `handle_full_input`
-  pub fn handle_incoming_message(&mut self, message: msg::MasterMessage) {
-    self.context.handle_incoming_message(&mut self.statuses, message);
-  }
-
-  pub fn handle_full_input(&mut self, input: FullMasterInput) {
+  pub fn handle_full_input<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, input: FullMasterInput) {
     match input {
       FullMasterInput::MasterMessage(message) => {
-        self.context.handle_incoming_message(&mut self.statuses, message);
+        self.context.handle_incoming_message(io_ctx, &mut self.statuses, message);
       }
       FullMasterInput::MasterTimerInput(timer_input) => {
         let forward_msg = MasterForwardMsg::MasterTimerInput(timer_input);
-        self.context.handle_input(&mut self.statuses, forward_msg);
+        self.context.handle_input(io_ctx, &mut self.statuses, forward_msg);
       }
     }
   }
 }
 
-impl<T: IOTypes> MasterContext<T> {
-  pub fn ctx(&mut self) -> MasterServerContext<T> {
-    MasterServerContext {
-      network_output: &mut self.network_output,
-      leader_map: &mut self.leader_map,
-    }
+impl MasterContext {
+  pub fn ctx<'a, IO: MasterIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> MasterServerContext<'a, IO> {
+    MasterServerContext { io_ctx, leader_map: &mut self.leader_map }
   }
 
-  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::MasterMessage) {
+  pub fn handle_incoming_message<IO: MasterIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    message: msg::MasterMessage,
+  ) {
     match message {
       MasterMessage::MasterExternalReq(request) => {
         if self.is_leader() {
-          self.handle_input(statuses, MasterForwardMsg::MasterExternalReq(request))
+          self.handle_input(io_ctx, statuses, MasterForwardMsg::MasterExternalReq(request))
         }
       }
       MasterMessage::RemoteMessage(remote_message) => {
@@ -377,18 +357,13 @@ impl<T: IOTypes> MasterContext<T> {
           );
           if let Some(payload) = maybe_delivered {
             // Deliver if the message passed through
-            self.handle_input(statuses, MasterForwardMsg::MasterRemotePayload(payload));
+            self.handle_input(io_ctx, statuses, MasterForwardMsg::MasterRemotePayload(payload));
           }
         }
       }
       MasterMessage::PaxosDriverMessage(paxos_message) => {
-        let bundles = self.paxos_driver.handle_paxos_message::<T, _>(
-          &mut MasterPaxosContext {
-            network_output: &mut self.network_output,
-            rand: &mut self.rand,
-            master_timer_output: &mut self.master_timer_output,
-            this_eid: &self.this_eid,
-          },
+        let bundles = self.paxos_driver.handle_paxos_message(
+          &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
           paxos_message,
         );
         for shared_bundle in bundles {
@@ -397,11 +372,15 @@ impl<T: IOTypes> MasterContext<T> {
               // Dispatch RemoteLeaderChanges
               for remote_change in master_bundle.remote_leader_changes.clone() {
                 let forward_msg = MasterForwardMsg::RemoteLeaderChanged(remote_change.clone());
-                self.handle_input(statuses, forward_msg);
+                self.handle_input(io_ctx, statuses, forward_msg);
               }
 
               // Dispatch the PaxosBundles
-              self.handle_input(statuses, MasterForwardMsg::MasterBundle(master_bundle.plms));
+              self.handle_input(
+                io_ctx,
+                statuses,
+                MasterForwardMsg::MasterBundle(master_bundle.plms),
+              );
 
               // Dispatch any messages that were buffered in the NetworkDriver.
               // Note: we must do this after RemoteLeaderChanges. Also note that there will
@@ -411,13 +390,21 @@ impl<T: IOTypes> MasterContext<T> {
                   .network_driver
                   .deliver_blocked_messages(remote_change.gid, remote_change.lid);
                 for payload in payloads {
-                  self.handle_input(statuses, MasterForwardMsg::MasterRemotePayload(payload));
+                  self.handle_input(
+                    io_ctx,
+                    statuses,
+                    MasterForwardMsg::MasterRemotePayload(payload),
+                  );
                 }
               }
             }
             msg::PLEntry::LeaderChanged(leader_changed) => {
               // Forward to Master Backend
-              self.handle_input(statuses, MasterForwardMsg::LeaderChanged(leader_changed.clone()));
+              self.handle_input(
+                io_ctx,
+                statuses,
+                MasterForwardMsg::LeaderChanged(leader_changed.clone()),
+              );
             }
           }
         }
@@ -425,19 +412,18 @@ impl<T: IOTypes> MasterContext<T> {
     }
   }
 
-  pub fn handle_input(&mut self, statuses: &mut Statuses, master_input: MasterForwardMsg) {
+  pub fn handle_input<IO: MasterIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    master_input: MasterForwardMsg,
+  ) {
     match master_input {
       MasterForwardMsg::MasterTimerInput(timer_input) => match timer_input {
         MasterTimerInput::PaxosTimerEvent(timer_event) => {
-          self.paxos_driver.timer_event::<T, _>(
-            &mut MasterPaxosContext {
-              network_output: &mut self.network_output,
-              rand: &mut self.rand,
-              master_timer_output: &mut self.master_timer_output,
-              this_eid: &self.this_eid,
-            },
-            timer_event,
-          );
+          self
+            .paxos_driver
+            .timer_event(&mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid }, timer_event);
         }
       },
       MasterForwardMsg::MasterBundle(bundle) => {
@@ -449,7 +435,7 @@ impl<T: IOTypes> MasterContext<T> {
                 let result = master_query_planning_post(self, planning_plm);
                 if let Some(es) = statuses.planning_ess.remove(&query_id) {
                   // If the ES still exists, we respond.
-                  self.ctx().send_to_c(
+                  self.ctx(io_ctx).send_to_c(
                     es.sender_path.node_path,
                     msg::CoordMessage::MasterQueryPlanningSuccess(
                       msg::MasterQueryPlanningSuccess {
@@ -465,92 +451,92 @@ impl<T: IOTypes> MasterContext<T> {
               MasterPLm::CreateTableTMPrepared(prepared) => {
                 let query_id = prepared.query_id;
                 let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_prepared_plm(self);
+                let action = es.handle_prepared_plm(self, io_ctx);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               MasterPLm::CreateTableTMCommitted(committed) => {
                 let query_id = committed.query_id;
                 let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self);
+                let action = es.handle_committed_plm(self, io_ctx);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               MasterPLm::CreateTableTMAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               MasterPLm::CreateTableTMClosed(closed) => {
                 let query_id = closed.query_id.clone();
                 let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_closed_plm(self, closed);
+                let action = es.handle_closed_plm(self, io_ctx, closed);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               // AlterTable
               MasterPLm::AlterTableTMPrepared(prepared) => {
                 let query_id = prepared.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_prepared_plm(self);
+                let action = es.handle_prepared_plm(self, io_ctx);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               MasterPLm::AlterTableTMCommitted(committed) => {
                 let query_id = committed.query_id.clone();
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self, committed);
+                let action = es.handle_committed_plm(self, io_ctx, committed);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               MasterPLm::AlterTableTMAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               MasterPLm::AlterTableTMClosed(closed) => {
                 let query_id = closed.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_closed_plm(self);
+                let action = es.handle_closed_plm(self, io_ctx);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               // DropTable
               MasterPLm::DropTableTMPrepared(prepared) => {
                 let query_id = prepared.query_id;
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_prepared_plm(self);
+                let action = es.handle_prepared_plm(self, io_ctx);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
               MasterPLm::DropTableTMCommitted(committed) => {
                 let query_id = committed.query_id.clone();
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self, committed);
+                let action = es.handle_committed_plm(self, io_ctx, committed);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
               MasterPLm::DropTableTMAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
               MasterPLm::DropTableTMClosed(closed) => {
                 let query_id = closed.query_id;
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_closed_plm(self);
+                let action = es.handle_closed_plm(self, io_ctx);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
             }
           }
 
           // Run the Main Loop
-          self.run_main_loop(statuses);
+          self.run_main_loop(io_ctx, statuses);
 
           // Inform all DDL ESs in WaitingInserting and start inserting a PLm.
           for (_, es) in &mut statuses.create_table_tm_ess {
-            es.start_inserting(self);
+            es.start_inserting(self, io_ctx);
           }
           for (_, es) in &mut statuses.alter_table_tm_ess {
-            es.start_inserting(self);
+            es.start_inserting(self, io_ctx);
           }
           for (_, es) in &mut statuses.drop_table_tm_ess {
-            es.start_inserting(self);
+            es.start_inserting(self, io_ctx);
           }
 
           // For every MasterQueryPlanningES, we add a PLm
@@ -566,13 +552,8 @@ impl<T: IOTypes> MasterContext<T> {
 
           // Dispatch the Master for insertion and start a new one.
           let master_bundle = std::mem::replace(&mut self.master_bundle, MasterBundle::default());
-          self.paxos_driver.insert_bundle::<T, _>(
-            &mut MasterPaxosContext {
-              network_output: &mut self.network_output,
-              rand: &mut self.rand,
-              master_timer_output: &mut self.master_timer_output,
-              this_eid: &self.this_eid,
-            },
+          self.paxos_driver.insert_bundle(
+            &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
             master_bundle,
           );
         } else {
@@ -601,19 +582,19 @@ impl<T: IOTypes> MasterContext<T> {
               MasterPLm::CreateTableTMCommitted(committed) => {
                 let query_id = committed.query_id;
                 let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self);
+                let action = es.handle_committed_plm(self, io_ctx);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               MasterPLm::CreateTableTMAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               MasterPLm::CreateTableTMClosed(closed) => {
                 let query_id = closed.query_id.clone();
                 let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_closed_plm(self, closed);
+                let action = es.handle_closed_plm(self, io_ctx, closed);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               // AlterTable
@@ -634,19 +615,19 @@ impl<T: IOTypes> MasterContext<T> {
               MasterPLm::AlterTableTMCommitted(committed) => {
                 let query_id = committed.query_id.clone();
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self, committed);
+                let action = es.handle_committed_plm(self, io_ctx, committed);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               MasterPLm::AlterTableTMAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               MasterPLm::AlterTableTMClosed(closed) => {
                 let query_id = closed.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_closed_plm(self);
+                let action = es.handle_closed_plm(self, io_ctx);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               // DropTable
@@ -666,19 +647,19 @@ impl<T: IOTypes> MasterContext<T> {
               MasterPLm::DropTableTMCommitted(committed) => {
                 let query_id = committed.query_id.clone();
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self, committed);
+                let action = es.handle_committed_plm(self, io_ctx, committed);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
               MasterPLm::DropTableTMAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
               MasterPLm::DropTableTMClosed(closed) => {
                 let query_id = closed.query_id;
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_closed_plm(self);
+                let action = es.handle_closed_plm(self, io_ctx);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
             }
@@ -690,7 +671,7 @@ impl<T: IOTypes> MasterContext<T> {
           MasterExternalReq::PerformExternalDDLQuery(external_query) => {
             match self.validate_ddl_query(&external_query) {
               Ok(ddl_query) => {
-                let query_id = mk_qid(&mut self.rand);
+                let query_id = mk_qid(io_ctx.rand());
                 let sender_eid = external_query.sender_eid;
                 let request_id = external_query.request_id;
                 self.external_request_id_map.insert(request_id.clone(), query_id.clone());
@@ -698,15 +679,12 @@ impl<T: IOTypes> MasterContext<T> {
                   DDLQuery::Create(create_table) => {
                     // Choose a random SlaveGroupId to place the Tablet
                     let sids = Vec::from_iter(self.slave_address_config.keys().into_iter());
-                    let idx = self.rand.next_u32() as usize % sids.len();
+                    let idx = io_ctx.rand().next_u32() as usize % sids.len();
                     let sid = sids[idx].clone();
 
                     // Construct shards
-                    let shards = vec![(
-                      TabletKeyRange { start: None, end: None },
-                      mk_tid(&mut self.rand),
-                      sid,
-                    )];
+                    let shards =
+                      vec![(TabletKeyRange { start: None, end: None }, mk_tid(io_ctx.rand()), sid)];
 
                     // Construct ES
                     btree_map_insert(
@@ -754,7 +732,7 @@ impl<T: IOTypes> MasterContext<T> {
               }
               Err(payload) => {
                 // We return an error because the RequestId is not unique.
-                self.network_output.send(
+                io_ctx.send(
                   &external_query.sender_eid,
                   msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
                     msg::ExternalDDLQueryAborted { request_id: external_query.request_id, payload },
@@ -767,7 +745,7 @@ impl<T: IOTypes> MasterContext<T> {
         }
 
         // Run Main Loop
-        self.run_main_loop(statuses);
+        self.run_main_loop(io_ctx, statuses);
       }
       MasterForwardMsg::MasterRemotePayload(payload) => match payload {
         MasterRemotePayload::RemoteLeaderChanged(_) => {}
@@ -787,7 +765,7 @@ impl<T: IOTypes> MasterContext<T> {
               );
             }
             MasterQueryPlanningAction::Respond(result) => {
-              self.ctx().send_to_c(
+              self.ctx(io_ctx).send_to_c(
                 query_planning.sender_path.node_path,
                 msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
                   return_qid: query_planning.sender_path.query_id,
@@ -805,57 +783,57 @@ impl<T: IOTypes> MasterContext<T> {
         MasterRemotePayload::CreateTablePrepared(prepared) => {
           let query_id = prepared.query_id.clone();
           let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_prepared(self, prepared);
+          let action = es.handle_prepared(self, io_ctx, prepared);
           self.handle_create_table_es_action(statuses, query_id, action);
         }
         MasterRemotePayload::CreateTableAborted(aborted) => {
           let query_id = aborted.query_id.clone();
           let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_aborted(self);
+          let action = es.handle_aborted(self, io_ctx);
           self.handle_create_table_es_action(statuses, query_id, action);
         }
         MasterRemotePayload::CreateTableCloseConfirm(closed) => {
           let query_id = closed.query_id.clone();
           let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_close_confirmed(self, closed);
+          let action = es.handle_close_confirmed(self, io_ctx, closed);
           self.handle_create_table_es_action(statuses, query_id, action);
         }
         // AlterTable
         MasterRemotePayload::AlterTablePrepared(prepared) => {
           let query_id = prepared.query_id.clone();
           let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_prepared(self, prepared);
+          let action = es.handle_prepared(self, io_ctx, prepared);
           self.handle_alter_table_es_action(statuses, query_id, action);
         }
         MasterRemotePayload::AlterTableAborted(aborted) => {
           let query_id = aborted.query_id.clone();
           let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_aborted(self);
+          let action = es.handle_aborted(self, io_ctx);
           self.handle_alter_table_es_action(statuses, query_id, action);
         }
         MasterRemotePayload::AlterTableCloseConfirm(closed) => {
           let query_id = closed.query_id.clone();
           let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_close_confirmed(self, closed);
+          let action = es.handle_close_confirmed(self, io_ctx, closed);
           self.handle_alter_table_es_action(statuses, query_id, action);
         }
         // Drop
         MasterRemotePayload::DropTablePrepared(prepared) => {
           let query_id = prepared.query_id.clone();
           let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_prepared(self, prepared);
+          let action = es.handle_prepared(self, io_ctx, prepared);
           self.handle_drop_table_es_action(statuses, query_id, action);
         }
         MasterRemotePayload::DropTableAborted(aborted) => {
           let query_id = aborted.query_id.clone();
           let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_aborted(self);
+          let action = es.handle_aborted(self, io_ctx);
           self.handle_drop_table_es_action(statuses, query_id, action);
         }
         MasterRemotePayload::DropTableCloseConfirm(closed) => {
           let query_id = closed.query_id.clone();
           let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_close_confirmed(self, closed);
+          let action = es.handle_close_confirmed(self, io_ctx, closed);
           self.handle_drop_table_es_action(statuses, query_id, action);
         }
         MasterRemotePayload::MasterGossipRequest(_) => {}
@@ -869,7 +847,7 @@ impl<T: IOTypes> MasterContext<T> {
         let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
         for query_id in query_ids {
           let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.remote_leader_changed(self, remote_leader_changed.clone());
+          let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
           self.handle_create_table_es_action(statuses, query_id, action);
         }
 
@@ -877,7 +855,7 @@ impl<T: IOTypes> MasterContext<T> {
         let query_ids: Vec<QueryId> = statuses.alter_table_tm_ess.keys().cloned().collect();
         for query_id in query_ids {
           let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.remote_leader_changed(self, remote_leader_changed.clone());
+          let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
           self.handle_alter_table_es_action(statuses, query_id, action);
         }
 
@@ -885,7 +863,7 @@ impl<T: IOTypes> MasterContext<T> {
         let query_ids: Vec<QueryId> = statuses.drop_table_tm_ess.keys().cloned().collect();
         for query_id in query_ids {
           let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.remote_leader_changed(self, remote_leader_changed.clone());
+          let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
           self.handle_drop_table_es_action(statuses, query_id, action);
         }
 
@@ -906,7 +884,7 @@ impl<T: IOTypes> MasterContext<T> {
         let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
         for query_id in query_ids {
           let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.leader_changed(self);
+          let action = es.leader_changed(self, io_ctx);
           self.handle_create_table_es_action(statuses, query_id, action);
         }
 
@@ -914,7 +892,7 @@ impl<T: IOTypes> MasterContext<T> {
         let query_ids: Vec<QueryId> = statuses.alter_table_tm_ess.keys().cloned().collect();
         for query_id in query_ids {
           let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.leader_changed(self);
+          let action = es.leader_changed(self, io_ctx);
           self.handle_alter_table_es_action(statuses, query_id, action);
         }
 
@@ -922,7 +900,7 @@ impl<T: IOTypes> MasterContext<T> {
         let query_ids: Vec<QueryId> = statuses.drop_table_tm_ess.keys().cloned().collect();
         for query_id in query_ids {
           let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.leader_changed(self);
+          let action = es.leader_changed(self, io_ctx);
           self.handle_drop_table_es_action(statuses, query_id, action);
         }
 
@@ -963,12 +941,16 @@ impl<T: IOTypes> MasterContext<T> {
   }
 
   /// Runs the `run_main_loop_once` until it finally results in no states changes.
-  fn run_main_loop(&mut self, statuses: &mut Statuses) {
-    while !self.run_main_loop_once(statuses) {}
+  fn run_main_loop<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
+    while !self.run_main_loop_once(io_ctx, statuses) {}
   }
 
   /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
-  fn run_main_loop_once(&mut self, statuses: &mut Statuses) -> bool {
+  fn run_main_loop_once<IO: MasterIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+  ) -> bool {
     // First, we accumulate all TablePaths that currently have a a DDL Query running for them.
     let mut tables_being_modified = HashSet::<TablePath>::new();
     for (_, es) in &statuses.create_table_tm_ess {
@@ -1014,7 +996,7 @@ impl<T: IOTypes> MasterContext<T> {
       for query_id in ess_to_remove {
         let es = statuses.create_table_tm_ess.remove(&query_id).unwrap();
         if let Some(response_data) = &es.response_data {
-          response_invalid_ddl::<T>(&mut self.network_output, response_data);
+          response_invalid_ddl(io_ctx, response_data);
         }
       }
     }
@@ -1047,7 +1029,7 @@ impl<T: IOTypes> MasterContext<T> {
       for query_id in ess_to_remove {
         let es = statuses.alter_table_tm_ess.remove(&query_id).unwrap();
         if let Some(response_data) = &es.response_data {
-          response_invalid_ddl::<T>(&mut self.network_output, response_data);
+          response_invalid_ddl(io_ctx, response_data);
         }
       }
     }
@@ -1074,7 +1056,7 @@ impl<T: IOTypes> MasterContext<T> {
       for query_id in ess_to_remove {
         let es = statuses.drop_table_tm_ess.remove(&query_id).unwrap();
         if let Some(response_data) = &es.response_data {
-          response_invalid_ddl::<T>(&mut self.network_output, response_data);
+          response_invalid_ddl(io_ctx, response_data);
         }
       }
     }
@@ -1134,7 +1116,7 @@ impl<T: IOTypes> MasterContext<T> {
   }
 
   /// Broadcast GossipData
-  pub fn broadcast_gossip(&mut self) {
+  pub fn broadcast_gossip<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
     let gossip_data = GossipData {
       gen: self.gen.clone(),
       db_schema: self.db_schema.clone(),
@@ -1146,7 +1128,7 @@ impl<T: IOTypes> MasterContext<T> {
     };
     let sids: Vec<SlaveGroupId> = self.slave_address_config.keys().cloned().collect();
     for sid in sids {
-      self.ctx().send_to_slave_common(
+      self.ctx(io_ctx).send_to_slave_common(
         sid,
         msg::SlaveRemotePayload::MasterGossip(msg::MasterGossip {
           gossip_data: gossip_data.clone(),
@@ -1157,11 +1139,8 @@ impl<T: IOTypes> MasterContext<T> {
 }
 
 /// Send `InvalidDDLQuery` to the given `ResponseData`
-fn response_invalid_ddl<T: IOTypes>(
-  network_output: &mut T::NetworkOutT,
-  response_data: &ResponseData,
-) {
-  network_output.send(
+fn response_invalid_ddl<IO: MasterIOCtx>(io_ctx: &mut IO, response_data: &ResponseData) {
+  io_ctx.send(
     &response_data.sender_eid,
     msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
       msg::ExternalDDLQueryAborted {

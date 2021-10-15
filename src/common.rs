@@ -19,58 +19,61 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 // -----------------------------------------------------------------------------------------------
-//  IOTypes
+//  SlaveIOCtx
 // -----------------------------------------------------------------------------------------------
 
-/// An interface for reading the time in milliseconds.
-pub trait Clock {
+pub trait SlaveIOCtx {
+  type RngCoreT: RngCore + Debug;
+
+  // Basic
+  fn rand(&mut self) -> &mut Self::RngCoreT;
   fn now(&mut self) -> Timestamp;
-}
-
-pub trait NetworkOut {
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
-}
 
-pub trait TabletForwardOut {
-  fn forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletForwardMsg);
-
+  // Tablet
+  fn create_tablet(&mut self, helper: TabletCreateHelper);
+  fn tablet_forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletForwardMsg);
   fn all_tids(&self) -> Vec<TabletGroupId>;
-
   fn num_tablets(&self) -> usize;
 
-  fn create_tablet(&mut self, helper: TabletCreateHelper);
-}
-
-pub trait CoordForwardOut {
-  fn forward(&mut self, coord_group_id: &CoordGroupId, msg: CoordForwardMsg);
-
+  // Coord
+  fn coord_forward(&mut self, coord_group_id: &CoordGroupId, msg: CoordForwardMsg);
   fn all_cids(&self) -> Vec<CoordGroupId>;
-}
 
-/// An interface for other Threads to forward data back to the Slave.
-pub trait SlaveForwardOut {
-  fn forward(&mut self, msg: SlaveBackMessage);
-}
-
-/// An interface for a Slave to perform a time-deferred task in the future
-pub trait SlaveTimerOut {
+  // Timer
   fn defer(&mut self, defer_time: Timestamp, msg: SlaveTimerInput);
 }
 
-/// An interface for a Master to perform a time-deferred task in the future
-pub trait MasterTimerOut {
-  fn defer(&mut self, defer_time: Timestamp, msg: MasterTimerInput);
+// -----------------------------------------------------------------------------------------------
+//  CoreIOCtx
+// -----------------------------------------------------------------------------------------------
+
+pub trait CoreIOCtx {
+  type RngCoreT: RngCore + Debug;
+
+  // Basic
+  fn rand(&mut self) -> &mut Self::RngCoreT;
+  fn now(&mut self) -> Timestamp;
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
+
+  // Slave
+  fn slave_forward(&mut self, msg: SlaveBackMessage);
 }
 
-pub trait IOTypes {
+// -----------------------------------------------------------------------------------------------
+//  MasterIOCtx
+// -----------------------------------------------------------------------------------------------
+
+pub trait MasterIOCtx {
   type RngCoreT: RngCore + Debug;
-  type ClockT: Clock + Debug;
-  type NetworkOutT: NetworkOut + Debug;
-  type TabletForwardOutT: TabletForwardOut + Debug;
-  type CoordForwardOutT: CoordForwardOut + Debug;
-  type SlaveForwardOutT: SlaveForwardOut + Debug;
-  type SlaveTimerOutT: SlaveTimerOut + Debug;
-  type MasterTimerOutT: MasterTimerOut + Debug;
+
+  // Basic
+  fn rand(&mut self) -> &mut Self::RngCoreT;
+  fn now(&mut self) -> Timestamp;
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
+
+  // Timer
+  fn defer(&mut self, defer_time: Timestamp, msg: MasterTimerInput);
 }
 
 // -----------------------------------------------------------------------------------------------

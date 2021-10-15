@@ -1,4 +1,4 @@
-use crate::common::{IOTypes, NetworkOut, RemoteLeaderChangedPLm};
+use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::model::common::{proc, QueryId, Timestamp};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
@@ -39,11 +39,15 @@ pub enum AlterTableAction {
 impl AlterTableES {
   // STMPaxos2PC messages
 
-  pub fn handle_prepare<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> AlterTableAction {
+  pub fn handle_prepare<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> AlterTableAction {
     match &self.state {
       State::Prepared => {
         let this_node_path = ctx.mk_node_path();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::AlterTablePrepared(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTablePrepared(
           msg::AlterTablePrepared {
             query_id: self.query_id.clone(),
             rm: this_node_path,
@@ -56,9 +60,9 @@ impl AlterTableES {
     AlterTableAction::Wait
   }
 
-  pub fn handle_commit<T: IOTypes>(
+  pub fn handle_commit(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
     commit: msg::AlterTableCommit,
   ) -> AlterTableAction {
     match &self.state {
@@ -74,11 +78,15 @@ impl AlterTableES {
     AlterTableAction::Wait
   }
 
-  pub fn handle_abort<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> AlterTableAction {
+  pub fn handle_abort<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> AlterTableAction {
     match &self.state {
       State::WaitingInsertingPrepared => {
         let this_node_path = ctx.mk_node_path();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
           msg::AlterTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
         ));
         AlterTableAction::Exit
@@ -103,14 +111,15 @@ impl AlterTableES {
 
   // STMPaxos2PC PLm Insertions
 
-  pub fn handle_prepared_plm<T: IOTypes>(
+  pub fn handle_prepared_plm<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
   ) -> AlterTableAction {
     match &self.state {
       State::InsertingPrepared => {
         let this_node_path = ctx.mk_node_path();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::AlterTablePrepared(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTablePrepared(
           msg::AlterTablePrepared {
             query_id: self.query_id.clone(),
             rm: this_node_path,
@@ -127,12 +136,16 @@ impl AlterTableES {
     AlterTableAction::Wait
   }
 
-  pub fn handle_aborted_plm<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> AlterTableAction {
+  pub fn handle_aborted_plm<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> AlterTableAction {
     match &self.state {
       State::Follower => AlterTableAction::Exit,
       State::InsertingAborted => {
         let this_node_path = ctx.mk_node_path();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
           msg::AlterTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
         ));
         AlterTableAction::Exit
@@ -142,11 +155,7 @@ impl AlterTableES {
   }
 
   /// Apply the `alter_op` to this Tablet's `table_schema`.
-  fn apply_alter_op<T: IOTypes>(
-    &mut self,
-    ctx: &mut TabletContext<T>,
-    committed_plm: plm::AlterTableCommitted,
-  ) {
+  fn apply_alter_op(&mut self, ctx: &mut TabletContext, committed_plm: plm::AlterTableCommitted) {
     ctx.table_schema.val_cols.write(
       &self.alter_op.col_name,
       self.alter_op.maybe_col_type.clone(),
@@ -154,9 +163,10 @@ impl AlterTableES {
     );
   }
 
-  pub fn handle_committed_plm<T: IOTypes>(
+  pub fn handle_committed_plm<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     committed_plm: plm::AlterTableCommitted,
   ) -> AlterTableAction {
     match &self.state {
@@ -166,7 +176,7 @@ impl AlterTableES {
       }
       State::InsertingCommitted => {
         let this_node_path = ctx.mk_node_path();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
           msg::AlterTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
         ));
         self.apply_alter_op(ctx, committed_plm);
@@ -178,7 +188,7 @@ impl AlterTableES {
 
   // Other
 
-  pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> AlterTableAction {
+  pub fn start_inserting(&mut self, ctx: &mut TabletContext) -> AlterTableAction {
     match &self.state {
       State::WaitingInsertingPrepared => {
         ctx.tablet_bundle.push(TabletPLm::AlterTablePrepared(plm::AlterTablePrepared {
@@ -193,7 +203,7 @@ impl AlterTableES {
     AlterTableAction::Wait
   }
 
-  pub fn leader_changed<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> AlterTableAction {
+  pub fn leader_changed(&mut self, ctx: &mut TabletContext) -> AlterTableAction {
     match &self.state {
       State::Follower => {
         if ctx.is_leader() {

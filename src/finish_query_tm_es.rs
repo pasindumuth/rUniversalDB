@@ -1,5 +1,4 @@
-use crate::common::RemoteLeaderChangedPLm;
-use crate::common::{IOTypes, NetworkOut};
+use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::model::common::{
   proc, EndpointId, QueryId, RequestId, TQueryPath, TableView, Timestamp,
@@ -53,31 +52,40 @@ pub enum FinishQueryTMAction {
 //  Implementation
 // -----------------------------------------------------------------------------------------------
 impl FinishQueryTMES {
-  pub fn start_orig<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> FinishQueryTMAction {
+  pub fn start_orig<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
+  ) -> FinishQueryTMAction {
     // Send out FinishQueryPrepare to all RMs
     let mut state = HashSet::<TQueryPath>::new();
     for rm in &self.all_rms {
       state.insert(rm.clone());
-      send_prepare(ctx, self.query_id.clone(), rm.clone(), self.all_rms.clone());
+      send_prepare(ctx, io_ctx, self.query_id.clone(), rm.clone(), self.all_rms.clone());
     }
     self.state = Paxos2PCTMState::Preparing(state);
     FinishQueryTMAction::Wait
   }
 
-  pub fn start_rec<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> FinishQueryTMAction {
+  pub fn start_rec<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
+  ) -> FinishQueryTMAction {
     // Send out FinishQueryCheckPrepared to all RMs
     let mut state = HashSet::<TQueryPath>::new();
     for rm in &self.all_rms {
       state.insert(rm.clone());
-      send_check_prepared(ctx, self.query_id.clone(), rm.clone());
+      send_check_prepared(ctx, io_ctx, self.query_id.clone(), rm.clone());
     }
     self.state = Paxos2PCTMState::CheckPreparing(state);
     FinishQueryTMAction::Wait
   }
 
-  pub fn handle_prepared<T: IOTypes>(
+  pub fn handle_prepared<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     prepared: msg::FinishQueryPrepared,
   ) -> FinishQueryTMAction {
     match &mut self.state {
@@ -86,7 +94,7 @@ impl FinishQueryTMES {
         if exec_state.is_empty() {
           // The Preparing is finished.
           for rm in &self.all_rms {
-            ctx.ctx().send_to_t(
+            ctx.ctx(io_ctx).send_to_t(
               rm.node_path.clone(),
               msg::TabletMessage::FinishQueryCommit(msg::FinishQueryCommit {
                 query_id: rm.query_id.clone(),
@@ -102,9 +110,10 @@ impl FinishQueryTMES {
     }
   }
 
-  pub fn handle_aborted<T: IOTypes>(
+  pub fn handle_aborted<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     aborted: msg::FinishQueryAborted,
   ) -> FinishQueryTMAction {
     match &mut self.state {
@@ -112,7 +121,7 @@ impl FinishQueryTMES {
         exec_state.remove(&aborted.rm_path);
         // The Preparing has been aborted.
         for rm in &self.all_rms {
-          ctx.ctx().send_to_t(
+          ctx.ctx(io_ctx).send_to_t(
             rm.node_path.clone(),
             msg::TabletMessage::FinishQueryAbort(msg::FinishQueryAbort {
               query_id: rm.query_id.clone(),
@@ -125,24 +134,26 @@ impl FinishQueryTMES {
     }
   }
 
-  pub fn handle_wait<T: IOTypes>(
+  pub fn handle_wait<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     wait: msg::FinishQueryWait,
   ) -> FinishQueryTMAction {
     match &mut self.state {
       Paxos2PCTMState::CheckPreparing(_) => {
         // Send back a CheckPrepared
-        send_check_prepared(ctx, self.query_id.clone(), wait.rm_path);
+        send_check_prepared(ctx, io_ctx, self.query_id.clone(), wait.rm_path);
         FinishQueryTMAction::Aborted
       }
       _ => FinishQueryTMAction::Wait,
     }
   }
 
-  pub fn remote_leader_changed<T: IOTypes>(
+  pub fn remote_leader_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     remote_leader_changed: RemoteLeaderChangedPLm,
   ) -> FinishQueryTMAction {
     match &self.state {
@@ -150,7 +161,7 @@ impl FinishQueryTMES {
         for rm in exec_state {
           // If the RM has not responded and its Leadership changed, we resend Prepare.
           if rm.node_path.sid.to_gid() == remote_leader_changed.gid {
-            send_prepare(ctx, self.query_id.clone(), rm.clone(), self.all_rms.clone());
+            send_prepare(ctx, io_ctx, self.query_id.clone(), rm.clone(), self.all_rms.clone());
           }
         }
       }
@@ -158,7 +169,7 @@ impl FinishQueryTMES {
         for rm in exec_state {
           // If the RM has not responded and its Leadership changed, we resend CheckPrepared.
           if rm.node_path.sid.to_gid() == remote_leader_changed.gid {
-            send_check_prepared(ctx, self.query_id.clone(), rm.clone());
+            send_check_prepared(ctx, io_ctx, self.query_id.clone(), rm.clone());
           }
         }
       }
@@ -169,14 +180,15 @@ impl FinishQueryTMES {
 }
 
 /// Send a `FinishQueryPrepare` to `rm`.
-fn send_prepare<T: IOTypes>(
-  ctx: &mut CoordContext<T>,
+fn send_prepare<IO: CoreIOCtx>(
+  ctx: &mut CoordContext,
+  io_ctx: &mut IO,
   this_query_id: QueryId,
   rm: TQueryPath,
   all_rms: Vec<TQueryPath>,
 ) {
   let tm = ctx.mk_query_path(this_query_id);
-  ctx.ctx().send_to_t(
+  ctx.ctx(io_ctx).send_to_t(
     rm.node_path.clone(),
     msg::TabletMessage::FinishQueryPrepare(msg::FinishQueryPrepare {
       tm,
@@ -187,13 +199,14 @@ fn send_prepare<T: IOTypes>(
 }
 
 /// Send a `FinishQueryCheckPrepared` to `rm`.
-fn send_check_prepared<T: IOTypes>(
-  ctx: &mut CoordContext<T>,
+fn send_check_prepared<IO: CoreIOCtx>(
+  ctx: &mut CoordContext,
+  io_ctx: &mut IO,
   this_query_id: QueryId,
   rm: TQueryPath,
 ) {
   let tm = ctx.mk_query_path(this_query_id);
-  ctx.ctx().send_to_t(
+  ctx.ctx(io_ctx).send_to_t(
     rm.node_path.clone(),
     msg::TabletMessage::FinishQueryCheckPrepared(msg::FinishQueryCheckPrepared {
       tm,

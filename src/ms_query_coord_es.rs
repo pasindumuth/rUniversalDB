@@ -2,8 +2,8 @@ use crate::col_usage::{
   collect_table_paths, compute_all_tier_maps, compute_query_plan_data, iterate_stage_ms_query,
   node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode, GeneralStage,
 };
-use crate::common::RemoteLeaderChangedPLm;
-use crate::common::{lookup, mk_qid, IOTypes, NetworkOut, OrigP, QueryPlan, TMStatus};
+use crate::common::{lookup, mk_qid, OrigP, QueryPlan, TMStatus};
+use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::model::common::{
   proc, CTQueryPath, ColName, Context, ContextRow, EndpointId, Gen, LeadershipId, NodeGroupId,
@@ -127,28 +127,34 @@ pub enum SendHelper {
 
 impl FullMSCoordES {
   /// Start the FullMSCoordES
-  pub fn start<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordAction {
+  pub fn start<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
+  ) -> MSQueryCoordAction {
     let plan_es = cast!(Self::QueryPlanning, self).unwrap();
-    let action = plan_es.start(ctx);
-    self.handle_planning_action(ctx, action)
+    let action = plan_es.start(ctx, io_ctx);
+    self.handle_planning_action(ctx, io_ctx, action)
   }
 
   /// Handle Master Response, routing it to the QueryReplanning.
-  pub fn handle_master_response<T: IOTypes>(
+  pub fn handle_master_response<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     master_qid: QueryId,
     result: msg::MasteryQueryPlanningResult,
   ) -> MSQueryCoordAction {
     let plan_es = cast!(FullMSCoordES::QueryPlanning, self).unwrap();
-    let action = plan_es.handle_master_query_plan(ctx, master_qid, result);
-    self.handle_planning_action(ctx, action)
+    let action = plan_es.handle_master_query_plan(ctx, io_ctx, master_qid, result);
+    self.handle_planning_action(ctx, io_ctx, action)
   }
 
   /// Handle the `action` sent back by the `MSQueryCoordReplanningES`.
-  fn handle_planning_action<T: IOTypes>(
+  fn handle_planning_action<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     action: QueryPlanningAction,
   ) -> MSQueryCoordAction {
     match action {
@@ -167,7 +173,7 @@ impl FullMSCoordES {
         });
 
         // Move the ES onto the next stage.
-        self.advance(ctx)
+        self.advance(ctx, io_ctx)
       }
       QueryPlanningAction::Failed(error) => {
         // Here, the QueryReplanning had failed. We do not need to ECU because
@@ -178,9 +184,10 @@ impl FullMSCoordES {
   }
 
   /// This is called when the TMStatus has completed successfully.
-  pub fn handle_tm_success<T: IOTypes>(
+  pub fn handle_tm_success<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     tm_qid: QueryId,
     new_rms: HashSet<TQueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
@@ -202,13 +209,14 @@ impl FullMSCoordES {
     let table_view = table_views.into_iter().next().unwrap();
     es.trans_table_views.push((trans_table_name.clone(), (schema, table_view)));
     es.all_rms.extend(new_rms);
-    self.advance(ctx)
+    self.advance(ctx, io_ctx)
   }
 
   /// This is called when the TMStatus has aborted.
-  pub fn handle_tm_aborted<T: IOTypes>(
+  pub fn handle_tm_aborted<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     aborted_data: msg::AbortedData,
   ) -> MSQueryCoordAction {
     // Interpret the `aborted_data`.
@@ -217,14 +225,14 @@ impl FullMSCoordES {
       | msg::AbortedData::QueryError(msg::QueryError::RuntimeError { .. }) => {
         // This implies an unrecoverable error, since trying again at a higher timestamp won't
         // generally fix the issue. Thus we ECU and return accordingly.
-        self.exit_and_clean_up(ctx);
+        self.exit_and_clean_up(ctx, io_ctx);
         MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError)
       }
       msg::AbortedData::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
       | msg::AbortedData::QueryError(msg::QueryError::DeadlockSafetyAbortion)
       | msg::AbortedData::QueryError(msg::QueryError::TimestampConflict) => {
         // This implies a recoverable failure, so we ECU and return accordingly.
-        self.exit_and_clean_up(ctx);
+        self.exit_and_clean_up(ctx, io_ctx);
         MSQueryCoordAction::NonFatalFailure
       }
       // Recall that LateralErrors should never make it back to the MSCoordES.
@@ -237,14 +245,15 @@ impl FullMSCoordES {
 
   /// This is called when one of the remote node's Leadership changes beyond the
   /// LeadershipId that we had sent a PerformQuery to.
-  pub fn handle_tm_remote_leadership_changed<T: IOTypes>(
+  pub fn handle_tm_remote_leadership_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
   ) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
     let stage = cast!(CoordState::Stage, &es.state).unwrap();
     let stage_idx = stage.stage_idx.clone();
-    self.process_ms_query_stage(ctx, stage_idx)
+    self.process_ms_query_stage(ctx, io_ctx, stage_idx)
   }
 
   // Handle a RegisterQuery sent by an MSQuery to an MSCoordES.
@@ -254,16 +263,17 @@ impl FullMSCoordES {
   }
 
   /// Handle a RemoteLeaderChanged
-  pub fn remote_leader_changed<T: IOTypes>(
+  pub fn remote_leader_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     remote_leader_changed: RemoteLeaderChangedPLm,
   ) -> MSQueryCoordAction {
     match self {
       FullMSCoordES::QueryPlanning(es) => {
         if remote_leader_changed.gid == PaxosGroupId::Master {
-          let action = es.master_leader_changed(ctx);
-          self.handle_planning_action(ctx, action)
+          let action = es.master_leader_changed(ctx, io_ctx);
+          self.handle_planning_action(ctx, io_ctx, action)
         } else {
           MSQueryCoordAction::Wait
         }
@@ -286,14 +296,15 @@ impl FullMSCoordES {
   }
 
   /// Handles the GossipData changing.
-  pub fn gossip_data_changed<T: IOTypes>(
+  pub fn gossip_data_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
   ) -> MSQueryCoordAction {
     match self {
       FullMSCoordES::QueryPlanning(es) => {
-        let action = es.gossip_data_changed(ctx);
-        self.handle_planning_action(ctx, action)
+        let action = es.gossip_data_changed(ctx, io_ctx);
+        self.handle_planning_action(ctx, io_ctx, action)
       }
       FullMSCoordES::Executing(_) => MSQueryCoordAction::Wait,
     }
@@ -301,13 +312,17 @@ impl FullMSCoordES {
 
   /// This function accepts the results for the subquery, and then decides either
   /// to move onto the next stage, or start 2PC to commit the change.
-  fn advance<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> MSQueryCoordAction {
+  fn advance<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
+  ) -> MSQueryCoordAction {
     // Compute the next stage
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
     let next_stage_idx = es.state.stage_idx().unwrap() + 1;
 
     if next_stage_idx < es.sql_query.trans_tables.len() {
-      self.process_ms_query_stage(ctx, next_stage_idx)
+      self.process_ms_query_stage(ctx, io_ctx, next_stage_idx)
     } else {
       // Check that none of the Leaderships in `all_rms` have changed.
       for rm in &es.all_rms {
@@ -315,7 +330,7 @@ impl FullMSCoordES {
         let cur_lid = ctx.leader_map.get(&rm.node_path.sid.to_gid()).unwrap();
         if orig_lid != cur_lid {
           // If a Leadership has changed, we abort and retry this MSCoordES.
-          self.exit_and_clean_up(ctx);
+          self.exit_and_clean_up(ctx, io_ctx);
           return MSQueryCoordAction::NonFatalFailure;
         }
       }
@@ -323,7 +338,7 @@ impl FullMSCoordES {
       // Cancel all RegisteredQueries that are not also an RM in the upcoming Paxos2PC.
       for registered_query in &es.registered_queries {
         if !es.all_rms.contains(registered_query) {
-          ctx.ctx().send_to_ct(
+          ctx.ctx(io_ctx).send_to_ct(
             registered_query.clone().into_ct().node_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: registered_query.query_id.clone(),
@@ -350,9 +365,10 @@ impl FullMSCoordES {
 
   /// This function advances the given MSCoordES at `query_id` to the next
   /// `Stage` with index `stage_idx`.
-  fn process_ms_query_stage<T: IOTypes>(
+  fn process_ms_query_stage<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     stage_idx: usize,
   ) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
@@ -367,7 +383,7 @@ impl FullMSCoordES {
     let mut context_row = ContextRow::default();
     for trans_table_name in &trans_table_names {
       context.context_schema.trans_table_context_schema.push(TransTableLocationPrefix {
-        source: ctx.ctx().mk_this_query_path(es.query_id.clone()),
+        source: ctx.ctx(io_ctx).mk_this_query_path(es.query_id.clone()),
         trans_table_name: trans_table_name.clone(),
       });
       context_row.trans_table_context_row.push(0);
@@ -389,8 +405,8 @@ impl FullMSCoordES {
     };
 
     // Create Construct the TMStatus that's going to be used to coordinate this stage.
-    let tm_qid = mk_qid(&mut ctx.rand);
-    let child_qid = mk_qid(&mut ctx.rand);
+    let tm_qid = mk_qid(io_ctx.rand());
+    let child_qid = mk_qid(io_ctx.rand());
     let mut tm_status = TMStatus {
       query_id: tm_qid.clone(),
       child_query_id: child_qid.clone(),
@@ -424,7 +440,7 @@ impl FullMSCoordES {
                 },
               ),
             };
-            let tids = ctx.ctx().get_min_tablets(&table_path, &select_query.selection);
+            let tids = ctx.ctx(io_ctx).get_min_tablets(&table_path, &select_query.selection);
             SendHelper::TableQuery(perform_query, tids)
           }
           proc::TableRef::TransTableName(sub_trans_table_name) => {
@@ -465,7 +481,7 @@ impl FullMSCoordES {
             query_plan,
           }),
         };
-        let tids = ctx.ctx().get_min_tablets(&update_query.table, &update_query.selection);
+        let tids = ctx.ctx(io_ctx).get_min_tablets(&update_query.table, &update_query.selection);
         SendHelper::TableQuery(perform_query, tids)
       }
     };
@@ -481,7 +497,7 @@ impl FullMSCoordES {
           if let Some(lid) = query_leader_map.get(sid) {
             if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
               // The `lid` has since changed, so we cannot finish this MSQueryES.
-              self.exit_and_clean_up(ctx);
+              self.exit_and_clean_up(ctx, io_ctx);
               return MSQueryCoordAction::NonFatalFailure;
             }
             // Recall that since > is not possible, these Leadership must be equals.
@@ -497,8 +513,8 @@ impl FullMSCoordES {
           // for the given `tids` align, so using `send_to_t` sends to Leaderships
           // in `query_leader_map`.
           let tablet_msg = msg::TabletMessage::PerformQuery(perform_query.clone());
-          let node_path = ctx.ctx().mk_node_path_from_tablet(tid);
-          ctx.ctx().send_to_t(node_path.clone(), tablet_msg);
+          let node_path = ctx.ctx(io_ctx).mk_node_path_from_tablet(tid);
+          ctx.ctx(io_ctx).send_to_t(node_path.clone(), tablet_msg);
 
           // Add the TabletGroup into the TMStatus.
           tm_status.tm_state.insert(node_path.clone().into_ct(), None);
@@ -512,7 +528,7 @@ impl FullMSCoordES {
         // MSCoordES. Thus, there is no need to verify Leadership of `location_prefix` is
         // still alive, since it obviously is if we get here.
         let node_path = location_prefix.source.node_path.clone();
-        ctx.ctx().send_to_ct(node_path.clone(), CommonQuery::PerformQuery(perform_query));
+        ctx.ctx(io_ctx).send_to_ct(node_path.clone(), CommonQuery::PerformQuery(perform_query));
 
         // Add the TabletGroup into the TMStatus.
         tm_status.tm_state.insert(node_path.clone(), None);
@@ -528,9 +544,9 @@ impl FullMSCoordES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) {
+  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, ctx: &mut CoordContext, io_ctx: &mut IO) {
     match self {
-      FullMSCoordES::QueryPlanning(plan_es) => plan_es.exit_and_clean_up(ctx),
+      FullMSCoordES::QueryPlanning(plan_es) => plan_es.exit_and_clean_up(ctx, io_ctx),
       FullMSCoordES::Executing(es) => {
         match &es.state {
           CoordState::Start => {}
@@ -538,7 +554,7 @@ impl FullMSCoordES {
             // Clean up any Registered Queries in the MSCoordES. The `registered_queries` docs
             // describe why `send_to_ct` sends the message to the right PaxosNode.
             for registered_query in &es.registered_queries {
-              ctx.ctx().send_to_ct(
+              ctx.ctx(io_ctx).send_to_ct(
                 registered_query.clone().into_ct().node_path,
                 CommonQuery::CancelQuery(msg::CancelQuery {
                   query_id: registered_query.query_id.clone(),
@@ -604,14 +620,18 @@ pub enum QueryPlanningAction {
 }
 
 impl QueryPlanningES {
-  pub fn start<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) -> QueryPlanningAction {
+  pub fn start<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
+  ) -> QueryPlanningAction {
     debug_assert!(matches!(&self.state, QueryPlanningS::Start));
 
     // First, we see if all TablePaths are in the GossipData
     for table_path in collect_table_paths(&self.sql_query) {
       if ctx.gossip.table_generation.static_read(&table_path, self.timestamp).is_none() {
         // We must go to MasterQueryPlanning.
-        return self.perform_master_query_planning(ctx);
+        return self.perform_master_query_planning(ctx, io_ctx);
       }
     }
 
@@ -665,7 +685,7 @@ impl QueryPlanningES {
 
     if !required_cols_exist {
       // We must go to MasterQueryPlanning.
-      return self.perform_master_query_planning(ctx);
+      return self.perform_master_query_planning(ctx, io_ctx);
     }
 
     // Next, we run the FrozenColUsageAlgorithm
@@ -679,22 +699,23 @@ impl QueryPlanningES {
     // If there is an External Column at the top-level, we must go to MasterQueryPlanning.
     for (_, (_, child)) in &col_usage_nodes {
       if !child.external_cols.is_empty() {
-        return self.perform_master_query_planning(ctx);
+        return self.perform_master_query_planning(ctx, io_ctx);
       }
     }
 
     // If we get here, the QueryPlan is valid, so we return it and go to Done.
-    self.finish_planning(ctx, col_usage_nodes)
+    self.finish_planning(ctx, io_ctx, col_usage_nodes)
   }
 
   /// Send a `PerformMasterQueryPlanning` and go to the `MasterQueryReplanning` state.
-  fn perform_master_query_planning<T: IOTypes>(
+  fn perform_master_query_planning<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
   ) -> QueryPlanningAction {
-    let master_query_id = mk_qid(&mut ctx.rand);
+    let master_query_id = mk_qid(io_ctx.rand());
     let sender_path = ctx.mk_query_path(self.query_id.clone());
-    ctx.ctx().send_to_master(msg::MasterRemotePayload::PerformMasterQueryPlanning(
+    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::PerformMasterQueryPlanning(
       msg::PerformMasterQueryPlanning {
         sender_path,
         query_id: master_query_id.clone(),
@@ -710,9 +731,10 @@ impl QueryPlanningES {
 
   /// All verifications of `gossip` have been complete and we construct a
   /// `CoordQueryPlan` before going to the `Done` state.
-  fn finish_planning<T: IOTypes>(
+  fn finish_planning<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
   ) -> QueryPlanningAction {
     let all_tier_maps = compute_all_tier_maps(&self.sql_query);
@@ -721,7 +743,7 @@ impl QueryPlanningES {
     self.state = QueryPlanningS::Done;
     QueryPlanningAction::Success(CoordQueryPlan {
       all_tier_maps,
-      query_leader_map: self.compute_query_leader_map(ctx, &table_location_map),
+      query_leader_map: self.compute_query_leader_map(ctx, io_ctx, &table_location_map),
       table_location_map,
       extra_req_cols,
       col_usage_nodes,
@@ -729,17 +751,18 @@ impl QueryPlanningES {
   }
 
   /// Compute a query_leader_map using the `TablePath`s in `table_location_map`.
-  fn compute_query_leader_map<T: IOTypes>(
+  fn compute_query_leader_map<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     table_location_map: &HashMap<TablePath, Gen>,
   ) -> HashMap<SlaveGroupId, LeadershipId> {
     let mut query_leader_map = HashMap::<SlaveGroupId, LeadershipId>::new();
     for (table_path, gen) in table_location_map {
       let shards = ctx.gossip.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap();
       for (_, tid) in shards.clone() {
-        let sid = ctx.ctx().gossip.tablet_address_config.get(&tid).unwrap().clone();
-        let lid = ctx.ctx().leader_map.get(&sid.to_gid()).unwrap();
+        let sid = ctx.ctx(io_ctx).gossip.tablet_address_config.get(&tid).unwrap().clone();
+        let lid = ctx.ctx(io_ctx).leader_map.get(&sid.to_gid()).unwrap();
         query_leader_map.insert(sid.clone(), lid.clone());
       }
     }
@@ -747,9 +770,10 @@ impl QueryPlanningES {
   }
 
   /// Handles the QueryPlan constructed by the Master.
-  pub fn handle_master_query_plan<T: IOTypes>(
+  pub fn handle_master_query_plan<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     master_qid: QueryId,
     result: msg::MasteryQueryPlanningResult,
   ) -> QueryPlanningAction {
@@ -773,8 +797,8 @@ impl QueryPlanningES {
         for table_path in collect_table_paths(&self.sql_query) {
           if ctx.gossip.table_generation.static_read(&table_path, self.timestamp).is_none() {
             // We send a MasterGossipRequest and go to GossipDataWaiting.
-            let sender_path = ctx.ctx().mk_this_query_path(self.query_id.clone());
-            ctx.ctx().send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+            let sender_path = ctx.ctx(io_ctx).mk_this_query_path(self.query_id.clone());
+            ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
               msg::MasterGossipRequest { sender_path },
             ));
 
@@ -784,7 +808,7 @@ impl QueryPlanningES {
         }
 
         // Otherwise, we can finish QueryPlanning and return a Success.
-        self.finish_master_query_plan(ctx, master_query_plan)
+        self.finish_master_query_plan(ctx, io_ctx, master_query_plan)
       }
       MasteryQueryPlanningResult::TablePathDNE(_)
       | MasteryQueryPlanningResult::InvalidUpdate
@@ -797,9 +821,10 @@ impl QueryPlanningES {
   }
 
   /// Handles the GossipData changing.
-  pub fn gossip_data_changed<T: IOTypes>(
+  pub fn gossip_data_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
   ) -> QueryPlanningAction {
     if let QueryPlanningS::GossipDataWaiting(last_state) = &self.state {
       // We must check again whether the GossipData is new enough, since this is called
@@ -813,22 +838,27 @@ impl QueryPlanningES {
       }
 
       // We have a recent enough GossipData, so we finish QueryPlanning and return Success.
-      self.finish_master_query_plan(ctx, last_state.master_query_plan.clone())
+      self.finish_master_query_plan(ctx, io_ctx, last_state.master_query_plan.clone())
     } else {
       QueryPlanningAction::Wait
     }
   }
 
   /// Here, we have verified all `TablePath`s are present in the GossipData.
-  fn finish_master_query_plan<T: IOTypes>(
+  fn finish_master_query_plan<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     master_query_plan: msg::MasterQueryPlan,
   ) -> QueryPlanningAction {
     self.state = QueryPlanningS::Done;
     QueryPlanningAction::Success(CoordQueryPlan {
       all_tier_maps: master_query_plan.all_tier_maps,
-      query_leader_map: self.compute_query_leader_map(ctx, &master_query_plan.table_location_map),
+      query_leader_map: self.compute_query_leader_map(
+        ctx,
+        io_ctx,
+        &master_query_plan.table_location_map,
+      ),
       table_location_map: master_query_plan.table_location_map,
       extra_req_cols: master_query_plan.extra_req_cols,
       col_usage_nodes: master_query_plan.col_usage_nodes,
@@ -836,24 +866,25 @@ impl QueryPlanningES {
   }
 
   /// This is called when there is a Leadership change in the Master PaxosGroup.
-  pub fn master_leader_changed<T: IOTypes>(
+  pub fn master_leader_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CoordContext<T>,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
   ) -> QueryPlanningAction {
     if let QueryPlanningS::MasterQueryPlanning(_) = &self.state {
       // This means we have to resend the PerformMasterQueryPlanning to the new Leader.
-      self.perform_master_query_planning(ctx)
+      self.perform_master_query_planning(ctx, io_ctx)
     } else {
       QueryPlanningAction::Wait
     }
   }
 
   /// This Exits and Cleans up this QueryReplanningES
-  fn exit_and_clean_up<T: IOTypes>(&mut self, ctx: &mut CoordContext<T>) {
+  fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, ctx: &mut CoordContext, io_ctx: &mut IO) {
     match &self.state {
       QueryPlanningS::Start => {}
       QueryPlanningS::MasterQueryPlanning(MasterQueryPlanning { master_query_id }) => {
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::CancelMasterQueryPlanning(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CancelMasterQueryPlanning(
           msg::CancelMasterQueryPlanning { query_id: master_query_id.clone() },
         ));
       }

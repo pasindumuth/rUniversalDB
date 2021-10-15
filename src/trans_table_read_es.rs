@@ -2,7 +2,7 @@ use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, nodes_external_cols,
   nodes_external_trans_tables, ColUsagePlanner,
 };
-use crate::common::{lookup_pos, mk_qid, IOTypes, NetworkOut, OrigP, QueryESResult, QueryPlan};
+use crate::common::{lookup_pos, mk_qid, CoreIOCtx, OrigP, QueryESResult, QueryPlan};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRExecutionS, GRQueryConstructorView, GRQueryES, GRQueryPlan};
 use crate::model::common::{
@@ -139,18 +139,18 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
 // -----------------------------------------------------------------------------------------------
 
 impl TransTableReadES {
-  pub fn start<T: IOTypes, SourceT: TransTableSource>(
+  pub fn start<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut SlaveServerContext<T>,
+    ctx: &mut SlaveServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     self.start_trans_table_read_es(ctx, trans_table_source)
   }
 
   /// Constructs and returns subqueries.
-  fn start_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
+  fn start_trans_table_read_es<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut SlaveServerContext<T>,
+    ctx: &mut SlaveServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     assert!(matches!(&self.state, &TransExecutionS::Start));
@@ -182,7 +182,7 @@ impl TransTableReadES {
     let mut gr_query_ess = Vec::<GRQueryES>::new();
     for (subquery_idx, child_context) in child_contexts.into_iter().enumerate() {
       gr_query_ess.push(subquery_view.mk_gr_query_es(
-        mk_qid(&mut ctx.rand),
+        mk_qid(ctx.io_ctx.rand()),
         Rc::new(child_context),
         subquery_idx,
       ));
@@ -217,9 +217,9 @@ impl TransTableReadES {
   /// This is can be called both for if a subquery fails, or if there is a LateralError
   /// due to the ES owning the TransTable disappears. This simply responds to the sender
   /// and Exits and Clean Ups this ES.
-  pub fn handle_internal_query_error<T: IOTypes>(
+  pub fn handle_internal_query_error<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut SlaveServerContext<T>,
+    ctx: &mut SlaveServerContext<IO>,
     query_error: msg::QueryError,
   ) -> TransTableAction {
     self.exit_and_clean_up(ctx);
@@ -227,9 +227,9 @@ impl TransTableReadES {
   }
 
   /// Handles a Subquery completing
-  pub fn handle_subquery_done<T: IOTypes, SourceT: TransTableSource>(
+  pub fn handle_subquery_done<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut SlaveServerContext<T>,
+    ctx: &mut SlaveServerContext<IO>,
     trans_table_source: &SourceT,
     subquery_id: QueryId,
     subquery_new_rms: HashSet<TQueryPath>,
@@ -258,9 +258,9 @@ impl TransTableReadES {
   }
 
   /// Handles a ES finishing with all subqueries results in.
-  fn finish_trans_table_read_es<T: IOTypes, SourceT: TransTableSource>(
+  fn finish_trans_table_read_es<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    _: &mut SlaveServerContext<T>,
+    _: &mut SlaveServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     let executing_state = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
@@ -346,7 +346,7 @@ impl TransTableReadES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<T: IOTypes>(&mut self, _: &mut SlaveServerContext<T>) {
+  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut SlaveServerContext<IO>) {
     self.state = TransExecutionS::Done
   }
 

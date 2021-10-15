@@ -6,10 +6,9 @@ use crate::col_usage::{
 };
 use crate::common::{
   btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
-  mk_qid, remove_item, Clock, ColBound, GossipData, IOTypes, KeyBound, NetworkOut, OrigP,
-  PolyColBound, SingleBound, TMStatus, TableRegion, TableSchema,
+  mk_qid, remove_item, ColBound, CoreIOCtx, GossipData, KeyBound, OrigP, PolyColBound,
+  RemoteLeaderChangedPLm, SingleBound, TMStatus, TableRegion, TableSchema,
 };
-use crate::common::{RemoteLeaderChangedPLm, SlaveForwardOut};
 use crate::drop_table_es::DropTableAction;
 use crate::drop_table_es::DropTableES;
 use crate::expression::{
@@ -50,6 +49,7 @@ use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{
   TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
 };
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -571,19 +571,13 @@ pub struct TabletCreateHelper {
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub struct TabletState<T: IOTypes> {
-  pub tablet_context: TabletContext<T>,
+pub struct TabletState {
+  pub tablet_context: TabletContext,
   pub statuses: Statuses,
 }
 
 #[derive(Debug)]
-pub struct TabletContext<T: IOTypes> {
-  /// IO Objects.
-  pub rand: T::RngCoreT,
-  pub clock: T::ClockT,
-  pub network_output: T::NetworkOutT,
-  pub slave_forward_output: T::SlaveForwardOutT,
-
+pub struct TabletContext {
   /// Metadata
   pub this_slave_group_id: SlaveGroupId,
   pub this_tablet_group_id: TabletGroupId,
@@ -625,83 +619,19 @@ pub struct TabletContext<T: IOTypes> {
   pub tablet_bundle: TabletBundle,
 }
 
-impl<T: IOTypes> TabletState<T> {
-  pub fn new(
-    rand: T::RngCoreT,
-    clock: T::ClockT,
-    network_output: T::NetworkOutT,
-    slave_forward_output: T::SlaveForwardOutT,
-    gossip: Arc<GossipData>,
-    this_slave_group_id: SlaveGroupId,
-    this_tablet_group_id: TabletGroupId,
-  ) -> TabletState<T> {
-    // TODO fix this logic
-    let ((this_table_path, _), this_table_key_range) = (|| {
-      // Search the sharding config, which should contain this data.
-      for (path, shards) in &gossip.sharding_config {
-        for (key_range, tid) in shards {
-          if tid == &this_tablet_group_id {
-            return (path.clone(), key_range.clone());
-          }
-        }
-      }
-      panic!();
-    })();
-    let table_schema = gossip.db_schema.get(&(this_table_path.clone(), Gen(0))).unwrap().clone();
-    TabletState {
-      tablet_context: TabletContext::<T> {
-        rand,
-        clock,
-        network_output,
-        slave_forward_output,
-        this_slave_group_id,
-        this_tablet_group_id: this_tablet_group_id.clone(),
-        sub_node_path: CTSubNodePath::Tablet(this_tablet_group_id),
-        this_eid: EndpointId("".to_string()),
-        gossip,
-        leader_map: Default::default(),
-        storage: GenericMVTable::new(),
-        this_table_path,
-        this_table_key_range,
-        table_schema,
-        verifying_writes: Default::default(),
-        inserting_prepared_writes: Default::default(),
-        prepared_writes: Default::default(),
-        committed_writes: Default::default(),
-        waiting_read_protected: Default::default(),
-        inserting_read_protected: Default::default(),
-        read_protected: Default::default(),
-        waiting_locked_cols: Default::default(),
-        inserting_locked_cols: Default::default(),
-        ms_root_query_map: Default::default(),
-        tablet_bundle: vec![],
-      },
-      statuses: Default::default(),
-    }
-  }
-
-  pub fn new2(tablet_context: TabletContext<T>) -> TabletState<T> {
+impl TabletState {
+  pub fn new(tablet_context: TabletContext) -> TabletState {
     TabletState { tablet_context, statuses: Default::default() }
   }
 
-  pub fn handle_input(&mut self, coord_input: TabletForwardMsg) {
-    self.tablet_context.handle_input(&mut self.statuses, coord_input);
+  pub fn handle_input<IO: CoreIOCtx>(&mut self, io_ctx: &mut IO, coord_input: TabletForwardMsg) {
+    self.tablet_context.handle_input(io_ctx, &mut self.statuses, coord_input);
   }
 }
 
-impl<T: IOTypes> TabletContext<T> {
-  pub fn new(
-    rand: T::RngCoreT,
-    clock: T::ClockT,
-    network_output: T::NetworkOutT,
-    slave_forward_output: T::SlaveForwardOutT,
-    helper: TabletCreateHelper,
-  ) -> TabletContext<T> {
-    TabletContext::<T> {
-      rand,
-      clock,
-      network_output,
-      slave_forward_output,
+impl TabletContext {
+  pub fn new(helper: TabletCreateHelper) -> TabletContext {
+    TabletContext {
       this_slave_group_id: helper.this_slave_group_id,
       this_tablet_group_id: helper.this_tablet_group_id.clone(),
       sub_node_path: CTSubNodePath::Tablet(helper.this_tablet_group_id),
@@ -726,11 +656,9 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  pub fn ctx(&mut self) -> SlaveServerContext<T> {
+  pub fn ctx<'a, IO: CoreIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
     SlaveServerContext {
-      rand: &mut self.rand,
-      clock: &mut self.clock,
-      network_output: &mut self.network_output,
+      io_ctx,
       this_slave_group_id: &self.this_slave_group_id,
       sub_node_path: &self.sub_node_path,
       leader_map: &self.leader_map,
@@ -738,7 +666,12 @@ impl<T: IOTypes> TabletContext<T> {
     }
   }
 
-  fn handle_input(&mut self, statuses: &mut Statuses, tablet_input: TabletForwardMsg) {
+  fn handle_input<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    tablet_input: TabletForwardMsg,
+  ) {
     match tablet_input {
       TabletForwardMsg::TabletBundle(bundle) => {
         if self.is_leader() {
@@ -754,7 +687,7 @@ impl<T: IOTypes> TabletContext<T> {
 
                 // Remove RequestedLockedCols and grant GlobalLockedCols
                 let req = self.inserting_locked_cols.remove(&locked_cols.query_id).unwrap();
-                self.grant_global_locked_cols(statuses, req.orig_p, req.query_id);
+                self.grant_global_locked_cols(io_ctx, statuses, req.orig_p, req.query_id);
               }
               TabletPLm::ReadProtected(read_protected) => {
                 let req = self
@@ -772,14 +705,14 @@ impl<T: IOTypes> TabletContext<T> {
                 // Inform the originator.
                 let query_id = req.orig_p.query_id;
                 if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
-                  let action = read.es.global_read_protected(self, req.query_id);
-                  self.handle_read_es_action(statuses, query_id, action);
+                  let action = read.es.global_read_protected(self, io_ctx, req.query_id);
+                  self.handle_read_es_action(io_ctx, statuses, query_id, action);
                 }
               }
               TabletPLm::FinishQueryPrepared(prepared) => {
                 let query_id = prepared.query_id;
                 let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                let action = finish_query_es.handle_prepared_plm(self);
+                let action = finish_query_es.handle_prepared_plm(self, io_ctx);
                 self.handle_finish_query_es_action(statuses, query_id, action);
               }
               TabletPLm::FinishQueryCommitted(committed) => {
@@ -796,37 +729,37 @@ impl<T: IOTypes> TabletContext<T> {
               }
               TabletPLm::AlterTablePrepared(_) => {
                 let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_prepared_plm(self);
+                let action = es.handle_prepared_plm(self, io_ctx);
                 let query_id = es.query_id.clone();
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               TabletPLm::AlterTableCommitted(committed_plm) => {
                 let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_committed_plm(self, committed_plm);
+                let action = es.handle_committed_plm(self, io_ctx, committed_plm);
                 let query_id = es.query_id.clone();
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               TabletPLm::AlterTableAborted(_) => {
                 let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 let query_id = es.query_id.clone();
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               TabletPLm::DropTablePrepared(_) => {
                 let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_prepared_plm(self);
+                let action = es.handle_prepared_plm(self, io_ctx);
                 let query_id = es.query_id.clone();
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
               TabletPLm::DropTableCommitted(committed_plm) => {
                 let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_committed_plm(self, committed_plm);
+                let action = es.handle_committed_plm(self, io_ctx, committed_plm);
                 let query_id = es.query_id.clone();
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
               TabletPLm::DropTableAborted(_) => {
                 let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 let query_id = es.query_id.clone();
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
@@ -834,7 +767,7 @@ impl<T: IOTypes> TabletContext<T> {
           }
 
           // Run the Main Loop
-          self.run_main_loop(statuses);
+          self.run_main_loop(io_ctx, statuses);
 
           // Inform all ESs in WaitingInserting and start inserting a PLm.
           for (_, es) in &mut statuses.finish_query_ess {
@@ -854,7 +787,7 @@ impl<T: IOTypes> TabletContext<T> {
           // Dispatch the TabletBundle for insertion and start a new one.
           let tid = self.this_tablet_group_id.clone();
           let tablet_bundle = std::mem::replace(&mut self.tablet_bundle, Vec::default());
-          self.slave_forward_output.forward(SlaveBackMessage::TabletBundle(tid, tablet_bundle));
+          io_ctx.slave_forward(SlaveBackMessage::TabletBundle(tid, tablet_bundle));
         } else {
           for paxos_log_msg in bundle {
             match paxos_log_msg {
@@ -914,13 +847,13 @@ impl<T: IOTypes> TabletContext<T> {
               }
               TabletPLm::AlterTableCommitted(committed_plm) => {
                 let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_committed_plm(self, committed_plm);
+                let action = es.handle_committed_plm(self, io_ctx, committed_plm);
                 let query_id = es.query_id.clone();
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               TabletPLm::AlterTableAborted(_) => {
                 let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 let query_id = es.query_id.clone();
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
@@ -934,13 +867,13 @@ impl<T: IOTypes> TabletContext<T> {
               }
               TabletPLm::DropTableCommitted(committed_plm) => {
                 let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_committed_plm(self, committed_plm);
+                let action = es.handle_committed_plm(self, io_ctx, committed_plm);
                 let query_id = es.query_id.clone();
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
               TabletPLm::DropTableAborted(_) => {
                 let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 let query_id = es.query_id.clone();
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
@@ -980,12 +913,17 @@ impl<T: IOTypes> TabletContext<T> {
                     },
                   );
 
-                  let action = trans_table.es.start(&mut self.ctx(), &gr_query.es);
-                  self.handle_trans_read_es_action(statuses, perform_query.query_id, action);
+                  let action = trans_table.es.start(&mut self.ctx(io_ctx), &gr_query.es);
+                  self.handle_trans_read_es_action(
+                    io_ctx,
+                    statuses,
+                    perform_query.query_id,
+                    action,
+                  );
                 } else {
                   // This means that the target GRQueryES was deleted, so we send back
                   // an Abort with LateralError.
-                  self.ctx().send_query_error(
+                  self.ctx(io_ctx).send_query_error(
                     perform_query.sender_path,
                     perform_query.query_id,
                     msg::QueryError::LateralError,
@@ -1000,6 +938,7 @@ impl<T: IOTypes> TabletContext<T> {
                   // Here, we create an MSTableReadES.
                   let root_query_path = perform_query.root_query_path;
                   match self.get_msquery_id(
+                    io_ctx,
                     statuses,
                     root_query_path.clone(),
                     query.timestamp,
@@ -1031,12 +970,17 @@ impl<T: IOTypes> TabletContext<T> {
                           },
                         },
                       );
-                      let action = ms_read.es.start(self);
-                      self.handle_ms_read_es_action(statuses, perform_query.query_id, action);
+                      let action = ms_read.es.start(self, io_ctx);
+                      self.handle_ms_read_es_action(
+                        io_ctx,
+                        statuses,
+                        perform_query.query_id,
+                        action,
+                      );
                     }
                     Err(query_error) => {
                       // The MSQueryES couldn't be constructed.
-                      self.ctx().send_query_error(
+                      self.ctx(io_ctx).send_query_error(
                         perform_query.sender_path,
                         perform_query.query_id,
                         query_error,
@@ -1064,8 +1008,8 @@ impl<T: IOTypes> TabletContext<T> {
                       },
                     },
                   );
-                  let action = read.es.start(self);
-                  self.handle_read_es_action(statuses, perform_query.query_id, action);
+                  let action = read.es.start(self, io_ctx);
+                  self.handle_read_es_action(io_ctx, statuses, perform_query.query_id, action);
                 }
               }
               msg::GeneralQuery::UpdateQuery(query) => {
@@ -1078,6 +1022,7 @@ impl<T: IOTypes> TabletContext<T> {
                 // Here, we create an MSTableWriteES.
                 let root_query_path = perform_query.root_query_path;
                 match self.get_msquery_id(
+                  io_ctx,
                   statuses,
                   root_query_path.clone(),
                   query.timestamp,
@@ -1117,12 +1062,17 @@ impl<T: IOTypes> TabletContext<T> {
                         },
                       },
                     );
-                    let action = ms_write.es.start(self);
-                    self.handle_ms_write_es_action(statuses, perform_query.query_id, action);
+                    let action = ms_write.es.start(self, io_ctx);
+                    self.handle_ms_write_es_action(
+                      io_ctx,
+                      statuses,
+                      perform_query.query_id,
+                      action,
+                    );
                   }
                   Err(query_error) => {
                     // The MSQueryES couldn't be constructed.
-                    self.ctx().send_query_error(
+                    self.ctx(io_ctx).send_query_error(
                       perform_query.sender_path,
                       perform_query.query_id,
                       query_error,
@@ -1133,19 +1083,19 @@ impl<T: IOTypes> TabletContext<T> {
             }
           }
           msg::TabletMessage::CancelQuery(cancel_query) => {
-            self.exit_and_clean_up(statuses, cancel_query.query_id);
+            self.exit_and_clean_up(io_ctx, statuses, cancel_query.query_id);
           }
           msg::TabletMessage::QueryAborted(query_aborted) => {
-            self.handle_query_aborted(statuses, query_aborted);
+            self.handle_query_aborted(io_ctx, statuses, query_aborted);
           }
           msg::TabletMessage::QuerySuccess(query_success) => {
-            self.handle_query_success(statuses, query_success);
+            self.handle_query_success(io_ctx, statuses, query_success);
           }
           msg::TabletMessage::FinishQueryPrepare(prepare) => {
             let query_id = prepare.query_id.clone();
             if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
               // If a FinishQueryES already exists, we route the prepare message there.
-              let action = finish_query_es.handle_prepare(self);
+              let action = finish_query_es.handle_prepare(self, io_ctx);
               self.handle_finish_query_es_action(statuses, query_id, action);
             } else {
               if let Some(ms_query_es) = statuses.ms_query_ess.remove(&query_id) {
@@ -1184,7 +1134,7 @@ impl<T: IOTypes> TabletContext<T> {
               } else {
                 // The MSQueryES might not be present because of a DeadlockSafetyWriteAbort.
                 let this_query_path = self.mk_query_path(prepare.query_id);
-                self.ctx().send_to_c(
+                self.ctx(io_ctx).send_to_c(
                   prepare.tm.node_path,
                   msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
                     return_qid: prepare.tm.query_id,
@@ -1210,11 +1160,11 @@ impl<T: IOTypes> TabletContext<T> {
           msg::TabletMessage::FinishQueryCheckPrepared(check_prepared) => {
             let query_id = check_prepared.query_id.clone();
             if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
-              let action = finish_query_es.handle_check_prepared(self, check_prepared);
+              let action = finish_query_es.handle_check_prepared(self, io_ctx, check_prepared);
               self.handle_finish_query_es_action(statuses, query_id, action);
             } else {
               let this_query_path = self.mk_query_path(check_prepared.query_id);
-              self.ctx().send_to_c(
+              self.ctx(io_ctx).send_to_c(
                 check_prepared.tm.node_path,
                 msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
                   return_qid: check_prepared.tm.query_id,
@@ -1232,11 +1182,11 @@ impl<T: IOTypes> TabletContext<T> {
           }
           msg::TabletMessage::AlterTablePrepare(prepare) => {
             if let DDLES::Alter(es) = &mut statuses.ddl_es {
-              es.handle_prepare(self);
+              es.handle_prepare(self, io_ctx);
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Construct the `preparing_timestamp`
-              let mut timestamp = self.clock.now();
+              let mut timestamp = io_ctx.now();
               timestamp =
                 max(timestamp, self.table_schema.val_cols.get_lat(&prepare.alter_op.col_name));
               for (_, req) in
@@ -1260,12 +1210,12 @@ impl<T: IOTypes> TabletContext<T> {
           }
           msg::TabletMessage::AlterTableAbort(abort) => {
             if let DDLES::Alter(es) = &mut statuses.ddl_es {
-              es.handle_abort(self);
+              es.handle_abort(self, io_ctx);
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
               let rm = self.mk_node_path();
-              self.ctx().send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
                 msg::AlterTableCloseConfirm { query_id: abort.query_id, rm },
               ));
             }
@@ -1277,18 +1227,18 @@ impl<T: IOTypes> TabletContext<T> {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
               let rm = self.mk_node_path();
-              self.ctx().send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
                 msg::AlterTableCloseConfirm { query_id: commit.query_id, rm },
               ));
             }
           }
           msg::TabletMessage::DropTablePrepare(prepare) => {
             if let DDLES::Drop(es) = &mut statuses.ddl_es {
-              es.handle_prepare(self);
+              es.handle_prepare(self, io_ctx);
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Construct the `preparing_timestamp`
-              let mut timestamp = self.clock.now();
+              let mut timestamp = io_ctx.now();
               timestamp = max(timestamp, self.table_schema.val_cols.get_latest_lat());
               for (_, req) in
                 self.waiting_locked_cols.iter().chain(self.inserting_locked_cols.iter())
@@ -1308,12 +1258,12 @@ impl<T: IOTypes> TabletContext<T> {
           }
           msg::TabletMessage::DropTableAbort(abort) => {
             if let DDLES::Drop(es) = &mut statuses.ddl_es {
-              es.handle_abort(self);
+              es.handle_abort(self, io_ctx);
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
               let rm = self.mk_node_path();
-              self.ctx().send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
                 msg::DropTableCloseConfirm { query_id: abort.query_id, rm },
               ));
             }
@@ -1325,7 +1275,7 @@ impl<T: IOTypes> TabletContext<T> {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
               let rm = self.mk_node_path();
-              self.ctx().send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
                 msg::DropTableCloseConfirm { query_id: commit.query_id, rm },
               ));
             }
@@ -1333,7 +1283,7 @@ impl<T: IOTypes> TabletContext<T> {
         }
 
         // Run Main Loop
-        self.run_main_loop(statuses);
+        self.run_main_loop(io_ctx, statuses);
       }
       TabletForwardMsg::GossipData(gossip) => {
         self.gossip = gossip;
@@ -1342,26 +1292,26 @@ impl<T: IOTypes> TabletContext<T> {
         let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
         for query_id in query_ids {
           let read = statuses.table_read_ess.get_mut(&query_id).unwrap();
-          let action = read.es.gossip_data_changed(self);
-          self.handle_read_es_action(statuses, query_id, action);
+          let action = read.es.gossip_data_changed(self, io_ctx);
+          self.handle_read_es_action(io_ctx, statuses, query_id, action);
         }
 
         let query_ids: Vec<QueryId> = statuses.ms_table_read_ess.keys().cloned().collect();
         for query_id in query_ids {
           let ms_read = statuses.ms_table_read_ess.get_mut(&query_id).unwrap();
-          let action = ms_read.es.gossip_data_changed(self);
-          self.handle_ms_read_es_action(statuses, query_id, action);
+          let action = ms_read.es.gossip_data_changed(self, io_ctx);
+          self.handle_ms_read_es_action(io_ctx, statuses, query_id, action);
         }
 
         let query_ids: Vec<QueryId> = statuses.ms_table_write_ess.keys().cloned().collect();
         for query_id in query_ids {
           let ms_write = statuses.ms_table_write_ess.get_mut(&query_id).unwrap();
-          let action = ms_write.es.gossip_data_changed(self);
-          self.handle_ms_write_es_action(statuses, query_id, action);
+          let action = ms_write.es.gossip_data_changed(self, io_ctx);
+          self.handle_ms_write_es_action(io_ctx, statuses, query_id, action);
         }
 
         // Run Main Loop
-        self.run_main_loop(statuses);
+        self.run_main_loop(io_ctx, statuses);
       }
       TabletForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
         let gid = remote_leader_changed.gid.clone();
@@ -1373,7 +1323,7 @@ impl<T: IOTypes> TabletContext<T> {
         for query_id in query_ids {
           let read = statuses.table_read_ess.get_mut(&query_id).unwrap();
           if read.sender_gid() == gid {
-            self.exit_and_clean_up(statuses, query_id);
+            self.exit_and_clean_up(io_ctx, statuses, query_id);
           }
         }
 
@@ -1381,7 +1331,7 @@ impl<T: IOTypes> TabletContext<T> {
         for query_id in query_ids {
           let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
           if trans_read.sender_gid() == gid {
-            self.exit_and_clean_up(statuses, query_id);
+            self.exit_and_clean_up(io_ctx, statuses, query_id);
           }
         }
 
@@ -1389,7 +1339,7 @@ impl<T: IOTypes> TabletContext<T> {
         for query_id in query_ids {
           let ms_read = statuses.ms_table_read_ess.get_mut(&query_id).unwrap();
           if ms_read.sender_gid() == gid {
-            self.exit_and_clean_up(statuses, query_id);
+            self.exit_and_clean_up(io_ctx, statuses, query_id);
           }
         }
 
@@ -1397,7 +1347,7 @@ impl<T: IOTypes> TabletContext<T> {
         for query_id in query_ids {
           let ms_write = statuses.ms_table_write_ess.get_mut(&query_id).unwrap();
           if ms_write.sender_gid() == gid {
-            self.exit_and_clean_up(statuses, query_id);
+            self.exit_and_clean_up(io_ctx, statuses, query_id);
           }
         }
 
@@ -1412,13 +1362,13 @@ impl<T: IOTypes> TabletContext<T> {
                 // had contacted, so that RM will surely not respond. Thus we abort this
                 // whole TMStatus and inform the GRQueryES so that it can retry the stage.
                 let gr_query_id = tm_status.orig_p.query_id.clone();
-                self.exit_and_clean_up(statuses, query_id.clone());
+                self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
 
                 // Inform the GRQueryES
                 let gr_query = statuses.gr_query_ess.get_mut(&query_id).unwrap();
                 remove_item(&mut gr_query.child_queries, &query_id);
-                let action = gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx());
-                self.handle_gr_query_es_action(statuses, gr_query_id, action);
+                let action = gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx(io_ctx));
+                self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
               }
             }
           }
@@ -1430,7 +1380,7 @@ impl<T: IOTypes> TabletContext<T> {
             let root_sid = &ms_query_es.root_query_path.node_path.sid;
             if root_sid == &sid && ms_query_es.root_lid < lid {
               // Here, the root PaxosNode is dead, so we simply ECU the MSQueryES.
-              self.exit_and_clean_up(statuses, query_id);
+              self.exit_and_clean_up(io_ctx, statuses, query_id);
             }
           }
 
@@ -1438,12 +1388,13 @@ impl<T: IOTypes> TabletContext<T> {
           let query_ids: Vec<QueryId> = statuses.finish_query_ess.keys().cloned().collect();
           for query_id in query_ids {
             let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-            let action = finish_query_es.remote_leader_changed(self, remote_leader_changed.clone());
+            let action =
+              finish_query_es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
             self.handle_finish_query_es_action(statuses, query_id.clone(), action);
           }
 
           // Run Main Loop
-          self.run_main_loop(statuses);
+          self.run_main_loop(io_ctx, statuses);
         }
       }
       TabletForwardMsg::LeaderChanged(leader_changed) => {
@@ -1454,7 +1405,7 @@ impl<T: IOTypes> TabletContext<T> {
         let query_ids: Vec<QueryId> = statuses.finish_query_ess.keys().cloned().collect();
         for query_id in query_ids {
           let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-          let action = finish_query_es.leader_changed(self);
+          let action = finish_query_es.leader_changed(self, io_ctx);
           self.handle_finish_query_es_action(statuses, query_id.clone(), action);
         }
 
@@ -1501,8 +1452,9 @@ impl<T: IOTypes> TabletContext<T> {
   /// Checks if the MSQueryES for `root_query_id` already exists, returning its
   /// `QueryId` if so. If not, we create an MSQueryES (populating `verifying_writes`,
   /// sending `RegisterQuery`, etc).
-  fn get_msquery_id(
+  fn get_msquery_id<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     root_query_path: CQueryPath,
     timestamp: Timestamp,
@@ -1523,7 +1475,7 @@ impl<T: IOTypes> TabletContext<T> {
       return Err(msg::QueryError::TimestampConflict);
     }
 
-    let ms_query_id = mk_qid(&mut self.rand);
+    let ms_query_id = mk_qid(io_ctx.rand());
 
     // We check that the original Leadership of root_query_path is not dead,
     // returning a QueryError if so.
@@ -1535,7 +1487,7 @@ impl<T: IOTypes> TabletContext<T> {
 
     // Otherwise, send a register message back to the root.
     let ms_query_path = self.mk_query_path(ms_query_id.clone());
-    self.ctx().send_to_c_lid(
+    self.ctx(io_ctx).send_to_c_lid(
       root_query_path.node_path.clone(),
       msg::CoordMessage::RegisterQuery(msg::RegisterQuery {
         root_query_id: root_query_id.clone(),
@@ -1576,13 +1528,14 @@ impl<T: IOTypes> TabletContext<T> {
 
   /// Adds the following triple into `waiting_locked_cols`. Here, `orig_p` is the origiator
   /// who should get the locking result.
-  pub fn add_requested_locked_columns(
+  pub fn add_requested_locked_columns<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     orig_p: OrigP,
     timestamp: Timestamp,
     cols: Vec<ColName>,
   ) -> QueryId {
-    let locked_cols_qid = mk_qid(&mut self.rand);
+    let locked_cols_qid = mk_qid(io_ctx.rand());
     self.waiting_locked_cols.insert(
       locked_cols_qid.clone(),
       RequestedLockedCols { query_id: locked_cols_qid.clone(), timestamp, cols, orig_p },
@@ -1710,12 +1663,16 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   // The Main Loop
-  fn run_main_loop(&mut self, statuses: &mut Statuses) {
-    while !self.run_main_loop_iteration(statuses) {}
+  fn run_main_loop<IO: CoreIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
+    while !self.run_main_loop_iteration(io_ctx, statuses) {}
   }
 
   /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
-  fn run_main_loop_iteration(&mut self, statuses: &mut Statuses) -> bool {
+  fn run_main_loop_iteration<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+  ) -> bool {
     // First, we see if we can satisfy Column Locking
 
     // Process `waiting_locked_cols`
@@ -1735,7 +1692,7 @@ impl<T: IOTypes> TabletContext<T> {
         let orig_p = req.orig_p.clone();
         let query_id = req.query_id.clone();
         self.waiting_locked_cols.remove(&query_id);
-        self.grant_global_locked_cols(statuses, orig_p, query_id);
+        self.grant_global_locked_cols(io_ctx, statuses, orig_p, query_id);
         return true;
       }
 
@@ -1745,7 +1702,7 @@ impl<T: IOTypes> TabletContext<T> {
         DDLES::None => {
           // Grant LocalLockedCols
           let query_id = req.query_id.clone();
-          self.grant_local_locked_cols(statuses, query_id);
+          self.grant_local_locked_cols(io_ctx, statuses, query_id);
           return true;
         }
         DDLES::Alter(es) => {
@@ -1758,7 +1715,7 @@ impl<T: IOTypes> TabletContext<T> {
           if !conflicts {
             // Grant LocalLockedCols
             let query_id = req.query_id.clone();
-            self.grant_local_locked_cols(statuses, query_id);
+            self.grant_local_locked_cols(io_ctx, statuses, query_id);
             return true;
           }
         }
@@ -1766,7 +1723,7 @@ impl<T: IOTypes> TabletContext<T> {
           if req.timestamp < es.prepared_timestamp {
             // Grant LocalLockedCols
             let query_id = req.query_id.clone();
-            self.grant_local_locked_cols(statuses, query_id);
+            self.grant_local_locked_cols(io_ctx, statuses, query_id);
             return true;
           }
         }
@@ -1774,13 +1731,13 @@ impl<T: IOTypes> TabletContext<T> {
           if &req.timestamp < dropped_timestamp {
             // Grant LocalLockedCols
             let query_id = req.query_id.clone();
-            self.grant_local_locked_cols(statuses, query_id);
+            self.grant_local_locked_cols(io_ctx, statuses, query_id);
           } else {
             // Grant TableDropped
             let orig_p = req.orig_p.clone();
             let query_id = req.query_id.clone();
             self.waiting_locked_cols.remove(&query_id);
-            self.grant_table_dropped(statuses, orig_p);
+            self.grant_table_dropped(io_ctx, statuses, orig_p);
           }
           return true;
         }
@@ -1816,13 +1773,14 @@ impl<T: IOTypes> TabletContext<T> {
       let bound = (Bound::Unbounded, Bound::Excluded(first_write_timestamp));
       for (timestamp, set) in self.waiting_read_protected.range(bound) {
         let protect_request = set.first().unwrap().clone();
-        self.grant_local_read_protected(statuses, *timestamp, protect_request);
+        self.grant_local_read_protected(io_ctx, statuses, *timestamp, protect_request);
         return true;
       }
 
       // Next, process all `m_read_protected`s for the first `verifying_write`
       for protect_request in &verifying_write.m_waiting_read_protected {
         self.grant_m_local_read_protected(
+          io_ctx,
           statuses,
           *first_write_timestamp,
           protect_request.clone(),
@@ -1844,7 +1802,12 @@ impl<T: IOTypes> TabletContext<T> {
         // Process `m_read_protected`
         for protect_request in &verifying_write.m_waiting_read_protected {
           if !does_intersect(&protect_request.read_region, &cum_write_regions) {
-            self.grant_m_local_read_protected(statuses, *cur_timestamp, protect_request.clone());
+            self.grant_m_local_read_protected(
+              io_ctx,
+              statuses,
+              *cur_timestamp,
+              protect_request.clone(),
+            );
             return true;
           }
         }
@@ -1854,7 +1817,12 @@ impl<T: IOTypes> TabletContext<T> {
         for (timestamp, set) in self.waiting_read_protected.range(bound) {
           for protect_request in set {
             if !does_intersect(&protect_request.read_region, &cum_write_regions) {
-              self.grant_local_read_protected(statuses, *timestamp, protect_request.clone());
+              self.grant_local_read_protected(
+                io_ctx,
+                statuses,
+                *timestamp,
+                protect_request.clone(),
+              );
               return true;
             }
           }
@@ -1872,7 +1840,7 @@ impl<T: IOTypes> TabletContext<T> {
       for (timestamp, set) in self.waiting_read_protected.range(bound) {
         for protect_request in set {
           if !does_intersect(&protect_request.read_region, &cum_write_regions) {
-            self.grant_local_read_protected(statuses, *timestamp, protect_request.clone());
+            self.grant_local_read_protected(io_ctx, statuses, *timestamp, protect_request.clone());
             return true;
           }
         }
@@ -1880,7 +1848,7 @@ impl<T: IOTypes> TabletContext<T> {
     } else {
       for (timestamp, set) in &self.waiting_read_protected {
         for protect_request in set {
-          self.grant_local_read_protected(statuses, *timestamp, protect_request.clone());
+          self.grant_local_read_protected(io_ctx, statuses, *timestamp, protect_request.clone());
           return true;
         }
       }
@@ -1891,7 +1859,12 @@ impl<T: IOTypes> TabletContext<T> {
       if let Some(verifying_write) = self.verifying_writes.get(timestamp) {
         for protect_request in set {
           if does_intersect(&protect_request.read_region, &verifying_write.m_write_protected) {
-            self.deadlock_safety_write_abort(statuses, verifying_write.orig_p.clone(), *timestamp);
+            self.deadlock_safety_write_abort(
+              io_ctx,
+              statuses,
+              verifying_write.orig_p.clone(),
+              *timestamp,
+            );
             return true;
           }
         }
@@ -1903,7 +1876,12 @@ impl<T: IOTypes> TabletContext<T> {
 
   /// Route the column locking to the appropriate ES. Here, `query_id` is that of
   /// the `waiting_locked_cols` that can be moved forward.
-  fn grant_local_locked_cols(&mut self, statuses: &mut Statuses, locked_cols_qid: QueryId) {
+  fn grant_local_locked_cols<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    locked_cols_qid: QueryId,
+  ) {
     // Move the RequestedLockedCols to `inserting_*`
     let req = self.waiting_locked_cols.remove(&locked_cols_qid).unwrap();
     self.inserting_locked_cols.insert(locked_cols_qid.clone(), req.clone());
@@ -1917,22 +1895,23 @@ impl<T: IOTypes> TabletContext<T> {
     let query_id = req.orig_p.query_id;
     if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
-      let action = read.es.local_locked_cols(self, locked_cols_qid);
-      self.handle_read_es_action(statuses, query_id, action);
+      let action = read.es.local_locked_cols(self, io_ctx, locked_cols_qid);
+      self.handle_read_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
       // MSTableWriteES
-      let action = ms_write.es.local_locked_cols(self, locked_cols_qid);
-      self.handle_ms_write_es_action(statuses, query_id, action);
+      let action = ms_write.es.local_locked_cols(self, io_ctx, locked_cols_qid);
+      self.handle_ms_write_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
-      let action = ms_read.es.local_locked_cols(self, locked_cols_qid);
-      self.handle_ms_read_es_action(statuses, query_id, action);
+      let action = ms_read.es.local_locked_cols(self, io_ctx, locked_cols_qid);
+      self.handle_ms_read_es_action(io_ctx, statuses, query_id, action);
     }
   }
 
   /// Route the column locking to the appropriate ES.
-  fn grant_global_locked_cols(
+  fn grant_global_locked_cols<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     orig_p: OrigP,
     locked_cols_qid: QueryId,
@@ -1940,32 +1919,38 @@ impl<T: IOTypes> TabletContext<T> {
     let query_id = orig_p.query_id;
     if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
-      let action = read.es.global_locked_cols(self, locked_cols_qid);
-      self.handle_read_es_action(statuses, query_id, action);
+      let action = read.es.global_locked_cols(self, io_ctx, locked_cols_qid);
+      self.handle_read_es_action(io_ctx, statuses, query_id, action);
     }
   }
 
   /// Route the column locking to the appropriate ES.
-  fn grant_table_dropped(&mut self, statuses: &mut Statuses, orig_p: OrigP) {
+  fn grant_table_dropped<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+  ) {
     let query_id = orig_p.query_id;
     if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
-      let action = read.es.table_dropped(self);
-      self.handle_read_es_action(statuses, query_id, action);
+      let action = read.es.table_dropped(self, io_ctx);
+      self.handle_read_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
       // MSTableWriteES
       let action = ms_write.es.table_dropped(self);
-      self.handle_ms_write_es_action(statuses, query_id, action);
+      self.handle_ms_write_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       let action = ms_read.es.table_dropped(self);
-      self.handle_ms_read_es_action(statuses, query_id, action);
+      self.handle_ms_read_es_action(io_ctx, statuses, query_id, action);
     }
   }
 
   /// Move the ProtectRequest in `waiting_read_protected` forward.
-  fn grant_local_read_protected(
+  fn grant_local_read_protected<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     timestamp: Timestamp,
     protect_request: RequestedReadProtected,
@@ -1982,14 +1967,15 @@ impl<T: IOTypes> TabletContext<T> {
     let query_id = protect_request.orig_p.query_id;
     if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
-      let action = read.es.local_read_protected(self, protect_request.query_id);
-      self.handle_read_es_action(statuses, query_id, action);
+      let action = read.es.local_read_protected(self, io_ctx, protect_request.query_id);
+      self.handle_read_es_action(io_ctx, statuses, query_id, action);
     }
   }
 
   /// Move the ProtectRequest in `m_waiting_read_protected` forward.
-  fn grant_m_local_read_protected(
+  fn grant_m_local_read_protected<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     timestamp: Timestamp,
     protect_request: RequestedReadProtected,
@@ -2004,28 +1990,46 @@ impl<T: IOTypes> TabletContext<T> {
       // MSTableWriteES
       let action = ms_write.es.local_read_protected(
         self,
+        io_ctx,
         statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap(),
         protect_request.query_id,
       );
-      self.handle_ms_write_es_action(statuses, query_id, action);
+      self.handle_ms_write_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       let action = ms_read.es.local_read_protected(
         self,
+        io_ctx,
         statuses.ms_query_ess.get(&ms_read.es.ms_query_id).unwrap(),
         protect_request.query_id,
       );
-      self.handle_ms_read_es_action(statuses, query_id, action);
+      self.handle_ms_read_es_action(io_ctx, statuses, query_id, action);
     }
   }
 
   /// Simply aborts the MSQueryES, which will clean up everything to do with it.
-  fn deadlock_safety_write_abort(&mut self, statuses: &mut Statuses, orig_p: OrigP, _: Timestamp) {
-    self.exit_ms_query_es(statuses, orig_p.query_id, msg::QueryError::DeadlockSafetyAbortion);
+  fn deadlock_safety_write_abort<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    orig_p: OrigP,
+    _: Timestamp,
+  ) {
+    self.exit_ms_query_es(
+      io_ctx,
+      statuses,
+      orig_p.query_id,
+      msg::QueryError::DeadlockSafetyAbortion,
+    );
   }
 
   /// Handles an incoming QuerySuccess message.
-  fn handle_query_success(&mut self, statuses: &mut Statuses, query_success: msg::QuerySuccess) {
+  fn handle_query_success<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    query_success: msg::QuerySuccess,
+  ) {
     let tm_query_id = &query_success.return_qid;
     if let Some(tm_status) = statuses.tm_statuss.get_mut(tm_query_id) {
       // We just add the result of the `query_success` here.
@@ -2046,37 +2050,43 @@ impl<T: IOTypes> TabletContext<T> {
         let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
         remove_item(&mut gr_query.child_queries, tm_query_id);
         let action = gr_query.es.handle_tm_success(
-          &mut self.ctx(),
+          &mut self.ctx(io_ctx),
           tm_query_id.clone(),
           tm_status.new_rms,
           merged_result,
         );
-        self.handle_gr_query_es_action(statuses, gr_query_id, action);
+        self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
       }
     }
   }
 
   /// Handles an incoming QueryAborted message.
-  fn handle_query_aborted(&mut self, statuses: &mut Statuses, query_aborted: msg::QueryAborted) {
+  fn handle_query_aborted<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    query_aborted: msg::QueryAborted,
+  ) {
     let tm_query_id = &query_aborted.return_qid;
     if let Some(tm_status) = statuses.tm_statuss.get(tm_query_id) {
       // We ECU this TMStatus by sending CancelQuery to all remaining participants.
       // Then, we propagate the QueryAborted back to the orig_p.
       let gr_query_id = tm_status.orig_p.query_id.clone();
-      self.exit_and_clean_up(statuses, tm_query_id.clone());
+      self.exit_and_clean_up(io_ctx, statuses, tm_query_id.clone());
 
       // Then, inform the GRQueryES
       let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
       remove_item(&mut gr_query.child_queries, tm_query_id);
-      let action = gr_query.es.handle_tm_aborted(&mut self.ctx(), query_aborted.payload);
-      self.handle_gr_query_es_action(statuses, gr_query_id, action);
+      let action = gr_query.es.handle_tm_aborted(&mut self.ctx(io_ctx), query_aborted.payload);
+      self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
     }
   }
 
   /// This function processes the result of a GRQueryES. Generally, it finds the ESWrapper
   /// to route the results to, cleans up its `child_queries`, and forwards the result.
-  fn handle_gr_query_done(
+  fn handle_gr_query_done<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     orig_p: OrigP,
     subquery_id: QueryId,
@@ -2087,52 +2097,58 @@ impl<T: IOTypes> TabletContext<T> {
     if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
       remove_item(&mut read.child_queries, &subquery_id);
-      let action = read.es.handle_subquery_done(self, subquery_id, subquery_new_rms, result);
-      self.handle_read_es_action(statuses, query_id, action);
+      let action =
+        read.es.handle_subquery_done(self, io_ctx, subquery_id, subquery_new_rms, result);
+      self.handle_read_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
       // TransTableReadES
       let prefix = trans_read.es.location_prefix();
       remove_item(&mut trans_read.child_queries, &subquery_id);
       let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id) {
         trans_read.es.handle_subquery_done(
-          &mut self.ctx(),
+          &mut self.ctx(io_ctx),
           &gr_query.es,
           subquery_id,
           subquery_new_rms,
           result,
         )
       } else {
-        trans_read.es.handle_internal_query_error(&mut self.ctx(), msg::QueryError::LateralError)
+        trans_read
+          .es
+          .handle_internal_query_error(&mut self.ctx(io_ctx), msg::QueryError::LateralError)
       };
-      self.handle_trans_read_es_action(statuses, query_id, action);
+      self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
       // MSTableWriteES
       remove_item(&mut ms_write.child_queries, &subquery_id);
       let action = ms_write.es.handle_subquery_done(
         self,
+        io_ctx,
         statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap(),
         subquery_id,
         subquery_new_rms,
         result,
       );
-      self.handle_ms_write_es_action(statuses, query_id, action);
+      self.handle_ms_write_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       remove_item(&mut ms_read.child_queries, &subquery_id);
       let action = ms_read.es.handle_subquery_done(
         self,
+        io_ctx,
         statuses.ms_query_ess.get(&ms_read.es.ms_query_id).unwrap(),
         subquery_id,
         subquery_new_rms,
         result,
       );
-      self.handle_ms_read_es_action(statuses, query_id, action);
+      self.handle_ms_read_es_action(io_ctx, statuses, query_id, action);
     }
   }
 
   /// This routes the QueryError propagated by a GRQueryES up to the appropriate top-level ES.
-  fn handle_internal_query_error(
+  fn handle_internal_query_error<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     orig_p: OrigP,
     subquery_id: QueryId,
@@ -2142,28 +2158,33 @@ impl<T: IOTypes> TabletContext<T> {
     if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
       // TableReadES
       remove_item(&mut read.child_queries, &subquery_id);
-      let action = read.es.handle_internal_query_error(self, query_error);
-      self.handle_read_es_action(statuses, query_id, action);
+      let action = read.es.handle_internal_query_error(self, io_ctx, query_error);
+      self.handle_read_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
       // TransTableReadES
       remove_item(&mut trans_read.child_queries, &subquery_id);
-      let action = trans_read.es.handle_internal_query_error(&mut self.ctx(), query_error);
-      self.handle_trans_read_es_action(statuses, query_id, action);
+      let action = trans_read.es.handle_internal_query_error(&mut self.ctx(io_ctx), query_error);
+      self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
       // MSTableWriteES
       remove_item(&mut ms_write.child_queries, &subquery_id);
-      let action = ms_write.es.handle_internal_query_error(self, query_error);
-      self.handle_ms_write_es_action(statuses, query_id, action);
+      let action = ms_write.es.handle_internal_query_error(self, io_ctx, query_error);
+      self.handle_ms_write_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       remove_item(&mut ms_read.child_queries, &subquery_id);
-      let action = ms_read.es.handle_internal_query_error(self, query_error);
-      self.handle_ms_read_es_action(statuses, query_id, action);
+      let action = ms_read.es.handle_internal_query_error(self, io_ctx, query_error);
+      self.handle_ms_read_es_action(io_ctx, statuses, query_id, action);
     }
   }
 
   /// Adds the given `gr_query_ess` to `statuses`, executing them one at a time.
-  fn launch_subqueries(&mut self, statuses: &mut Statuses, gr_query_ess: Vec<GRQueryES>) {
+  fn launch_subqueries<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    gr_query_ess: Vec<GRQueryES>,
+  ) {
     /// Here, we have to add in the GRQueryESs and start them.
     let mut subquery_ids = Vec::<QueryId>::new();
     for gr_query_es in gr_query_ess {
@@ -2178,8 +2199,8 @@ impl<T: IOTypes> TabletContext<T> {
       if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
         // Generally, we use an `if` guard in case one child Query aborts the parent and
         // thus all other children. (This won't happen for GRQueryESs, though)
-        let action = gr_query.es.start::<T>(&mut self.ctx());
-        self.handle_gr_query_es_action(statuses, query_id, action);
+        let action = gr_query.es.start(&mut self.ctx(io_ctx));
+        self.handle_gr_query_es_action(io_ctx, statuses, query_id, action);
       }
     }
   }
@@ -2233,8 +2254,9 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   /// Handles the actions produced by a TransTableReadES.
-  fn handle_trans_read_es_action(
+  fn handle_trans_read_es_action<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
     action: TransTableAction,
@@ -2242,7 +2264,7 @@ impl<T: IOTypes> TabletContext<T> {
     match action {
       TransTableAction::Wait => {}
       TransTableAction::SendSubqueries(gr_query_ess) => {
-        self.launch_subqueries(statuses, gr_query_ess);
+        self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
       TransTableAction::Success(success) => {
         // Remove the TableReadESWrapper and respond.
@@ -2250,7 +2272,7 @@ impl<T: IOTypes> TabletContext<T> {
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx().send_to_ct(
+        self.ctx(io_ctx).send_to_ct(
           sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -2266,7 +2288,7 @@ impl<T: IOTypes> TabletContext<T> {
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx().send_to_ct(
+        self.ctx(io_ctx).send_to_ct(
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2274,14 +2296,15 @@ impl<T: IOTypes> TabletContext<T> {
             payload: msg::AbortedData::QueryError(query_error.clone()),
           }),
         );
-        self.exit_all(statuses, trans_read.child_queries)
+        self.exit_all(io_ctx, statuses, trans_read.child_queries)
       }
     }
   }
 
   /// Handles the actions produced by a TableReadES.
-  fn handle_read_es_action(
+  fn handle_read_es_action<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
     action: TableAction,
@@ -2289,7 +2312,7 @@ impl<T: IOTypes> TabletContext<T> {
     match action {
       TableAction::Wait => {}
       TableAction::SendSubqueries(gr_query_ess) => {
-        self.launch_subqueries(statuses, gr_query_ess);
+        self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
       TableAction::Success(success) => {
         // Remove the TableReadESWrapper and respond.
@@ -2297,7 +2320,7 @@ impl<T: IOTypes> TabletContext<T> {
         let sender_path = read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx().send_to_ct(
+        self.ctx(io_ctx).send_to_ct(
           sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -2313,7 +2336,7 @@ impl<T: IOTypes> TabletContext<T> {
         let sender_path = read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx().send_to_ct(
+        self.ctx(io_ctx).send_to_ct(
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2321,15 +2344,16 @@ impl<T: IOTypes> TabletContext<T> {
             payload: msg::AbortedData::QueryError(query_error.clone()),
           }),
         );
-        self.exit_all(statuses, read.child_queries)
+        self.exit_all(io_ctx, statuses, read.child_queries)
       }
     }
   }
 
   /// Cleans up the MSQueryES with QueryId of `query_id`. This can only be called
   /// if the MSQueryES hasn't Prepared yet.
-  fn exit_ms_query_es(
+  fn exit_ms_query_es<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
     query_error: msg::QueryError,
@@ -2341,11 +2365,11 @@ impl<T: IOTypes> TabletContext<T> {
     for query_id in ms_query_es.pending_queries {
       if let Some(mut ms_read) = statuses.ms_table_read_ess.remove(&query_id) {
         // MSTableReadES
-        ms_read.es.exit_and_clean_up(self);
+        ms_read.es.exit_and_clean_up(self, io_ctx);
         let sender_path = ms_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx().send_to_ct(
+        self.ctx(io_ctx).send_to_ct(
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2353,14 +2377,14 @@ impl<T: IOTypes> TabletContext<T> {
             payload: msg::AbortedData::QueryError(query_error.clone()),
           }),
         );
-        self.exit_all(statuses, ms_read.child_queries);
+        self.exit_all(io_ctx, statuses, ms_read.child_queries);
       } else if let Some(mut ms_write) = statuses.ms_table_write_ess.remove(&query_id) {
         // MSTableWriteES
-        ms_write.es.exit_and_clean_up(self);
+        ms_write.es.exit_and_clean_up(self, io_ctx);
         let sender_path = ms_write.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx().send_to_ct(
+        self.ctx(io_ctx).send_to_ct(
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2368,7 +2392,7 @@ impl<T: IOTypes> TabletContext<T> {
             payload: msg::AbortedData::QueryError(query_error.clone()),
           }),
         );
-        self.exit_all(statuses, ms_write.child_queries);
+        self.exit_all(io_ctx, statuses, ms_write.child_queries);
       }
     }
 
@@ -2377,8 +2401,9 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   /// Handles the actions produced by an MSTableWriteES.
-  fn handle_ms_write_es_action(
+  fn handle_ms_write_es_action<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
     action: MSTableWriteAction,
@@ -2386,7 +2411,7 @@ impl<T: IOTypes> TabletContext<T> {
     match action {
       MSTableWriteAction::Wait => {}
       MSTableWriteAction::SendSubqueries(gr_query_ess) => {
-        self.launch_subqueries(statuses, gr_query_ess);
+        self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
       MSTableWriteAction::Success(success) => {
         // Remove the MSWriteESWrapper, removing it from the MSQueryES, and respond.
@@ -2396,7 +2421,7 @@ impl<T: IOTypes> TabletContext<T> {
         let sender_path = ms_write.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx().send_to_ct(
+        self.ctx(io_ctx).send_to_ct(
           sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -2414,7 +2439,7 @@ impl<T: IOTypes> TabletContext<T> {
         let sender_path = ms_write.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx().send_to_ct(
+        self.ctx(io_ctx).send_to_ct(
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2427,8 +2452,9 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   /// Handles the actions produced by an MSTableReadES.
-  fn handle_ms_read_es_action(
+  fn handle_ms_read_es_action<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
     action: MSTableReadAction,
@@ -2436,7 +2462,7 @@ impl<T: IOTypes> TabletContext<T> {
     match action {
       MSTableReadAction::Wait => {}
       MSTableReadAction::SendSubqueries(gr_query_ess) => {
-        self.launch_subqueries(statuses, gr_query_ess);
+        self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
       MSTableReadAction::Success(success) => {
         // Remove the MSReadESWrapper, removing it from the MSQueryES, and respond.
@@ -2446,7 +2472,7 @@ impl<T: IOTypes> TabletContext<T> {
         let sender_path = ms_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx().send_to_ct(
+        self.ctx(io_ctx).send_to_ct(
           sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -2463,7 +2489,7 @@ impl<T: IOTypes> TabletContext<T> {
         let sender_path = ms_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx().send_to_ct(
+        self.ctx(io_ctx).send_to_ct(
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2476,8 +2502,9 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   /// Handles the actions produced by a GRQueryES.
-  fn handle_gr_query_es_action(
+  fn handle_gr_query_es_action<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
     action: GRQueryAction,
@@ -2491,6 +2518,7 @@ impl<T: IOTypes> TabletContext<T> {
       GRQueryAction::Success(res) => {
         let gr_query = statuses.gr_query_ess.remove(&query_id).unwrap();
         self.handle_gr_query_done(
+          io_ctx,
           statuses,
           gr_query.es.orig_p,
           gr_query.es.query_id,
@@ -2501,6 +2529,7 @@ impl<T: IOTypes> TabletContext<T> {
       GRQueryAction::QueryError(query_error) => {
         let gr_query = statuses.gr_query_ess.remove(&query_id).unwrap();
         self.handle_internal_query_error(
+          io_ctx,
           statuses,
           gr_query.es.orig_p,
           gr_query.es.query_id,
@@ -2511,30 +2540,40 @@ impl<T: IOTypes> TabletContext<T> {
   }
 
   /// Run `exit_and_clean_up` for all QueryIds in `query_ids`.
-  fn exit_all(&mut self, statuses: &mut Statuses, query_ids: Vec<QueryId>) {
+  fn exit_all<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    query_ids: Vec<QueryId>,
+  ) {
     for query_id in query_ids {
-      self.exit_and_clean_up(statuses, query_id);
+      self.exit_and_clean_up(io_ctx, statuses, query_id);
     }
   }
 
   /// This function is used to initiate an Exit and Clean Up of ESs. This is needed to handle
   /// CancelQuery's, as well as when one on ES wants to Exit and Clean Up another ES. Note that
   /// We allow the ES at `query_id` to be in any state, or to not even exist.
-  fn exit_and_clean_up(&mut self, statuses: &mut Statuses, query_id: QueryId) {
+  fn exit_and_clean_up<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+  ) {
     // GRQueryES
     if let Some(mut gr_query) = statuses.gr_query_ess.remove(&query_id) {
-      gr_query.es.exit_and_clean_up(&mut self.ctx());
-      self.exit_all(statuses, gr_query.child_queries);
+      gr_query.es.exit_and_clean_up(&mut self.ctx(io_ctx));
+      self.exit_all(io_ctx, statuses, gr_query.child_queries);
     }
     // TableReadES
     else if let Some(mut read) = statuses.table_read_ess.remove(&query_id) {
-      read.es.exit_and_clean_up(self);
-      self.exit_all(statuses, read.child_queries);
+      read.es.exit_and_clean_up(self, io_ctx);
+      self.exit_all(io_ctx, statuses, read.child_queries);
     }
     // TransTableReadES
     else if let Some(mut trans_read) = statuses.trans_table_read_ess.remove(&query_id) {
-      trans_read.es.exit_and_clean_up(&mut self.ctx());
-      self.exit_all(statuses, trans_read.child_queries);
+      trans_read.es.exit_and_clean_up(&mut self.ctx(io_ctx));
+      self.exit_all(io_ctx, statuses, trans_read.child_queries);
     }
     // TMStatus
     else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
@@ -2543,7 +2582,7 @@ impl<T: IOTypes> TabletContext<T> {
         if rm_result.is_none() {
           let orig_sid = &rm_path.sid;
           let orig_lid = tm_status.leaderships.get(&orig_sid).unwrap().clone();
-          self.ctx().send_to_ct_lid(
+          self.ctx(io_ctx).send_to_ct_lid(
             rm_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: tm_status.child_query_id.clone(),
@@ -2568,21 +2607,26 @@ impl<T: IOTypes> TabletContext<T> {
       // TODO: In the spirit of getting local safety, we shouldn't have the above expection.
       // Instead, we should give MSQueryES a state variable and have it react to CancelQuery
       // accordingly (ignore it if we have prepared).
-      self.exit_ms_query_es(statuses, ms_query_es.query_id.clone(), msg::QueryError::LateralError);
+      self.exit_ms_query_es(
+        io_ctx,
+        statuses,
+        ms_query_es.query_id.clone(),
+        msg::QueryError::LateralError,
+      );
     }
     // MSTableWriteES
     else if let Some(mut ms_write) = statuses.ms_table_write_ess.remove(&query_id) {
       let ms_query_es = statuses.ms_query_ess.get_mut(&ms_write.es.ms_query_id).unwrap();
       ms_query_es.pending_queries.remove(&query_id);
-      ms_write.es.exit_and_clean_up(self);
-      self.exit_all(statuses, ms_write.child_queries);
+      ms_write.es.exit_and_clean_up(self, io_ctx);
+      self.exit_all(io_ctx, statuses, ms_write.child_queries);
     }
     // MSTableReadES
     else if let Some(mut ms_read) = statuses.ms_table_read_ess.remove(&query_id) {
       let ms_query_es = statuses.ms_query_ess.get_mut(&ms_read.es.ms_query_id).unwrap();
       ms_query_es.pending_queries.remove(&query_id);
-      ms_read.es.exit_and_clean_up(self);
-      self.exit_all(statuses, ms_read.child_queries);
+      ms_read.es.exit_and_clean_up(self, io_ctx);
+      self.exit_all(io_ctx, statuses, ms_read.child_queries);
     }
   }
 
@@ -2730,9 +2774,13 @@ pub fn compute_contexts<LocalTableT: LocalTable>(
 }
 
 /// This computes GRQueryESs corresponding to every element in `subqueries`.
-pub fn compute_subqueries<T: IOTypes, LocalTableT: LocalTable, SqlQueryT: SubqueryComputableSql>(
+pub fn compute_subqueries<
+  RngCoreT: RngCore,
+  LocalTableT: LocalTable,
+  SqlQueryT: SubqueryComputableSql,
+>(
   subquery_view: GRQueryConstructorView<SqlQueryT>,
-  rand: &mut T::RngCoreT,
+  rand: &mut RngCoreT,
   local_table: LocalTableT,
 ) -> Result<Vec<GRQueryES>, EvalError> {
   // Here, we construct first construct all of the subquery Contexts using the

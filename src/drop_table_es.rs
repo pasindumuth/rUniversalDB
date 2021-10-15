@@ -1,5 +1,5 @@
 use crate::alter_table_es::State;
-use crate::common::IOTypes;
+use crate::common::CoreIOCtx;
 use crate::model::common::{proc, QueryId, Timestamp};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
@@ -29,11 +29,15 @@ pub enum DropTableAction {
 impl DropTableES {
   // STMPaxos2PC messages
 
-  pub fn handle_prepare<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> DropTableAction {
+  pub fn handle_prepare<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> DropTableAction {
     match &self.state {
       State::Prepared => {
         let this_node_path = ctx.mk_node_path();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::DropTablePrepared(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTablePrepared(
           msg::DropTablePrepared {
             query_id: self.query_id.clone(),
             rm: this_node_path,
@@ -46,9 +50,9 @@ impl DropTableES {
     DropTableAction::Wait
   }
 
-  pub fn handle_commit<T: IOTypes>(
+  pub fn handle_commit(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
     commit: msg::DropTableCommit,
   ) -> DropTableAction {
     match &self.state {
@@ -64,11 +68,15 @@ impl DropTableES {
     DropTableAction::Wait
   }
 
-  pub fn handle_abort<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> DropTableAction {
+  pub fn handle_abort<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> DropTableAction {
     match &self.state {
       State::WaitingInsertingPrepared => {
         let this_node_path = ctx.mk_node_path();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
           msg::DropTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
         ));
         DropTableAction::Aborted
@@ -93,11 +101,15 @@ impl DropTableES {
 
   // STMPaxos2PC PLm Insertions
 
-  pub fn handle_prepared_plm<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> DropTableAction {
+  pub fn handle_prepared_plm<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> DropTableAction {
     match &self.state {
       State::InsertingPrepared => {
         let this_node_path = ctx.mk_node_path();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::DropTablePrepared(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTablePrepared(
           msg::DropTablePrepared {
             query_id: self.query_id.clone(),
             rm: this_node_path,
@@ -114,12 +126,16 @@ impl DropTableES {
     DropTableAction::Wait
   }
 
-  pub fn handle_aborted_plm<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> DropTableAction {
+  pub fn handle_aborted_plm<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> DropTableAction {
     match &self.state {
       State::Follower => DropTableAction::Aborted,
       State::InsertingAborted => {
         let this_node_path = ctx.mk_node_path();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
           msg::DropTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
         ));
         DropTableAction::Aborted
@@ -128,16 +144,17 @@ impl DropTableES {
     }
   }
 
-  pub fn handle_committed_plm<T: IOTypes>(
+  pub fn handle_committed_plm<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut TabletContext<T>,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
     committed_plm: plm::DropTableCommitted,
   ) -> DropTableAction {
     match &self.state {
       State::Follower => DropTableAction::Committed(committed_plm.timestamp.clone()),
       State::InsertingCommitted => {
         let this_node_path = ctx.mk_node_path();
-        ctx.ctx().send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
           msg::DropTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
         ));
         DropTableAction::Committed(committed_plm.timestamp.clone())
@@ -148,7 +165,7 @@ impl DropTableES {
 
   // Other
 
-  pub fn start_inserting<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> DropTableAction {
+  pub fn start_inserting(&mut self, ctx: &mut TabletContext) -> DropTableAction {
     match &self.state {
       State::WaitingInsertingPrepared => {
         ctx.tablet_bundle.push(TabletPLm::DropTablePrepared(plm::DropTablePrepared {
@@ -162,7 +179,7 @@ impl DropTableES {
     DropTableAction::Wait
   }
 
-  pub fn leader_changed<T: IOTypes>(&mut self, ctx: &mut TabletContext<T>) -> DropTableAction {
+  pub fn leader_changed(&mut self, ctx: &mut TabletContext) -> DropTableAction {
     match &self.state {
       State::Follower => {
         if ctx.is_leader() {

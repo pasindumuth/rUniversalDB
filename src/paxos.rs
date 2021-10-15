@@ -1,4 +1,4 @@
-use crate::common::{mk_uuid, IOTypes, NetworkOut, UUID};
+use crate::common::{mk_uuid, UUID};
 use crate::model::common::{EndpointId, Gen, LeadershipId, Timestamp};
 use crate::model::message as msg;
 use crate::model::message::{
@@ -69,10 +69,11 @@ const PROPOSAL_INCREMENT: u32 = 1000;
 //  PaxosContextBase
 // -----------------------------------------------------------------------------------------------
 
-pub trait PaxosContextBase<T: IOTypes, BundleT> {
+pub trait PaxosContextBase<BundleT> {
+  type RngCoreT: RngCore;
+
   /// Getters
-  fn network_output(&mut self) -> &mut T::NetworkOutT;
-  fn rand(&mut self) -> &mut T::RngCoreT;
+  fn rand(&mut self) -> &mut Self::RngCoreT;
   fn this_eid(&self) -> &EndpointId;
 
   /// Methods
@@ -149,7 +150,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     min_index
   }
 
-  fn is_leader<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+  fn is_leader<PaxosContextBaseT: PaxosContextBase<BundleT>>(
     &self,
     ctx: &mut PaxosContextBaseT,
   ) -> bool {
@@ -194,7 +195,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
 
   // Message Handler
 
-  pub fn handle_paxos_message<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+  pub fn handle_paxos_message<PaxosContextBaseT: PaxosContextBase<BundleT>>(
     &mut self,
     ctx: &mut PaxosContextBaseT,
     message: msg::PaxosDriverMessage<BundleT>,
@@ -478,7 +479,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
 
   // Bundle Insertion
 
-  pub fn insert_bundle<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+  pub fn insert_bundle<PaxosContextBaseT: PaxosContextBase<BundleT>>(
     &mut self,
     ctx: &mut PaxosContextBaseT,
     bundle: BundleT,
@@ -497,7 +498,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     }
   }
 
-  fn propose_next_index<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+  fn propose_next_index<PaxosContextBaseT: PaxosContextBase<BundleT>>(
     &mut self,
     ctx: &mut PaxosContextBaseT,
     entry: PLEntry<BundleT>,
@@ -545,7 +546,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
 
   // Timer Events
 
-  pub fn timer_event<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+  pub fn timer_event<PaxosContextBaseT: PaxosContextBase<BundleT>>(
     &mut self,
     ctx: &mut PaxosContextBaseT,
     event: PaxosTimerEvent,
@@ -563,7 +564,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     }
   }
 
-  fn retry_insert<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+  fn retry_insert<PaxosContextBaseT: PaxosContextBase<BundleT>>(
     &mut self,
     ctx: &mut PaxosContextBaseT,
     uuid: UUID,
@@ -582,7 +583,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     }
   }
 
-  fn leader_heartbeat<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+  fn leader_heartbeat<PaxosContextBaseT: PaxosContextBase<BundleT>>(
     &mut self,
     ctx: &mut PaxosContextBaseT,
   ) {
@@ -620,7 +621,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     }
   }
 
-  fn next_index_timer<T: IOTypes, PaxosContextBaseT: PaxosContextBase<T, BundleT>>(
+  fn next_index_timer<PaxosContextBaseT: PaxosContextBase<BundleT>>(
     &mut self,
     ctx: &mut PaxosContextBaseT,
   ) {

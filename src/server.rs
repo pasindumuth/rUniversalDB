@@ -1,5 +1,7 @@
 use crate::col_usage::{collect_top_level_cols, nodes_external_trans_tables, FrozenColUsageNode};
-use crate::common::{lookup_pos, GossipData, IOTypes, KeyBound, NetworkOut, OrigP, TableSchema};
+use crate::common::{
+  lookup_pos, CoreIOCtx, GossipData, KeyBound, MasterIOCtx, OrigP, SlaveIOCtx, TableSchema,
+};
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
   proc, CNodePath, CQueryPath, CSubNodePath, CTNodePath, CTQueryPath, CTSubNodePath, ColName,
@@ -22,12 +24,12 @@ use std::sync::Arc;
 /// This is used to present a consistent view of all servers in the system, include
 /// the Tablet, Slave, and Master. Fundamentally, in consists of basic IOTypes and the
 /// network configuration.
-pub trait ServerContextBase<T: IOTypes> {
+pub trait ServerContextBase {
   // Getters
 
   fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId>;
   fn this_gid(&self) -> PaxosGroupId;
-  fn network_output(&mut self) -> &mut T::NetworkOutT;
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
 
   // Send utilities
 
@@ -50,7 +52,7 @@ pub trait ServerContextBase<T: IOTypes> {
       to_gid,
     };
 
-    self.network_output().send(
+    self.send(
       &to_lid.eid,
       msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteMessage(remote_message)),
     );
@@ -140,7 +142,7 @@ pub trait ServerContextBase<T: IOTypes> {
       to_gid: master_gid,
     };
 
-    self.network_output().send(
+    self.send(
       &master_lid.eid,
       msg::NetworkMessage::Master(msg::MasterMessage::RemoteMessage(remote_message)),
     );
@@ -153,11 +155,9 @@ pub trait ServerContextBase<T: IOTypes> {
 
 /// This is used to present a consistent view of Tablets and Slave to shared ESs so
 /// that they can execute agnotisticly.
-pub struct SlaveServerContext<'a, T: IOTypes> {
-  /// IO Objects.
-  pub rand: &'a mut T::RngCoreT,
-  pub clock: &'a mut T::ClockT,
-  pub network_output: &'a mut T::NetworkOutT,
+pub struct SlaveServerContext<'a, IO: CoreIOCtx> {
+  /// IO
+  pub io_ctx: &'a mut IO,
 
   /// Metadata
   pub this_slave_group_id: &'a SlaveGroupId,
@@ -170,7 +170,7 @@ pub struct SlaveServerContext<'a, T: IOTypes> {
   pub gossip: &'a mut Arc<GossipData>,
 }
 
-impl<'a, T: IOTypes> SlaveServerContext<'a, T> {
+impl<'a, IO: CoreIOCtx> SlaveServerContext<'a, IO> {
   /// Construct a `NodePath` from a `NodeGroupId`.
   /// NOTE: the `tid` must exist in the `gossip` at this point.
   pub fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
@@ -244,7 +244,7 @@ impl<'a, T: IOTypes> SlaveServerContext<'a, T> {
   }
 }
 
-impl<'a, T: IOTypes> ServerContextBase<T> for SlaveServerContext<'a, T> {
+impl<'a, IO: CoreIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
   fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
     self.leader_map
   }
@@ -254,8 +254,8 @@ impl<'a, T: IOTypes> ServerContextBase<T> for SlaveServerContext<'a, T> {
     PaxosGroupId::Slave(self.this_slave_group_id.clone())
   }
 
-  fn network_output(&mut self) -> &mut T::NetworkOutT {
-    self.network_output
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
+    self.io_ctx.send(eid, msg);
   }
 }
 
@@ -264,9 +264,9 @@ impl<'a, T: IOTypes> ServerContextBase<T> for SlaveServerContext<'a, T> {
 // -----------------------------------------------------------------------------------------------
 
 /// This is used to easily use the `ServerContextBase` methods in the Slave thread.
-pub struct MainSlaveServerContext<'a, T: IOTypes> {
-  /// IO Objects.
-  pub network_output: &'a mut T::NetworkOutT,
+pub struct MainSlaveServerContext<'a, IO: SlaveIOCtx> {
+  /// IO
+  pub io_ctx: &'a mut IO,
 
   /// Metadata
   pub this_slave_group_id: &'a SlaveGroupId,
@@ -275,7 +275,7 @@ pub struct MainSlaveServerContext<'a, T: IOTypes> {
   pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
 }
 
-impl<'a, T: IOTypes> ServerContextBase<T> for MainSlaveServerContext<'a, T> {
+impl<'a, IO: SlaveIOCtx> ServerContextBase for MainSlaveServerContext<'a, IO> {
   fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
     self.leader_map
   }
@@ -285,8 +285,8 @@ impl<'a, T: IOTypes> ServerContextBase<T> for MainSlaveServerContext<'a, T> {
     PaxosGroupId::Slave(self.this_slave_group_id.clone())
   }
 
-  fn network_output(&mut self) -> &mut T::NetworkOutT {
-    self.network_output
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
+    self.io_ctx.send(eid, msg);
   }
 }
 
@@ -296,15 +296,15 @@ impl<'a, T: IOTypes> ServerContextBase<T> for MainSlaveServerContext<'a, T> {
 
 /// This is used to present a consistent view of Master to shared ESs so that they can
 /// execute agnotisticly.
-pub struct MasterServerContext<'a, T: IOTypes> {
-  /// IO Objects.
-  pub network_output: &'a mut T::NetworkOutT,
+pub struct MasterServerContext<'a, IO: MasterIOCtx> {
+  /// IO
+  pub io_ctx: &'a mut IO,
 
   /// Paxos
   pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
 }
 
-impl<'a, T: IOTypes> ServerContextBase<T> for MasterServerContext<'a, T> {
+impl<'a, IO: MasterIOCtx> ServerContextBase for MasterServerContext<'a, IO> {
   fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
     self.leader_map
   }
@@ -314,8 +314,8 @@ impl<'a, T: IOTypes> ServerContextBase<T> for MasterServerContext<'a, T> {
     PaxosGroupId::Master
   }
 
-  fn network_output(&mut self) -> &mut T::NetworkOutT {
-    self.network_output
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
+    self.io_ctx.send(eid, msg);
   }
 }
 

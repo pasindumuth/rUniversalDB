@@ -1,9 +1,8 @@
 use crate::alter_table_es::State;
 use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
-  lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, Clock, CoordForwardOut,
-  GossipData, IOTypes, NetworkOut, OrigP, RemoteLeaderChangedPLm, SlaveTimerOut, TMStatus,
-  TabletForwardOut, UUID,
+  lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, GossipData, OrigP,
+  RemoteLeaderChangedPLm, SlaveIOCtx, TMStatus, UUID,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_es::{CreateTableAction, CreateTableES};
@@ -33,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
+use std::borrow::BorrowMut;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -104,21 +104,17 @@ pub struct SharedPaxosBundle {
 //  SlavePaxosContext
 // -----------------------------------------------------------------------------------------------
 
-pub struct SlavePaxosContext<'a, T: IOTypes> {
+pub struct SlavePaxosContext<'a, IO: SlaveIOCtx> {
   /// IO Objects.
-  pub network_output: &'a mut T::NetworkOutT,
-  pub rand: &'a mut T::RngCoreT,
-  pub slave_timer_output: &'a mut T::SlaveTimerOutT,
+  pub io_ctx: &'a mut IO,
   pub this_eid: &'a EndpointId,
 }
 
-impl<'a, T: IOTypes> PaxosContextBase<T, SharedPaxosBundle> for SlavePaxosContext<'a, T> {
-  fn network_output(&mut self) -> &mut T::NetworkOutT {
-    self.network_output
-  }
+impl<'a, IO: SlaveIOCtx> PaxosContextBase<SharedPaxosBundle> for SlavePaxosContext<'a, IO> {
+  type RngCoreT = IO::RngCoreT;
 
-  fn rand(&mut self) -> &mut T::RngCoreT {
-    self.rand
+  fn rand(&mut self) -> &mut Self::RngCoreT {
+    self.io_ctx.rand()
   }
 
   fn this_eid(&self) -> &EndpointId {
@@ -127,12 +123,12 @@ impl<'a, T: IOTypes> PaxosContextBase<T, SharedPaxosBundle> for SlavePaxosContex
 
   fn send(&mut self, eid: &EndpointId, message: msg::PaxosDriverMessage<SharedPaxosBundle>) {
     self
-      .network_output
+      .io_ctx
       .send(eid, msg::NetworkMessage::Slave(msg::SlaveMessage::PaxosDriverMessage(message)));
   }
 
   fn defer(&mut self, defer_time: u128, timer_event: PaxosTimerEvent) {
-    self.slave_timer_output.defer(defer_time, SlaveTimerInput::PaxosTimerEvent(timer_event));
+    self.io_ctx.defer(defer_time, SlaveTimerInput::PaxosTimerEvent(timer_event));
   }
 }
 
@@ -187,21 +183,14 @@ pub struct Statuses {
 //  Slave State
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
-pub struct SlaveState<T: IOTypes> {
-  context: SlaveContext<T>,
+pub struct SlaveState {
+  context: SlaveContext,
   statuses: Statuses,
 }
 
 /// The SlaveState that holds all the state of the Slave
 #[derive(Debug)]
-pub struct SlaveContext<T: IOTypes> {
-  // IO Objects.
-  pub rand: T::RngCoreT,
-  pub clock: T::ClockT,
-  pub network_output: T::NetworkOutT,
-  pub tablet_forward_output: T::TabletForwardOutT,
-  pub coord_forward_output: T::CoordForwardOutT,
-  pub slave_timer_output: T::SlaveTimerOutT,
+pub struct SlaveContext {
   /// Maps integer values to Coords for the purpose of routing External requests.
   pub coord_positions: Vec<CoordGroupId>,
 
@@ -226,97 +215,40 @@ pub struct SlaveContext<T: IOTypes> {
   pub paxos_driver: PaxosDriver<SharedPaxosBundle>,
 }
 
-impl<T: IOTypes> SlaveState<T> {
-  pub fn new(
-    rand: T::RngCoreT,
-    clock: T::ClockT,
-    network_output: T::NetworkOutT,
-    tablet_forward_output: T::TabletForwardOutT,
-    coord_forward_output: T::CoordForwardOutT,
-    slave_timer_output: T::SlaveTimerOutT,
-    gossip: Arc<GossipData>,
-    this_slave_group_id: SlaveGroupId,
-  ) -> SlaveState<T> {
-    let this_gid = this_slave_group_id.to_gid();
-    let mut leader_map = HashMap::<PaxosGroupId, LeadershipId>::new();
-    for (sid, eids) in &gossip.slave_address_config {
-      leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
-    }
-    let all_gids = leader_map.keys().cloned().collect();
-    let paxos_nodes = gossip.slave_address_config.get(&this_slave_group_id).unwrap().clone();
-    SlaveState {
-      context: SlaveContext {
-        rand,
-        clock,
-        network_output,
-        tablet_forward_output,
-        coord_forward_output,
-        slave_timer_output,
-        coord_positions: vec![],
-        this_slave_group_id,
-        this_gid,
-        this_eid: EndpointId("".to_string()),
-        gossip,
-        leader_map,
-        network_driver: NetworkDriver::new(all_gids),
-        slave_bundle: SlaveBundle::default(),
-        tablet_bundles: Default::default(),
-        paxos_driver: PaxosDriver::new(paxos_nodes),
-      },
-      statuses: Default::default(),
-    }
-  }
-
-  pub fn new2(slave_context: SlaveContext<T>) -> SlaveState<T> {
+impl SlaveState {
+  pub fn new(slave_context: SlaveContext) -> SlaveState {
     SlaveState { context: slave_context, statuses: Default::default() }
   }
 
-  // TODO: stop using this in favor of `handle_full_input`
-  pub fn handle_incoming_message(&mut self, message: msg::SlaveMessage) {
-    self.context.handle_incoming_message(&mut self.statuses, message);
-  }
-
-  pub fn handle_full_input(&mut self, input: FullSlaveInput) {
+  pub fn handle_full_input<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO, input: FullSlaveInput) {
     match input {
       FullSlaveInput::SlaveMessage(message) => {
-        self.context.handle_incoming_message(&mut self.statuses, message);
+        self.context.handle_incoming_message(io_ctx, &mut self.statuses, message);
       }
       FullSlaveInput::SlaveBackMessage(message) => {
         /// Handles messages that were send from the Tablets back to the Slave.
         let forward_msg = SlaveForwardMsg::SlaveBackMessage(message);
-        self.context.handle_input(&mut self.statuses, forward_msg);
+        self.context.handle_input(io_ctx, &mut self.statuses, forward_msg);
       }
       FullSlaveInput::SlaveTimerInput(timer_input) => {
         let forward_msg = SlaveForwardMsg::SlaveTimerInput(timer_input);
-        self.context.handle_input(&mut self.statuses, forward_msg);
+        self.context.handle_input(io_ctx, &mut self.statuses, forward_msg);
       }
     }
   }
 }
 
-impl<T: IOTypes> SlaveContext<T> {
+impl SlaveContext {
   pub fn new(
-    rand: T::RngCoreT,
-    clock: T::ClockT,
-    network_output: T::NetworkOutT,
-    tablet_forward_output: T::TabletForwardOutT,
-    coord_forward_output: T::CoordForwardOutT,
-    slave_timer_output: T::SlaveTimerOutT,
     coord_positions: Vec<CoordGroupId>,
     this_slave_group_id: SlaveGroupId,
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
     leader_map: HashMap<PaxosGroupId, LeadershipId>,
-  ) -> SlaveContext<T> {
+  ) -> SlaveContext {
     let all_gids = leader_map.keys().cloned().collect();
     let paxos_nodes = gossip.slave_address_config.get(&this_slave_group_id).unwrap().clone();
     SlaveContext {
-      rand,
-      clock,
-      network_output,
-      tablet_forward_output,
-      coord_forward_output,
-      slave_timer_output,
       coord_positions,
       this_slave_group_id: this_slave_group_id.clone(),
       this_gid: this_slave_group_id.to_gid(),
@@ -330,20 +262,28 @@ impl<T: IOTypes> SlaveContext<T> {
     }
   }
 
-  pub fn ctx(&mut self) -> MainSlaveServerContext<T> {
+  pub fn ctx<'a, IO: SlaveIOCtx>(
+    &'a mut self,
+    io_ctx: &'a mut IO,
+  ) -> MainSlaveServerContext<'a, IO> {
     MainSlaveServerContext {
-      network_output: &mut self.network_output,
+      io_ctx,
       this_slave_group_id: &self.this_slave_group_id,
       leader_map: &self.leader_map,
     }
   }
 
   /// Handles all messages, coming from Tablets, the Slave, External, etc.
-  pub fn handle_incoming_message(&mut self, statuses: &mut Statuses, message: msg::SlaveMessage) {
+  pub fn handle_incoming_message<IO: SlaveIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    message: msg::SlaveMessage,
+  ) {
     match message {
       msg::SlaveMessage::ExternalMessage(request) => {
         if self.is_leader() {
-          self.handle_input(statuses, SlaveForwardMsg::SlaveExternalReq(request))
+          self.handle_input(io_ctx, statuses, SlaveForwardMsg::SlaveExternalReq(request))
         }
       }
       msg::SlaveMessage::RemoteMessage(remote_message) => {
@@ -360,25 +300,20 @@ impl<T: IOTypes> SlaveContext<T> {
           );
           if let Some(payload) = maybe_delivered {
             // Deliver if the message passed through
-            self.handle_input(statuses, SlaveForwardMsg::SlaveRemotePayload(payload));
+            self.handle_input(io_ctx, statuses, SlaveForwardMsg::SlaveRemotePayload(payload));
           }
         }
       }
       msg::SlaveMessage::PaxosDriverMessage(paxos_message) => {
-        let bundles = self.paxos_driver.handle_paxos_message::<T, _>(
-          &mut SlavePaxosContext {
-            network_output: &mut self.network_output,
-            rand: &mut self.rand,
-            slave_timer_output: &mut self.slave_timer_output,
-            this_eid: &self.this_eid,
-          },
+        let bundles = self.paxos_driver.handle_paxos_message(
+          &mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid },
           paxos_message,
         );
         for shared_bundle in bundles {
           match shared_bundle {
             msg::PLEntry::Bundle(shared_bundle) => {
-              let all_tids = self.tablet_forward_output.all_tids();
-              let all_cids = self.coord_forward_output.all_cids();
+              let all_tids = io_ctx.all_tids();
+              let all_cids = io_ctx.all_cids();
               let slave_bundle = shared_bundle.slave;
 
               // We buffer the SlaveForwardMsgs and execute them at the end.
@@ -390,11 +325,11 @@ impl<T: IOTypes> SlaveContext<T> {
                 slave_forward_msgs.push(forward_msg);
                 for tid in &all_tids {
                   let forward_msg = TabletForwardMsg::RemoteLeaderChanged(remote_change.clone());
-                  self.tablet_forward_output.forward(&tid, forward_msg);
+                  io_ctx.tablet_forward(&tid, forward_msg);
                 }
                 for cid in &all_cids {
                   let forward_msg = CoordForwardMsg::RemoteLeaderChanged(remote_change.clone());
-                  self.coord_forward_output.forward(&cid, forward_msg);
+                  io_ctx.coord_forward(&cid, forward_msg);
                 }
               }
 
@@ -404,11 +339,11 @@ impl<T: IOTypes> SlaveContext<T> {
                 slave_forward_msgs.push(SlaveForwardMsg::GossipData(gossip.clone()));
                 for tid in &all_tids {
                   let forward_msg = TabletForwardMsg::GossipData(gossip.clone());
-                  self.tablet_forward_output.forward(&tid, forward_msg);
+                  io_ctx.tablet_forward(&tid, forward_msg);
                 }
                 for cid in &all_cids {
                   let forward_msg = CoordForwardMsg::GossipData(gossip.clone());
-                  self.coord_forward_output.forward(&cid, forward_msg);
+                  io_ctx.coord_forward(&cid, forward_msg);
                 }
               }
 
@@ -416,7 +351,7 @@ impl<T: IOTypes> SlaveContext<T> {
               slave_forward_msgs.push(SlaveForwardMsg::SlaveBundle(slave_bundle.plms));
               for (tid, tablet_bundle) in shared_bundle.tablet {
                 let forward_msg = TabletForwardMsg::TabletBundle(tablet_bundle);
-                self.tablet_forward_output.forward(&tid, forward_msg);
+                io_ctx.tablet_forward(&tid, forward_msg);
               }
 
               // Dispatch any messages that were buffered in the NetworkDriver.
@@ -433,26 +368,30 @@ impl<T: IOTypes> SlaveContext<T> {
 
               // Forward to Slave Backend
               for forward_msg in slave_forward_msgs {
-                self.handle_input(statuses, forward_msg);
+                self.handle_input(io_ctx, statuses, forward_msg);
               }
             }
             msg::PLEntry::LeaderChanged(leader_changed) => {
               // Forward the LeaderChanged to all Tablets.
-              let all_tids = self.tablet_forward_output.all_tids();
+              let all_tids = io_ctx.all_tids();
               for tid in all_tids {
                 let forward_msg = TabletForwardMsg::LeaderChanged(leader_changed.clone());
-                self.tablet_forward_output.forward(&tid, forward_msg);
+                io_ctx.tablet_forward(&tid, forward_msg);
               }
 
               // Forward the LeaderChanged to all Coords.
-              let all_tids = self.coord_forward_output.all_cids();
+              let all_tids = io_ctx.all_cids();
               for cid in all_tids {
                 let forward_msg = CoordForwardMsg::LeaderChanged(leader_changed.clone());
-                self.coord_forward_output.forward(&cid, forward_msg);
+                io_ctx.coord_forward(&cid, forward_msg);
               }
 
               // Forward to Slave Backend
-              self.handle_input(statuses, SlaveForwardMsg::LeaderChanged(leader_changed.clone()));
+              self.handle_input(
+                io_ctx,
+                statuses,
+                SlaveForwardMsg::LeaderChanged(leader_changed.clone()),
+              );
             }
           }
         }
@@ -461,23 +400,23 @@ impl<T: IOTypes> SlaveContext<T> {
   }
 
   /// Handles inputs the Slave Backend.
-  fn handle_input(&mut self, statuses: &mut Statuses, slave_input: SlaveForwardMsg) {
+  fn handle_input<IO: SlaveIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    slave_input: SlaveForwardMsg,
+  ) {
     match slave_input {
       SlaveForwardMsg::SlaveBackMessage(slave_back_msg) => match slave_back_msg {
         SlaveBackMessage::TabletBundle(tid, tablet_bundle) => {
           self.tablet_bundles.insert(tid, tablet_bundle);
-          if self.tablet_bundles.len() == self.tablet_forward_output.num_tablets() {
+          if self.tablet_bundles.len() == io_ctx.num_tablets() {
             let shared_bundle = SharedPaxosBundle {
               slave: std::mem::replace(&mut self.slave_bundle, SlaveBundle::default()),
               tablet: std::mem::replace(&mut self.tablet_bundles, HashMap::default()),
             };
-            self.paxos_driver.insert_bundle::<T, _>(
-              &mut SlavePaxosContext {
-                network_output: &mut self.network_output,
-                rand: &mut self.rand,
-                slave_timer_output: &mut self.slave_timer_output,
-                this_eid: &self.this_eid,
-              },
+            self.paxos_driver.insert_bundle(
+              &mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid },
               shared_bundle,
             );
           }
@@ -485,15 +424,9 @@ impl<T: IOTypes> SlaveContext<T> {
       },
       SlaveForwardMsg::SlaveTimerInput(timer_input) => match timer_input {
         SlaveTimerInput::PaxosTimerEvent(timer_event) => {
-          self.paxos_driver.timer_event::<T, _>(
-            &mut SlavePaxosContext {
-              network_output: &mut self.network_output,
-              rand: &mut self.rand,
-              slave_timer_output: &mut self.slave_timer_output,
-              this_eid: &self.this_eid,
-            },
-            timer_event,
-          );
+          self
+            .paxos_driver
+            .timer_event(&mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid }, timer_event);
         }
       },
       SlaveForwardMsg::SlaveBundle(bundle) => {
@@ -503,19 +436,19 @@ impl<T: IOTypes> SlaveContext<T> {
               SlavePLm::CreateTablePrepared(prepared) => {
                 let query_id = prepared.query_id;
                 let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_prepared_plm(self);
+                let action = es.handle_prepared_plm(self, io_ctx);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               SlavePLm::CreateTableCommitted(committed) => {
                 let query_id = committed.query_id;
                 let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self);
+                let action = es.handle_committed_plm(self, io_ctx);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               SlavePLm::CreateTableAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
             }
@@ -523,7 +456,7 @@ impl<T: IOTypes> SlaveContext<T> {
 
           // Inform all ESs in WaitingInserting and start inserting a PLm.
           for (_, es) in &mut statuses.create_table_ess {
-            es.start_inserting(self);
+            es.start_inserting::<IO>(self);
           }
         } else {
           for paxos_log_msg in bundle {
@@ -548,13 +481,13 @@ impl<T: IOTypes> SlaveContext<T> {
               SlavePLm::CreateTableCommitted(committed) => {
                 let query_id = committed.query_id;
                 let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self);
+                let action = es.handle_committed_plm(self, io_ctx);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               SlavePLm::CreateTableAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_aborted_plm(self);
+                let action = es.handle_aborted_plm(self, io_ctx);
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
             }
@@ -574,14 +507,14 @@ impl<T: IOTypes> SlaveContext<T> {
         // Route the request to a Coord determined by the hash.
         let coord_index = hash_value % self.coord_positions.len() as u64;
         let cid = self.coord_positions.get(coord_index as usize).unwrap();
-        self.coord_forward_output.forward(cid, CoordForwardMsg::ExternalMessage(request));
+        io_ctx.coord_forward(cid, CoordForwardMsg::ExternalMessage(request));
       }
       SlaveForwardMsg::SlaveRemotePayload(payload) => match payload {
         msg::SlaveRemotePayload::RemoteLeaderChanged(_) => {}
         msg::SlaveRemotePayload::CreateTablePrepare(prepare) => {
           let query_id = prepare.query_id;
           if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
-            let action = es.handle_prepare(self);
+            let action = es.handle_prepare(self, io_ctx);
             self.handle_create_table_es_action(statuses, query_id, action);
           } else {
             map_insert(
@@ -608,7 +541,7 @@ impl<T: IOTypes> SlaveContext<T> {
           } else {
             // Send back a `CloseConfirm` to the Master.
             let sid = self.this_slave_group_id.clone();
-            self.ctx().send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
+            self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
               msg::CreateTableCloseConfirm { query_id, sid },
             ));
           }
@@ -616,12 +549,12 @@ impl<T: IOTypes> SlaveContext<T> {
         msg::SlaveRemotePayload::CreateTableAbort(abort) => {
           let query_id = abort.query_id;
           if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
-            let action = es.handle_abort(self);
+            let action = es.handle_abort(self, io_ctx);
             self.handle_create_table_es_action(statuses, query_id, action);
           } else {
             // Send back a `CloseConfirm` to the Master.
             let sid = self.this_slave_group_id.clone();
-            self.ctx().send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
+            self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
               msg::CreateTableCloseConfirm { query_id, sid },
             ));
           }
@@ -640,10 +573,10 @@ impl<T: IOTypes> SlaveContext<T> {
           }
         }
         msg::SlaveRemotePayload::TabletMessage(tid, tablet_msg) => {
-          self.tablet_forward_output.forward(&tid, TabletForwardMsg::TabletMessage(tablet_msg))
+          io_ctx.tablet_forward(&tid, TabletForwardMsg::TabletMessage(tablet_msg))
         }
         msg::SlaveRemotePayload::CoordMessage(cid, coord_msg) => {
-          self.coord_forward_output.forward(&cid, CoordForwardMsg::CoordMessage(coord_msg))
+          io_ctx.coord_forward(&cid, CoordForwardMsg::CoordMessage(coord_msg))
         }
       },
       SlaveForwardMsg::GossipData(gossip) => {
@@ -662,7 +595,7 @@ impl<T: IOTypes> SlaveContext<T> {
         let query_ids: Vec<QueryId> = statuses.create_table_ess.keys().cloned().collect();
         for query_id in query_ids {
           let create_query_es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-          let action = create_query_es.leader_changed(self);
+          let action = create_query_es.leader_changed::<IO>(self);
           self.handle_create_table_es_action(statuses, query_id.clone(), action);
         }
 
