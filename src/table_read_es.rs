@@ -1,4 +1,4 @@
-use crate::col_usage::{collect_top_level_cols, FrozenColUsageNode};
+use crate::col_usage::collect_top_level_cols;
 use crate::common::{
   btree_multimap_insert, lookup, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan,
   TableRegion,
@@ -23,7 +23,7 @@ use crate::tablet::{
   SubqueryFinished, SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion,
   TabletContext,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::iter::FromIterator;
 use std::rc::Rc;
 
@@ -191,7 +191,7 @@ impl TableReadES {
   fn remote_waiting_global_lock<IO: CoreIOCtx>(
     &mut self,
     _: &mut TabletContext,
-    io_ctx: &mut IO,
+    _: &mut IO,
     query_id: &QueryId,
   ) -> TableAction {
     self.waiting_global_locks.remove(query_id);
@@ -223,11 +223,7 @@ impl TableReadES {
   }
 
   /// Here, the column locking request results in us realizing the table has been dropped.
-  pub fn table_dropped<IO: CoreIOCtx>(
-    &mut self,
-    _: &mut TabletContext,
-    io_ctx: &mut IO,
-  ) -> TableAction {
+  pub fn table_dropped<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) -> TableAction {
     assert!(cast!(ExecutionS::ColumnsLocking, &self.state).is_ok());
     self.state = ExecutionS::Done;
     TableAction::QueryError(msg::QueryError::InvalidQueryPlan)
@@ -422,7 +418,7 @@ impl TableReadES {
   fn finish_table_read_es<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
-    io_ctx: &mut IO,
+    _: &mut IO,
   ) -> TableAction {
     let executing_state = cast!(ExecutionS::Executing, &mut self.state).unwrap();
 
@@ -512,7 +508,7 @@ impl TableReadES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, io_ctx: &mut IO) {
+  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {
     self.state = ExecutionS::Done;
   }
 }

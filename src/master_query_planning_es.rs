@@ -4,11 +4,8 @@ use crate::col_usage::{
 };
 use crate::common::{btree_map_insert, lookup, MasterIOCtx, TableSchema};
 use crate::master::{plm, MasterContext};
-use crate::model::common::{
-  proc, CQueryPath, ColName, QueryId, TablePath, Timestamp, TransTableName,
-};
+use crate::model::common::{proc, CQueryPath, ColName, QueryId, Timestamp, TransTableName};
 use crate::model::message as msg;
-use crate::server::ServerContextBase;
 
 // -----------------------------------------------------------------------------------------------
 //  Master MasterQueryPlanningES

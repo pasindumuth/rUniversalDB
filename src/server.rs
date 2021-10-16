@@ -1,4 +1,3 @@
-use crate::col_usage::{collect_top_level_cols, nodes_external_trans_tables, FrozenColUsageNode};
 use crate::common::{
   lookup_pos, CoreIOCtx, GossipData, KeyBound, MasterIOCtx, OrigP, SlaveIOCtx, TableSchema,
 };
@@ -10,11 +9,8 @@ use crate::model::common::{
   TableView, TabletGroupId, TabletKeyRange, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
-use sqlparser::test_utils::table;
-use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
-use std::rc::Rc;
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------

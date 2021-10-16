@@ -22,7 +22,6 @@ use crate::gr_query_es::{
   GRExecutionS, GRQueryAction, GRQueryConstructorView, GRQueryES, GRQueryPlan, ReadStage,
   SubqueryComputableSql,
 };
-use crate::model::common::proc::DropTable;
 use crate::model::common::{
   proc, CQueryPath, CSubNodePath, CTQueryPath, CTSubNodePath, ColType, ColValN, Context,
   ContextRow, ContextSchema, Gen, LeadershipId, NodeGroupId, PaxosGroupId, TNodePath, TQueryPath,
@@ -33,27 +32,20 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::model::message::SlaveMessage::PaxosDriverMessage;
 use crate::ms_table_read_es::{MSReadExecutionS, MSTableReadAction, MSTableReadES};
 use crate::ms_table_write_es::{MSTableWriteAction, MSTableWriteES, MSWriteExecutionS};
-use crate::multiversion_map::MVM;
 use crate::server::{
   are_cols_locked, contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error,
   CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
 };
 use crate::slave::SlaveBackMessage;
-use crate::storage::{
-  commit_to_storage, compress_updates_views, GenericMVTable, GenericTable, StorageView,
-};
+use crate::storage::{compress_updates_views, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
-use crate::trans_table_read_es::{
-  TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
-};
+use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::iter::FromIterator;
 use std::ops::{Add, Bound, Deref, Sub};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -2753,10 +2745,10 @@ pub fn compute_contexts<LocalTableT: LocalTable>(
   }
 
   // Create the child Contexts.
-  let callback = &mut |context_row_idx: usize,
-                       top_level_col_vals: Vec<ColValN>,
+  let callback = &mut |_context_row_idx: usize,
+                       _top_level_col_vals: Vec<ColValN>,
                        contexts: Vec<(ContextRow, usize)>,
-                       count: u64| {
+                       _count: u64| {
     for (subquery_idx, (context_row, idx)) in contexts.into_iter().enumerate() {
       let child_context = child_contexts.get_mut(subquery_idx).unwrap();
       if idx == child_context.context_rows.len() {

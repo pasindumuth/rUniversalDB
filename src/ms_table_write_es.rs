@@ -1,6 +1,6 @@
 use crate::col_usage::collect_top_level_cols;
 use crate::common::{
-  lookup, map_insert, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, TableRegion,
+  lookup, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, TableRegion,
 };
 use crate::expression::{compress_row_region, is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
@@ -9,7 +9,6 @@ use crate::model::common::{
   PrimaryKey, QueryId, TQueryPath, TableView, TierMap, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
-use crate::ms_table_read_es::MSTableReadES;
 use crate::server::{
   contains_col, evaluate_update, mk_eval_error, weak_contains_col, CommonQuery, ContextConstructor,
   ServerContextBase,
@@ -21,7 +20,7 @@ use crate::tablet::{
   SubqueryFinished, SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion,
   TabletContext,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::iter::FromIterator;
 use std::rc::Rc;
 
@@ -384,7 +383,7 @@ impl MSTableWriteES {
   pub fn finish_ms_table_write_es<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
-    io_ctx: &mut IO,
+    _: &mut IO,
     ms_query_es: &mut MSQueryES,
   ) -> MSTableWriteAction {
     let executing_state = cast!(MSWriteExecutionS::Executing, &mut self.state).unwrap();

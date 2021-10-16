@@ -34,7 +34,7 @@ fn main() {
     vec![mk_eid("m0"), mk_eid("m1"), mk_eid("m2"), mk_eid("m3"), mk_eid("m4")];
 
   // We just have one Tablet per Slave for now.
-  let tablet_address_config: HashMap<TabletGroupId, SlaveGroupId> = vec![
+  let _tablet_address_config: HashMap<TabletGroupId, SlaveGroupId> = vec![
     (mk_tid("t0"), mk_sid("s0")),
     (mk_tid("t1"), mk_sid("s1")),
     (mk_tid("t2"), mk_sid("s2")),
@@ -44,7 +44,7 @@ fn main() {
   .into_iter()
   .collect();
 
-  let schema: HashMap<(TablePath, Gen), TableSchema> = vec![
+  let _schema: HashMap<(TablePath, Gen), TableSchema> = vec![
     (
       (mk_tab("tab0"), Gen(0)),
       TableSchema::new(vec![(cn("id0"), ColType::String)], vec![(cn("c1"), ColType::Int)]),
@@ -68,7 +68,7 @@ fn main() {
   .collect();
 
   #[rustfmt::skip]
-  let sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>> = vec![
+  let _sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>> = vec![
     (
       (mk_tab("tab0"), Gen(0)),
       vec![

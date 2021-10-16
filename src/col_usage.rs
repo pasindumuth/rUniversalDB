@@ -4,10 +4,9 @@ use crate::model::common::{
   TierMap, Timestamp, TransTableName,
 };
 use crate::multiversion_map::MVM;
-use crate::server::{contains_col, weak_contains_col};
+use crate::server::weak_contains_col;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::iter::FromIterator;
 use std::ops::Deref;
 
 // -----------------------------------------------------------------------------------------------

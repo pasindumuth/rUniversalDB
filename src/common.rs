@@ -13,7 +13,6 @@ use crate::tablet::{TabletCreateHelper, TabletForwardMsg};
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
-use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;

@@ -1,4 +1,4 @@
-use crate::common::{GossipData, MasterIOCtx, RemoteLeaderChangedPLm};
+use crate::common::{MasterIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::ResponseData;
 use crate::master::{plm, MasterContext, MasterPLm};
 use crate::model::common::{
@@ -7,9 +7,8 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
-use sqlparser::tokenizer::Token::Comma;
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 // -----------------------------------------------------------------------------------------------
 //  AlterTableES

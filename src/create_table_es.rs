@@ -1,5 +1,5 @@
 use crate::alter_table_es::State;
-use crate::common::{RemoteLeaderChangedPLm, SlaveIOCtx, TableSchema};
+use crate::common::{SlaveIOCtx, TableSchema};
 use crate::model::common::{
   proc, ColName, ColType, Gen, QueryId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
@@ -10,7 +10,6 @@ use crate::slave::SlaveContext;
 use crate::slave::{plm, SlavePLm};
 use crate::tablet::TabletCreateHelper;
 use rand::RngCore;
-use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------------------------
 //  CreateTableES

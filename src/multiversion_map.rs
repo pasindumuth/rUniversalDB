@@ -150,7 +150,6 @@ pub fn find_version<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timest
 
 #[cfg(test)]
 mod tests {
-  use crate::model::common::Timestamp;
   use crate::multiversion_map::MVM;
 
   #[test]

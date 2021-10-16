@@ -1,42 +1,25 @@
 use crate::alter_table_es::State;
-use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, GossipData, OrigP,
   RemoteLeaderChangedPLm, SlaveIOCtx, TMStatus, UUID,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_es::{CreateTableAction, CreateTableES};
-use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
   iast, proc, CTQueryPath, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, LeadershipId,
   NodeGroupId, PaxosGroupId, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
   TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
-use crate::model::common::{EndpointId, QueryId, RequestId};
+use crate::model::common::{EndpointId, QueryId};
 use crate::model::message as msg;
-use crate::ms_query_coord_es::{
-  FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
-};
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
-use crate::query_converter::convert_to_msquery;
-use crate::server::{CommonQuery, SlaveServerContext};
 use crate::server::{MainSlaveServerContext, ServerContextBase};
-use crate::sql_parser::convert_ast;
-use crate::sql_parser::DDLQuery::Create;
 use crate::tablet::{GRQueryESWrapper, TabletBundle, TabletForwardMsg, TransTableReadESWrapper};
-use crate::trans_table_read_es::{
-  TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
-};
 use serde::{Deserialize, Serialize};
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser;
-use sqlparser::parser::ParserError::{ParserError, TokenizerError};
-use std::borrow::BorrowMut;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
@@ -44,7 +27,6 @@ use std::sync::Arc;
 // -----------------------------------------------------------------------------------------------
 
 pub mod plm {
-  use crate::common::GossipData;
   use crate::model::common::{
     proc, ColName, ColType, Gen, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
     Timestamp,

@@ -4,23 +4,16 @@ use runiversal::common::{
   btree_multimap_insert, mk_cid, mk_sid, CoreIOCtx, GossipData, SlaveIOCtx,
 };
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
-use runiversal::master::MasterTimerInput;
 use runiversal::model::common::{
-  CTSubNodePath, CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId,
-  TabletGroupId, Timestamp,
+  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId, TabletGroupId, Timestamp,
 };
-use runiversal::model::message as msg;
 use runiversal::model::message::NetworkMessage;
 use runiversal::multiversion_map::MVM;
-use runiversal::network_driver::NetworkDriver;
-use runiversal::paxos::PaxosDriver;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
 };
 use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
-use std::collections::{BTreeMap, BTreeSet, Bound, HashMap};
-use std::fmt::{Debug, Formatter, Result};
-use std::ops::{Deref, DerefMut};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -243,7 +236,7 @@ pub fn start_server(
     coord_map.insert(coord_group_id.clone(), to_coord_sender);
 
     // Create the Tablet
-    let mut coord_context = CoordContext::new(
+    let coord_context = CoordContext::new(
       this_sid.clone(),
       coord_group_id,
       this_eid.clone(),

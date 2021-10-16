@@ -1,4 +1,3 @@
-use crate::col_usage::{node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode};
 use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, GossipData, OrigP,
   TMStatus, TableSchema,
@@ -17,15 +16,13 @@ use crate::model::common::{
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
 use crate::ms_query_coord_es::{
-  FullMSCoordES, MSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
+  FullMSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContextBase, SlaveServerContext};
 use crate::sql_parser::convert_ast;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
-use crate::trans_table_read_es::{
-  TransExecutionS, TransTableAction, TransTableReadES, TransTableSource,
-};
+use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};

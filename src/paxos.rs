@@ -2,11 +2,10 @@ use crate::common::{mk_uuid, UUID};
 use crate::model::common::{EndpointId, Gen, LeadershipId, Timestamp};
 use crate::model::message as msg;
 use crate::model::message::{
-  LeaderChanged, MultiPaxosMessage, PLEntry, PLIndex, PaxosDriverMessage, PaxosMessage, Rnd,
+  LeaderChanged, PLEntry, PLIndex, PaxosDriverMessage, PaxosMessage, Rnd,
 };
 use crate::server::ServerContextBase;
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, HashMap};
 

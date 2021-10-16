@@ -9,19 +9,15 @@ use crate::model::common::{
   proc, CQueryPath, ColName, ColType, ColValN, ContextRow, ContextSchema, Gen, TQueryPath,
   TableView, Timestamp, TransTableName,
 };
-use crate::model::common::{CTQueryPath, Context, QueryId, TierMap, TransTableLocationPrefix};
+use crate::model::common::{CTQueryPath, Context, QueryId, TransTableLocationPrefix};
 use crate::model::message as msg;
-use crate::server::ServerContextBase;
 use crate::server::{
-  evaluate_super_simple_select, mk_eval_error, CommonQuery, ContextConstructor, LocalTable,
-  SlaveServerContext,
+  evaluate_super_simple_select, mk_eval_error, ContextConstructor, LocalTable, SlaveServerContext,
 };
 use crate::tablet::{
-  compute_contexts, Executing, QueryReplanningSqlView, SingleSubqueryStatus, SubqueryFinished,
-  SubqueryPending,
+  compute_contexts, Executing, SingleSubqueryStatus, SubqueryFinished, SubqueryPending,
 };
-use crate::trans_table_read_es::TransTableAction::Wait;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::iter::FromIterator;
 use std::ops::Deref;
 use std::rc::Rc;

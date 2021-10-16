@@ -1,8 +1,6 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{
-  mk_cid, rvec, CoreIOCtx, GossipData, MasterIOCtx, SlaveIOCtx, TableSchema,
-};
+use runiversal::common::{mk_cid, rvec, CoreIOCtx, GossipData, MasterIOCtx, SlaveIOCtx};
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::{FullMasterInput, MasterContext, MasterState, MasterTimerInput};
 use runiversal::model::common::{
@@ -16,10 +14,8 @@ use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
 };
 use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fmt::{Debug, Formatter, Result};
-use std::rc::Rc;
+use std::fmt::Debug;
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
@@ -327,7 +323,7 @@ impl Simulation {
           let cid = mk_cid(&mut sim.rand);
 
           // Create the Coord
-          let mut coord_state = CoordState::new(CoordContext::new(
+          let coord_state = CoordState::new(CoordContext::new(
             sid.clone(),
             cid.clone(),
             eid.clone(),

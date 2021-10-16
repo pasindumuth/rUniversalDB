@@ -1,5 +1,4 @@
 use crate::common::{MasterIOCtx, RemoteLeaderChangedPLm, TableSchema};
-use crate::master::MasterPLm::CreateTableTMPrepared;
 use crate::master::{plm, MasterContext, MasterPLm};
 use crate::model::common::{
   ColName, ColType, EndpointId, Gen, QueryId, RequestId, SlaveGroupId, TablePath, TabletGroupId,
@@ -8,9 +7,8 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
 use crate::server::ServerContextBase;
-use sqlparser::ast::WindowFrameBound::Following;
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 // -----------------------------------------------------------------------------------------------
 //  General STMPaxos2PC TM Types

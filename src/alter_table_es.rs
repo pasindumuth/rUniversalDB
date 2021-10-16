@@ -1,9 +1,8 @@
-use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
+use crate::common::CoreIOCtx;
 use crate::model::common::{proc, QueryId, Timestamp};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::tablet::{plm, TabletContext, TabletPLm};
-use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------------------------
 //  AlterTableES

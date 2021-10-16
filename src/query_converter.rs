@@ -1,8 +1,6 @@
-use crate::common::TableSchema;
 use crate::model::common::{iast, proc, ColName, TablePath, TransTableName};
 use crate::model::message as msg;
 use std::collections::{HashMap, HashSet};
-use std::iter::FromIterator;
 
 pub fn convert_to_msquery(query: iast::Query) -> Result<proc::MSQuery, msg::ExternalAbortedData> {
   // First, we rename all TransTable definitions and references so that they're

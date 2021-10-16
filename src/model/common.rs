@@ -341,7 +341,7 @@ impl RequestId {
 
 pub mod proc {
   use crate::model::common::iast::{BinaryOp, UnaryOp, Value};
-  use crate::model::common::{ColName, ColType, QueryId, TablePath, TransTableName};
+  use crate::model::common::{ColName, ColType, TablePath, TransTableName};
   use serde::{Deserialize, Serialize};
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

@@ -7,7 +7,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 // -----------------------------------------------------------------------------------------------
 //  DropTableTMES

@@ -1,10 +1,9 @@
 use crate::alter_table_es::State;
 use crate::common::CoreIOCtx;
-use crate::model::common::{proc, QueryId, Timestamp};
+use crate::model::common::{QueryId, Timestamp};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::tablet::{plm, TabletContext, TabletPLm};
-use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------------------------
 //  DropTableES

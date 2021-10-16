@@ -1,6 +1,6 @@
 use crate::col_usage::{
   collect_select_subqueries, collect_update_subqueries, node_external_trans_tables,
-  nodes_external_trans_tables, FrozenColUsageNode,
+  FrozenColUsageNode,
 };
 use crate::common::{lookup, lookup_pos, mk_qid, CoreIOCtx, OrigP, QueryPlan, TMStatus};
 use crate::model::common::{
@@ -11,10 +11,8 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::server::{CommonQuery, SlaveServerContext};
-use crate::tablet::{SingleSubqueryStatus, SubqueryPending};
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{HashMap, HashSet};
-use std::ops::Deref;
 use std::rc::Rc;
 
 // -----------------------------------------------------------------------------------------------

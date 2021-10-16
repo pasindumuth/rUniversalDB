@@ -1,14 +1,10 @@
 use crate::alter_table_tm_es::{
   AlterTableTMAction, AlterTableTMES, AlterTableTMS, Follower as AlterFollower,
 };
-use crate::col_usage::{
-  collect_table_paths, compute_all_tier_maps, compute_query_plan_data, iterate_stage_ms_query,
-  ColUsagePlanner, FrozenColUsageNode, GeneralStage,
-};
+use crate::common::RemoteLeaderChangedPLm;
 use crate::common::{
   btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, MasterIOCtx, TableSchema, UUID,
 };
-use crate::common::{map_insert, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{
   CreateTableTMAction, CreateTableTMES, CreateTableTMS, Follower as CreateFollower, ResponseData,
 };
@@ -19,7 +15,6 @@ use crate::master_query_planning_es::{
   master_query_planning, master_query_planning_post, MasterQueryPlanningAction,
   MasterQueryPlanningES,
 };
-use crate::model::common::proc::{AlterTable, TableRef};
 use crate::model::common::{
   proc, CQueryPath, ColName, EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId, RequestId,
   SlaveGroupId, SlaveQueryPath, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
@@ -41,11 +36,8 @@ use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
-use sqlparser::test_utils::table;
-use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
-use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
 //  MasterPLm

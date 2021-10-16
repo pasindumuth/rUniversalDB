@@ -1,7 +1,6 @@
 use crate::common::{ColBound, KeyBound, PolyColBound, SingleBound, TableRegion};
 use crate::model::common::proc::ValExpr;
 use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
-use std::cmp::{max, min};
 use std::collections::{BTreeSet, HashMap};
 use std::iter::FromIterator;
 use std::ops::Deref;
