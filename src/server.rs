@@ -22,8 +22,7 @@ use std::sync::Arc;
 // -----------------------------------------------------------------------------------------------
 
 /// This is used to present a consistent view of all servers in the system, include
-/// the Tablet, Slave, and Master. Fundamentally, in consists of basic IOTypes and the
-/// network configuration.
+/// the Tablet, Slave, and Master.
 pub trait ServerContextBase {
   // Getters
 

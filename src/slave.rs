@@ -158,6 +158,7 @@ pub enum SlaveBackMessage {
 }
 
 /// Messages deferred by the Slave to be run on the Slave.
+#[derive(Debug)]
 pub enum SlaveTimerInput {
   PaxosTimerEvent(PaxosTimerEvent),
 }
@@ -184,8 +185,8 @@ pub struct Statuses {
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct SlaveState {
-  context: SlaveContext,
-  statuses: Statuses,
+  pub context: SlaveContext,
+  pub statuses: Statuses,
 }
 
 /// The SlaveState that holds all the state of the Slave
@@ -220,7 +221,7 @@ impl SlaveState {
     SlaveState { context: slave_context, statuses: Default::default() }
   }
 
-  pub fn handle_full_input<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO, input: FullSlaveInput) {
+  pub fn handle_input<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO, input: FullSlaveInput) {
     match input {
       FullSlaveInput::SlaveMessage(message) => {
         self.context.handle_incoming_message(io_ctx, &mut self.statuses, message);

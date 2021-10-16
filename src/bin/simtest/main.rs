@@ -1,3 +1,5 @@
+#![feature(map_first_last)]
+
 mod simulation;
 
 use crate::simulation::{client_eid, slave_eid, Simulation};
@@ -7,7 +9,7 @@ use runiversal::model::common::{
   TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message as msg;
-use runiversal::test_utils::{cn, cvi, cvs, mk_sid, mk_tab, mk_tid};
+use runiversal::test_utils::{cn, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
 use std::collections::HashMap;
 
 fn main() {
@@ -27,6 +29,9 @@ fn main() {
   ]
   .into_iter()
   .collect();
+
+  let master_addres_config: Vec<EndpointId> =
+    vec![mk_eid("m0"), mk_eid("m1"), mk_eid("m2"), mk_eid("m3"), mk_eid("m4")];
 
   // We just have one Tablet per Slave for now.
   let tablet_address_config: HashMap<TabletGroupId, SlaveGroupId> = vec![
@@ -139,8 +144,7 @@ fn main() {
   .into_iter()
   .collect();
 
-  let mut sim =
-    Simulation::new(seed, 5, schema, sharding_config, tablet_address_config, slave_address_config);
+  let mut sim = Simulation::new(seed, 5, slave_address_config, master_addres_config);
 
   // let query = "\
   //     SELECT a, b, 123, myfunc(b) \

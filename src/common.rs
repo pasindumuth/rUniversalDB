@@ -32,16 +32,16 @@ pub trait SlaveIOCtx {
 
   // Tablet
   fn create_tablet(&mut self, helper: TabletCreateHelper);
-  fn tablet_forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletForwardMsg);
+  fn tablet_forward(&mut self, tablet_group_id: &TabletGroupId, forward_msg: TabletForwardMsg);
   fn all_tids(&self) -> Vec<TabletGroupId>;
   fn num_tablets(&self) -> usize;
 
   // Coord
-  fn coord_forward(&mut self, coord_group_id: &CoordGroupId, msg: CoordForwardMsg);
+  fn coord_forward(&mut self, coord_group_id: &CoordGroupId, forward_msg: CoordForwardMsg);
   fn all_cids(&self) -> Vec<CoordGroupId>;
 
   // Timer
-  fn defer(&mut self, defer_time: Timestamp, msg: SlaveTimerInput);
+  fn defer(&mut self, defer_time: Timestamp, timer_input: SlaveTimerInput);
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -57,7 +57,7 @@ pub trait CoreIOCtx {
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
 
   // Slave
-  fn slave_forward(&mut self, msg: SlaveBackMessage);
+  fn slave_forward(&mut self, forward_msg: SlaveBackMessage);
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -73,7 +73,7 @@ pub trait MasterIOCtx {
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
 
   // Timer
-  fn defer(&mut self, defer_time: Timestamp, msg: MasterTimerInput);
+  fn defer(&mut self, defer_time: Timestamp, timer_input: MasterTimerInput);
 }
 
 // -----------------------------------------------------------------------------------------------

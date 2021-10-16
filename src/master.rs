@@ -224,6 +224,7 @@ pub enum MasterForwardMsg {
 // -----------------------------------------------------------------------------------------------
 
 /// Messages deferred by the Slave to be run on the Slave.
+#[derive(Debug)]
 pub enum MasterTimerInput {
   PaxosTimerEvent(PaxosTimerEvent),
 }
@@ -282,38 +283,11 @@ pub struct MasterContext {
 }
 
 impl MasterState {
-  pub fn new(
-    db_schema: HashMap<(TablePath, Gen), TableSchema>,
-    sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
-    tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-    slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
-  ) -> MasterState {
-    let mut leader_map = HashMap::<PaxosGroupId, LeadershipId>::new();
-    for (sid, eids) in &slave_address_config {
-      leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
-    }
-    let all_gids = leader_map.keys().cloned().collect();
-    MasterState {
-      context: MasterContext {
-        this_eid: EndpointId("".to_string()),
-        gen: Gen(0),
-        db_schema,
-        table_generation: MVM::new(),
-        sharding_config,
-        tablet_address_config,
-        slave_address_config,
-        master_address_config: vec![],
-        leader_map,
-        network_driver: NetworkDriver::new(all_gids),
-        external_request_id_map: Default::default(),
-        master_bundle: MasterBundle::default(),
-        paxos_driver: PaxosDriver::new(vec![]),
-      },
-      statuses: Default::default(),
-    }
+  pub fn new(context: MasterContext) -> MasterState {
+    MasterState { context, statuses: Default::default() }
   }
 
-  pub fn handle_full_input<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, input: FullMasterInput) {
+  pub fn handle_input<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, input: FullMasterInput) {
     match input {
       FullMasterInput::MasterMessage(message) => {
         self.context.handle_incoming_message(io_ctx, &mut self.statuses, message);
@@ -327,6 +301,30 @@ impl MasterState {
 }
 
 impl MasterContext {
+  pub fn new(
+    this_eid: EndpointId,
+    slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
+    master_address_config: Vec<EndpointId>,
+    leader_map: HashMap<PaxosGroupId, LeadershipId>,
+  ) -> MasterContext {
+    let all_gids = leader_map.keys().cloned().collect();
+    MasterContext {
+      this_eid,
+      gen: Gen(0),
+      db_schema: Default::default(),
+      table_generation: MVM::new(),
+      sharding_config: Default::default(),
+      tablet_address_config: Default::default(),
+      slave_address_config,
+      master_address_config: master_address_config.clone(),
+      leader_map,
+      network_driver: NetworkDriver::new(all_gids),
+      external_request_id_map: Default::default(),
+      master_bundle: MasterBundle::default(),
+      paxos_driver: PaxosDriver::new(master_address_config),
+    }
+  }
+
   pub fn ctx<'a, IO: MasterIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> MasterServerContext<'a, IO> {
     MasterServerContext { io_ctx, leader_map: &mut self.leader_map }
   }

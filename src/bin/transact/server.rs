@@ -243,12 +243,11 @@ pub fn start_server(
     coord_map.insert(coord_group_id.clone(), to_coord_sender);
 
     // Create the Tablet
-    let gossip = gossip.clone();
     let mut coord_context = CoordContext::new(
       this_sid.clone(),
       coord_group_id,
       this_eid.clone(),
-      gossip,
+      gossip.clone(),
       leader_map.clone(),
     );
     let mut io_ctx = ProdCoreIOCtx {
@@ -281,6 +280,6 @@ pub fn start_server(
     // Receive data from the `to_server_receiver` and update the SlaveState accordingly.
     // This is the steady state that the slaves enters.
     let full_input = to_server_receiver.recv().unwrap();
-    slave.handle_full_input(&mut io_ctx, full_input);
+    slave.handle_input(&mut io_ctx, full_input);
   }
 }
