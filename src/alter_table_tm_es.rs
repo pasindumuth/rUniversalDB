@@ -142,8 +142,7 @@ impl AlterTableTMES {
   ) -> AlterTableTMAction {
     match &mut self.state {
       AlterTableTMS::Committed(committed) => {
-        if committed.rms_remaining.contains(&closed.rm) {
-          committed.rms_remaining.remove(&closed.rm);
+        if committed.rms_remaining.remove(&closed.rm) {
           if committed.rms_remaining.is_empty() {
             // All RMs have committed
             ctx.master_bundle.plms.push(MasterPLm::AlterTableTMClosed(plm::AlterTableTMClosed {
@@ -156,8 +155,7 @@ impl AlterTableTMES {
         }
       }
       AlterTableTMS::Aborted(aborted) => {
-        if aborted.rms_remaining.contains(&closed.rm) {
-          aborted.rms_remaining.remove(&closed.rm);
+        if aborted.rms_remaining.remove(&closed.rm) {
           if aborted.rms_remaining.is_empty() {
             // All RMs have aborted
             ctx.master_bundle.plms.push(MasterPLm::AlterTableTMClosed(plm::AlterTableTMClosed {
@@ -242,7 +240,8 @@ impl AlterTableTMES {
                 payload: msg::ExternalDDLQueryAbortData::Unknown,
               },
             )),
-          )
+          );
+          self.response_data = None;
         }
 
         self.advance_to_aborted(ctx, io_ctx);
@@ -328,13 +327,14 @@ impl AlterTableTMES {
                 timestamp: commit_timestamp,
               },
             )),
-          )
+          );
+          self.response_data = None;
         }
+
+        self.advance_to_committed(ctx, io_ctx, commit_timestamp);
 
         // Broadcast a GossipData
         ctx.broadcast_gossip(io_ctx);
-
-        self.advance_to_committed(ctx, io_ctx, commit_timestamp);
       }
       _ => {}
     }
@@ -398,28 +398,28 @@ impl AlterTableTMES {
         AlterTableTMAction::Wait
       }
       AlterTableTMS::WaitingInsertTMPrepared => {
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         AlterTableTMAction::Exit
       }
       AlterTableTMS::InsertTMPreparing => {
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         AlterTableTMAction::Exit
       }
       AlterTableTMS::Preparing(_)
       | AlterTableTMS::InsertingTMCommitted
       | AlterTableTMS::InsertingTMAborted => {
         self.state = AlterTableTMS::Follower(Follower::Preparing);
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         AlterTableTMAction::Wait
       }
       AlterTableTMS::Committed(committed) => {
         self.state = AlterTableTMS::Follower(Follower::Committed(committed.commit_timestamp));
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         AlterTableTMAction::Wait
       }
       AlterTableTMS::Aborted(_) => {
         self.state = AlterTableTMS::Follower(Follower::Aborted);
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         AlterTableTMAction::Wait
       }
       AlterTableTMS::InsertingTMClosed(tm_closed) => {
@@ -427,7 +427,7 @@ impl AlterTableTMES {
           InsertingTMClosed::Committed(timestamp) => Follower::Committed(timestamp.clone()),
           InsertingTMClosed::Aborted => Follower::Aborted,
         });
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         AlterTableTMAction::Wait
       }
     }
@@ -485,27 +485,11 @@ impl AlterTableTMES {
     }
     AlterTableTMAction::Wait
   }
-
-  fn maybe_respond_dead<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
-    if let Some(response_data) = &self.response_data {
-      ctx.external_request_id_map.remove(&response_data.request_id);
-      io_ctx.send(
-        &response_data.sender_eid,
-        msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-          msg::ExternalDDLQueryAborted {
-            request_id: response_data.request_id.clone(),
-            payload: msg::ExternalDDLQueryAbortData::NodeDied,
-          },
-        )),
-      );
-      self.response_data = None;
-    }
-  }
 }
 
-/// This returns the current set of RMs used by the `AlterTableTMES`. Recall that while
+/// This returns the current set of RMs associated with the given `TablePath`. Recall that while
 /// the ES is alive, we ensure that this is idempotent.
-fn get_rms<IO: MasterIOCtx>(
+pub fn get_rms<IO: MasterIOCtx>(
   ctx: &mut MasterContext,
   _: &mut IO,
   table_path: &TablePath,
@@ -517,4 +501,25 @@ fn get_rms<IO: MasterIOCtx>(
     rms.push(TNodePath { sid, sub: TSubNodePath::Tablet(tid.clone()) });
   }
   rms
+}
+
+/// Send a response back to the External, informing them that the current Master Leader died.
+pub fn maybe_respond_dead<IO: MasterIOCtx>(
+  response_data: &mut Option<ResponseData>,
+  ctx: &mut MasterContext,
+  io_ctx: &mut IO,
+) {
+  if let Some(data) = response_data {
+    ctx.external_request_id_map.remove(&data.request_id);
+    io_ctx.send(
+      &data.sender_eid,
+      msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+        msg::ExternalDDLQueryAborted {
+          request_id: data.request_id.clone(),
+          payload: msg::ExternalDDLQueryAbortData::NodeDied,
+        },
+      )),
+    );
+    *response_data = None;
+  }
 }

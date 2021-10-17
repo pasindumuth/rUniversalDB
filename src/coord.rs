@@ -84,8 +84,8 @@ pub struct CoordState {
 #[derive(Debug)]
 pub struct CoordContext {
   /// Metadata
-  pub this_slave_group_id: SlaveGroupId,
-  pub this_coord_group_id: CoordGroupId,
+  pub this_sid: SlaveGroupId,
+  pub this_cid: CoordGroupId,
   pub sub_node_path: CTSubNodePath, // // Wraps `this_coord_group_id` for expedience
   pub this_eid: EndpointId,
 
@@ -119,8 +119,8 @@ impl CoordContext {
     leader_map: HashMap<PaxosGroupId, LeadershipId>,
   ) -> CoordContext {
     CoordContext {
-      this_slave_group_id,
-      this_coord_group_id: this_coord_group_id.clone(),
+      this_sid: this_slave_group_id,
+      this_cid: this_coord_group_id.clone(),
       sub_node_path: CTSubNodePath::Coord(this_coord_group_id),
       this_eid,
       gossip,
@@ -132,7 +132,7 @@ impl CoordContext {
   pub fn ctx<'a, IO: CoreIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
     SlaveServerContext {
       io_ctx,
-      this_slave_group_id: &self.this_slave_group_id,
+      this_slave_group_id: &self.this_sid,
       sub_node_path: &self.sub_node_path,
       leader_map: &self.leader_map,
       gossip: &mut self.gossip,
@@ -418,7 +418,7 @@ impl CoordContext {
         }
       }
       CoordForwardMsg::LeaderChanged(leader_changed) => {
-        let this_gid = self.this_slave_group_id.to_gid();
+        let this_gid = self.this_sid.to_gid();
         self.leader_map.insert(this_gid, leader_changed.lid);
 
         if self.is_leader() {
@@ -973,8 +973,8 @@ impl CoordContext {
   pub fn mk_query_path(&self, query_id: QueryId) -> CQueryPath {
     CQueryPath {
       node_path: CNodePath {
-        sid: self.this_slave_group_id.clone(),
-        sub: CSubNodePath::Coord(self.this_coord_group_id.clone()),
+        sid: self.this_sid.clone(),
+        sub: CSubNodePath::Coord(self.this_cid.clone()),
       },
       query_id,
     }
@@ -982,7 +982,7 @@ impl CoordContext {
 
   /// Returns true iff this is the Leader.
   pub fn is_leader(&self) -> bool {
-    let lid = self.leader_map.get(&self.this_slave_group_id.to_gid()).unwrap();
+    let lid = self.leader_map.get(&self.this_sid.to_gid()).unwrap();
     lid.eid == self.this_eid
   }
 }

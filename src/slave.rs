@@ -178,7 +178,7 @@ pub struct SlaveContext {
   pub coord_positions: Vec<CoordGroupId>,
 
   // Metadata
-  pub this_slave_group_id: SlaveGroupId,
+  pub this_sid: SlaveGroupId,
   pub this_gid: PaxosGroupId, // self.this_slave_group_id.to_gid()
   pub this_eid: EndpointId,
 
@@ -233,7 +233,7 @@ impl SlaveContext {
     let paxos_nodes = gossip.slave_address_config.get(&this_slave_group_id).unwrap().clone();
     SlaveContext {
       coord_positions,
-      this_slave_group_id: this_slave_group_id.clone(),
+      this_sid: this_slave_group_id.clone(),
       this_gid: this_slave_group_id.to_gid(),
       this_eid,
       gossip,
@@ -251,7 +251,7 @@ impl SlaveContext {
   ) -> MainSlaveServerContext<'a, IO> {
     MainSlaveServerContext {
       io_ctx,
-      this_slave_group_id: &self.this_slave_group_id,
+      this_slave_group_id: &self.this_sid,
       leader_map: &self.leader_map,
     }
   }
@@ -523,7 +523,7 @@ impl SlaveContext {
             self.handle_create_table_es_action(statuses, query_id, action);
           } else {
             // Send back a `CloseConfirm` to the Master.
-            let sid = self.this_slave_group_id.clone();
+            let sid = self.this_sid.clone();
             self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
               msg::CreateTableCloseConfirm { query_id, sid },
             ));
@@ -536,7 +536,7 @@ impl SlaveContext {
             self.handle_create_table_es_action(statuses, query_id, action);
           } else {
             // Send back a `CloseConfirm` to the Master.
-            let sid = self.this_slave_group_id.clone();
+            let sid = self.this_sid.clone();
             self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
               msg::CreateTableCloseConfirm { query_id, sid },
             ));
@@ -571,7 +571,7 @@ impl SlaveContext {
         self.leader_map.insert(gid.clone(), lid.clone()); // Update the LeadershipId
       }
       SlaveForwardMsg::LeaderChanged(leader_changed) => {
-        let this_gid = self.this_slave_group_id.to_gid();
+        let this_gid = self.this_sid.to_gid();
         self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
 
         // Inform CreateQueryES
@@ -610,7 +610,7 @@ impl SlaveContext {
 
   /// Returns true iff this is the Leader.
   pub fn is_leader(&self) -> bool {
-    let lid = self.leader_map.get(&self.this_slave_group_id.to_gid()).unwrap();
+    let lid = self.leader_map.get(&self.this_sid.to_gid()).unwrap();
     lid.eid == self.this_eid
   }
 }

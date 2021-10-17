@@ -178,5 +178,5 @@ fn main() {
     &slave_eid(&2),
   );
 
-  sim.simulate_all();
+  // sim.simulate_all();
 }

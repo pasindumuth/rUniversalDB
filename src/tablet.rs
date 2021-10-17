@@ -571,8 +571,8 @@ pub struct TabletState {
 #[derive(Debug)]
 pub struct TabletContext {
   /// Metadata
-  pub this_slave_group_id: SlaveGroupId,
-  pub this_tablet_group_id: TabletGroupId,
+  pub this_sid: SlaveGroupId,
+  pub this_tid: TabletGroupId,
   pub sub_node_path: CTSubNodePath, // Wraps `this_tablet_group_id` for expedience
   pub this_eid: EndpointId,
 
@@ -624,8 +624,8 @@ impl TabletState {
 impl TabletContext {
   pub fn new(helper: TabletCreateHelper) -> TabletContext {
     TabletContext {
-      this_slave_group_id: helper.this_slave_group_id,
-      this_tablet_group_id: helper.this_tablet_group_id.clone(),
+      this_sid: helper.this_slave_group_id,
+      this_tid: helper.this_tablet_group_id.clone(),
       sub_node_path: CTSubNodePath::Tablet(helper.this_tablet_group_id),
       this_eid: helper.this_eid,
       gossip: helper.gossip,
@@ -651,7 +651,7 @@ impl TabletContext {
   pub fn ctx<'a, IO: CoreIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
     SlaveServerContext {
       io_ctx,
-      this_slave_group_id: &self.this_slave_group_id,
+      this_slave_group_id: &self.this_sid,
       sub_node_path: &self.sub_node_path,
       leader_map: &self.leader_map,
       gossip: &mut self.gossip,
@@ -777,7 +777,7 @@ impl TabletContext {
           }
 
           // Dispatch the TabletBundle for insertion and start a new one.
-          let tid = self.this_tablet_group_id.clone();
+          let tid = self.this_tid.clone();
           let tablet_bundle = std::mem::replace(&mut self.tablet_bundle, Vec::default());
           io_ctx.slave_forward(SlaveBackMessage::TabletBundle(tid, tablet_bundle));
         } else {
@@ -1190,7 +1190,7 @@ impl TabletContext {
               }
               timestamp += 1;
 
-              // Construct an AlterTableES set it to `ddl_es`.
+              // Construct an AlterTableES and set it to `ddl_es`.
               let query_id = prepare.query_id;
               statuses.ddl_es = DDLES::Alter(AlterTableES {
                 query_id,
@@ -1390,7 +1390,7 @@ impl TabletContext {
         }
       }
       TabletForwardMsg::LeaderChanged(leader_changed) => {
-        let this_gid = self.this_slave_group_id.to_gid();
+        let this_gid = self.this_sid.to_gid();
         self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
 
         // Inform FinishQueryES
@@ -2624,10 +2624,7 @@ impl TabletContext {
 
   /// Construct NodePath of this Tablet.
   pub fn mk_node_path(&self) -> TNodePath {
-    TNodePath {
-      sid: self.this_slave_group_id.clone(),
-      sub: TSubNodePath::Tablet(self.this_tablet_group_id.clone()),
-    }
+    TNodePath { sid: self.this_sid.clone(), sub: TSubNodePath::Tablet(self.this_tid.clone()) }
   }
 
   /// Construct QueryPath for a given `query_id` that belongs to this Tablet.
@@ -2637,7 +2634,7 @@ impl TabletContext {
 
   /// Returns true iff this is the Leader.
   pub fn is_leader(&self) -> bool {
-    let lid = self.leader_map.get(&self.this_slave_group_id.to_gid()).unwrap();
+    let lid = self.leader_map.get(&self.this_sid.to_gid()).unwrap();
     lid.eid == self.this_eid
   }
 }

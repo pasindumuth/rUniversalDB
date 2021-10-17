@@ -511,7 +511,7 @@ pub fn weak_contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &
 }
 
 /// Computes whether `col` is in `table_schema` at the latest time which `col` had been modified
-/// in the schema. This is not idempotent.
+/// in the schema. Obviously, this function is not idempotent.
 pub fn weak_contains_col_latest(table_schema: &TableSchema, col: &ColName) -> bool {
   lookup_pos(&table_schema.key_cols, col).is_some()
     || table_schema.val_cols.get_last_version(col).is_some()

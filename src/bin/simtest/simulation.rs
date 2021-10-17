@@ -465,7 +465,7 @@ impl Simulation {
       current_time, // TODO: simulate clock skew
       queues: &mut self.queues,
       nonempty_queues: &mut self.nonempty_queues,
-      this_sid: &slave_data.slave_state.context.this_slave_group_id.clone(),
+      this_sid: &slave_data.slave_state.context.this_sid.clone(),
       this_eid: to_eid,
       tablet_states: &mut slave_data.tablet_states,
       slave_back_messages: &mut slave_back_messages,

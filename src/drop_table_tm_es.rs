@@ -1,3 +1,4 @@
+use crate::alter_table_tm_es::{get_rms, maybe_respond_dead};
 use crate::common::{MasterIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::ResponseData;
 use crate::master::{plm, MasterContext, MasterPLm};
@@ -140,8 +141,7 @@ impl DropTableTMES {
   ) -> DropTableTMAction {
     match &mut self.state {
       DropTableTMS::Committed(committed) => {
-        if committed.rms_remaining.contains(&closed.rm) {
-          committed.rms_remaining.remove(&closed.rm);
+        if committed.rms_remaining.remove(&closed.rm) {
           if committed.rms_remaining.is_empty() {
             // All RMs have committed
             ctx.master_bundle.plms.push(MasterPLm::DropTableTMClosed(plm::DropTableTMClosed {
@@ -154,8 +154,7 @@ impl DropTableTMES {
         }
       }
       DropTableTMS::Aborted(aborted) => {
-        if aborted.rms_remaining.contains(&closed.rm) {
-          aborted.rms_remaining.remove(&closed.rm);
+        if aborted.rms_remaining.remove(&closed.rm) {
           if aborted.rms_remaining.is_empty() {
             // All RMs have aborted
             ctx.master_bundle.plms.push(MasterPLm::DropTableTMClosed(plm::DropTableTMClosed {
@@ -237,7 +236,8 @@ impl DropTableTMES {
                 payload: msg::ExternalDDLQueryAbortData::Unknown,
               },
             )),
-          )
+          );
+          self.response_data = None;
         }
 
         self.advance_to_aborted(ctx, io_ctx);
@@ -259,8 +259,10 @@ impl DropTableTMES {
     let mut commit_timestamp = committed_plm.timestamp_hint;
     commit_timestamp = max(commit_timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
 
-    // Apply the Drop
+    // Update Gossip Gen
     ctx.gen.0 += 1;
+
+    // Update `table_generation`
     ctx.table_generation.write(&self.table_path, None, commit_timestamp);
 
     commit_timestamp
@@ -313,13 +315,14 @@ impl DropTableTMES {
                 timestamp: commit_timestamp,
               },
             )),
-          )
+          );
+          self.response_data = None;
         }
+
+        self.advance_to_committed(ctx, io_ctx, commit_timestamp);
 
         // Broadcast a GossipData
         ctx.broadcast_gossip(io_ctx);
-
-        self.advance_to_committed(ctx, io_ctx, commit_timestamp);
       }
       _ => {}
     }
@@ -382,28 +385,28 @@ impl DropTableTMES {
         DropTableTMAction::Wait
       }
       DropTableTMS::WaitingInsertTMPrepared => {
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         DropTableTMAction::Exit
       }
       DropTableTMS::InsertTMPreparing => {
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         DropTableTMAction::Exit
       }
       DropTableTMS::Preparing(_)
       | DropTableTMS::InsertingTMCommitted
       | DropTableTMS::InsertingTMAborted => {
         self.state = DropTableTMS::Follower(Follower::Preparing);
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         DropTableTMAction::Wait
       }
       DropTableTMS::Committed(committed) => {
         self.state = DropTableTMS::Follower(Follower::Committed(committed.commit_timestamp));
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         DropTableTMAction::Wait
       }
       DropTableTMS::Aborted(_) => {
         self.state = DropTableTMS::Follower(Follower::Aborted);
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         DropTableTMAction::Wait
       }
       DropTableTMS::InsertingTMClosed(tm_closed) => {
@@ -411,7 +414,7 @@ impl DropTableTMES {
           InsertingTMClosed::Committed(timestamp) => Follower::Committed(timestamp.clone()),
           InsertingTMClosed::Aborted => Follower::Aborted,
         });
-        self.maybe_respond_dead(ctx, io_ctx);
+        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         DropTableTMAction::Wait
       }
     }
@@ -468,36 +471,4 @@ impl DropTableTMES {
     }
     DropTableTMAction::Wait
   }
-
-  fn maybe_respond_dead<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
-    if let Some(response_data) = &self.response_data {
-      ctx.external_request_id_map.remove(&response_data.request_id);
-      io_ctx.send(
-        &response_data.sender_eid,
-        msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-          msg::ExternalDDLQueryAborted {
-            request_id: response_data.request_id.clone(),
-            payload: msg::ExternalDDLQueryAbortData::NodeDied,
-          },
-        )),
-      );
-      self.response_data = None;
-    }
-  }
-}
-
-/// This returns the current set of RMs used by the `DropTableTMES`. Recall that while
-/// the ES is alive, we ensure that this is idempotent.
-fn get_rms<IO: MasterIOCtx>(
-  ctx: &mut MasterContext,
-  _: &mut IO,
-  table_path: &TablePath,
-) -> Vec<TNodePath> {
-  let gen = ctx.table_generation.get_last_version(table_path).unwrap();
-  let mut rms = Vec::<TNodePath>::new();
-  for (_, tid) in ctx.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap() {
-    let sid = ctx.tablet_address_config.get(&tid).unwrap().clone();
-    rms.push(TNodePath { sid, sub: TSubNodePath::Tablet(tid.clone()) });
-  }
-  rms
 }

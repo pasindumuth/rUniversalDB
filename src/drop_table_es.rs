@@ -35,14 +35,7 @@ impl DropTableES {
   ) -> DropTableAction {
     match &self.state {
       State::Prepared => {
-        let this_node_path = ctx.mk_node_path();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTablePrepared(
-          msg::DropTablePrepared {
-            query_id: self.query_id.clone(),
-            rm: this_node_path,
-            timestamp: self.prepared_timestamp.clone(),
-          },
-        ));
+        self.send_prepared(ctx, io_ctx);
       }
       _ => {}
     }
@@ -74,10 +67,7 @@ impl DropTableES {
   ) -> DropTableAction {
     match &self.state {
       State::WaitingInsertingPrepared => {
-        let this_node_path = ctx.mk_node_path();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
-          msg::DropTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
-        ));
+        self.send_close_confirm(ctx, io_ctx);
         DropTableAction::Aborted
       }
       State::InsertingPrepared => {
@@ -107,14 +97,7 @@ impl DropTableES {
   ) -> DropTableAction {
     match &self.state {
       State::InsertingPrepared => {
-        let this_node_path = ctx.mk_node_path();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTablePrepared(
-          msg::DropTablePrepared {
-            query_id: self.query_id.clone(),
-            rm: this_node_path,
-            timestamp: self.prepared_timestamp.clone(),
-          },
-        ));
+        self.send_prepared(ctx, io_ctx);
         self.state = State::Prepared;
       }
       State::InsertingPreparedAborted => {
@@ -133,10 +116,7 @@ impl DropTableES {
     match &self.state {
       State::Follower => DropTableAction::Aborted,
       State::InsertingAborted => {
-        let this_node_path = ctx.mk_node_path();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
-          msg::DropTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
-        ));
+        self.send_close_confirm(ctx, io_ctx);
         DropTableAction::Aborted
       }
       _ => DropTableAction::Wait,
@@ -152,10 +132,7 @@ impl DropTableES {
     match &self.state {
       State::Follower => DropTableAction::Committed(committed_plm.timestamp.clone()),
       State::InsertingCommitted => {
-        let this_node_path = ctx.mk_node_path();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
-          msg::DropTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
-        ));
+        self.send_close_confirm(ctx, io_ctx);
         DropTableAction::Committed(committed_plm.timestamp.clone())
       }
       _ => DropTableAction::Wait,
@@ -202,5 +179,25 @@ impl DropTableES {
         DropTableAction::Wait
       }
     }
+  }
+
+  // Helpers
+
+  fn send_prepared<IO: CoreIOCtx>(&self, ctx: &mut TabletContext, io_ctx: &mut IO) {
+    let this_node_path = ctx.mk_node_path();
+    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTablePrepared(
+      msg::DropTablePrepared {
+        query_id: self.query_id.clone(),
+        rm: this_node_path,
+        timestamp: self.prepared_timestamp.clone(),
+      },
+    ));
+  }
+
+  fn send_close_confirm<IO: CoreIOCtx>(&self, ctx: &mut TabletContext, io_ctx: &mut IO) {
+    let this_node_path = ctx.mk_node_path();
+    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
+      msg::DropTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
+    ));
   }
 }

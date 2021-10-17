@@ -737,97 +737,102 @@ impl MasterContext {
         // Run Main Loop
         self.run_main_loop(io_ctx, statuses);
       }
-      MasterForwardMsg::MasterRemotePayload(payload) => match payload {
-        MasterRemotePayload::RemoteLeaderChanged(_) => {}
-        MasterRemotePayload::PerformMasterQueryPlanning(query_planning) => {
-          let action = master_query_planning(self, query_planning.clone());
-          match action {
-            MasterQueryPlanningAction::Wait => {
-              btree_map_insert(
-                &mut statuses.planning_ess,
-                &query_planning.query_id.clone(),
-                MasterQueryPlanningES {
-                  sender_path: query_planning.sender_path,
-                  query_id: query_planning.query_id,
-                  timestamp: query_planning.timestamp,
-                  ms_query: query_planning.ms_query,
-                },
-              );
-            }
-            MasterQueryPlanningAction::Respond(result) => {
-              self.ctx(io_ctx).send_to_c(
-                query_planning.sender_path.node_path,
-                msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
-                  return_qid: query_planning.sender_path.query_id,
-                  query_id: query_planning.query_id,
-                  result,
-                }),
-              );
+      MasterForwardMsg::MasterRemotePayload(payload) => {
+        match payload {
+          MasterRemotePayload::RemoteLeaderChanged(_) => {}
+          MasterRemotePayload::PerformMasterQueryPlanning(query_planning) => {
+            let action = master_query_planning(self, query_planning.clone());
+            match action {
+              MasterQueryPlanningAction::Wait => {
+                btree_map_insert(
+                  &mut statuses.planning_ess,
+                  &query_planning.query_id.clone(),
+                  MasterQueryPlanningES {
+                    sender_path: query_planning.sender_path,
+                    query_id: query_planning.query_id,
+                    timestamp: query_planning.timestamp,
+                    ms_query: query_planning.ms_query,
+                  },
+                );
+              }
+              MasterQueryPlanningAction::Respond(result) => {
+                self.ctx(io_ctx).send_to_c(
+                  query_planning.sender_path.node_path,
+                  msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
+                    return_qid: query_planning.sender_path.query_id,
+                    query_id: query_planning.query_id,
+                    result,
+                  }),
+                );
+              }
             }
           }
+          MasterRemotePayload::CancelMasterQueryPlanning(cancel_query_planning) => {
+            statuses.planning_ess.remove(&cancel_query_planning.query_id);
+          }
+          // CreateTable
+          MasterRemotePayload::CreateTablePrepared(prepared) => {
+            let query_id = prepared.query_id.clone();
+            let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.handle_prepared(self, io_ctx, prepared);
+            self.handle_create_table_es_action(statuses, query_id, action);
+          }
+          MasterRemotePayload::CreateTableAborted(aborted) => {
+            let query_id = aborted.query_id.clone();
+            let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.handle_aborted(self, io_ctx);
+            self.handle_create_table_es_action(statuses, query_id, action);
+          }
+          MasterRemotePayload::CreateTableCloseConfirm(closed) => {
+            let query_id = closed.query_id.clone();
+            let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.handle_close_confirmed(self, io_ctx, closed);
+            self.handle_create_table_es_action(statuses, query_id, action);
+          }
+          // AlterTable
+          MasterRemotePayload::AlterTablePrepared(prepared) => {
+            let query_id = prepared.query_id.clone();
+            let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.handle_prepared(self, io_ctx, prepared);
+            self.handle_alter_table_es_action(statuses, query_id, action);
+          }
+          MasterRemotePayload::AlterTableAborted(aborted) => {
+            let query_id = aborted.query_id.clone();
+            let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.handle_aborted(self, io_ctx);
+            self.handle_alter_table_es_action(statuses, query_id, action);
+          }
+          MasterRemotePayload::AlterTableCloseConfirm(closed) => {
+            let query_id = closed.query_id.clone();
+            let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.handle_close_confirmed(self, io_ctx, closed);
+            self.handle_alter_table_es_action(statuses, query_id, action);
+          }
+          // Drop
+          MasterRemotePayload::DropTablePrepared(prepared) => {
+            let query_id = prepared.query_id.clone();
+            let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.handle_prepared(self, io_ctx, prepared);
+            self.handle_drop_table_es_action(statuses, query_id, action);
+          }
+          MasterRemotePayload::DropTableAborted(aborted) => {
+            let query_id = aborted.query_id.clone();
+            let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.handle_aborted(self, io_ctx);
+            self.handle_drop_table_es_action(statuses, query_id, action);
+          }
+          MasterRemotePayload::DropTableCloseConfirm(closed) => {
+            let query_id = closed.query_id.clone();
+            let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.handle_close_confirmed(self, io_ctx, closed);
+            self.handle_drop_table_es_action(statuses, query_id, action);
+          }
+          MasterRemotePayload::MasterGossipRequest(_) => {}
         }
-        MasterRemotePayload::CancelMasterQueryPlanning(cancel_query_planning) => {
-          statuses.planning_ess.remove(&cancel_query_planning.query_id);
-        }
-        // CreateTable
-        MasterRemotePayload::CreateTablePrepared(prepared) => {
-          let query_id = prepared.query_id.clone();
-          let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_prepared(self, io_ctx, prepared);
-          self.handle_create_table_es_action(statuses, query_id, action);
-        }
-        MasterRemotePayload::CreateTableAborted(aborted) => {
-          let query_id = aborted.query_id.clone();
-          let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_aborted(self, io_ctx);
-          self.handle_create_table_es_action(statuses, query_id, action);
-        }
-        MasterRemotePayload::CreateTableCloseConfirm(closed) => {
-          let query_id = closed.query_id.clone();
-          let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_close_confirmed(self, io_ctx, closed);
-          self.handle_create_table_es_action(statuses, query_id, action);
-        }
-        // AlterTable
-        MasterRemotePayload::AlterTablePrepared(prepared) => {
-          let query_id = prepared.query_id.clone();
-          let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_prepared(self, io_ctx, prepared);
-          self.handle_alter_table_es_action(statuses, query_id, action);
-        }
-        MasterRemotePayload::AlterTableAborted(aborted) => {
-          let query_id = aborted.query_id.clone();
-          let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_aborted(self, io_ctx);
-          self.handle_alter_table_es_action(statuses, query_id, action);
-        }
-        MasterRemotePayload::AlterTableCloseConfirm(closed) => {
-          let query_id = closed.query_id.clone();
-          let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_close_confirmed(self, io_ctx, closed);
-          self.handle_alter_table_es_action(statuses, query_id, action);
-        }
-        // Drop
-        MasterRemotePayload::DropTablePrepared(prepared) => {
-          let query_id = prepared.query_id.clone();
-          let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_prepared(self, io_ctx, prepared);
-          self.handle_drop_table_es_action(statuses, query_id, action);
-        }
-        MasterRemotePayload::DropTableAborted(aborted) => {
-          let query_id = aborted.query_id.clone();
-          let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_aborted(self, io_ctx);
-          self.handle_drop_table_es_action(statuses, query_id, action);
-        }
-        MasterRemotePayload::DropTableCloseConfirm(closed) => {
-          let query_id = closed.query_id.clone();
-          let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.handle_close_confirmed(self, io_ctx, closed);
-          self.handle_drop_table_es_action(statuses, query_id, action);
-        }
-        MasterRemotePayload::MasterGossipRequest(_) => {}
-      },
+
+        // Run Main Loop
+        self.run_main_loop(io_ctx, statuses);
+      }
       MasterForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
         let gid = remote_leader_changed.gid.clone();
         let lid = remote_leader_changed.lid.clone();
@@ -906,8 +911,8 @@ impl MasterContext {
     }
   }
 
-  /// Validate the uniqueness of `RequestId`, parse the SQL, ensure the `TablePath` exists, and
-  /// check that the column being modified is not a key column before returning the `AlterTable`.
+  /// Validate the uniqueness of `RequestId` and return the parsed SQL, or an
+  /// appropriate error if this fails.
   fn validate_ddl_query(
     &self,
     external_query: &msg::PerformExternalDDLQuery,
@@ -930,7 +935,7 @@ impl MasterContext {
     }
   }
 
-  /// Runs the `run_main_loop_once` until it finally results in no states changes.
+  /// Runs the `run_main_loop_once` until it finally results in changes to the node's state.
   fn run_main_loop<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
     while !self.run_main_loop_once(io_ctx, statuses) {}
   }
@@ -986,7 +991,7 @@ impl MasterContext {
       for query_id in ess_to_remove {
         let es = statuses.create_table_tm_ess.remove(&query_id).unwrap();
         if let Some(response_data) = &es.response_data {
-          response_invalid_ddl(io_ctx, response_data);
+          respond_invalid_ddl(io_ctx, response_data);
         }
       }
     }
@@ -997,13 +1002,14 @@ impl MasterContext {
       for (_, es) in &mut statuses.alter_table_tm_ess {
         if let AlterTableTMS::Start = &es.state {
           if !tables_being_modified.contains(&es.table_path) {
-            // Check Column Validity
+            // Check Column Validity (which is where the Table exists and the column exists
+            // or does not exist, depending on if alter_op is a DROP COLUMN or ADD COLUMN).
             if let Some(gen) = self.table_generation.get_last_version(&es.table_path) {
               // The Table Exists.
               let schema = &self.db_schema.get(&(es.table_path.clone(), gen.clone())).unwrap();
               let contains_col = weak_contains_col_latest(schema, &es.alter_op.col_name);
-              let add_col = es.alter_op.maybe_col_type.is_some();
-              if contains_col && !add_col || !contains_col && add_col {
+              let is_add_col = es.alter_op.maybe_col_type.is_some();
+              if contains_col && !is_add_col || !contains_col && is_add_col {
                 // We have Column Validity, so we move it to WaitingInsertTMPrepared.
                 es.state = AlterTableTMS::WaitingInsertTMPrepared;
                 tables_being_modified.insert(es.table_path.clone());
@@ -1019,7 +1025,7 @@ impl MasterContext {
       for query_id in ess_to_remove {
         let es = statuses.alter_table_tm_ess.remove(&query_id).unwrap();
         if let Some(response_data) = &es.response_data {
-          response_invalid_ddl(io_ctx, response_data);
+          respond_invalid_ddl(io_ctx, response_data);
         }
       }
     }
@@ -1046,7 +1052,7 @@ impl MasterContext {
       for query_id in ess_to_remove {
         let es = statuses.drop_table_tm_ess.remove(&query_id).unwrap();
         if let Some(response_data) = &es.response_data {
-          response_invalid_ddl(io_ctx, response_data);
+          respond_invalid_ddl(io_ctx, response_data);
         }
       }
     }
@@ -1129,7 +1135,7 @@ impl MasterContext {
 }
 
 /// Send `InvalidDDLQuery` to the given `ResponseData`
-fn response_invalid_ddl<IO: MasterIOCtx>(io_ctx: &mut IO, response_data: &ResponseData) {
+fn respond_invalid_ddl<IO: MasterIOCtx>(io_ctx: &mut IO, response_data: &ResponseData) {
   io_ctx.send(
     &response_data.sender_eid,
     msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(

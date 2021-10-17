@@ -45,14 +45,7 @@ impl AlterTableES {
   ) -> AlterTableAction {
     match &self.state {
       State::Prepared => {
-        let this_node_path = ctx.mk_node_path();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTablePrepared(
-          msg::AlterTablePrepared {
-            query_id: self.query_id.clone(),
-            rm: this_node_path,
-            timestamp: self.prepared_timestamp.clone(),
-          },
-        ));
+        self.send_prepared(ctx, io_ctx);
       }
       _ => {}
     }
@@ -84,10 +77,7 @@ impl AlterTableES {
   ) -> AlterTableAction {
     match &self.state {
       State::WaitingInsertingPrepared => {
-        let this_node_path = ctx.mk_node_path();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
-          msg::AlterTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
-        ));
+        self.send_close_confirm(ctx, io_ctx);
         AlterTableAction::Exit
       }
       State::InsertingPrepared => {
@@ -117,14 +107,7 @@ impl AlterTableES {
   ) -> AlterTableAction {
     match &self.state {
       State::InsertingPrepared => {
-        let this_node_path = ctx.mk_node_path();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTablePrepared(
-          msg::AlterTablePrepared {
-            query_id: self.query_id.clone(),
-            rm: this_node_path,
-            timestamp: self.prepared_timestamp.clone(),
-          },
-        ));
+        self.send_prepared(ctx, io_ctx);
         self.state = State::Prepared;
       }
       State::InsertingPreparedAborted => {
@@ -143,10 +126,7 @@ impl AlterTableES {
     match &self.state {
       State::Follower => AlterTableAction::Exit,
       State::InsertingAborted => {
-        let this_node_path = ctx.mk_node_path();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
-          msg::AlterTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
-        ));
+        self.send_close_confirm(ctx, io_ctx);
         AlterTableAction::Exit
       }
       _ => AlterTableAction::Wait,
@@ -174,10 +154,7 @@ impl AlterTableES {
         AlterTableAction::Exit
       }
       State::InsertingCommitted => {
-        let this_node_path = ctx.mk_node_path();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
-          msg::AlterTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
-        ));
+        self.send_close_confirm(ctx, io_ctx);
         self.apply_alter_op(ctx, committed_plm);
         AlterTableAction::Exit
       }
@@ -226,5 +203,25 @@ impl AlterTableES {
         AlterTableAction::Wait
       }
     }
+  }
+
+  // Helpers
+
+  fn send_prepared<IO: CoreIOCtx>(&self, ctx: &mut TabletContext, io_ctx: &mut IO) {
+    let this_node_path = ctx.mk_node_path();
+    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTablePrepared(
+      msg::AlterTablePrepared {
+        query_id: self.query_id.clone(),
+        rm: this_node_path,
+        timestamp: self.prepared_timestamp.clone(),
+      },
+    ));
+  }
+
+  fn send_close_confirm<IO: CoreIOCtx>(&self, ctx: &mut TabletContext, io_ctx: &mut IO) {
+    let this_node_path = ctx.mk_node_path();
+    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
+      msg::AlterTableCloseConfirm { query_id: self.query_id.clone(), rm: this_node_path },
+    ));
   }
 }

@@ -392,10 +392,8 @@ impl FullMSCoordES {
 
     // Construct the QueryPlan
     let mut query_leader_map = es.query_plan.query_leader_map.clone();
-    query_leader_map.insert(
-      ctx.this_slave_group_id.clone(),
-      ctx.leader_map.get(&ctx.this_slave_group_id.to_gid()).unwrap().clone(),
-    );
+    query_leader_map
+      .insert(ctx.this_sid.clone(), ctx.leader_map.get(&ctx.this_sid.to_gid()).unwrap().clone());
     let query_plan = QueryPlan {
       tier_map: es.query_plan.all_tier_maps.get(trans_table_name).unwrap().clone(),
       query_leader_map: query_leader_map.clone(),

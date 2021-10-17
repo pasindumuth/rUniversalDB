@@ -48,10 +48,7 @@ impl CreateTableES {
   ) -> CreateTableAction {
     match &self.state {
       State::Prepared => {
-        let sid = ctx.this_slave_group_id.clone();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTablePrepared(
-          msg::CreateTablePrepared { query_id: self.query_id.clone(), sid },
-        ));
+        self.send_prepared(ctx, io_ctx);
       }
       _ => {}
     }
@@ -78,10 +75,7 @@ impl CreateTableES {
   ) -> CreateTableAction {
     match &self.state {
       State::WaitingInsertingPrepared => {
-        let sid = ctx.this_slave_group_id.clone();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
-          msg::CreateTableCloseConfirm { query_id: self.query_id.clone(), sid },
-        ));
+        self.send_close_confirm(ctx, io_ctx);
         CreateTableAction::Exit
       }
       State::InsertingPrepared => {
@@ -111,10 +105,7 @@ impl CreateTableES {
   ) -> CreateTableAction {
     match &self.state {
       State::InsertingPrepared => {
-        let sid = ctx.this_slave_group_id.clone();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTablePrepared(
-          msg::CreateTablePrepared { query_id: self.query_id.clone(), sid },
-        ));
+        self.send_prepared(ctx, io_ctx);
         self.state = State::Prepared;
       }
       State::InsertingPreparedAborted => {
@@ -133,10 +124,7 @@ impl CreateTableES {
     match &self.state {
       State::Follower => CreateTableAction::Exit,
       State::InsertingAborted => {
-        let sid = ctx.this_slave_group_id.clone();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
-          msg::CreateTableCloseConfirm { query_id: self.query_id.clone(), sid },
-        ));
+        self.send_close_confirm(ctx, io_ctx);
         CreateTableAction::Exit
       }
       _ => CreateTableAction::Wait,
@@ -150,7 +138,7 @@ impl CreateTableES {
     io_ctx.rand().fill_bytes(&mut rand_seed);
     let helper = TabletCreateHelper {
       rand_seed,
-      this_slave_group_id: ctx.this_slave_group_id.clone(),
+      this_slave_group_id: ctx.this_sid.clone(),
       this_tablet_group_id: self.tablet_group_id.clone(),
       this_eid: ctx.this_eid.clone(),
       gossip: ctx.gossip.clone(),
@@ -176,10 +164,7 @@ impl CreateTableES {
         CreateTableAction::Exit
       }
       State::InsertingCommitted => {
-        let sid = ctx.this_slave_group_id.clone();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
-          msg::CreateTableCloseConfirm { query_id: self.query_id.clone(), sid },
-        ));
+        self.send_close_confirm(ctx, io_ctx);
         self.create_table(ctx, io_ctx);
         CreateTableAction::Exit
       }
@@ -232,5 +217,21 @@ impl CreateTableES {
         CreateTableAction::Wait
       }
     }
+  }
+
+  // Helpers
+
+  fn send_prepared<IO: SlaveIOCtx>(&self, ctx: &mut SlaveContext, io_ctx: &mut IO) {
+    let sid = ctx.this_sid.clone();
+    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTablePrepared(
+      msg::CreateTablePrepared { query_id: self.query_id.clone(), sid },
+    ));
+  }
+
+  fn send_close_confirm<IO: SlaveIOCtx>(&self, ctx: &mut SlaveContext, io_ctx: &mut IO) {
+    let sid = ctx.this_sid.clone();
+    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
+      msg::CreateTableCloseConfirm { query_id: self.query_id.clone(), sid },
+    ));
   }
 }
