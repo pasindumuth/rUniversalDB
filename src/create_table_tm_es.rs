@@ -418,7 +418,6 @@ impl CreateTableTMES {
     io_ctx: &mut IO,
   ) -> CreateTableTMAction {
     match &self.state {
-      CreateTableTMS::Start => CreateTableTMAction::Wait,
       CreateTableTMS::Follower(follower) => {
         if ctx.is_leader() {
           match follower {
@@ -435,11 +434,9 @@ impl CreateTableTMES {
         }
         CreateTableTMAction::Wait
       }
-      CreateTableTMS::WaitingInsertTMPrepared => {
-        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
-        CreateTableTMAction::Exit
-      }
-      CreateTableTMS::InsertTMPreparing => {
+      CreateTableTMS::Start
+      | CreateTableTMS::WaitingInsertTMPrepared
+      | CreateTableTMS::InsertTMPreparing => {
         maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         CreateTableTMAction::Exit
       }

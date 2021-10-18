@@ -30,6 +30,7 @@ pub mod query_converter;
 pub mod server;
 pub mod slave;
 pub mod sql_parser;
+pub mod stmpaxos2pc;
 pub mod storage;
 pub mod table_read_es;
 pub mod tablet;

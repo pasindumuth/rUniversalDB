@@ -1,6 +1,4 @@
-use crate::alter_table_tm_es::{
-  AlterTableTMAction, AlterTableTMES, AlterTableTMS, Follower as AlterFollower,
-};
+use crate::alter_table_tm_es::{AlterTablePayloadTypes, AlterTableTMInner};
 use crate::common::RemoteLeaderChangedPLm;
 use crate::common::{
   btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, MasterIOCtx, TableSchema, UUID,
@@ -31,6 +29,8 @@ use crate::server::{
   weak_contains_col, weak_contains_col_latest, CommonQuery, MasterServerContext, ServerContextBase,
 };
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
+use crate::stmpaxos2pc as paxos2pc;
+use crate::stmpaxos2pc::{STMPaxos2PCAction, State};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
@@ -154,10 +154,10 @@ pub enum MasterPLm {
   CreateTableTMCommitted(plm::CreateTableTMCommitted),
   CreateTableTMAborted(plm::CreateTableTMAborted),
   CreateTableTMClosed(plm::CreateTableTMClosed),
-  AlterTableTMPrepared(plm::AlterTableTMPrepared),
-  AlterTableTMCommitted(plm::AlterTableTMCommitted),
-  AlterTableTMAborted(plm::AlterTableTMAborted),
-  AlterTableTMClosed(plm::AlterTableTMClosed),
+  AlterTableTMPrepared2(paxos2pc::TMPreparedPLm<AlterTablePayloadTypes>),
+  AlterTableTMCommitted2(paxos2pc::TMCommittedPLm<AlterTablePayloadTypes>),
+  AlterTableTMAborted2(paxos2pc::TMAbortedPLm<AlterTablePayloadTypes>),
+  AlterTableTMClosed2(paxos2pc::TMClosedPLm<AlterTablePayloadTypes>),
   DropTableTMPrepared(plm::DropTableTMPrepared),
   DropTableTMCommitted(plm::DropTableTMCommitted),
   DropTableTMAborted(plm::DropTableTMAborted),
@@ -225,6 +225,12 @@ pub enum FullMasterInput {
   MasterMessage(msg::MasterMessage),
   MasterTimerInput(MasterTimerInput),
 }
+
+// -----------------------------------------------------------------------------------------------
+//  Master State
+// -----------------------------------------------------------------------------------------------
+
+type AlterTableTMES = paxos2pc::STMPaxos2PCOuter<AlterTablePayloadTypes, AlterTableTMInner>;
 
 // -----------------------------------------------------------------------------------------------
 //  Master State
@@ -463,25 +469,25 @@ impl MasterContext {
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               // AlterTable
-              MasterPLm::AlterTableTMPrepared(prepared) => {
+              MasterPLm::AlterTableTMPrepared2(prepared) => {
                 let query_id = prepared.query_id;
+                let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+                let action = es.handle_closed_plm(self, io_ctx);
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
+              MasterPLm::AlterTableTMCommitted2(committed) => {
+                let query_id = committed.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
                 let action = es.handle_prepared_plm(self, io_ctx);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
-              MasterPLm::AlterTableTMCommitted(committed) => {
-                let query_id = committed.query_id.clone();
-                let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self, io_ctx, committed);
-                self.handle_alter_table_es_action(statuses, query_id, action);
-              }
-              MasterPLm::AlterTableTMAborted(aborted) => {
+              MasterPLm::AlterTableTMAborted2(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
                 let action = es.handle_aborted_plm(self, io_ctx);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
-              MasterPLm::AlterTableTMClosed(closed) => {
+              MasterPLm::AlterTableTMClosed2(closed) => {
                 let query_id = closed.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
                 let action = es.handle_closed_plm(self, io_ctx);
@@ -588,33 +594,33 @@ impl MasterContext {
                 self.handle_create_table_es_action(statuses, query_id, action);
               }
               // AlterTable
-              MasterPLm::AlterTableTMPrepared(prepared) => {
+              MasterPLm::AlterTableTMPrepared2(prepared) => {
                 let query_id = prepared.query_id;
-                btree_map_insert(
-                  &mut statuses.alter_table_tm_ess,
-                  &query_id.clone(),
-                  AlterTableTMES {
+                let mut es = AlterTableTMES::new(
+                  query_id.clone(),
+                  AlterTableTMInner {
                     response_data: None,
-                    query_id,
-                    table_path: prepared.table_path,
-                    alter_op: prepared.alter_op,
-                    state: AlterTableTMS::Follower(AlterFollower::Preparing),
+                    query_id: query_id.clone(),
+                    table_path: prepared.payload.table_path,
+                    alter_op: prepared.payload.alter_op,
                   },
                 );
+                es.init_follower(self, io_ctx);
+                btree_map_insert(&mut statuses.alter_table_tm_ess, &query_id.clone(), es);
               }
-              MasterPLm::AlterTableTMCommitted(committed) => {
-                let query_id = committed.query_id.clone();
+              MasterPLm::AlterTableTMCommitted2(committed) => {
+                let query_id = committed.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self, io_ctx, committed);
+                let action = es.handle_prepared_plm(self, io_ctx);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
-              MasterPLm::AlterTableTMAborted(aborted) => {
+              MasterPLm::AlterTableTMAborted2(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
                 let action = es.handle_aborted_plm(self, io_ctx);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
-              MasterPLm::AlterTableTMClosed(closed) => {
+              MasterPLm::AlterTableTMClosed2(closed) => {
                 let query_id = closed.query_id;
                 let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
                 let action = es.handle_closed_plm(self, io_ctx);
@@ -696,13 +702,15 @@ impl MasterContext {
                     btree_map_insert(
                       &mut statuses.alter_table_tm_ess,
                       &query_id,
-                      AlterTableTMES {
-                        response_data: Some(ResponseData { request_id, sender_eid }),
-                        query_id: query_id.clone(),
-                        table_path: alter_table.table_path,
-                        alter_op: alter_table.alter_op,
-                        state: AlterTableTMS::Start,
-                      },
+                      AlterTableTMES::new(
+                        query_id.clone(),
+                        AlterTableTMInner {
+                          response_data: Some(ResponseData { request_id, sender_eid }),
+                          query_id: query_id.clone(),
+                          table_path: alter_table.table_path,
+                          alter_op: alter_table.alter_op,
+                        },
+                      ),
                     );
                   }
                   DDLQuery::Drop(drop_table) => {
@@ -789,20 +797,20 @@ impl MasterContext {
             let action = es.handle_close_confirmed(self, io_ctx, closed);
             self.handle_create_table_es_action(statuses, query_id, action);
           }
-          // AlterTable
-          MasterRemotePayload::AlterTablePrepared(prepared) => {
+          // Advanced
+          MasterRemotePayload::AlterTablePrepared2(prepared) => {
             let query_id = prepared.query_id.clone();
             let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
             let action = es.handle_prepared(self, io_ctx, prepared);
             self.handle_alter_table_es_action(statuses, query_id, action);
           }
-          MasterRemotePayload::AlterTableAborted(aborted) => {
+          MasterRemotePayload::AlterTableAborted2(aborted) => {
             let query_id = aborted.query_id.clone();
             let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
             let action = es.handle_aborted(self, io_ctx);
             self.handle_alter_table_es_action(statuses, query_id, action);
           }
-          MasterRemotePayload::AlterTableCloseConfirm(closed) => {
+          MasterRemotePayload::AlterTableClosed2(closed) => {
             let query_id = closed.query_id.clone();
             let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
             let action = es.handle_close_confirmed(self, io_ctx, closed);
@@ -828,6 +836,9 @@ impl MasterContext {
             self.handle_drop_table_es_action(statuses, query_id, action);
           }
           MasterRemotePayload::MasterGossipRequest(_) => {}
+          MasterRemotePayload::AlterTablePrepared(_) => {}
+          MasterRemotePayload::AlterTableAborted(_) => {}
+          MasterRemotePayload::AlterTableCloseConfirm(_) => {}
         }
 
         // Run Main Loop
@@ -956,9 +967,9 @@ impl MasterContext {
     }
 
     for (_, es) in &statuses.alter_table_tm_ess {
-      if let AlterTableTMS::Start = &es.state {
+      if let paxos2pc::State::Start = &es.state {
       } else {
-        tables_being_modified.insert(es.table_path.clone());
+        tables_being_modified.insert(es.inner.table_path.clone());
       }
     }
 
@@ -1000,19 +1011,20 @@ impl MasterContext {
     {
       let mut ess_to_remove = Vec::<QueryId>::new();
       for (_, es) in &mut statuses.alter_table_tm_ess {
-        if let AlterTableTMS::Start = &es.state {
-          if !tables_being_modified.contains(&es.table_path) {
+        if let paxos2pc::State::Start = &es.state {
+          if !tables_being_modified.contains(&es.inner.table_path) {
             // Check Column Validity (which is where the Table exists and the column exists
             // or does not exist, depending on if alter_op is a DROP COLUMN or ADD COLUMN).
-            if let Some(gen) = self.table_generation.get_last_version(&es.table_path) {
+            if let Some(gen) = self.table_generation.get_last_version(&es.inner.table_path) {
               // The Table Exists.
-              let schema = &self.db_schema.get(&(es.table_path.clone(), gen.clone())).unwrap();
-              let contains_col = weak_contains_col_latest(schema, &es.alter_op.col_name);
-              let is_add_col = es.alter_op.maybe_col_type.is_some();
+              let schema =
+                &self.db_schema.get(&(es.inner.table_path.clone(), gen.clone())).unwrap();
+              let contains_col = weak_contains_col_latest(schema, &es.inner.alter_op.col_name);
+              let is_add_col = es.inner.alter_op.maybe_col_type.is_some();
               if contains_col && !is_add_col || !contains_col && is_add_col {
                 // We have Column Validity, so we move it to WaitingInsertTMPrepared.
-                es.state = AlterTableTMS::WaitingInsertTMPrepared;
-                tables_being_modified.insert(es.table_path.clone());
+                es.state = paxos2pc::State::WaitingInsertTMPrepared;
+                tables_being_modified.insert(es.inner.table_path.clone());
                 continue;
               }
             }
@@ -1024,7 +1036,7 @@ impl MasterContext {
       }
       for query_id in ess_to_remove {
         let es = statuses.alter_table_tm_ess.remove(&query_id).unwrap();
-        if let Some(response_data) = &es.response_data {
+        if let Some(response_data) = &es.inner.response_data {
           respond_invalid_ddl(io_ctx, response_data);
         }
       }
@@ -1080,11 +1092,11 @@ impl MasterContext {
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: AlterTableTMAction,
+    action: STMPaxos2PCAction,
   ) {
     match action {
-      AlterTableTMAction::Wait => {}
-      AlterTableTMAction::Exit => {
+      STMPaxos2PCAction::Wait => {}
+      STMPaxos2PCAction::Exit => {
         statuses.alter_table_tm_ess.remove(&query_id);
       }
     }

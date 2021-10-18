@@ -174,7 +174,7 @@ impl DropTableTMES {
   /// Change state to `Preparing` and broadcast `DropTablePrepare` to the RMs.
   fn advance_to_prepared<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     let mut rms_remaining = HashSet::<TNodePath>::new();
-    for rm in get_rms(ctx, io_ctx, &self.table_path) {
+    for rm in get_rms::<IO>(ctx, &self.table_path) {
       ctx.ctx(io_ctx).send_to_t(
         rm.clone(),
         msg::TabletMessage::DropTablePrepare(msg::DropTablePrepare {
@@ -204,7 +204,7 @@ impl DropTableTMES {
   /// Change state to `Aborted` and broadcast `DropTableAbort` to the RMs.
   fn advance_to_aborted<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     let mut rms_remaining = HashSet::<TNodePath>::new();
-    for rm in get_rms(ctx, io_ctx, &self.table_path) {
+    for rm in get_rms::<IO>(ctx, &self.table_path) {
       ctx.ctx(io_ctx).send_to_t(
         rm.clone(),
         msg::TabletMessage::DropTableAbort(msg::DropTableAbort { query_id: self.query_id.clone() }),
@@ -276,7 +276,7 @@ impl DropTableTMES {
     commit_timestamp: Timestamp,
   ) {
     let mut rms_remaining = HashSet::<TNodePath>::new();
-    for rm in get_rms(ctx, io_ctx, &self.table_path) {
+    for rm in get_rms::<IO>(ctx, &self.table_path) {
       ctx.ctx(io_ctx).send_to_t(
         rm.clone(),
         msg::TabletMessage::DropTableCommit(msg::DropTableCommit {
@@ -367,7 +367,6 @@ impl DropTableTMES {
     io_ctx: &mut IO,
   ) -> DropTableTMAction {
     match &self.state {
-      DropTableTMS::Start => DropTableTMAction::Wait,
       DropTableTMS::Follower(follower) => {
         if ctx.is_leader() {
           match follower {
@@ -384,11 +383,9 @@ impl DropTableTMES {
         }
         DropTableTMAction::Wait
       }
-      DropTableTMS::WaitingInsertTMPrepared => {
-        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
-        DropTableTMAction::Exit
-      }
-      DropTableTMS::InsertTMPreparing => {
+      DropTableTMS::Start
+      | DropTableTMS::InsertTMPreparing
+      | DropTableTMS::WaitingInsertTMPrepared => {
         maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
         DropTableTMAction::Exit
       }

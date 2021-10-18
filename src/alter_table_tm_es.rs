@@ -1,69 +1,143 @@
-use crate::common::{MasterIOCtx, RemoteLeaderChangedPLm};
+use crate::common::MasterIOCtx;
 use crate::create_table_tm_es::ResponseData;
-use crate::master::{plm, MasterContext, MasterPLm};
-use crate::model::common::{
-  proc, EndpointId, Gen, QueryId, RequestId, TNodePath, TSubNodePath, TablePath, TabletGroupId,
-  Timestamp,
-};
+use crate::master::{MasterContext, MasterPLm};
+use crate::model::common::{proc, QueryId, TNodePath, TSubNodePath, TablePath, Timestamp};
 use crate::model::message as msg;
-use crate::server::ServerContextBase;
+use crate::stmpaxos2pc::{
+  Abort, Commit, PayloadTypes, Prepare, STMPaxos2PCTMInner, TMAbortedPLm, TMClosedPLm,
+  TMCommittedPLm, TMPreparedPLm,
+};
+use serde::{Deserialize, Serialize};
 use std::cmp::max;
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------------------------
-//  AlterTableES
+//  Payloads
 // -----------------------------------------------------------------------------------------------
-#[derive(Debug)]
-pub enum Follower {
-  Preparing,
-  Committed(Timestamp),
-  Aborted,
+
+// TM PLm
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableTMPrepared {
+  pub table_path: TablePath,
+  pub alter_op: proc::AlterOp,
 }
 
-#[derive(Debug)]
-pub struct Preparing {
-  /// The `Timestamp`s sent back by the RMs.
-  prepared_timestamps: Vec<Timestamp>,
-  /// The set of RMs that still have not prepared.
-  rms_remaining: HashSet<TNodePath>,
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableTMCommitted {
+  pub timestamp_hint: Timestamp,
 }
 
-#[derive(Debug)]
-pub struct Committed {
-  /// The `Timestamp`s at which to commit.
-  commit_timestamp: Timestamp,
-  /// The set of RMs that still have not committed.
-  rms_remaining: HashSet<TNodePath>,
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableTMAborted {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableTMClosed {}
+
+// RM PLm
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableRMPrepared {
+  pub alter_op: proc::AlterOp,
+  pub timestamp: Timestamp,
 }
 
-#[derive(Debug)]
-pub struct Aborted {
-  /// The set of RMs that still have not aborted.
-  rms_remaining: HashSet<TNodePath>,
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableRMCommitted {
+  pub timestamp: Timestamp,
 }
 
-#[derive(Debug)]
-pub enum InsertingTMClosed {
-  Committed(Timestamp),
-  Aborted,
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableRMAborted {}
+
+// RM-to-TM
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTablePrepare {
+  pub alter_op: proc::AlterOp,
 }
 
-#[derive(Debug)]
-pub enum AlterTableTMS {
-  Start,
-  Follower(Follower),
-  WaitingInsertTMPrepared,
-  InsertTMPreparing,
-  Preparing(Preparing),
-  InsertingTMCommitted,
-  Committed(Committed),
-  InsertingTMAborted,
-  Aborted(Aborted),
-  InsertingTMClosed(InsertingTMClosed),
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTablePrepared {
+  pub timestamp: Timestamp,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAborted {}
+
+// TM-to-RM
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAbort {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableCommit {
+  pub timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableClosed {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTablePayloadTypes {}
+
+impl PayloadTypes for AlterTablePayloadTypes {
+  // TM PLm
+  type TMPreparedPLm = AlterTableTMPrepared;
+  type TMCommittedPLm = AlterTableTMCommitted;
+  type TMAbortedPLm = AlterTableTMAborted;
+  type TMClosedPLm = AlterTableTMClosed;
+
+  fn master_prepared_plm(prepared_plm: TMPreparedPLm<Self>) -> MasterPLm {
+    MasterPLm::AlterTableTMPrepared2(prepared_plm)
+  }
+
+  fn master_committed_plm(committed_plm: TMCommittedPLm<Self>) -> MasterPLm {
+    MasterPLm::AlterTableTMCommitted2(committed_plm)
+  }
+
+  fn master_aborted_plm(aborted_plm: TMAbortedPLm<Self>) -> MasterPLm {
+    MasterPLm::AlterTableTMAborted2(aborted_plm)
+  }
+
+  fn master_closed_plm(closed_plm: TMClosedPLm<Self>) -> MasterPLm {
+    MasterPLm::AlterTableTMClosed2(closed_plm)
+  }
+
+  // RM PLm
+  type RMPreparedPLm = AlterTableRMPrepared;
+  type RMCommittedPLm = AlterTableRMCommitted;
+  type RMAbortedPLm = AlterTableRMAborted;
+
+  // TM-to-RM Messages
+  type Prepare = AlterTablePrepare;
+  type Abort = AlterTableAbort;
+  type Commit = AlterTableCommit;
+
+  fn tablet_prepare(prepare: Prepare<Self>) -> msg::TabletMessage {
+    msg::TabletMessage::AlterTablePrepare2(prepare)
+  }
+
+  fn tablet_commit(commit: Commit<Self>) -> msg::TabletMessage {
+    msg::TabletMessage::AlterTableCommit2(commit)
+  }
+
+  fn tablet_abort(abort: Abort<Self>) -> msg::TabletMessage {
+    msg::TabletMessage::AlterTableAbort2(abort)
+  }
+
+  // RM-to-TM Messages
+  type Prepared = AlterTablePrepared;
+  type Aborted = AlterTableAborted;
+  type Closed = AlterTableClosed;
+}
+
+// -----------------------------------------------------------------------------------------------
+//  AlterTable Implementation
+// -----------------------------------------------------------------------------------------------
+
 #[derive(Debug)]
-pub struct AlterTableTMES {
+pub struct AlterTableTMInner {
   // Response data
   pub response_data: Option<ResponseData>,
 
@@ -71,199 +145,55 @@ pub struct AlterTableTMES {
   pub query_id: QueryId,
   pub table_path: TablePath,
   pub alter_op: proc::AlterOp,
-
-  // STMPaxos2PCTM state
-  pub state: AlterTableTMS,
 }
 
-#[derive(Debug)]
-pub enum AlterTableTMAction {
-  Wait,
-  Exit,
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Implementation
-// -----------------------------------------------------------------------------------------------
-
-impl AlterTableTMES {
-  // STMPaxos2PC messages
-
-  pub fn handle_prepared<IO: MasterIOCtx>(
+impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
+  fn mk_prepared_plm<IO: MasterIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
-    io_ctx: &mut IO,
-    prepared: msg::AlterTablePrepared,
-  ) -> AlterTableTMAction {
-    match &mut self.state {
-      AlterTableTMS::Preparing(preparing) => {
-        if preparing.rms_remaining.remove(&prepared.rm) {
-          preparing.prepared_timestamps.push(prepared.timestamp.clone());
-          if preparing.rms_remaining.is_empty() {
-            // All RMs have prepared
-            let mut timestamp_hint = io_ctx.now();
-            for timestamp in &preparing.prepared_timestamps {
-              timestamp_hint = max(timestamp_hint, *timestamp);
-            }
-            ctx.master_bundle.plms.push(MasterPLm::AlterTableTMCommitted(
-              plm::AlterTableTMCommitted { query_id: self.query_id.clone(), timestamp_hint },
-            ));
-            self.state = AlterTableTMS::InsertingTMCommitted;
-          }
-        }
-      }
-      _ => {}
-    }
-    AlterTableTMAction::Wait
+    _: &mut MasterContext,
+    _: &mut IO,
+  ) -> AlterTableTMPrepared {
+    AlterTableTMPrepared { table_path: self.table_path.clone(), alter_op: self.alter_op.clone() }
   }
 
-  pub fn handle_aborted<IO: MasterIOCtx>(
+  fn prepared_plm_inserted<IO: MasterIOCtx>(
     &mut self,
     ctx: &mut MasterContext,
     _: &mut IO,
-  ) -> AlterTableTMAction {
-    match &mut self.state {
-      AlterTableTMS::Preparing(_) => {
-        ctx.master_bundle.plms.push(MasterPLm::AlterTableTMAborted(plm::AlterTableTMAborted {
-          query_id: self.query_id.clone(),
-        }));
-        self.state = AlterTableTMS::InsertingTMAborted;
-      }
-      _ => {}
+  ) -> HashMap<TNodePath, AlterTablePrepare> {
+    let mut prepares = HashMap::<TNodePath, AlterTablePrepare>::new();
+    for rm in get_rms::<IO>(ctx, &self.table_path) {
+      prepares.insert(rm.clone(), AlterTablePrepare { alter_op: self.alter_op.clone() });
     }
-    AlterTableTMAction::Wait
+    prepares
   }
 
-  pub fn handle_close_confirmed<IO: MasterIOCtx>(
+  fn mk_committed_plm<IO: MasterIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
-    _: &mut IO,
-    closed: msg::AlterTableCloseConfirm,
-  ) -> AlterTableTMAction {
-    match &mut self.state {
-      AlterTableTMS::Committed(committed) => {
-        if committed.rms_remaining.remove(&closed.rm) {
-          if committed.rms_remaining.is_empty() {
-            // All RMs have committed
-            ctx.master_bundle.plms.push(MasterPLm::AlterTableTMClosed(plm::AlterTableTMClosed {
-              query_id: self.query_id.clone(),
-            }));
-            self.state = AlterTableTMS::InsertingTMClosed(InsertingTMClosed::Committed(
-              committed.commit_timestamp,
-            ));
-          }
-        }
-      }
-      AlterTableTMS::Aborted(aborted) => {
-        if aborted.rms_remaining.remove(&closed.rm) {
-          if aborted.rms_remaining.is_empty() {
-            // All RMs have aborted
-            ctx.master_bundle.plms.push(MasterPLm::AlterTableTMClosed(plm::AlterTableTMClosed {
-              query_id: self.query_id.clone(),
-            }));
-            self.state = AlterTableTMS::InsertingTMClosed(InsertingTMClosed::Aborted);
-          }
-        }
-      }
-      _ => {}
+    _: &mut MasterContext,
+    io_ctx: &mut IO,
+    prepared: &HashMap<TNodePath, AlterTablePrepared>,
+  ) -> AlterTableTMCommitted {
+    let mut timestamp_hint = io_ctx.now();
+    for (_, prepared) in prepared {
+      timestamp_hint = max(timestamp_hint, prepared.timestamp);
     }
-    AlterTableTMAction::Wait
+    AlterTableTMCommitted { timestamp_hint }
   }
 
-  // STMPaxos2PC PLm Insertions
-
-  /// Change state to `Preparing` and broadcast `AlterTablePrepare` to the RMs.
-  fn advance_to_prepared<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
-    let mut rms_remaining = HashSet::<TNodePath>::new();
-    for rm in get_rms(ctx, io_ctx, &self.table_path) {
-      ctx.ctx(io_ctx).send_to_t(
-        rm.clone(),
-        msg::TabletMessage::AlterTablePrepare(msg::AlterTablePrepare {
-          query_id: self.query_id.clone(),
-          alter_op: self.alter_op.clone(),
-        }),
-      );
-      rms_remaining.insert(rm);
-    }
-    let prepared = Preparing { prepared_timestamps: Vec::new(), rms_remaining };
-    self.state = AlterTableTMS::Preparing(prepared);
-  }
-
-  pub fn handle_prepared_plm<IO: MasterIOCtx>(
+  /// Apply this `alter_op` to the system and construct Commit messages with the
+  /// commit timestamp (which is resolved form the resolved from `timestamp_hint`).
+  fn committed_plm_inserted<IO: MasterIOCtx>(
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-  ) -> AlterTableTMAction {
-    match &self.state {
-      AlterTableTMS::InsertTMPreparing => {
-        self.advance_to_prepared(ctx, io_ctx);
-      }
-      _ => {}
-    }
-    AlterTableTMAction::Wait
-  }
-
-  /// Change state to `Aborted` and broadcast `AlterTableAbort` to the RMs.
-  fn advance_to_aborted<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
-    let mut rms_remaining = HashSet::<TNodePath>::new();
-    for rm in get_rms(ctx, io_ctx, &self.table_path) {
-      ctx.ctx(io_ctx).send_to_t(
-        rm.clone(),
-        msg::TabletMessage::AlterTableAbort(msg::AlterTableAbort {
-          query_id: self.query_id.clone(),
-        }),
-      );
-      rms_remaining.insert(rm);
-    }
-
-    self.state = AlterTableTMS::Aborted(Aborted { rms_remaining });
-  }
-
-  pub fn handle_aborted_plm<IO: MasterIOCtx>(
-    &mut self,
-    ctx: &mut MasterContext,
-    io_ctx: &mut IO,
-  ) -> AlterTableTMAction {
-    match &self.state {
-      AlterTableTMS::Follower(_) => {
-        self.state = AlterTableTMS::Follower(Follower::Aborted);
-      }
-      AlterTableTMS::InsertingTMAborted => {
-        // Send a abort response to the External
-        if let Some(response_data) = &self.response_data {
-          ctx.external_request_id_map.remove(&response_data.request_id);
-          io_ctx.send(
-            &response_data.sender_eid,
-            msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-              msg::ExternalDDLQueryAborted {
-                request_id: response_data.request_id.clone(),
-                payload: msg::ExternalDDLQueryAbortData::Unknown,
-              },
-            )),
-          );
-          self.response_data = None;
-        }
-
-        self.advance_to_aborted(ctx, io_ctx);
-      }
-      _ => {}
-    }
-    AlterTableTMAction::Wait
-  }
-
-  /// Apply this `alter_op` to the system and returned the commit `Timestamp` (that is
-  /// resolved from the `timestamp_hint` and from GossipData).
-  fn apply_alter_op<IO: MasterIOCtx>(
-    &mut self,
-    ctx: &mut MasterContext,
-    _: &mut IO,
-    committed_plm: plm::AlterTableTMCommitted,
-  ) -> Timestamp {
+    committed_plm: &TMCommittedPLm<AlterTablePayloadTypes>,
+  ) -> HashMap<TNodePath, AlterTableCommit> {
     let gen = ctx.table_generation.get_last_version(&self.table_path).unwrap();
     let table_schema = ctx.db_schema.get_mut(&(self.table_path.clone(), gen.clone())).unwrap();
 
     // Compute the resolved timestamp
-    let mut commit_timestamp = committed_plm.timestamp_hint;
+    let mut commit_timestamp = committed_plm.payload.timestamp_hint;
     commit_timestamp = max(commit_timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
     commit_timestamp =
       max(commit_timestamp, table_schema.val_cols.get_lat(&self.alter_op.col_name) + 1);
@@ -277,223 +207,85 @@ impl AlterTableTMES {
       commit_timestamp,
     );
 
-    commit_timestamp
-  }
-
-  /// Change state to `Committed` and broadcast `AlterTableCommit` to the RMs.
-  fn advance_to_committed<IO: MasterIOCtx>(
-    &mut self,
-    ctx: &mut MasterContext,
-    io_ctx: &mut IO,
-    commit_timestamp: Timestamp,
-  ) {
-    let mut rms_remaining = HashSet::<TNodePath>::new();
-    for rm in get_rms(ctx, io_ctx, &self.table_path) {
-      ctx.ctx(io_ctx).send_to_t(
-        rm.clone(),
-        msg::TabletMessage::AlterTableCommit(msg::AlterTableCommit {
-          query_id: self.query_id.clone(),
-          timestamp: commit_timestamp,
-        }),
-      );
-      rms_remaining.insert(rm);
+    // Potentially respond to the External if we are the leader.
+    if ctx.is_leader() {
+      if let Some(response_data) = &self.response_data {
+        ctx.external_request_id_map.remove(&response_data.request_id);
+        io_ctx.send(
+          &response_data.sender_eid,
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
+            msg::ExternalDDLQuerySuccess {
+              request_id: response_data.request_id.clone(),
+              timestamp: commit_timestamp,
+            },
+          )),
+        );
+        self.response_data = None;
+      }
     }
 
-    self.state = AlterTableTMS::Committed(Committed { commit_timestamp, rms_remaining });
-  }
-
-  pub fn handle_committed_plm<IO: MasterIOCtx>(
-    &mut self,
-    ctx: &mut MasterContext,
-    io_ctx: &mut IO,
-    committed_plm: plm::AlterTableTMCommitted,
-  ) -> AlterTableTMAction {
-    match &self.state {
-      AlterTableTMS::Follower(_) => {
-        let commit_timestamp = self.apply_alter_op(ctx, io_ctx, committed_plm);
-        self.state = AlterTableTMS::Follower(Follower::Committed(commit_timestamp));
-      }
-      AlterTableTMS::InsertingTMCommitted => {
-        let commit_timestamp = self.apply_alter_op(ctx, io_ctx, committed_plm);
-
-        // Send a success response to the External
-        if let Some(response_data) = &self.response_data {
-          ctx.external_request_id_map.remove(&response_data.request_id);
-          io_ctx.send(
-            &response_data.sender_eid,
-            msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
-              msg::ExternalDDLQuerySuccess {
-                request_id: response_data.request_id.clone(),
-                timestamp: commit_timestamp,
-              },
-            )),
-          );
-          self.response_data = None;
-        }
-
-        self.advance_to_committed(ctx, io_ctx, commit_timestamp);
-
-        // Broadcast a GossipData
-        ctx.broadcast_gossip(io_ctx);
-      }
-      _ => {}
+    let mut commits = HashMap::<TNodePath, AlterTableCommit>::new();
+    for rm in get_rms::<IO>(ctx, &self.table_path) {
+      commits.insert(rm.clone(), AlterTableCommit { timestamp: commit_timestamp });
     }
-    AlterTableTMAction::Wait
+    commits
   }
 
-  pub fn handle_closed_plm<IO: MasterIOCtx>(
+  fn mk_aborted_plm<IO: MasterIOCtx>(
     &mut self,
     _: &mut MasterContext,
     _: &mut IO,
-  ) -> AlterTableTMAction {
-    match &self.state {
-      AlterTableTMS::Follower(_) => AlterTableTMAction::Exit,
-      AlterTableTMS::InsertingTMClosed(_) => AlterTableTMAction::Exit,
-      _ => AlterTableTMAction::Wait,
-    }
+  ) -> AlterTableTMAborted {
+    AlterTableTMAborted {}
   }
 
-  // Other
-
-  pub fn start_inserting<IO: MasterIOCtx>(
+  fn aborted_plm_inserted<IO: MasterIOCtx>(
     &mut self,
     ctx: &mut MasterContext,
+    io_ctx: &mut IO,
+  ) -> HashMap<TNodePath, AlterTableAbort> {
+    // Potentially respond to the External if we are the leader.
+    if ctx.is_leader() {
+      if let Some(response_data) = &self.response_data {
+        ctx.external_request_id_map.remove(&response_data.request_id);
+        io_ctx.send(
+          &response_data.sender_eid,
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+            msg::ExternalDDLQueryAborted {
+              request_id: response_data.request_id.clone(),
+              payload: msg::ExternalDDLQueryAbortData::Unknown,
+            },
+          )),
+        );
+        self.response_data = None;
+      }
+    }
+
+    let mut aborts = HashMap::<TNodePath, AlterTableAbort>::new();
+    for rm in get_rms::<IO>(ctx, &self.table_path) {
+      aborts.insert(rm.clone(), AlterTableAbort {});
+    }
+    aborts
+  }
+
+  fn mk_closed_plm<IO: MasterIOCtx>(
+    &mut self,
+    _: &mut MasterContext,
     _: &mut IO,
-  ) -> AlterTableTMAction {
-    match &self.state {
-      AlterTableTMS::WaitingInsertTMPrepared => {
-        ctx.master_bundle.plms.push(MasterPLm::AlterTableTMPrepared(plm::AlterTableTMPrepared {
-          query_id: self.query_id.clone(),
-          table_path: self.table_path.clone(),
-          alter_op: self.alter_op.clone(),
-        }));
-        self.state = AlterTableTMS::InsertTMPreparing;
-      }
-      _ => {}
-    }
-    AlterTableTMAction::Wait
+  ) -> AlterTableTMClosed {
+    AlterTableTMClosed {}
   }
 
-  pub fn leader_changed<IO: MasterIOCtx>(
-    &mut self,
-    ctx: &mut MasterContext,
-    io_ctx: &mut IO,
-  ) -> AlterTableTMAction {
-    match &self.state {
-      AlterTableTMS::Start => AlterTableTMAction::Wait,
-      AlterTableTMS::Follower(follower) => {
-        if ctx.is_leader() {
-          match follower {
-            Follower::Preparing => {
-              self.advance_to_prepared(ctx, io_ctx);
-            }
-            Follower::Committed(commit_timestamp) => {
-              self.advance_to_committed(ctx, io_ctx, commit_timestamp.clone());
-            }
-            Follower::Aborted => {
-              self.advance_to_aborted(ctx, io_ctx);
-            }
-          }
-        }
-        AlterTableTMAction::Wait
-      }
-      AlterTableTMS::WaitingInsertTMPrepared => {
-        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
-        AlterTableTMAction::Exit
-      }
-      AlterTableTMS::InsertTMPreparing => {
-        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
-        AlterTableTMAction::Exit
-      }
-      AlterTableTMS::Preparing(_)
-      | AlterTableTMS::InsertingTMCommitted
-      | AlterTableTMS::InsertingTMAborted => {
-        self.state = AlterTableTMS::Follower(Follower::Preparing);
-        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
-        AlterTableTMAction::Wait
-      }
-      AlterTableTMS::Committed(committed) => {
-        self.state = AlterTableTMS::Follower(Follower::Committed(committed.commit_timestamp));
-        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
-        AlterTableTMAction::Wait
-      }
-      AlterTableTMS::Aborted(_) => {
-        self.state = AlterTableTMS::Follower(Follower::Aborted);
-        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
-        AlterTableTMAction::Wait
-      }
-      AlterTableTMS::InsertingTMClosed(tm_closed) => {
-        self.state = AlterTableTMS::Follower(match tm_closed {
-          InsertingTMClosed::Committed(timestamp) => Follower::Committed(timestamp.clone()),
-          InsertingTMClosed::Aborted => Follower::Aborted,
-        });
-        maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
-        AlterTableTMAction::Wait
-      }
-    }
-  }
+  fn closed_plm_inserted<IO: MasterIOCtx>(&mut self, _: &mut MasterContext, _: &mut IO) {}
 
-  pub fn remote_leader_changed<IO: MasterIOCtx>(
-    &mut self,
-    ctx: &mut MasterContext,
-    io_ctx: &mut IO,
-    remote_leader_changed: RemoteLeaderChangedPLm,
-  ) -> AlterTableTMAction {
-    match &self.state {
-      AlterTableTMS::Preparing(preparing) => {
-        for rm in &preparing.rms_remaining {
-          // If the RM has not responded and its Leadership changed, we resend Prepare.
-          if rm.sid.to_gid() == remote_leader_changed.gid {
-            ctx.ctx(io_ctx).send_to_t(
-              rm.clone(),
-              msg::TabletMessage::AlterTablePrepare(msg::AlterTablePrepare {
-                query_id: self.query_id.clone(),
-                alter_op: self.alter_op.clone(),
-              }),
-            );
-          }
-        }
-      }
-      AlterTableTMS::Committed(committed) => {
-        for rm in &committed.rms_remaining {
-          // If the RM has not responded and its Leadership changed, we resend Commit.
-          if rm.sid.to_gid() == remote_leader_changed.gid {
-            ctx.ctx(io_ctx).send_to_t(
-              rm.clone(),
-              msg::TabletMessage::AlterTableCommit(msg::AlterTableCommit {
-                query_id: self.query_id.clone(),
-                timestamp: committed.commit_timestamp,
-              }),
-            );
-          }
-        }
-      }
-      AlterTableTMS::Aborted(aborted) => {
-        for rm in &aborted.rms_remaining {
-          // If the RM has not responded and its Leadership changed, we resend Abort.
-          if rm.sid.to_gid() == remote_leader_changed.gid {
-            ctx.ctx(io_ctx).send_to_t(
-              rm.clone(),
-              msg::TabletMessage::AlterTableAbort(msg::AlterTableAbort {
-                query_id: self.query_id.clone(),
-              }),
-            );
-          }
-        }
-      }
-      _ => {}
-    }
-    AlterTableTMAction::Wait
+  fn node_died<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
+    maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
   }
 }
 
 /// This returns the current set of RMs associated with the given `TablePath`. Recall that while
 /// the ES is alive, we ensure that this is idempotent.
-pub fn get_rms<IO: MasterIOCtx>(
-  ctx: &mut MasterContext,
-  _: &mut IO,
-  table_path: &TablePath,
-) -> Vec<TNodePath> {
+pub fn get_rms<IO: MasterIOCtx>(ctx: &mut MasterContext, table_path: &TablePath) -> Vec<TNodePath> {
   let gen = ctx.table_generation.get_last_version(table_path).unwrap();
   let mut rms = Vec::<TNodePath>::new();
   for (_, tid) in ctx.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap() {

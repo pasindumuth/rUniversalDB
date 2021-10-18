@@ -32,6 +32,7 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
+use crate::model::message::TabletMessage;
 use crate::ms_table_read_es::{MSReadExecutionS, MSTableReadAction, MSTableReadES};
 use crate::ms_table_write_es::{MSTableWriteAction, MSTableWriteES, MSWriteExecutionS};
 use crate::server::{
@@ -1272,6 +1273,9 @@ impl TabletContext {
               ));
             }
           }
+          TabletMessage::AlterTablePrepare2(_) => {}
+          TabletMessage::AlterTableAbort2(_) => {}
+          TabletMessage::AlterTableCommit2(_) => {}
         }
 
         // Run Main Loop
