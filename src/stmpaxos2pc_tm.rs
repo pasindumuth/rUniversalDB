@@ -4,6 +4,7 @@ use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{proc, QueryId, TNodePath, TSubNodePath, TablePath, Timestamp};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
+use crate::tablet::TabletPLm;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -13,7 +14,7 @@ use std::fmt::Debug;
 //  STMPaxos2PC
 // -----------------------------------------------------------------------------------------------
 
-pub trait PayloadTypes: Sized {
+pub trait PayloadTypes: Clone {
   // TM PLm
   type TMPreparedPLm: Debug + Clone;
   type TMCommittedPLm: Debug + Clone;
@@ -30,6 +31,10 @@ pub trait PayloadTypes: Sized {
   type RMCommittedPLm: Debug + Clone;
   type RMAbortedPLm: Debug + Clone;
 
+  fn tablet_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> TabletPLm;
+  fn tablet_committed_plm(committed_plm: RMCommittedPLm<Self>) -> TabletPLm;
+  fn tablet_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> TabletPLm;
+
   // TM-to-RM Messages
   type Prepare: Debug + Clone;
   type Abort: Debug + Clone;
@@ -43,6 +48,10 @@ pub trait PayloadTypes: Sized {
   type Prepared: Debug + Clone;
   type Aborted: Debug + Clone;
   type Closed: Debug + Clone;
+
+  fn master_prepared(prepared: Prepared<Self>) -> msg::MasterRemotePayload;
+  fn master_aborted(aborted: Aborted<Self>) -> msg::MasterRemotePayload;
+  fn master_closed(closed: Closed<Self>) -> msg::MasterRemotePayload;
 }
 
 // TM PLm
@@ -130,7 +139,7 @@ pub struct Closed<T: PayloadTypes> {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  STMPaxos2PCTM Inner
+//  STMPaxos2PCTMInner
 // -----------------------------------------------------------------------------------------------
 
 pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
@@ -193,7 +202,7 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  STMPaxos2PCTM Outer
+//  STMPaxos2PCTMOuter
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -233,22 +242,22 @@ pub enum State<T: PayloadTypes> {
   InsertingTMClosed,
 }
 
-pub enum STMPaxos2PCAction {
+pub enum STMPaxos2PCTMAction {
   Wait,
   Exit,
 }
 
 #[derive(Debug)]
-pub struct STMPaxos2PCOuter<T: PayloadTypes, InnerT> {
+pub struct STMPaxos2PCTMOuter<T: PayloadTypes, InnerT> {
   pub query_id: QueryId,
   pub follower: Option<FollowerState<T>>,
   pub state: State<T>,
   pub inner: InnerT,
 }
 
-impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT> {
-  pub fn new(query_id: QueryId, inner: InnerT) -> STMPaxos2PCOuter<T, InnerT> {
-    STMPaxos2PCOuter { query_id, follower: None, state: State::Start, inner }
+impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, InnerT> {
+  pub fn new(query_id: QueryId, inner: InnerT) -> STMPaxos2PCTMOuter<T, InnerT> {
+    STMPaxos2PCTMOuter { query_id, follower: None, state: State::Start, inner }
   }
 
   /// This is only called when the `PreparedPLm` is insert at a Follower node.
@@ -265,7 +274,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
     prepared: Prepared<T>,
-  ) -> STMPaxos2PCAction {
+  ) -> STMPaxos2PCTMAction {
     match &mut self.state {
       State::Preparing(preparing) => {
         if preparing.rms_remaining.remove(&prepared.rm) {
@@ -282,14 +291,14 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
       }
       _ => {}
     }
-    STMPaxos2PCAction::Wait
+    STMPaxos2PCTMAction::Wait
   }
 
   pub fn handle_aborted<IO: MasterIOCtx>(
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCAction {
+  ) -> STMPaxos2PCTMAction {
     match &mut self.state {
       State::Preparing(_) => {
         let aborted_plm = T::master_aborted_plm(TMAbortedPLm {
@@ -301,7 +310,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
       }
       _ => {}
     }
-    STMPaxos2PCAction::Wait
+    STMPaxos2PCTMAction::Wait
   }
 
   pub fn handle_close_confirmed<IO: MasterIOCtx>(
@@ -309,7 +318,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
     closed: Closed<T>,
-  ) -> STMPaxos2PCAction {
+  ) -> STMPaxos2PCTMAction {
     match &mut self.state {
       State::Committed(committed) => {
         if committed.rms_remaining.remove(&closed.rm) {
@@ -339,7 +348,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
       }
       _ => {}
     }
-    STMPaxos2PCAction::Wait
+    STMPaxos2PCTMAction::Wait
   }
 
   // STMPaxos2PC PLm Insertions
@@ -366,7 +375,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCAction {
+  ) -> STMPaxos2PCTMAction {
     match &self.state {
       State::InsertTMPreparing => {
         let prepare_payloads = self.inner.prepared_plm_inserted(ctx, io_ctx);
@@ -374,7 +383,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
       }
       _ => {}
     }
-    STMPaxos2PCAction::Wait
+    STMPaxos2PCTMAction::Wait
   }
 
   /// Change state to `Committed` and broadcast `AlterTableCommit` to the RMs.
@@ -400,7 +409,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
     committed_plm: TMCommittedPLm<T>,
-  ) -> STMPaxos2PCAction {
+  ) -> STMPaxos2PCTMAction {
     match &self.state {
       State::Following => {
         let commit_payloads = self.inner.committed_plm_inserted(ctx, io_ctx, &committed_plm);
@@ -418,7 +427,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
       }
       _ => {}
     }
-    STMPaxos2PCAction::Wait
+    STMPaxos2PCTMAction::Wait
   }
 
   /// Change state to `Aborted` and broadcast `AlterTableAbort` to the RMs.
@@ -443,7 +452,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCAction {
+  ) -> STMPaxos2PCTMAction {
     match &self.state {
       State::Following => {
         let abort_payloads = self.inner.aborted_plm_inserted(ctx, io_ctx);
@@ -458,7 +467,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
       }
       _ => {}
     }
-    STMPaxos2PCAction::Wait
+    STMPaxos2PCTMAction::Wait
   }
 
   /// Simply return Exit in the appropriate states.
@@ -466,17 +475,17 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCAction {
+  ) -> STMPaxos2PCTMAction {
     match &self.state {
       State::Following => {
         self.inner.closed_plm_inserted(ctx, io_ctx);
-        STMPaxos2PCAction::Exit
+        STMPaxos2PCTMAction::Exit
       }
       State::InsertingTMClosed => {
         self.inner.closed_plm_inserted(ctx, io_ctx);
-        STMPaxos2PCAction::Exit
+        STMPaxos2PCTMAction::Exit
       }
-      _ => STMPaxos2PCAction::Wait,
+      _ => STMPaxos2PCTMAction::Wait,
     }
   }
 
@@ -486,7 +495,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCAction {
+  ) -> STMPaxos2PCTMAction {
     match &self.state {
       State::WaitingInsertTMPrepared => {
         let prepared = T::master_prepared_plm(TMPreparedPLm {
@@ -498,14 +507,14 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
       }
       _ => {}
     }
-    STMPaxos2PCAction::Wait
+    STMPaxos2PCTMAction::Wait
   }
 
   pub fn leader_changed<IO: MasterIOCtx>(
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCAction {
+  ) -> STMPaxos2PCTMAction {
     match &self.state {
       State::Following => {
         if ctx.is_leader() {
@@ -522,11 +531,11 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
             }
           }
         }
-        STMPaxos2PCAction::Wait
+        STMPaxos2PCTMAction::Wait
       }
       State::Start | State::WaitingInsertTMPrepared | State::InsertTMPreparing => {
         self.inner.node_died(ctx, io_ctx);
-        STMPaxos2PCAction::Exit
+        STMPaxos2PCTMAction::Exit
       }
       State::Preparing(_)
       | State::InsertingTMCommitted
@@ -536,7 +545,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
       | State::InsertingTMClosed => {
         self.state = State::Following;
         self.inner.node_died(ctx, io_ctx);
-        STMPaxos2PCAction::Wait
+        STMPaxos2PCTMAction::Wait
       }
     }
   }
@@ -546,7 +555,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
     remote_leader_changed: RemoteLeaderChangedPLm,
-  ) -> STMPaxos2PCAction {
+  ) -> STMPaxos2PCTMAction {
     let follower = self.follower.as_ref().unwrap();
     match &self.state {
       State::Preparing(preparing) => {
@@ -584,6 +593,6 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCOuter<T, InnerT>
       }
       _ => {}
     }
-    STMPaxos2PCAction::Wait
+    STMPaxos2PCTMAction::Wait
   }
 }

@@ -1,4 +1,5 @@
 use crate::alter_table_es::{AlterTableAction, AlterTableES, State};
+use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, collect_update_subqueries,
   node_external_trans_tables, nodes_external_cols, nodes_external_trans_tables, ColUsagePlanner,
@@ -40,6 +41,7 @@ use crate::server::{
   CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
 };
 use crate::slave::SlaveBackMessage;
+use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::storage::{compress_updates_views, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
@@ -519,6 +521,11 @@ pub enum TabletPLm {
   DropTablePrepared(plm::DropTablePrepared),
   DropTableCommitted(plm::DropTableCommitted),
   DropTableAborted(plm::DropTableAborted),
+
+  // Alter
+  AlterTableRMPrepared2(paxos2pc::RMPreparedPLm<AlterTablePayloadTypes>),
+  AlterTableRMCommitted2(paxos2pc::RMCommittedPLm<AlterTablePayloadTypes>),
+  AlterTableRMAborted2(paxos2pc::RMAbortedPLm<AlterTablePayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -756,6 +763,9 @@ impl TabletContext {
                 let query_id = es.query_id.clone();
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
+              TabletPLm::AlterTableRMPrepared2(_) => {}
+              TabletPLm::AlterTableRMCommitted2(_) => {}
+              TabletPLm::AlterTableRMAborted2(_) => {}
             }
           }
 
@@ -870,6 +880,9 @@ impl TabletContext {
                 let query_id = es.query_id.clone();
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
+              TabletPLm::AlterTableRMPrepared2(_) => {}
+              TabletPLm::AlterTableRMCommitted2(_) => {}
+              TabletPLm::AlterTableRMAborted2(_) => {}
             }
           }
         }

@@ -29,8 +29,8 @@ use crate::server::{
   weak_contains_col, weak_contains_col_latest, CommonQuery, MasterServerContext, ServerContextBase,
 };
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
-use crate::stmpaxos2pc as paxos2pc;
-use crate::stmpaxos2pc::{STMPaxos2PCAction, State};
+use crate::stmpaxos2pc_tm as paxos2pc;
+use crate::stmpaxos2pc_tm::{STMPaxos2PCTMAction, State};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
@@ -230,7 +230,7 @@ pub enum FullMasterInput {
 //  Master State
 // -----------------------------------------------------------------------------------------------
 
-type AlterTableTMES = paxos2pc::STMPaxos2PCOuter<AlterTablePayloadTypes, AlterTableTMInner>;
+type AlterTableTMES = paxos2pc::STMPaxos2PCTMOuter<AlterTablePayloadTypes, AlterTableTMInner>;
 
 // -----------------------------------------------------------------------------------------------
 //  Master State
@@ -1092,11 +1092,11 @@ impl MasterContext {
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: STMPaxos2PCAction,
+    action: STMPaxos2PCTMAction,
   ) {
     match action {
-      STMPaxos2PCAction::Wait => {}
-      STMPaxos2PCAction::Exit => {
+      STMPaxos2PCTMAction::Wait => {}
+      STMPaxos2PCTMAction::Exit => {
         statuses.alter_table_tm_ess.remove(&query_id);
       }
     }

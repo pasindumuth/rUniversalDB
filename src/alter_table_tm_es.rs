@@ -3,10 +3,11 @@ use crate::create_table_tm_es::ResponseData;
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{proc, QueryId, TNodePath, TSubNodePath, TablePath, Timestamp};
 use crate::model::message as msg;
-use crate::stmpaxos2pc::{
-  Abort, Commit, PayloadTypes, Prepare, STMPaxos2PCTMInner, TMAbortedPLm, TMClosedPLm,
-  TMCommittedPLm, TMPreparedPLm,
+use crate::stmpaxos2pc_tm::{
+  Abort, Aborted, Closed, Commit, PayloadTypes, Prepare, Prepared, RMAbortedPLm, RMCommittedPLm,
+  RMPreparedPLm, STMPaxos2PCTMInner, TMAbortedPLm, TMClosedPLm, TMCommittedPLm, TMPreparedPLm,
 };
+use crate::tablet::TabletPLm;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::HashMap;
@@ -109,6 +110,18 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type RMCommittedPLm = AlterTableRMCommitted;
   type RMAbortedPLm = AlterTableRMAborted;
 
+  fn tablet_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> TabletPLm {
+    TabletPLm::AlterTableRMPrepared2(prepared_plm)
+  }
+
+  fn tablet_committed_plm(committed_plm: RMCommittedPLm<Self>) -> TabletPLm {
+    TabletPLm::AlterTableRMCommitted2(committed_plm)
+  }
+
+  fn tablet_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> TabletPLm {
+    TabletPLm::AlterTableRMAborted2(aborted_plm)
+  }
+
   // TM-to-RM Messages
   type Prepare = AlterTablePrepare;
   type Abort = AlterTableAbort;
@@ -130,6 +143,18 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type Prepared = AlterTablePrepared;
   type Aborted = AlterTableAborted;
   type Closed = AlterTableClosed;
+
+  fn master_prepared(prepared: Prepared<Self>) -> msg::MasterRemotePayload {
+    msg::MasterRemotePayload::AlterTablePrepared2(prepared)
+  }
+
+  fn master_aborted(aborted: Aborted<Self>) -> msg::MasterRemotePayload {
+    msg::MasterRemotePayload::AlterTableAborted2(aborted)
+  }
+
+  fn master_closed(closed: Closed<Self>) -> msg::MasterRemotePayload {
+    msg::MasterRemotePayload::AlterTableClosed2(closed)
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

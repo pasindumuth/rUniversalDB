@@ -9,7 +9,7 @@ use crate::model::common::{
   TransTableLocationPrefix, TransTableName,
 };
 use crate::slave::SharedPaxosBundle;
-use crate::stmpaxos2pc;
+use crate::stmpaxos2pc_tm;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -104,9 +104,9 @@ pub enum MasterRemotePayload {
   AlterTableCloseConfirm(AlterTableCloseConfirm),
 
   // AlterTable TM Messages
-  AlterTablePrepared2(stmpaxos2pc::Prepared<AlterTablePayloadTypes>),
-  AlterTableAborted2(stmpaxos2pc::Aborted<AlterTablePayloadTypes>),
-  AlterTableClosed2(stmpaxos2pc::Closed<AlterTablePayloadTypes>),
+  AlterTablePrepared2(stmpaxos2pc_tm::Prepared<AlterTablePayloadTypes>),
+  AlterTableAborted2(stmpaxos2pc_tm::Aborted<AlterTablePayloadTypes>),
+  AlterTableClosed2(stmpaxos2pc_tm::Closed<AlterTablePayloadTypes>),
 
   // DropTable TM Messages
   DropTablePrepared(DropTablePrepared),
@@ -155,9 +155,9 @@ pub enum TabletMessage {
   AlterTableCommit(AlterTableCommit),
 
   // AlterTable RM Messages
-  AlterTablePrepare2(stmpaxos2pc::Prepare<AlterTablePayloadTypes>),
-  AlterTableAbort2(stmpaxos2pc::Abort<AlterTablePayloadTypes>),
-  AlterTableCommit2(stmpaxos2pc::Commit<AlterTablePayloadTypes>),
+  AlterTablePrepare2(stmpaxos2pc_tm::Prepare<AlterTablePayloadTypes>),
+  AlterTableAbort2(stmpaxos2pc_tm::Abort<AlterTablePayloadTypes>),
+  AlterTableCommit2(stmpaxos2pc_tm::Commit<AlterTablePayloadTypes>),
 
   // DropTable RM Messages
   DropTablePrepare(DropTablePrepare),
