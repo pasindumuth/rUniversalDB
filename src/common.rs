@@ -18,17 +18,23 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 // -----------------------------------------------------------------------------------------------
-//  SlaveIOCtx
+//  Basic
 // -----------------------------------------------------------------------------------------------
 
-pub trait SlaveIOCtx {
+pub trait BasicCtx {
   type RngCoreT: RngCore + Debug;
 
   // Basic
   fn rand(&mut self) -> &mut Self::RngCoreT;
   fn now(&mut self) -> Timestamp;
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
+}
 
+// -----------------------------------------------------------------------------------------------
+//  SlaveIOCtx
+// -----------------------------------------------------------------------------------------------
+
+pub trait SlaveIOCtx: BasicCtx {
   // Tablet
   fn create_tablet(&mut self, helper: TabletCreateHelper);
   fn tablet_forward(&mut self, tablet_group_id: &TabletGroupId, forward_msg: TabletForwardMsg);
@@ -47,14 +53,7 @@ pub trait SlaveIOCtx {
 //  CoreIOCtx
 // -----------------------------------------------------------------------------------------------
 
-pub trait CoreIOCtx {
-  type RngCoreT: RngCore + Debug;
-
-  // Basic
-  fn rand(&mut self) -> &mut Self::RngCoreT;
-  fn now(&mut self) -> Timestamp;
-  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
-
+pub trait CoreIOCtx: BasicCtx {
   // Slave
   fn slave_forward(&mut self, forward_msg: SlaveBackMessage);
 }
@@ -63,14 +62,7 @@ pub trait CoreIOCtx {
 //  MasterIOCtx
 // -----------------------------------------------------------------------------------------------
 
-pub trait MasterIOCtx {
-  type RngCoreT: RngCore + Debug;
-
-  // Basic
-  fn rand(&mut self) -> &mut Self::RngCoreT;
-  fn now(&mut self) -> Timestamp;
-  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
-
+pub trait MasterIOCtx: BasicCtx {
   // Timer
   fn defer(&mut self, defer_time: Timestamp, timer_input: MasterTimerInput);
 }

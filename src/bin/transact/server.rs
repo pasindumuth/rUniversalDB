@@ -1,7 +1,7 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  btree_multimap_insert, mk_cid, mk_sid, CoreIOCtx, GossipData, SlaveIOCtx,
+  btree_multimap_insert, mk_cid, mk_sid, BasicCtx, CoreIOCtx, GossipData, SlaveIOCtx,
 };
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::model::common::{
@@ -70,7 +70,7 @@ impl ProdSlaveIOCtx {
   }
 }
 
-impl SlaveIOCtx for ProdSlaveIOCtx {
+impl BasicCtx for ProdSlaveIOCtx {
   type RngCoreT = XorShiftRng;
 
   fn rand(&mut self) -> &mut Self::RngCoreT {
@@ -86,7 +86,9 @@ impl SlaveIOCtx for ProdSlaveIOCtx {
     let sender = net_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
   }
+}
 
+impl SlaveIOCtx for ProdSlaveIOCtx {
   fn create_tablet(&mut self, helper: TabletCreateHelper) {
     // Create an RNG using the random seed provided by the Slave.
     let rand = XorShiftRng::from_seed(helper.rand_seed);
@@ -155,7 +157,7 @@ pub struct ProdCoreIOCtx {
   to_slave: Sender<FullSlaveInput>,
 }
 
-impl CoreIOCtx for ProdCoreIOCtx {
+impl BasicCtx for ProdCoreIOCtx {
   type RngCoreT = XorShiftRng;
 
   fn rand(&mut self) -> &mut Self::RngCoreT {
@@ -171,7 +173,9 @@ impl CoreIOCtx for ProdCoreIOCtx {
     let sender = net_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
   }
+}
 
+impl CoreIOCtx for ProdCoreIOCtx {
   fn slave_forward(&mut self, msg: SlaveBackMessage) {
     self.to_slave.send(FullSlaveInput::SlaveBackMessage(msg));
   }

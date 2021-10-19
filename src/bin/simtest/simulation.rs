@@ -1,6 +1,6 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_cid, rvec, CoreIOCtx, GossipData, MasterIOCtx, SlaveIOCtx};
+use runiversal::common::{mk_cid, rvec, BasicCtx, CoreIOCtx, GossipData, MasterIOCtx, SlaveIOCtx};
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::{FullMasterInput, MasterContext, MasterState, MasterTimerInput};
 use runiversal::model::common::{
@@ -49,7 +49,7 @@ pub struct TestSlaveIOCtx<'a> {
   tasks: &'a mut BTreeMap<Timestamp, Vec<SlaveTimerInput>>,
 }
 
-impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
+impl<'a> BasicCtx for TestSlaveIOCtx<'a> {
   type RngCoreT = XorShiftRng;
 
   fn rand(&mut self) -> &mut Self::RngCoreT {
@@ -63,7 +63,9 @@ impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
   fn send(&mut self, eid: &EndpointId, msg: NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
+}
 
+impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
   fn create_tablet(&mut self, helper: TabletCreateHelper) {
     let tid = helper.this_tablet_group_id.clone();
     self.tablet_states.insert(tid, TabletState::new(TabletContext::new(helper)));
@@ -135,7 +137,7 @@ pub struct TestCoreIOCtx<'a> {
   slave_back_messages: &'a mut VecDeque<SlaveBackMessage>,
 }
 
-impl<'a> CoreIOCtx for TestCoreIOCtx<'a> {
+impl<'a> BasicCtx for TestCoreIOCtx<'a> {
   type RngCoreT = XorShiftRng;
 
   fn rand(&mut self) -> &mut Self::RngCoreT {
@@ -149,7 +151,9 @@ impl<'a> CoreIOCtx for TestCoreIOCtx<'a> {
   fn send(&mut self, eid: &EndpointId, msg: NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
+}
 
+impl<'a> CoreIOCtx for TestCoreIOCtx<'a> {
   fn slave_forward(&mut self, msg: SlaveBackMessage) {
     self.slave_back_messages.push_back(msg);
   }
@@ -173,7 +177,7 @@ pub struct TestMasterIOCtx<'a> {
   tasks: &'a mut BTreeMap<Timestamp, Vec<MasterTimerInput>>,
 }
 
-impl<'a> MasterIOCtx for TestMasterIOCtx<'a> {
+impl<'a> BasicCtx for TestMasterIOCtx<'a> {
   type RngCoreT = XorShiftRng;
 
   fn rand(&mut self) -> &mut Self::RngCoreT {
@@ -187,7 +191,9 @@ impl<'a> MasterIOCtx for TestMasterIOCtx<'a> {
   fn send(&mut self, eid: &EndpointId, msg: NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
+}
 
+impl<'a> MasterIOCtx for TestMasterIOCtx<'a> {
   fn defer(&mut self, defer_time: u128, timer_input: MasterTimerInput) {
     let deferred_time = self.current_time + defer_time;
     if let Some(timer_inputs) = self.tasks.get_mut(&deferred_time) {
