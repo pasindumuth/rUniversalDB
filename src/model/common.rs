@@ -150,7 +150,7 @@ pub enum CTSubNodePath {
   Coord(CoordGroupId),
 }
 
-trait IntoCTSubNodePath {
+pub trait IntoCTSubNodePath {
   fn into_ct(self) -> CTSubNodePath;
 }
 

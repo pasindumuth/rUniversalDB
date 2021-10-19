@@ -111,15 +111,15 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type RMAbortedPLm = AlterTableRMAborted;
 
   fn tablet_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> TabletPLm {
-    TabletPLm::AlterTableRMPrepared2(prepared_plm)
+    TabletPLm::AlterTablePrepared(prepared_plm)
   }
 
   fn tablet_committed_plm(committed_plm: RMCommittedPLm<Self>) -> TabletPLm {
-    TabletPLm::AlterTableRMCommitted2(committed_plm)
+    TabletPLm::AlterTableCommitted(committed_plm)
   }
 
   fn tablet_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> TabletPLm {
-    TabletPLm::AlterTableRMAborted2(aborted_plm)
+    TabletPLm::AlterTableAborted(aborted_plm)
   }
 
   // TM-to-RM Messages
@@ -128,15 +128,15 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type Commit = AlterTableCommit;
 
   fn tablet_prepare(prepare: Prepare<Self>) -> msg::TabletMessage {
-    msg::TabletMessage::AlterTablePrepare2(prepare)
+    msg::TabletMessage::AlterTablePrepare(prepare)
   }
 
   fn tablet_commit(commit: Commit<Self>) -> msg::TabletMessage {
-    msg::TabletMessage::AlterTableCommit2(commit)
+    msg::TabletMessage::AlterTableCommit(commit)
   }
 
   fn tablet_abort(abort: Abort<Self>) -> msg::TabletMessage {
-    msg::TabletMessage::AlterTableAbort2(abort)
+    msg::TabletMessage::AlterTableAbort(abort)
   }
 
   // RM-to-TM Messages
@@ -145,15 +145,15 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type Closed = AlterTableClosed;
 
   fn master_prepared(prepared: Prepared<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::AlterTablePrepared2(prepared)
+    msg::MasterRemotePayload::AlterTablePrepared(prepared)
   }
 
   fn master_aborted(aborted: Aborted<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::AlterTableAborted2(aborted)
+    msg::MasterRemotePayload::AlterTableAborted(aborted)
   }
 
   fn master_closed(closed: Closed<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::AlterTableClosed2(closed)
+    msg::MasterRemotePayload::AlterTableClosed(closed)
   }
 }
 

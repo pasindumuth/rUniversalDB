@@ -87,31 +87,6 @@ pub mod plm {
     pub timestamp_hint: Option<Timestamp>,
   }
 
-  // AlterTable
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct AlterTableTMPrepared {
-    pub query_id: QueryId,
-    pub table_path: TablePath,
-    pub alter_op: proc::AlterOp,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct AlterTableTMCommitted {
-    pub query_id: QueryId,
-    pub timestamp_hint: Timestamp,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct AlterTableTMAborted {
-    pub query_id: QueryId,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct AlterTableTMClosed {
-    pub query_id: QueryId,
-  }
-
   // DropTable
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -798,19 +773,19 @@ impl MasterContext {
             self.handle_create_table_es_action(statuses, query_id, action);
           }
           // Advanced
-          MasterRemotePayload::AlterTablePrepared2(prepared) => {
+          MasterRemotePayload::AlterTablePrepared(prepared) => {
             let query_id = prepared.query_id.clone();
             let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
             let action = es.handle_prepared(self, io_ctx, prepared);
             self.handle_alter_table_es_action(statuses, query_id, action);
           }
-          MasterRemotePayload::AlterTableAborted2(aborted) => {
+          MasterRemotePayload::AlterTableAborted(aborted) => {
             let query_id = aborted.query_id.clone();
             let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
             let action = es.handle_aborted(self, io_ctx);
             self.handle_alter_table_es_action(statuses, query_id, action);
           }
-          MasterRemotePayload::AlterTableClosed2(closed) => {
+          MasterRemotePayload::AlterTableClosed(closed) => {
             let query_id = closed.query_id.clone();
             let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
             let action = es.handle_close_confirmed(self, io_ctx, closed);
@@ -836,9 +811,6 @@ impl MasterContext {
             self.handle_drop_table_es_action(statuses, query_id, action);
           }
           MasterRemotePayload::MasterGossipRequest(_) => {}
-          MasterRemotePayload::AlterTablePrepared(_) => {}
-          MasterRemotePayload::AlterTableAborted(_) => {}
-          MasterRemotePayload::AlterTableCloseConfirm(_) => {}
         }
 
         // Run Main Loop

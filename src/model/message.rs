@@ -99,14 +99,9 @@ pub enum MasterRemotePayload {
   CreateTableCloseConfirm(CreateTableCloseConfirm),
 
   // AlterTable TM Messages
-  AlterTablePrepared(AlterTablePrepared),
-  AlterTableAborted(AlterTableAborted),
-  AlterTableCloseConfirm(AlterTableCloseConfirm),
-
-  // AlterTable TM Messages
-  AlterTablePrepared2(stmpaxos2pc_tm::Prepared<AlterTablePayloadTypes>),
-  AlterTableAborted2(stmpaxos2pc_tm::Aborted<AlterTablePayloadTypes>),
-  AlterTableClosed2(stmpaxos2pc_tm::Closed<AlterTablePayloadTypes>),
+  AlterTablePrepared(stmpaxos2pc_tm::Prepared<AlterTablePayloadTypes>),
+  AlterTableAborted(stmpaxos2pc_tm::Aborted<AlterTablePayloadTypes>),
+  AlterTableClosed(stmpaxos2pc_tm::Closed<AlterTablePayloadTypes>),
 
   // DropTable TM Messages
   DropTablePrepared(DropTablePrepared),
@@ -150,14 +145,9 @@ pub enum TabletMessage {
   FinishQueryCheckPrepared(FinishQueryCheckPrepared),
 
   // AlterTable RM Messages
-  AlterTablePrepare(AlterTablePrepare),
-  AlterTableAbort(AlterTableAbort),
-  AlterTableCommit(AlterTableCommit),
-
-  // AlterTable RM Messages
-  AlterTablePrepare2(stmpaxos2pc_tm::Prepare<AlterTablePayloadTypes>),
-  AlterTableAbort2(stmpaxos2pc_tm::Abort<AlterTablePayloadTypes>),
-  AlterTableCommit2(stmpaxos2pc_tm::Commit<AlterTablePayloadTypes>),
+  AlterTablePrepare(stmpaxos2pc_tm::Prepare<AlterTablePayloadTypes>),
+  AlterTableAbort(stmpaxos2pc_tm::Abort<AlterTablePayloadTypes>),
+  AlterTableCommit(stmpaxos2pc_tm::Commit<AlterTablePayloadTypes>),
 
   // DropTable RM Messages
   DropTablePrepare(DropTablePrepare),
@@ -551,47 +541,6 @@ pub struct MasterQueryPlanningSuccess {
   pub return_qid: QueryId,
   pub query_id: QueryId,
   pub result: MasteryQueryPlanningResult,
-}
-
-// -------------------------------------------------------------------------------------------------
-//  AlterTable Messages
-// -------------------------------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTablePrepare {
-  pub query_id: QueryId,
-  pub alter_op: proc::AlterOp,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTablePrepared {
-  pub query_id: QueryId,
-  pub rm: TNodePath,
-  pub timestamp: Timestamp,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableAborted {
-  pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableAbort {
-  pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableCommit {
-  pub query_id: QueryId,
-  pub timestamp: Timestamp,
-}
-
-// Other Paxos2PC messages
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableCloseConfirm {
-  pub query_id: QueryId,
-  pub rm: TNodePath,
 }
 
 // -------------------------------------------------------------------------------------------------

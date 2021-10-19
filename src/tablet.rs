@@ -1,5 +1,5 @@
-use crate::alter_table_es::{AlterTableAction, AlterTableES, State};
-use crate::alter_table_tm_es::AlterTablePayloadTypes;
+use crate::alter_table_es::{AlterTableES, AlterTableRMInner, State};
+use crate::alter_table_tm_es::{AlterTableClosed, AlterTablePayloadTypes};
 use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, collect_update_subqueries,
   node_external_trans_tables, nodes_external_cols, nodes_external_trans_tables, ColUsagePlanner,
@@ -33,7 +33,6 @@ use crate::model::common::{
   TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
-use crate::model::message::TabletMessage;
 use crate::ms_table_read_es::{MSReadExecutionS, MSTableReadAction, MSTableReadES};
 use crate::ms_table_write_es::{MSTableWriteAction, MSTableWriteES, MSWriteExecutionS};
 use crate::server::{
@@ -41,7 +40,9 @@ use crate::server::{
   CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
 };
 use crate::slave::SlaveBackMessage;
+use crate::stmpaxos2pc_rm::STMPaxos2PCRMAction;
 use crate::stmpaxos2pc_tm as paxos2pc;
+use crate::stmpaxos2pc_tm::Closed;
 use crate::storage::{compress_updates_views, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
@@ -468,26 +469,6 @@ pub mod plm {
     pub query_id: QueryId,
   }
 
-  // AlterTable
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct AlterTablePrepared {
-    pub query_id: QueryId,
-    pub alter_op: proc::AlterOp,
-    pub timestamp: Timestamp,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct AlterTableCommitted {
-    pub query_id: QueryId,
-    pub timestamp: Timestamp,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct AlterTableAborted {
-    pub query_id: QueryId,
-  }
-
   // DropTable
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -515,17 +496,12 @@ pub enum TabletPLm {
   FinishQueryPrepared(plm::FinishQueryPrepared),
   FinishQueryCommitted(plm::FinishQueryCommitted),
   FinishQueryAborted(plm::FinishQueryAborted),
-  AlterTablePrepared(plm::AlterTablePrepared),
-  AlterTableCommitted(plm::AlterTableCommitted),
-  AlterTableAborted(plm::AlterTableAborted),
+  AlterTablePrepared(paxos2pc::RMPreparedPLm<AlterTablePayloadTypes>),
+  AlterTableCommitted(paxos2pc::RMCommittedPLm<AlterTablePayloadTypes>),
+  AlterTableAborted(paxos2pc::RMAbortedPLm<AlterTablePayloadTypes>),
   DropTablePrepared(plm::DropTablePrepared),
   DropTableCommitted(plm::DropTableCommitted),
   DropTableAborted(plm::DropTableAborted),
-
-  // Alter
-  AlterTableRMPrepared2(paxos2pc::RMPreparedPLm<AlterTablePayloadTypes>),
-  AlterTableRMCommitted2(paxos2pc::RMCommittedPLm<AlterTablePayloadTypes>),
-  AlterTableRMAborted2(paxos2pc::RMAbortedPLm<AlterTablePayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -763,9 +739,6 @@ impl TabletContext {
                 let query_id = es.query_id.clone();
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
-              TabletPLm::AlterTableRMPrepared2(_) => {}
-              TabletPLm::AlterTableRMCommitted2(_) => {}
-              TabletPLm::AlterTableRMAborted2(_) => {}
             }
           }
 
@@ -779,7 +752,7 @@ impl TabletContext {
           match &mut statuses.ddl_es {
             DDLES::None => {}
             DDLES::Alter(es) => {
-              es.start_inserting(self);
+              es.start_inserting(self, io_ctx);
             }
             DDLES::Drop(es) => {
               es.start_inserting(self);
@@ -841,12 +814,16 @@ impl TabletContext {
               }
               TabletPLm::AlterTablePrepared(prepared) => {
                 debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-                statuses.ddl_es = DDLES::Alter(AlterTableES {
-                  query_id: prepared.query_id,
-                  alter_op: prepared.alter_op,
-                  prepared_timestamp: prepared.timestamp,
-                  state: State::Follower,
-                });
+                let mut es = AlterTableES::new(
+                  prepared.query_id.clone(),
+                  AlterTableRMInner {
+                    query_id: prepared.query_id,
+                    alter_op: prepared.payload.alter_op,
+                    prepared_timestamp: prepared.payload.timestamp,
+                  },
+                );
+                es.init_follower(self, io_ctx);
+                statuses.ddl_es = DDLES::Alter(es);
               }
               TabletPLm::AlterTableCommitted(committed_plm) => {
                 let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
@@ -880,9 +857,6 @@ impl TabletContext {
                 let query_id = es.query_id.clone();
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
-              TabletPLm::AlterTableRMPrepared2(_) => {}
-              TabletPLm::AlterTableRMCommitted2(_) => {}
-              TabletPLm::AlterTableRMAborted2(_) => {}
             }
           }
         }
@@ -1193,12 +1167,12 @@ impl TabletContext {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Construct the `preparing_timestamp`
               let mut timestamp = io_ctx.now();
-              timestamp =
-                max(timestamp, self.table_schema.val_cols.get_lat(&prepare.alter_op.col_name));
+              let col_name = &prepare.payload.alter_op.col_name;
+              timestamp = max(timestamp, self.table_schema.val_cols.get_lat(col_name));
               for (_, req) in
                 self.waiting_locked_cols.iter().chain(self.inserting_locked_cols.iter())
               {
-                if req.cols.contains(&prepare.alter_op.col_name) {
+                if req.cols.contains(col_name) {
                   timestamp = max(timestamp, req.timestamp);
                 }
               }
@@ -1206,12 +1180,14 @@ impl TabletContext {
 
               // Construct an AlterTableES and set it to `ddl_es`.
               let query_id = prepare.query_id;
-              statuses.ddl_es = DDLES::Alter(AlterTableES {
-                query_id,
-                alter_op: prepare.alter_op,
-                prepared_timestamp: timestamp,
-                state: State::WaitingInsertingPrepared,
-              });
+              statuses.ddl_es = DDLES::Alter(AlterTableES::new(
+                query_id.clone(),
+                AlterTableRMInner {
+                  query_id,
+                  alter_op: prepare.payload.alter_op,
+                  prepared_timestamp: timestamp,
+                },
+              ));
             }
           }
           msg::TabletMessage::AlterTableAbort(abort) => {
@@ -1220,22 +1196,26 @@ impl TabletContext {
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
-              let rm = self.mk_node_path();
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
-                msg::AlterTableCloseConfirm { query_id: abort.query_id, rm },
-              ));
+              let this_node_path = self.mk_node_path();
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableClosed(Closed {
+                query_id: abort.query_id,
+                rm: this_node_path,
+                payload: AlterTableClosed {},
+              }));
             }
           }
           msg::TabletMessage::AlterTableCommit(commit) => {
             if let DDLES::Alter(es) = &mut statuses.ddl_es {
-              es.handle_commit(self, commit);
+              es.handle_commit(self, io_ctx, commit);
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
               // Send back a `CloseConfirm` to the Master.
-              let rm = self.mk_node_path();
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableCloseConfirm(
-                msg::AlterTableCloseConfirm { query_id: commit.query_id, rm },
-              ));
+              let this_node_path = self.mk_node_path();
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableClosed(Closed {
+                query_id: commit.query_id,
+                rm: this_node_path,
+                payload: AlterTableClosed {},
+              }));
             }
           }
           msg::TabletMessage::DropTablePrepare(prepare) => {
@@ -1286,9 +1266,6 @@ impl TabletContext {
               ));
             }
           }
-          TabletMessage::AlterTablePrepare2(_) => {}
-          TabletMessage::AlterTableAbort2(_) => {}
-          TabletMessage::AlterTableCommit2(_) => {}
         }
 
         // Run Main Loop
@@ -1717,7 +1694,9 @@ impl TabletContext {
         DDLES::Alter(es) => {
           let mut conflicts = false;
           for col_name in &req.cols {
-            if &es.alter_op.col_name == col_name && req.timestamp >= es.prepared_timestamp {
+            if &es.inner.alter_op.col_name == col_name
+              && req.timestamp >= es.inner.prepared_timestamp
+            {
               conflicts = true;
             }
           }
@@ -2237,11 +2216,11 @@ impl TabletContext {
     &mut self,
     statuses: &mut Statuses,
     _: QueryId,
-    action: AlterTableAction,
+    action: STMPaxos2PCRMAction,
   ) {
     match action {
-      AlterTableAction::Wait => {}
-      AlterTableAction::Exit => {
+      STMPaxos2PCRMAction::Wait => {}
+      STMPaxos2PCRMAction::Exit => {
         statuses.ddl_es = DDLES::None;
       }
     }

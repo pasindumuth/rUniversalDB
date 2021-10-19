@@ -6,7 +6,8 @@ use crate::common::CoreIOCtx;
 use crate::model::common::{proc, QueryId, TNodePath, Timestamp};
 use crate::server::ServerContextBase;
 use crate::stmpaxos2pc_tm::{
-  Closed, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMPreparedPLm, TMCommittedPLm,
+  Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMPreparedPLm,
+  TMCommittedPLm,
 };
 use crate::tablet::TabletContext;
 use std::collections::HashMap;
@@ -39,7 +40,7 @@ pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-    commit: T::Commit,
+    commit: &T::Commit,
   ) -> T::RMCommittedPLm;
 
   /// Called after CommittedPLm is inserted.
@@ -90,6 +91,16 @@ pub struct STMPaxos2PCRMOuter<T: PayloadTypes, InnerT> {
 }
 
 impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, InnerT> {
+  pub fn new(query_id: QueryId, inner: InnerT) -> STMPaxos2PCRMOuter<T, InnerT> {
+    STMPaxos2PCRMOuter { query_id, follower: None, state: State::WaitingInsertingPrepared, inner }
+  }
+
+  /// This is only called when the `PreparedPLm` is insert at a Follower node.
+  pub fn init_follower<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) {
+    self._handle_prepared_plm(ctx, io_ctx);
+    self.state = State::Follower;
+  }
+
   // STMPaxos2PC messages
 
   pub fn handle_prepare<IO: CoreIOCtx>(
@@ -110,13 +121,13 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-    commit: T::Commit,
+    commit: Commit<T>,
   ) -> STMPaxos2PCRMAction {
     match &self.state {
       State::Prepared(_) => {
         let committed_plm = T::tablet_committed_plm(RMCommittedPLm {
           query_id: self.query_id.clone(),
-          payload: self.inner.mk_committed_plm(ctx, io_ctx, commit),
+          payload: self.inner.mk_committed_plm(ctx, io_ctx, &commit.payload),
         });
         ctx.tablet_bundle.push(committed_plm);
         self.state = State::InsertingCommitted;
@@ -284,69 +295,4 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     };
     ctx.ctx(io_ctx).send_to_master(T::master_closed(closed));
   }
-}
-
-// -----------------------------------------------------------------------------------------------
-//  AlterTableES Implementation
-// -----------------------------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub struct AlterTableRMInner {
-  pub query_id: QueryId,
-  pub alter_op: proc::AlterOp,
-  pub prepared_timestamp: Timestamp,
-}
-
-impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
-  fn mk_closed<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) -> AlterTableClosed {
-    AlterTableClosed {}
-  }
-
-  fn mk_prepared_plm<IO: CoreIOCtx>(
-    &mut self,
-    _: &mut TabletContext,
-    _: &mut IO,
-  ) -> AlterTableRMPrepared {
-    AlterTableRMPrepared { alter_op: self.alter_op.clone(), timestamp: self.prepared_timestamp }
-  }
-
-  fn prepared_plm_inserted<IO: CoreIOCtx>(
-    &mut self,
-    _: &mut TabletContext,
-    _: &mut IO,
-  ) -> AlterTablePrepared {
-    AlterTablePrepared { timestamp: self.prepared_timestamp }
-  }
-
-  fn mk_committed_plm<IO: CoreIOCtx>(
-    &mut self,
-    _: &mut TabletContext,
-    _: &mut IO,
-    commit: AlterTableCommit,
-  ) -> AlterTableRMCommitted {
-    AlterTableRMCommitted { timestamp: commit.timestamp }
-  }
-  /// Apply the `alter_op` to this Tablet's `table_schema`.
-  fn committed_plm_inserted<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    _: &mut IO,
-    committed_plm: &RMCommittedPLm<AlterTablePayloadTypes>,
-  ) {
-    ctx.table_schema.val_cols.write(
-      &self.alter_op.col_name,
-      self.alter_op.maybe_col_type.clone(),
-      committed_plm.payload.timestamp,
-    );
-  }
-
-  fn mk_aborted_plm<IO: CoreIOCtx>(
-    &mut self,
-    _: &mut TabletContext,
-    _: &mut IO,
-  ) -> AlterTableRMAborted {
-    AlterTableRMAborted {}
-  }
-
-  fn aborted_plm_inserted<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {}
 }
