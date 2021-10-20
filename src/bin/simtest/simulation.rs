@@ -1,6 +1,8 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_cid, rvec, BasicCtx, CoreIOCtx, GossipData, MasterIOCtx, SlaveIOCtx};
+use runiversal::common::{
+  mk_cid, rvec, BasicIOCtx, CoreIOCtx, GossipData, MasterIOCtx, SlaveIOCtx,
+};
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::{FullMasterInput, MasterContext, MasterState, MasterTimerInput};
 use runiversal::model::common::{
@@ -49,7 +51,7 @@ pub struct TestSlaveIOCtx<'a> {
   tasks: &'a mut BTreeMap<Timestamp, Vec<SlaveTimerInput>>,
 }
 
-impl<'a> BasicCtx for TestSlaveIOCtx<'a> {
+impl<'a> BasicIOCtx for TestSlaveIOCtx<'a> {
   type RngCoreT = XorShiftRng;
 
   fn rand(&mut self) -> &mut Self::RngCoreT {
@@ -137,7 +139,7 @@ pub struct TestCoreIOCtx<'a> {
   slave_back_messages: &'a mut VecDeque<SlaveBackMessage>,
 }
 
-impl<'a> BasicCtx for TestCoreIOCtx<'a> {
+impl<'a> BasicIOCtx for TestCoreIOCtx<'a> {
   type RngCoreT = XorShiftRng;
 
   fn rand(&mut self) -> &mut Self::RngCoreT {
@@ -177,7 +179,7 @@ pub struct TestMasterIOCtx<'a> {
   tasks: &'a mut BTreeMap<Timestamp, Vec<MasterTimerInput>>,
 }
 
-impl<'a> BasicCtx for TestMasterIOCtx<'a> {
+impl<'a> BasicIOCtx for TestMasterIOCtx<'a> {
   type RngCoreT = XorShiftRng;
 
   fn rand(&mut self) -> &mut Self::RngCoreT {

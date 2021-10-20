@@ -2,7 +2,7 @@ use crate::alter_table_tm_es::{
   AlterTableClosed, AlterTableCommit, AlterTablePayloadTypes, AlterTablePrepared,
   AlterTableRMAborted, AlterTableRMCommitted, AlterTableRMPrepared,
 };
-use crate::common::CoreIOCtx;
+use crate::common::BasicIOCtx;
 use crate::model::common::{proc, QueryId, Timestamp};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
@@ -38,11 +38,11 @@ pub struct AlterTableRMInner {
 pub(crate) type AlterTableES = STMPaxos2PCRMOuter<AlterTablePayloadTypes, AlterTableRMInner>;
 
 impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
-  fn mk_closed<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) -> AlterTableClosed {
+  fn mk_closed<IO: BasicIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) -> AlterTableClosed {
     AlterTableClosed {}
   }
 
-  fn mk_prepared_plm<IO: CoreIOCtx>(
+  fn mk_prepared_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut TabletContext,
     _: &mut IO,
@@ -50,7 +50,7 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     AlterTableRMPrepared { alter_op: self.alter_op.clone(), timestamp: self.prepared_timestamp }
   }
 
-  fn prepared_plm_inserted<IO: CoreIOCtx>(
+  fn prepared_plm_inserted<IO: BasicIOCtx>(
     &mut self,
     _: &mut TabletContext,
     _: &mut IO,
@@ -58,7 +58,7 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     AlterTablePrepared { timestamp: self.prepared_timestamp }
   }
 
-  fn mk_committed_plm<IO: CoreIOCtx>(
+  fn mk_committed_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut TabletContext,
     _: &mut IO,
@@ -67,7 +67,7 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     AlterTableRMCommitted { timestamp: commit.timestamp }
   }
   /// Apply the `alter_op` to this Tablet's `table_schema`.
-  fn committed_plm_inserted<IO: CoreIOCtx>(
+  fn committed_plm_inserted<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
     _: &mut IO,
@@ -80,7 +80,7 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     );
   }
 
-  fn mk_aborted_plm<IO: CoreIOCtx>(
+  fn mk_aborted_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut TabletContext,
     _: &mut IO,
@@ -88,5 +88,5 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     AlterTableRMAborted {}
   }
 
-  fn aborted_plm_inserted<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {}
+  fn aborted_plm_inserted<IO: BasicIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {}
 }

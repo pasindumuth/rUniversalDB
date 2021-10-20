@@ -21,7 +21,7 @@ use std::hash::Hash;
 //  Basic
 // -----------------------------------------------------------------------------------------------
 
-pub trait BasicCtx {
+pub trait BasicIOCtx {
   type RngCoreT: RngCore + Debug;
 
   // Basic
@@ -34,7 +34,7 @@ pub trait BasicCtx {
 //  SlaveIOCtx
 // -----------------------------------------------------------------------------------------------
 
-pub trait SlaveIOCtx: BasicCtx {
+pub trait SlaveIOCtx: BasicIOCtx {
   // Tablet
   fn create_tablet(&mut self, helper: TabletCreateHelper);
   fn tablet_forward(&mut self, tablet_group_id: &TabletGroupId, forward_msg: TabletForwardMsg);
@@ -53,7 +53,7 @@ pub trait SlaveIOCtx: BasicCtx {
 //  CoreIOCtx
 // -----------------------------------------------------------------------------------------------
 
-pub trait CoreIOCtx: BasicCtx {
+pub trait CoreIOCtx: BasicIOCtx {
   // Slave
   fn slave_forward(&mut self, forward_msg: SlaveBackMessage);
 }
@@ -62,7 +62,7 @@ pub trait CoreIOCtx: BasicCtx {
 //  MasterIOCtx
 // -----------------------------------------------------------------------------------------------
 
-pub trait MasterIOCtx: BasicCtx {
+pub trait MasterIOCtx: BasicIOCtx {
   // Timer
   fn defer(&mut self, defer_time: Timestamp, timer_input: MasterTimerInput);
 }

@@ -1,8 +1,8 @@
-use crate::alter_table_tm_es::{AlterTablePayloadTypes, AlterTableTMInner};
-use crate::common::RemoteLeaderChangedPLm;
+use crate::alter_table_tm_es::{AlterTablePayloadTypes, AlterTableTMES, AlterTableTMInner};
 use crate::common::{
   btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, MasterIOCtx, TableSchema, UUID,
 };
+use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{
   CreateTableTMAction, CreateTableTMES, CreateTableTMS, Follower as CreateFollower, ResponseData,
 };
@@ -15,7 +15,7 @@ use crate::master_query_planning_es::{
 };
 use crate::model::common::{
   proc, CQueryPath, ColName, EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId, RequestId,
-  SlaveGroupId, SlaveQueryPath, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
+  SlaveGroupId, SlaveQueryPath, TNodePath, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
   TransTableName,
 };
 use crate::model::message as msg;
@@ -30,7 +30,9 @@ use crate::server::{
 };
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
-use crate::stmpaxos2pc_tm::{STMPaxos2PCTMAction, State};
+use crate::stmpaxos2pc_tm::{
+  PayloadTypes, RMPathTrait, STMPaxos2PCTMAction, State, TMServerContext,
+};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
@@ -202,10 +204,43 @@ pub enum FullMasterInput {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Master State
+//  TMServerContext
 // -----------------------------------------------------------------------------------------------
 
-type AlterTableTMES = paxos2pc::STMPaxos2PCTMOuter<AlterTablePayloadTypes, AlterTableTMInner>;
+impl TMServerContext<AlterTablePayloadTypes> for MasterContext {
+  fn push_plm(&mut self, plm: MasterPLm) {
+    self.master_bundle.plms.push(plm);
+  }
+
+  fn send_to_rm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    rm: &TNodePath,
+    msg: msg::TabletMessage,
+  ) {
+    self.ctx(io_ctx).send_to_t(rm.clone(), msg);
+  }
+
+  fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO) {
+    MasterContext::broadcast_gossip(self, io_ctx);
+  }
+
+  fn is_leader(&self) -> bool {
+    MasterContext::is_leader(self)
+  }
+}
+
+impl RMPathTrait for TNodePath {
+  fn to_gid(&self) -> PaxosGroupId {
+    TNodePath::to_gid(self)
+  }
+}
+
+impl RMPathTrait for SlaveGroupId {
+  fn to_gid(&self) -> PaxosGroupId {
+    SlaveGroupId::to_gid(self)
+  }
+}
 
 // -----------------------------------------------------------------------------------------------
 //  Master State
@@ -298,7 +333,7 @@ impl MasterContext {
     }
   }
 
-  pub fn ctx<'a, IO: MasterIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> MasterServerContext<'a, IO> {
+  pub fn ctx<'a, IO: BasicIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> MasterServerContext<'a, IO> {
     MasterServerContext { io_ctx, leader_map: &mut self.leader_map }
   }
 
@@ -1096,7 +1131,7 @@ impl MasterContext {
   }
 
   /// Broadcast GossipData
-  pub fn broadcast_gossip<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
+  pub fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO) {
     let gossip_data = GossipData {
       gen: self.gen.clone(),
       db_schema: self.db_schema.clone(),

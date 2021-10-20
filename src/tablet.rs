@@ -7,7 +7,7 @@ use crate::col_usage::{
 };
 use crate::common::{
   btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
-  mk_qid, remove_item, ColBound, CoreIOCtx, GossipData, KeyBound, OrigP, PolyColBound,
+  mk_qid, remove_item, BasicIOCtx, ColBound, CoreIOCtx, GossipData, KeyBound, OrigP, PolyColBound,
   RemoteLeaderChangedPLm, SingleBound, TMStatus, TableRegion, TableSchema,
 };
 use crate::drop_table_es::DropTableAction;
@@ -42,7 +42,7 @@ use crate::server::{
 use crate::slave::SlaveBackMessage;
 use crate::stmpaxos2pc_rm::STMPaxos2PCRMAction;
 use crate::stmpaxos2pc_tm as paxos2pc;
-use crate::stmpaxos2pc_tm::Closed;
+use crate::stmpaxos2pc_tm::{Closed, PayloadTypes, RMServerContext};
 use crate::storage::{compress_updates_views, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
@@ -543,6 +543,28 @@ pub struct TabletCreateHelper {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  RMServerContext
+// -----------------------------------------------------------------------------------------------
+
+impl RMServerContext<AlterTablePayloadTypes> for TabletContext {
+  fn push_plm(&mut self, plm: TabletPLm) {
+    self.tablet_bundle.push(plm);
+  }
+
+  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, msg: msg::MasterRemotePayload) {
+    self.ctx(io_ctx).send_to_master(msg);
+  }
+
+  fn mk_node_path(&self) -> TNodePath {
+    TabletContext::mk_node_path(self)
+  }
+
+  fn is_leader(&self) -> bool {
+    TabletContext::is_leader(self)
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Tablet State
 // -----------------------------------------------------------------------------------------------
 
@@ -632,7 +654,7 @@ impl TabletContext {
     }
   }
 
-  pub fn ctx<'a, IO: CoreIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
+  pub fn ctx<'a, IO: BasicIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
     SlaveServerContext {
       io_ctx,
       this_slave_group_id: &self.this_sid,

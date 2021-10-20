@@ -1,7 +1,7 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  btree_multimap_insert, mk_cid, mk_sid, BasicCtx, CoreIOCtx, GossipData, SlaveIOCtx,
+  btree_multimap_insert, mk_cid, mk_sid, BasicIOCtx, CoreIOCtx, GossipData, SlaveIOCtx,
 };
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::model::common::{
@@ -70,7 +70,7 @@ impl ProdSlaveIOCtx {
   }
 }
 
-impl BasicCtx for ProdSlaveIOCtx {
+impl BasicIOCtx for ProdSlaveIOCtx {
   type RngCoreT = XorShiftRng;
 
   fn rand(&mut self) -> &mut Self::RngCoreT {
@@ -157,7 +157,7 @@ pub struct ProdCoreIOCtx {
   to_slave: Sender<FullSlaveInput>,
 }
 
-impl BasicCtx for ProdCoreIOCtx {
+impl BasicIOCtx for ProdCoreIOCtx {
   type RngCoreT = XorShiftRng;
 
   fn rand(&mut self) -> &mut Self::RngCoreT {

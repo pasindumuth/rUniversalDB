@@ -1,5 +1,6 @@
 use crate::common::{
-  lookup_pos, CoreIOCtx, GossipData, KeyBound, MasterIOCtx, OrigP, SlaveIOCtx, TableSchema,
+  lookup_pos, BasicIOCtx, CoreIOCtx, GossipData, KeyBound, MasterIOCtx, OrigP, SlaveIOCtx,
+  TableSchema,
 };
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
@@ -150,7 +151,7 @@ pub trait ServerContextBase {
 
 /// This is used to present a consistent view of Tablets and Slave to shared ESs so
 /// that they can execute agnotisticly.
-pub struct SlaveServerContext<'a, IO: CoreIOCtx> {
+pub struct SlaveServerContext<'a, IO: BasicIOCtx> {
   /// IO
   pub io_ctx: &'a mut IO,
 
@@ -165,7 +166,7 @@ pub struct SlaveServerContext<'a, IO: CoreIOCtx> {
   pub gossip: &'a mut Arc<GossipData>,
 }
 
-impl<'a, IO: CoreIOCtx> SlaveServerContext<'a, IO> {
+impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
   /// Construct a `NodePath` from a `NodeGroupId`.
   /// NOTE: the `tid` must exist in the `gossip` at this point.
   pub fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
@@ -239,7 +240,7 @@ impl<'a, IO: CoreIOCtx> SlaveServerContext<'a, IO> {
   }
 }
 
-impl<'a, IO: CoreIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
+impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
   fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
     self.leader_map
   }
@@ -291,7 +292,7 @@ impl<'a, IO: SlaveIOCtx> ServerContextBase for MainSlaveServerContext<'a, IO> {
 
 /// This is used to present a consistent view of Master to shared ESs so that they can
 /// execute agnotisticly.
-pub struct MasterServerContext<'a, IO: MasterIOCtx> {
+pub struct MasterServerContext<'a, IO> {
   /// IO
   pub io_ctx: &'a mut IO,
 
@@ -299,7 +300,7 @@ pub struct MasterServerContext<'a, IO: MasterIOCtx> {
   pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
 }
 
-impl<'a, IO: MasterIOCtx> ServerContextBase for MasterServerContext<'a, IO> {
+impl<'a, IO: BasicIOCtx> ServerContextBase for MasterServerContext<'a, IO> {
   fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
     self.leader_map
   }

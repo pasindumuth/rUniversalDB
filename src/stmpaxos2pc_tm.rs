@@ -1,57 +1,96 @@
-use crate::common::{MasterIOCtx, RemoteLeaderChangedPLm};
+use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::ResponseData;
-use crate::master::{MasterContext, MasterPLm};
-use crate::model::common::{proc, QueryId, TNodePath, TSubNodePath, TablePath, Timestamp};
-use crate::model::message as msg;
-use crate::server::ServerContextBase;
-use crate::tablet::TabletPLm;
+use crate::model::common::{proc, PaxosGroupId, QueryId};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::hash::Hash;
+
+// -----------------------------------------------------------------------------------------------
+//  RMServerContext
+// -----------------------------------------------------------------------------------------------
+
+pub trait RMServerContext<T: PayloadTypes> {
+  fn push_plm(&mut self, plm: T::RMPLm);
+
+  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, msg: T::TMMessage);
+
+  fn mk_node_path(&self) -> T::RMPath;
+
+  fn is_leader(&self) -> bool;
+}
+
+// -----------------------------------------------------------------------------------------------
+//  TMServerContext
+// -----------------------------------------------------------------------------------------------
+
+pub trait TMServerContext<T: PayloadTypes> {
+  fn push_plm(&mut self, plm: T::TMPLm);
+
+  fn send_to_rm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, rm: &T::RMPath, msg: T::RMMessage);
+
+  fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO);
+
+  fn is_leader(&self) -> bool;
+}
+
+pub trait RMPathTrait {
+  fn to_gid(&self) -> PaxosGroupId;
+}
 
 // -----------------------------------------------------------------------------------------------
 //  STMPaxos2PC
 // -----------------------------------------------------------------------------------------------
 
 pub trait PayloadTypes: Clone {
+  // Meta
+  type TMPLm: Debug + Clone;
+  type RMPLm: Debug + Clone;
+  type RMPath: Debug + Clone + Hash + PartialEq + Eq + RMPathTrait;
+  type TMPath: Debug + Clone;
+  type RMMessage: Debug + Clone;
+  type TMMessage: Debug + Clone;
+  type RMContext: RMServerContext<Self>;
+  type TMContext: TMServerContext<Self>;
+
   // TM PLm
   type TMPreparedPLm: Debug + Clone;
   type TMCommittedPLm: Debug + Clone;
   type TMAbortedPLm: Debug + Clone;
   type TMClosedPLm: Debug + Clone;
 
-  fn master_prepared_plm(prepared_plm: TMPreparedPLm<Self>) -> MasterPLm;
-  fn master_committed_plm(committed_plm: TMCommittedPLm<Self>) -> MasterPLm;
-  fn master_aborted_plm(aborted_plm: TMAbortedPLm<Self>) -> MasterPLm;
-  fn master_closed_plm(closed_plm: TMClosedPLm<Self>) -> MasterPLm;
+  fn tm_prepared_plm(prepared_plm: TMPreparedPLm<Self>) -> Self::TMPLm;
+  fn tm_committed_plm(committed_plm: TMCommittedPLm<Self>) -> Self::TMPLm;
+  fn tm_aborted_plm(aborted_plm: TMAbortedPLm<Self>) -> Self::TMPLm;
+  fn tm_closed_plm(closed_plm: TMClosedPLm<Self>) -> Self::TMPLm;
 
   // RM PLm
   type RMPreparedPLm: Debug + Clone;
   type RMCommittedPLm: Debug + Clone;
   type RMAbortedPLm: Debug + Clone;
 
-  fn tablet_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> TabletPLm;
-  fn tablet_committed_plm(committed_plm: RMCommittedPLm<Self>) -> TabletPLm;
-  fn tablet_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> TabletPLm;
+  fn rm_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> Self::RMPLm;
+  fn rm_committed_plm(committed_plm: RMCommittedPLm<Self>) -> Self::RMPLm;
+  fn rm_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> Self::RMPLm;
 
   // TM-to-RM Messages
   type Prepare: Debug + Clone;
   type Abort: Debug + Clone;
   type Commit: Debug + Clone;
 
-  fn tablet_prepare(prepare: Prepare<Self>) -> msg::TabletMessage;
-  fn tablet_commit(commit: Commit<Self>) -> msg::TabletMessage;
-  fn tablet_abort(abort: Abort<Self>) -> msg::TabletMessage;
+  fn rm_prepare(prepare: Prepare<Self>) -> Self::RMMessage;
+  fn rm_commit(commit: Commit<Self>) -> Self::RMMessage;
+  fn rm_abort(abort: Abort<Self>) -> Self::RMMessage;
 
   // RM-to-TM Messages
   type Prepared: Debug + Clone;
   type Aborted: Debug + Clone;
   type Closed: Debug + Clone;
 
-  fn master_prepared(prepared: Prepared<Self>) -> msg::MasterRemotePayload;
-  fn master_aborted(aborted: Aborted<Self>) -> msg::MasterRemotePayload;
-  fn master_closed(closed: Closed<Self>) -> msg::MasterRemotePayload;
+  fn tm_prepared(prepared: Prepared<Self>) -> Self::TMMessage;
+  fn tm_aborted(aborted: Aborted<Self>) -> Self::TMMessage;
+  fn tm_closed(closed: Closed<Self>) -> Self::TMMessage;
 }
 
 // TM PLm
@@ -121,7 +160,7 @@ pub struct Commit<T: PayloadTypes> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Prepared<T: PayloadTypes> {
   pub query_id: QueryId,
-  pub rm: TNodePath,
+  pub rm: T::RMPath,
   pub payload: T::Prepared,
 }
 
@@ -134,7 +173,7 @@ pub struct Aborted<T: PayloadTypes> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Closed<T: PayloadTypes> {
   pub query_id: QueryId,
-  pub rm: TNodePath,
+  pub rm: T::RMPath,
   pub payload: T::Closed,
 }
 
@@ -144,61 +183,61 @@ pub struct Closed<T: PayloadTypes> {
 
 pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
   /// Called in order to get the `TMPreparedPLm` to insert.
-  fn mk_prepared_plm<IO: MasterIOCtx>(
+  fn mk_prepared_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   ) -> T::TMPreparedPLm;
 
   /// Called after PreparedPLm is inserted.
-  fn prepared_plm_inserted<IO: MasterIOCtx>(
+  fn prepared_plm_inserted<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-  ) -> HashMap<TNodePath, T::Prepare>;
+  ) -> HashMap<T::RMPath, T::Prepare>;
 
   /// Called after all RMs have Prepared.
-  fn mk_committed_plm<IO: MasterIOCtx>(
+  fn mk_committed_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-    prepared: &HashMap<TNodePath, T::Prepared>,
+    prepared: &HashMap<T::RMPath, T::Prepared>,
   ) -> T::TMCommittedPLm;
 
   /// Called after CommittedPLm is inserted.
-  fn committed_plm_inserted<IO: MasterIOCtx>(
+  fn committed_plm_inserted<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
     committed_plm: &TMCommittedPLm<T>,
-  ) -> HashMap<TNodePath, T::Commit>;
+  ) -> HashMap<T::RMPath, T::Commit>;
 
   /// Called if one of the RMs returned Aborted.
-  fn mk_aborted_plm<IO: MasterIOCtx>(
+  fn mk_aborted_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   ) -> T::TMAbortedPLm;
 
   /// Called after AbortedPLm is inserted.
-  fn aborted_plm_inserted<IO: MasterIOCtx>(
+  fn aborted_plm_inserted<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-  ) -> HashMap<TNodePath, T::Abort>;
+  ) -> HashMap<T::RMPath, T::Abort>;
 
   /// Called after all RMs have processed the `Commit` or or `Abort` message.
-  fn mk_closed_plm<IO: MasterIOCtx>(
+  fn mk_closed_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   ) -> T::TMClosedPLm;
 
   /// Called after all RMs have processed the `Commit` or or `Abort` message.
-  fn closed_plm_inserted<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO);
+  fn closed_plm_inserted<IO: BasicIOCtx>(&mut self, ctx: &mut T::TMContext, io_ctx: &mut IO);
 
   // This is called when the node died.
-  fn node_died<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO);
+  fn node_died<IO: BasicIOCtx>(&mut self, ctx: &mut T::TMContext, io_ctx: &mut IO);
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -207,25 +246,25 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
 
 #[derive(Debug)]
 pub struct PreparingSt<T: PayloadTypes> {
-  rms_remaining: HashSet<TNodePath>,
-  prepared: HashMap<TNodePath, T::Prepared>,
+  rms_remaining: HashSet<T::RMPath>,
+  prepared: HashMap<T::RMPath, T::Prepared>,
 }
 
 #[derive(Debug)]
-pub struct CommittedSt {
-  rms_remaining: HashSet<TNodePath>,
+pub struct CommittedSt<T: PayloadTypes> {
+  rms_remaining: HashSet<T::RMPath>,
 }
 
 #[derive(Debug)]
-pub struct AbortedSt {
-  rms_remaining: HashSet<TNodePath>,
+pub struct AbortedSt<T: PayloadTypes> {
+  rms_remaining: HashSet<T::RMPath>,
 }
 
 #[derive(Debug)]
 pub enum FollowerState<T: PayloadTypes> {
-  Preparing(HashMap<TNodePath, T::Prepare>),
-  Committed(HashMap<TNodePath, T::Commit>),
-  Aborted(HashMap<TNodePath, T::Abort>),
+  Preparing(HashMap<T::RMPath, T::Prepare>),
+  Committed(HashMap<T::RMPath, T::Commit>),
+  Aborted(HashMap<T::RMPath, T::Abort>),
 }
 
 #[derive(Debug)]
@@ -236,9 +275,9 @@ pub enum State<T: PayloadTypes> {
   InsertTMPreparing,
   Preparing(PreparingSt<T>),
   InsertingTMCommitted,
-  Committed(CommittedSt),
+  Committed(CommittedSt<T>),
   InsertingTMAborted,
-  Aborted(AbortedSt),
+  Aborted(AbortedSt<T>),
   InsertingTMClosed,
 }
 
@@ -261,7 +300,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   }
 
   /// This is only called when the `PreparedPLm` is insert at a Follower node.
-  pub fn init_follower<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
+  pub fn init_follower<IO: BasicIOCtx>(&mut self, ctx: &mut T::TMContext, io_ctx: &mut IO) {
     let prepare_payloads = self.inner.prepared_plm_inserted(ctx, io_ctx);
     self.follower = Some(FollowerState::Preparing(prepare_payloads));
     self.state = State::Following;
@@ -269,9 +308,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
 
   // STMPaxos2PC messages
 
-  pub fn handle_prepared<IO: MasterIOCtx>(
+  pub fn handle_prepared<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
     prepared: Prepared<T>,
   ) -> STMPaxos2PCTMAction {
@@ -280,11 +319,11 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         if preparing.rms_remaining.remove(&prepared.rm) {
           preparing.prepared.insert(prepared.rm.clone(), prepared.payload);
           if preparing.rms_remaining.is_empty() {
-            let committed_plm = T::master_committed_plm(TMCommittedPLm {
+            let committed_plm = T::tm_committed_plm(TMCommittedPLm {
               query_id: self.query_id.clone(),
               payload: self.inner.mk_committed_plm(ctx, io_ctx, &preparing.prepared),
             });
-            ctx.master_bundle.plms.push(committed_plm);
+            ctx.push_plm(committed_plm);
             self.state = State::InsertingTMCommitted;
           }
         }
@@ -294,18 +333,18 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     STMPaxos2PCTMAction::Wait
   }
 
-  pub fn handle_aborted<IO: MasterIOCtx>(
+  pub fn handle_aborted<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCTMAction {
     match &mut self.state {
       State::Preparing(_) => {
-        let aborted_plm = T::master_aborted_plm(TMAbortedPLm {
+        let aborted_plm = T::tm_aborted_plm(TMAbortedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_aborted_plm(ctx, io_ctx),
         });
-        ctx.master_bundle.plms.push(aborted_plm);
+        ctx.push_plm(aborted_plm);
         self.state = State::InsertingTMAborted;
       }
       _ => {}
@@ -313,9 +352,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     STMPaxos2PCTMAction::Wait
   }
 
-  pub fn handle_close_confirmed<IO: MasterIOCtx>(
+  pub fn handle_close_confirmed<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
     closed: Closed<T>,
   ) -> STMPaxos2PCTMAction {
@@ -324,11 +363,11 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         if committed.rms_remaining.remove(&closed.rm) {
           if committed.rms_remaining.is_empty() {
             // All RMs have committed
-            let closed_plm = T::master_closed_plm(TMClosedPLm {
+            let closed_plm = T::tm_closed_plm(TMClosedPLm {
               query_id: self.query_id.clone(),
               payload: self.inner.mk_closed_plm(ctx, io_ctx),
             });
-            ctx.master_bundle.plms.push(closed_plm);
+            ctx.push_plm(closed_plm);
             self.state = State::InsertingTMClosed;
           }
         }
@@ -337,11 +376,11 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         if aborted.rms_remaining.remove(&closed.rm) {
           if aborted.rms_remaining.is_empty() {
             // All RMs have aborted
-            let closed_plm = T::master_closed_plm(TMClosedPLm {
+            let closed_plm = T::tm_closed_plm(TMClosedPLm {
               query_id: self.query_id.clone(),
               payload: self.inner.mk_closed_plm(ctx, io_ctx),
             });
-            ctx.master_bundle.plms.push(closed_plm);
+            ctx.push_plm(closed_plm);
             self.state = State::InsertingTMClosed;
           }
         }
@@ -354,16 +393,16 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   // STMPaxos2PC PLm Insertions
 
   /// Change state to `Preparing` and broadcast `Prepare` to the RMs.
-  fn advance_to_prepared<IO: MasterIOCtx>(
+  fn advance_to_prepared<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-    prepare_payloads: HashMap<TNodePath, T::Prepare>,
+    prepare_payloads: HashMap<T::RMPath, T::Prepare>,
   ) {
-    let mut rms_remaining = HashSet::<TNodePath>::new();
+    let mut rms_remaining = HashSet::<T::RMPath>::new();
     for (rm, payload) in prepare_payloads.clone() {
       let prepare = Prepare { query_id: self.query_id.clone(), payload };
-      ctx.ctx(io_ctx).send_to_t(rm.clone(), T::tablet_prepare(prepare));
+      ctx.send_to_rm(io_ctx, &rm, T::rm_prepare(prepare));
       rms_remaining.insert(rm);
     }
 
@@ -371,9 +410,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     self.state = State::Preparing(PreparingSt { rms_remaining, prepared: Default::default() });
   }
 
-  pub fn handle_prepared_plm<IO: MasterIOCtx>(
+  pub fn handle_prepared_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCTMAction {
     match &self.state {
@@ -387,16 +426,16 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   }
 
   /// Change state to `Committed` and broadcast `AlterTableCommit` to the RMs.
-  fn advance_to_committed<IO: MasterIOCtx>(
+  fn advance_to_committed<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-    commit_payloads: HashMap<TNodePath, T::Commit>,
+    commit_payloads: HashMap<T::RMPath, T::Commit>,
   ) {
-    let mut rms_remaining = HashSet::<TNodePath>::new();
+    let mut rms_remaining = HashSet::<T::RMPath>::new();
     for (rm, payload) in commit_payloads.clone() {
       let commit = Commit { query_id: self.query_id.clone(), payload };
-      ctx.ctx(io_ctx).send_to_t(rm.clone(), T::tablet_commit(commit));
+      ctx.send_to_rm(io_ctx, &rm, T::rm_commit(commit));
       rms_remaining.insert(rm);
     }
 
@@ -404,9 +443,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     self.state = State::Committed(CommittedSt { rms_remaining });
   }
 
-  pub fn handle_committed_plm<IO: MasterIOCtx>(
+  pub fn handle_committed_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
     committed_plm: TMCommittedPLm<T>,
   ) -> STMPaxos2PCTMAction {
@@ -431,16 +470,16 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   }
 
   /// Change state to `Aborted` and broadcast `AlterTableAbort` to the RMs.
-  fn advance_to_aborted<IO: MasterIOCtx>(
+  fn advance_to_aborted<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-    abort_payloads: HashMap<TNodePath, T::Abort>,
+    abort_payloads: HashMap<T::RMPath, T::Abort>,
   ) {
-    let mut rms_remaining = HashSet::<TNodePath>::new();
+    let mut rms_remaining = HashSet::<T::RMPath>::new();
     for (rm, payload) in abort_payloads.clone() {
       let abort = Abort { query_id: self.query_id.clone(), payload };
-      ctx.ctx(io_ctx).send_to_t(rm.clone(), T::tablet_abort(abort));
+      ctx.send_to_rm(io_ctx, &rm, T::rm_abort(abort));
       rms_remaining.insert(rm);
     }
 
@@ -448,9 +487,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     self.state = State::Aborted(AbortedSt { rms_remaining });
   }
 
-  pub fn handle_aborted_plm<IO: MasterIOCtx>(
+  pub fn handle_aborted_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCTMAction {
     match &self.state {
@@ -471,9 +510,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   }
 
   /// Simply return Exit in the appropriate states.
-  pub fn handle_closed_plm<IO: MasterIOCtx>(
+  pub fn handle_closed_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCTMAction {
     match &self.state {
@@ -491,18 +530,18 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
 
   // Other
 
-  pub fn start_inserting<IO: MasterIOCtx>(
+  pub fn start_inserting<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCTMAction {
     match &self.state {
       State::WaitingInsertTMPrepared => {
-        let prepared = T::master_prepared_plm(TMPreparedPLm {
+        let prepared = T::tm_prepared_plm(TMPreparedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_prepared_plm(ctx, io_ctx),
         });
-        ctx.master_bundle.plms.push(prepared);
+        ctx.push_plm(prepared);
         self.state = State::InsertTMPreparing;
       }
       _ => {}
@@ -510,9 +549,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     STMPaxos2PCTMAction::Wait
   }
 
-  pub fn leader_changed<IO: MasterIOCtx>(
+  pub fn leader_changed<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCTMAction {
     match &self.state {
@@ -550,9 +589,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     }
   }
 
-  pub fn remote_leader_changed<IO: MasterIOCtx>(
+  pub fn remote_leader_changed<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut MasterContext,
+    ctx: &mut T::TMContext,
     io_ctx: &mut IO,
     remote_leader_changed: RemoteLeaderChangedPLm,
   ) -> STMPaxos2PCTMAction {
@@ -562,10 +601,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         let prepare_payloads = cast!(FollowerState::Preparing, follower).unwrap();
         for rm in &preparing.rms_remaining {
           // If the RM has not responded and its Leadership changed, we resend Prepare.
-          if rm.sid.to_gid() == remote_leader_changed.gid {
+          if rm.to_gid() == remote_leader_changed.gid {
             let payload = prepare_payloads.get(rm).unwrap().clone();
             let prepare = Prepare { query_id: self.query_id.clone(), payload };
-            ctx.ctx(io_ctx).send_to_t(rm.clone(), T::tablet_prepare(prepare));
+            ctx.send_to_rm(io_ctx, &rm, T::rm_prepare(prepare));
           }
         }
       }
@@ -573,10 +612,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         let commit_payloads = cast!(FollowerState::Committed, follower).unwrap();
         for rm in &committed.rms_remaining {
           // If the RM has not responded and its Leadership changed, we resend Commit.
-          if rm.sid.to_gid() == remote_leader_changed.gid {
+          if rm.to_gid() == remote_leader_changed.gid {
             let payload = commit_payloads.get(rm).unwrap().clone();
             let commit = Commit { query_id: self.query_id.clone(), payload };
-            ctx.ctx(io_ctx).send_to_t(rm.clone(), T::tablet_commit(commit));
+            ctx.send_to_rm(io_ctx, &rm, T::rm_commit(commit));
           }
         }
       }
@@ -584,10 +623,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         let abort_payloads = cast!(FollowerState::Aborted, follower).unwrap();
         for rm in &aborted.rms_remaining {
           // If the RM has not responded and its Leadership changed, we resend Abort.
-          if rm.sid.to_gid() == remote_leader_changed.gid {
+          if rm.to_gid() == remote_leader_changed.gid {
             let payload = abort_payloads.get(rm).unwrap().clone();
             let abort = Abort { query_id: self.query_id.clone(), payload };
-            ctx.ctx(io_ctx).send_to_t(rm.clone(), T::tablet_abort(abort));
+            ctx.send_to_rm(io_ctx, &rm, T::rm_abort(abort));
           }
         }
       }

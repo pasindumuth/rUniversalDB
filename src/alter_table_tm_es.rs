@@ -1,13 +1,14 @@
-use crate::common::MasterIOCtx;
+use crate::common::BasicIOCtx;
 use crate::create_table_tm_es::ResponseData;
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{proc, QueryId, TNodePath, TSubNodePath, TablePath, Timestamp};
 use crate::model::message as msg;
 use crate::stmpaxos2pc_tm::{
   Abort, Aborted, Closed, Commit, PayloadTypes, Prepare, Prepared, RMAbortedPLm, RMCommittedPLm,
-  RMPreparedPLm, STMPaxos2PCTMInner, TMAbortedPLm, TMClosedPLm, TMCommittedPLm, TMPreparedPLm,
+  RMPreparedPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMAbortedPLm, TMClosedPLm, TMCommittedPLm,
+  TMPreparedPLm,
 };
-use crate::tablet::TabletPLm;
+use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::HashMap;
@@ -51,22 +52,12 @@ pub struct AlterTableRMCommitted {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableRMAborted {}
 
-// RM-to-TM
+// TM-to-RM
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTablePrepare {
   pub alter_op: proc::AlterOp,
 }
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTablePrepared {
-  pub timestamp: Timestamp,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableAborted {}
-
-// TM-to-RM
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAbort {}
@@ -76,32 +67,54 @@ pub struct AlterTableCommit {
   pub timestamp: Timestamp,
 }
 
+// RM-to-TM
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTablePrepared {
+  pub timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAborted {}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableClosed {}
+
+// AlterTablePayloadTypes
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTablePayloadTypes {}
 
 impl PayloadTypes for AlterTablePayloadTypes {
+  // Master
+  type TMPLm = MasterPLm;
+  type RMPLm = TabletPLm;
+  type RMPath = TNodePath;
+  type TMPath = ();
+  type RMMessage = msg::TabletMessage;
+  type TMMessage = msg::MasterRemotePayload;
+  type RMContext = TabletContext;
+  type TMContext = MasterContext;
+
   // TM PLm
   type TMPreparedPLm = AlterTableTMPrepared;
   type TMCommittedPLm = AlterTableTMCommitted;
   type TMAbortedPLm = AlterTableTMAborted;
   type TMClosedPLm = AlterTableTMClosed;
 
-  fn master_prepared_plm(prepared_plm: TMPreparedPLm<Self>) -> MasterPLm {
+  fn tm_prepared_plm(prepared_plm: TMPreparedPLm<Self>) -> MasterPLm {
     MasterPLm::AlterTableTMPrepared2(prepared_plm)
   }
 
-  fn master_committed_plm(committed_plm: TMCommittedPLm<Self>) -> MasterPLm {
+  fn tm_committed_plm(committed_plm: TMCommittedPLm<Self>) -> MasterPLm {
     MasterPLm::AlterTableTMCommitted2(committed_plm)
   }
 
-  fn master_aborted_plm(aborted_plm: TMAbortedPLm<Self>) -> MasterPLm {
+  fn tm_aborted_plm(aborted_plm: TMAbortedPLm<Self>) -> MasterPLm {
     MasterPLm::AlterTableTMAborted2(aborted_plm)
   }
 
-  fn master_closed_plm(closed_plm: TMClosedPLm<Self>) -> MasterPLm {
+  fn tm_closed_plm(closed_plm: TMClosedPLm<Self>) -> MasterPLm {
     MasterPLm::AlterTableTMClosed2(closed_plm)
   }
 
@@ -110,15 +123,15 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type RMCommittedPLm = AlterTableRMCommitted;
   type RMAbortedPLm = AlterTableRMAborted;
 
-  fn tablet_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> TabletPLm {
+  fn rm_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> TabletPLm {
     TabletPLm::AlterTablePrepared(prepared_plm)
   }
 
-  fn tablet_committed_plm(committed_plm: RMCommittedPLm<Self>) -> TabletPLm {
+  fn rm_committed_plm(committed_plm: RMCommittedPLm<Self>) -> TabletPLm {
     TabletPLm::AlterTableCommitted(committed_plm)
   }
 
-  fn tablet_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> TabletPLm {
+  fn rm_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> TabletPLm {
     TabletPLm::AlterTableAborted(aborted_plm)
   }
 
@@ -127,15 +140,15 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type Abort = AlterTableAbort;
   type Commit = AlterTableCommit;
 
-  fn tablet_prepare(prepare: Prepare<Self>) -> msg::TabletMessage {
+  fn rm_prepare(prepare: Prepare<Self>) -> msg::TabletMessage {
     msg::TabletMessage::AlterTablePrepare(prepare)
   }
 
-  fn tablet_commit(commit: Commit<Self>) -> msg::TabletMessage {
+  fn rm_commit(commit: Commit<Self>) -> msg::TabletMessage {
     msg::TabletMessage::AlterTableCommit(commit)
   }
 
-  fn tablet_abort(abort: Abort<Self>) -> msg::TabletMessage {
+  fn rm_abort(abort: Abort<Self>) -> msg::TabletMessage {
     msg::TabletMessage::AlterTableAbort(abort)
   }
 
@@ -144,15 +157,15 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type Aborted = AlterTableAborted;
   type Closed = AlterTableClosed;
 
-  fn master_prepared(prepared: Prepared<Self>) -> msg::MasterRemotePayload {
+  fn tm_prepared(prepared: Prepared<Self>) -> msg::MasterRemotePayload {
     msg::MasterRemotePayload::AlterTablePrepared(prepared)
   }
 
-  fn master_aborted(aborted: Aborted<Self>) -> msg::MasterRemotePayload {
+  fn tm_aborted(aborted: Aborted<Self>) -> msg::MasterRemotePayload {
     msg::MasterRemotePayload::AlterTableAborted(aborted)
   }
 
-  fn master_closed(closed: Closed<Self>) -> msg::MasterRemotePayload {
+  fn tm_closed(closed: Closed<Self>) -> msg::MasterRemotePayload {
     msg::MasterRemotePayload::AlterTableClosed(closed)
   }
 }
@@ -160,6 +173,8 @@ impl PayloadTypes for AlterTablePayloadTypes {
 // -----------------------------------------------------------------------------------------------
 //  AlterTable Implementation
 // -----------------------------------------------------------------------------------------------
+
+pub type AlterTableTMES = STMPaxos2PCTMOuter<AlterTablePayloadTypes, AlterTableTMInner>;
 
 #[derive(Debug)]
 pub struct AlterTableTMInner {
@@ -173,7 +188,7 @@ pub struct AlterTableTMInner {
 }
 
 impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
-  fn mk_prepared_plm<IO: MasterIOCtx>(
+  fn mk_prepared_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut MasterContext,
     _: &mut IO,
@@ -181,7 +196,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     AlterTableTMPrepared { table_path: self.table_path.clone(), alter_op: self.alter_op.clone() }
   }
 
-  fn prepared_plm_inserted<IO: MasterIOCtx>(
+  fn prepared_plm_inserted<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut MasterContext,
     _: &mut IO,
@@ -193,7 +208,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     prepares
   }
 
-  fn mk_committed_plm<IO: MasterIOCtx>(
+  fn mk_committed_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut MasterContext,
     io_ctx: &mut IO,
@@ -208,7 +223,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
 
   /// Apply this `alter_op` to the system and construct Commit messages with the
   /// commit timestamp (which is resolved form the resolved from `timestamp_hint`).
-  fn committed_plm_inserted<IO: MasterIOCtx>(
+  fn committed_plm_inserted<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
@@ -256,7 +271,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     commits
   }
 
-  fn mk_aborted_plm<IO: MasterIOCtx>(
+  fn mk_aborted_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut MasterContext,
     _: &mut IO,
@@ -264,7 +279,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     AlterTableTMAborted {}
   }
 
-  fn aborted_plm_inserted<IO: MasterIOCtx>(
+  fn aborted_plm_inserted<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
@@ -293,7 +308,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     aborts
   }
 
-  fn mk_closed_plm<IO: MasterIOCtx>(
+  fn mk_closed_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut MasterContext,
     _: &mut IO,
@@ -301,16 +316,16 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     AlterTableTMClosed {}
   }
 
-  fn closed_plm_inserted<IO: MasterIOCtx>(&mut self, _: &mut MasterContext, _: &mut IO) {}
+  fn closed_plm_inserted<IO: BasicIOCtx>(&mut self, _: &mut MasterContext, _: &mut IO) {}
 
-  fn node_died<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
+  fn node_died<IO: BasicIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
   }
 }
 
 /// This returns the current set of RMs associated with the given `TablePath`. Recall that while
 /// the ES is alive, we ensure that this is idempotent.
-pub fn get_rms<IO: MasterIOCtx>(ctx: &mut MasterContext, table_path: &TablePath) -> Vec<TNodePath> {
+pub fn get_rms<IO: BasicIOCtx>(ctx: &mut MasterContext, table_path: &TablePath) -> Vec<TNodePath> {
   let gen = ctx.table_generation.get_last_version(table_path).unwrap();
   let mut rms = Vec::<TNodePath>::new();
   for (_, tid) in ctx.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap() {
@@ -321,7 +336,7 @@ pub fn get_rms<IO: MasterIOCtx>(ctx: &mut MasterContext, table_path: &TablePath)
 }
 
 /// Send a response back to the External, informing them that the current Master Leader died.
-pub fn maybe_respond_dead<IO: MasterIOCtx>(
+pub fn maybe_respond_dead<IO: BasicIOCtx>(
   response_data: &mut Option<ResponseData>,
   ctx: &mut MasterContext,
   io_ctx: &mut IO,

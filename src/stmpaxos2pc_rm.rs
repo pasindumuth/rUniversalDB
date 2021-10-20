@@ -1,15 +1,9 @@
-use crate::alter_table_tm_es::{
-  AlterTableClosed, AlterTableCommit, AlterTablePayloadTypes, AlterTablePrepared,
-  AlterTableRMAborted, AlterTableRMCommitted, AlterTableRMPrepared,
-};
-use crate::common::CoreIOCtx;
-use crate::model::common::{proc, QueryId, TNodePath, Timestamp};
-use crate::server::ServerContextBase;
+use crate::common::BasicIOCtx;
+use crate::model::common::{proc, QueryId};
 use crate::stmpaxos2pc_tm::{
   Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMPreparedPLm,
-  TMCommittedPLm,
+  RMServerContext, TMCommittedPLm,
 };
-use crate::tablet::TabletContext;
 use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------------------------
@@ -19,47 +13,47 @@ use std::collections::HashMap;
 pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
   /// This is called at various times, like after `CommittedPLm` and `AbortedPLM` are inserted,
   /// and while in `WaitingInsertingPrepared`, when an `Abort` arrives.
-  fn mk_closed<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) -> T::Closed;
+  fn mk_closed<IO: BasicIOCtx>(&mut self, ctx: &mut T::RMContext, io_ctx: &mut IO) -> T::Closed;
 
   /// Called in order to get the `RMPreparedPLm` to insert.
-  fn mk_prepared_plm<IO: CoreIOCtx>(
+  fn mk_prepared_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> T::RMPreparedPLm;
 
   /// Called after PreparedPLm is inserted.
-  fn prepared_plm_inserted<IO: CoreIOCtx>(
+  fn prepared_plm_inserted<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> T::Prepared;
 
   /// Called after all RMs have Prepared.
-  fn mk_committed_plm<IO: CoreIOCtx>(
+  fn mk_committed_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
     commit: &T::Commit,
   ) -> T::RMCommittedPLm;
 
   /// Called after CommittedPLm is inserted.
-  fn committed_plm_inserted<IO: CoreIOCtx>(
+  fn committed_plm_inserted<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
     committed_plm: &RMCommittedPLm<T>,
   );
 
   /// Called if one of the RMs returned Aborted.
-  fn mk_aborted_plm<IO: CoreIOCtx>(
+  fn mk_aborted_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> T::RMAbortedPLm;
 
   /// Called after AbortedPLm is inserted.
-  fn aborted_plm_inserted<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO);
+  fn aborted_plm_inserted<IO: BasicIOCtx>(&mut self, ctx: &mut T::RMContext, io_ctx: &mut IO);
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -96,40 +90,41 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
   }
 
   /// This is only called when the `PreparedPLm` is insert at a Follower node.
-  pub fn init_follower<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) {
+  pub fn init_follower<IO: BasicIOCtx>(&mut self, ctx: &mut T::RMContext, io_ctx: &mut IO) {
     self._handle_prepared_plm(ctx, io_ctx);
     self.state = State::Follower;
   }
 
   // STMPaxos2PC messages
 
-  pub fn handle_prepare<IO: CoreIOCtx>(
+  pub fn handle_prepare<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCRMAction {
     match &self.state {
       State::Prepared(prepared) => {
-        ctx.ctx(io_ctx).send_to_master(T::master_prepared(prepared.clone()));
+        // Populate with TM. Hold it here in the RM.
+        ctx.send_to_tm(io_ctx, T::tm_prepared(prepared.clone()));
       }
       _ => {}
     }
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn handle_commit<IO: CoreIOCtx>(
+  pub fn handle_commit<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
     commit: Commit<T>,
   ) -> STMPaxos2PCRMAction {
     match &self.state {
       State::Prepared(_) => {
-        let committed_plm = T::tablet_committed_plm(RMCommittedPLm {
+        let committed_plm = T::rm_committed_plm(RMCommittedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_committed_plm(ctx, io_ctx, &commit.payload),
         });
-        ctx.tablet_bundle.push(committed_plm);
+        ctx.push_plm(committed_plm);
         self.state = State::InsertingCommitted;
       }
       _ => {}
@@ -137,9 +132,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn handle_abort<IO: CoreIOCtx>(
+  pub fn handle_abort<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCRMAction {
     match &self.state {
@@ -152,11 +147,11 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
         STMPaxos2PCRMAction::Wait
       }
       State::Prepared(_) => {
-        let aborted_plm = T::tablet_aborted_plm(RMAbortedPLm {
+        let aborted_plm = T::rm_aborted_plm(RMAbortedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_aborted_plm(ctx, io_ctx),
         });
-        ctx.tablet_bundle.push(aborted_plm);
+        ctx.push_plm(aborted_plm);
         self.state = State::InsertingAborted;
         STMPaxos2PCRMAction::Wait
       }
@@ -166,9 +161,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
 
   // STMPaxos2PC PLm Insertions
 
-  fn _handle_prepared_plm<IO: CoreIOCtx>(
+  fn _handle_prepared_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> Prepared<T> {
     let this_node_path = ctx.mk_node_path();
@@ -181,24 +176,24 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     prepared
   }
 
-  pub fn handle_prepared_plm<IO: CoreIOCtx>(
+  pub fn handle_prepared_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCRMAction {
     match &self.state {
       State::InsertingPrepared => {
         let prepared = self._handle_prepared_plm(ctx, io_ctx);
-        ctx.ctx(io_ctx).send_to_master(T::master_prepared(prepared.clone()));
+        ctx.send_to_tm(io_ctx, T::tm_prepared(prepared.clone()));
         self.state = State::Prepared(prepared);
       }
       State::InsertingPreparedAborted => {
         self._handle_prepared_plm(ctx, io_ctx);
-        let aborted_plm = T::tablet_aborted_plm(RMAbortedPLm {
+        let aborted_plm = T::rm_aborted_plm(RMAbortedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_aborted_plm(ctx, io_ctx),
         });
-        ctx.tablet_bundle.push(aborted_plm);
+        ctx.push_plm(aborted_plm);
         self.state = State::InsertingAborted;
       }
       _ => {}
@@ -206,9 +201,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn handle_committed_plm<IO: CoreIOCtx>(
+  pub fn handle_committed_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
     committed_plm: RMCommittedPLm<T>,
   ) -> STMPaxos2PCRMAction {
@@ -226,9 +221,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     }
   }
 
-  pub fn handle_aborted_plm<IO: CoreIOCtx>(
+  pub fn handle_aborted_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCRMAction {
     match &self.state {
@@ -247,9 +242,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
 
   // Other
 
-  pub fn start_inserting<IO: CoreIOCtx>(
+  pub fn start_inserting<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut TabletContext,
+    ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> STMPaxos2PCRMAction {
     match &self.state {
@@ -258,7 +253,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
           query_id: self.query_id.clone(),
           payload: self.inner.mk_prepared_plm(ctx, io_ctx),
         };
-        ctx.tablet_bundle.push(T::tablet_prepared_plm(prepared_plm));
+        ctx.push_plm(T::rm_prepared_plm(prepared_plm));
         self.state = State::InsertingPrepared;
       }
       _ => {}
@@ -266,7 +261,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn leader_changed(&mut self, ctx: &mut TabletContext) -> STMPaxos2PCRMAction {
+  pub fn leader_changed(&mut self, ctx: &mut T::RMContext) -> STMPaxos2PCRMAction {
     match &self.state {
       State::Follower => {
         if ctx.is_leader() {
@@ -286,13 +281,13 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
   }
 
   // Helpers
-  pub fn send_closed<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) {
+  pub fn send_closed<IO: BasicIOCtx>(&mut self, ctx: &mut T::RMContext, io_ctx: &mut IO) {
     let this_node_path = ctx.mk_node_path();
     let closed = Closed {
       query_id: self.query_id.clone(),
       rm: this_node_path,
       payload: self.inner.mk_closed(ctx, io_ctx),
     };
-    ctx.ctx(io_ctx).send_to_master(T::master_closed(closed));
+    ctx.send_to_tm(io_ctx, T::tm_closed(closed));
   }
 }
