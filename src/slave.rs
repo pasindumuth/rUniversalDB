@@ -1,4 +1,3 @@
-use crate::alter_table_es::State;
 use crate::common::{
   lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx, GossipData,
   OrigP, RemoteLeaderChangedPLm, SlaveIOCtx, TMStatus, UUID,

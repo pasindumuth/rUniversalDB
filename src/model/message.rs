@@ -2,6 +2,7 @@ use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::FrozenColUsageNode;
 use crate::common::{GossipData, QueryPlan};
 use crate::create_table_tm_es::CreateTablePayloadTypes;
+use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::master::MasterBundle;
 use crate::model::common::{
   proc, CQueryPath, CSubNodePath, CTQueryPath, ColName, ColType, Context, CoordGroupId, EndpointId,
@@ -105,9 +106,9 @@ pub enum MasterRemotePayload {
   AlterTableClosed(stmpaxos2pc_tm::Closed<AlterTablePayloadTypes>),
 
   // DropTable TM Messages
-  DropTablePrepared(DropTablePrepared),
-  DropTableAborted(DropTableAborted),
-  DropTableCloseConfirm(DropTableCloseConfirm),
+  DropTablePrepared(stmpaxos2pc_tm::Prepared<DropTablePayloadTypes>),
+  DropTableAborted(stmpaxos2pc_tm::Aborted<DropTablePayloadTypes>),
+  DropTableClosed(stmpaxos2pc_tm::Closed<DropTablePayloadTypes>),
 
   // Gossip
   MasterGossipRequest(MasterGossipRequest),
@@ -151,9 +152,9 @@ pub enum TabletMessage {
   AlterTableCommit(stmpaxos2pc_tm::Commit<AlterTablePayloadTypes>),
 
   // DropTable RM Messages
-  DropTablePrepare(DropTablePrepare),
-  DropTableAbort(DropTableAbort),
-  DropTableCommit(DropTableCommit),
+  DropTablePrepare(stmpaxos2pc_tm::Prepare<DropTablePayloadTypes>),
+  DropTableAbort(stmpaxos2pc_tm::Abort<DropTablePayloadTypes>),
+  DropTableCommit(stmpaxos2pc_tm::Commit<DropTablePayloadTypes>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -542,47 +543,6 @@ pub struct MasterQueryPlanningSuccess {
   pub return_qid: QueryId,
   pub query_id: QueryId,
   pub result: MasteryQueryPlanningResult,
-}
-
-// -------------------------------------------------------------------------------------------------
-//  DropTable Messages
-// -------------------------------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTablePrepare {
-  pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTablePrepared {
-  pub query_id: QueryId,
-  pub rm: TNodePath,
-  pub timestamp: Timestamp,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableAborted {
-  pub query_id: QueryId,
-  pub rm: TNodePath,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableAbort {
-  pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableCommit {
-  pub query_id: QueryId,
-  pub timestamp: Timestamp,
-}
-
-// Other Paxos2PC messages
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableCloseConfirm {
-  pub query_id: QueryId,
-  pub rm: TNodePath,
 }
 
 // -------------------------------------------------------------------------------------------------

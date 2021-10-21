@@ -6,9 +6,7 @@ use crate::common::{
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
-use crate::drop_table_tm_es::{
-  DropTableTMAction, DropTableTMES, DropTableTMS, Follower as DropFollower,
-};
+use crate::drop_table_tm_es::{DropTablePayloadTypes, DropTableTMES, DropTableTMInner};
 use crate::master_query_planning_es::{
   master_query_planning, master_query_planning_post, MasterQueryPlanningAction,
   MasterQueryPlanningES,
@@ -60,30 +58,6 @@ pub mod plm {
     pub timestamp: Timestamp,
     pub ms_query: proc::MSQuery,
   }
-
-  // DropTable
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct DropTableTMPrepared {
-    pub query_id: QueryId,
-    pub table_path: TablePath,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct DropTableTMCommitted {
-    pub query_id: QueryId,
-    pub timestamp_hint: Timestamp,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct DropTableTMAborted {
-    pub query_id: QueryId,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct DropTableTMClosed {
-    pub query_id: QueryId,
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -107,10 +81,10 @@ pub enum MasterPLm {
   AlterTableTMCommitted(paxos2pc::TMCommittedPLm<AlterTablePayloadTypes>),
   AlterTableTMAborted(paxos2pc::TMAbortedPLm<AlterTablePayloadTypes>),
   AlterTableTMClosed(paxos2pc::TMClosedPLm<AlterTablePayloadTypes>),
-  DropTableTMPrepared(plm::DropTableTMPrepared),
-  DropTableTMCommitted(plm::DropTableTMCommitted),
-  DropTableTMAborted(plm::DropTableTMAborted),
-  DropTableTMClosed(plm::DropTableTMClosed),
+  DropTableTMPrepared(paxos2pc::TMPreparedPLm<DropTablePayloadTypes>),
+  DropTableTMCommitted(paxos2pc::TMCommittedPLm<DropTablePayloadTypes>),
+  DropTableTMAborted(paxos2pc::TMAbortedPLm<DropTablePayloadTypes>),
+  DropTableTMClosed(paxos2pc::TMClosedPLm<DropTablePayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -176,6 +150,22 @@ pub enum FullMasterInput {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  TMServerContext Common
+// -----------------------------------------------------------------------------------------------
+
+impl RMPathTrait for TNodePath {
+  fn to_gid(&self) -> PaxosGroupId {
+    TNodePath::to_gid(self)
+  }
+}
+
+impl RMPathTrait for SlaveGroupId {
+  fn to_gid(&self) -> PaxosGroupId {
+    SlaveGroupId::to_gid(self)
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  TMServerContext AlterTable
 // -----------------------------------------------------------------------------------------------
 
@@ -202,15 +192,30 @@ impl TMServerContext<AlterTablePayloadTypes> for MasterContext {
   }
 }
 
-impl RMPathTrait for TNodePath {
-  fn to_gid(&self) -> PaxosGroupId {
-    TNodePath::to_gid(self)
-  }
-}
+// -----------------------------------------------------------------------------------------------
+//  TMServerContext AlterTable
+// -----------------------------------------------------------------------------------------------
 
-impl RMPathTrait for SlaveGroupId {
-  fn to_gid(&self) -> PaxosGroupId {
-    SlaveGroupId::to_gid(self)
+impl TMServerContext<DropTablePayloadTypes> for MasterContext {
+  fn push_plm(&mut self, plm: MasterPLm) {
+    self.master_bundle.plms.push(plm);
+  }
+
+  fn send_to_rm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    rm: &TNodePath,
+    msg: msg::TabletMessage,
+  ) {
+    self.ctx(io_ctx).send_to_t(rm.clone(), msg);
+  }
+
+  fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO) {
+    MasterContext::broadcast_gossip(self, io_ctx);
+  }
+
+  fn is_leader(&self) -> bool {
+    MasterContext::is_leader(self)
   }
 }
 
@@ -522,9 +527,9 @@ impl MasterContext {
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
               MasterPLm::DropTableTMClosed(closed) => {
-                let query_id = closed.query_id;
+                let query_id = closed.query_id.clone();
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_closed_plm(self, io_ctx);
+                let action = es.handle_closed_plm(self, io_ctx, closed);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
             }
@@ -639,16 +644,16 @@ impl MasterContext {
               // DropTable
               MasterPLm::DropTableTMPrepared(prepared) => {
                 let query_id = prepared.query_id;
-                btree_map_insert(
-                  &mut statuses.drop_table_tm_ess,
-                  &query_id.clone(),
-                  DropTableTMES {
+                let mut es = DropTableTMES::new(
+                  query_id.clone(),
+                  DropTableTMInner {
                     response_data: None,
-                    query_id,
-                    table_path: prepared.table_path,
-                    state: DropTableTMS::Follower(DropFollower::Preparing),
+                    query_id: query_id.clone(),
+                    table_path: prepared.payload.table_path,
                   },
                 );
+                es.init_follower(self, io_ctx);
+                btree_map_insert(&mut statuses.drop_table_tm_ess, &query_id.clone(), es);
               }
               MasterPLm::DropTableTMCommitted(committed) => {
                 let query_id = committed.query_id.clone();
@@ -663,9 +668,9 @@ impl MasterContext {
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
               MasterPLm::DropTableTMClosed(closed) => {
-                let query_id = closed.query_id;
+                let query_id = closed.query_id.clone();
                 let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_closed_plm(self, io_ctx);
+                let action = es.handle_closed_plm(self, io_ctx, closed);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
             }
@@ -731,12 +736,14 @@ impl MasterContext {
                     btree_map_insert(
                       &mut statuses.drop_table_tm_ess,
                       &query_id,
-                      DropTableTMES {
-                        response_data: Some(ResponseData { request_id, sender_eid }),
-                        query_id: query_id.clone(),
-                        table_path: drop_table.table_path,
-                        state: DropTableTMS::Start,
-                      },
+                      DropTableTMES::new(
+                        query_id.clone(),
+                        DropTableTMInner {
+                          response_data: Some(ResponseData { request_id, sender_eid }),
+                          query_id: query_id.clone(),
+                          table_path: drop_table.table_path,
+                        },
+                      ),
                     );
                   }
                 }
@@ -842,7 +849,7 @@ impl MasterContext {
             let action = es.handle_aborted(self, io_ctx);
             self.handle_drop_table_es_action(statuses, query_id, action);
           }
-          MasterRemotePayload::DropTableCloseConfirm(closed) => {
+          MasterRemotePayload::DropTableClosed(closed) => {
             let query_id = closed.query_id.clone();
             let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
             let action = es.handle_close_confirmed(self, io_ctx, closed);
@@ -984,9 +991,9 @@ impl MasterContext {
     }
 
     for (_, es) in &statuses.drop_table_tm_ess {
-      if let DropTableTMS::Start = &es.state {
+      if let paxos2pc::State::Start = &es.state {
       } else {
-        tables_being_modified.insert(es.table_path.clone());
+        tables_being_modified.insert(es.inner.table_path.clone());
       }
     }
 
@@ -1056,13 +1063,13 @@ impl MasterContext {
     {
       let mut ess_to_remove = Vec::<QueryId>::new();
       for (_, es) in &mut statuses.drop_table_tm_ess {
-        if let DropTableTMS::Start = &es.state {
-          if !tables_being_modified.contains(&es.table_path) {
+        if let paxos2pc::State::Start = &es.state {
+          if !tables_being_modified.contains(&es.inner.table_path) {
             // Check Table Validity
-            if self.table_generation.get_last_version(&es.table_path).is_some() {
+            if self.table_generation.get_last_version(&es.inner.table_path).is_some() {
               // If the table exists, we move the ES to WaitingInsertTMPrepared.
-              es.state = DropTableTMS::WaitingInsertTMPrepared;
-              tables_being_modified.insert(es.table_path.clone());
+              es.state = paxos2pc::State::WaitingInsertTMPrepared;
+              tables_being_modified.insert(es.inner.table_path.clone());
               continue;
             }
 
@@ -1073,7 +1080,7 @@ impl MasterContext {
       }
       for query_id in ess_to_remove {
         let es = statuses.drop_table_tm_ess.remove(&query_id).unwrap();
-        if let Some(response_data) = &es.response_data {
+        if let Some(response_data) = &es.inner.response_data {
           respond_invalid_ddl(io_ctx, response_data);
         }
       }
@@ -1117,11 +1124,11 @@ impl MasterContext {
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: DropTableTMAction,
+    action: STMPaxos2PCTMAction,
   ) {
     match action {
-      DropTableTMAction::Wait => {}
-      DropTableTMAction::Exit => {
+      STMPaxos2PCTMAction::Wait => {}
+      STMPaxos2PCTMAction::Exit => {
         statuses.drop_table_tm_ess.remove(&query_id);
       }
     }

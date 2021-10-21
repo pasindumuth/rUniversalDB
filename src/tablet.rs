@@ -1,4 +1,4 @@
-use crate::alter_table_es::{AlterTableES, AlterTableRMInner, State};
+use crate::alter_table_es::{AlterTableES, AlterTableRMInner};
 use crate::alter_table_tm_es::{AlterTableClosed, AlterTablePayloadTypes};
 use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, collect_update_subqueries,
@@ -10,8 +10,8 @@ use crate::common::{
   mk_qid, remove_item, BasicIOCtx, ColBound, CoreIOCtx, GossipData, KeyBound, OrigP, PolyColBound,
   RemoteLeaderChangedPLm, SingleBound, TMStatus, TableRegion, TableSchema,
 };
-use crate::drop_table_es::DropTableAction;
-use crate::drop_table_es::DropTableES;
+use crate::drop_table_es::{DropTableES, DropTableRMInner};
+use crate::drop_table_tm_es::{DropTableClosed, DropTablePayloadTypes};
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
   construct_kb_expr, does_intersect, evaluate_c_expr, is_true, CExpr, EvalError,
@@ -468,25 +468,6 @@ pub mod plm {
   pub struct FinishQueryAborted {
     pub query_id: QueryId,
   }
-
-  // DropTable
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct DropTablePrepared {
-    pub query_id: QueryId,
-    pub timestamp: Timestamp,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct DropTableCommitted {
-    pub query_id: QueryId,
-    pub timestamp: Timestamp,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct DropTableAborted {
-    pub query_id: QueryId,
-  }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -499,9 +480,9 @@ pub enum TabletPLm {
   AlterTablePrepared(paxos2pc::RMPreparedPLm<AlterTablePayloadTypes>),
   AlterTableCommitted(paxos2pc::RMCommittedPLm<AlterTablePayloadTypes>),
   AlterTableAborted(paxos2pc::RMAbortedPLm<AlterTablePayloadTypes>),
-  DropTablePrepared(plm::DropTablePrepared),
-  DropTableCommitted(plm::DropTableCommitted),
-  DropTableAborted(plm::DropTableAborted),
+  DropTablePrepared(paxos2pc::RMPreparedPLm<DropTablePayloadTypes>),
+  DropTableCommitted(paxos2pc::RMCommittedPLm<DropTablePayloadTypes>),
+  DropTableAborted(paxos2pc::RMAbortedPLm<DropTablePayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -544,10 +525,32 @@ pub struct TabletCreateHelper {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  RMServerContext
+//  RMServerContext AlterTable
 // -----------------------------------------------------------------------------------------------
 
 impl RMServerContext<AlterTablePayloadTypes> for TabletContext {
+  fn push_plm(&mut self, plm: TabletPLm) {
+    self.tablet_bundle.push(plm);
+  }
+
+  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, msg: msg::MasterRemotePayload) {
+    self.ctx(io_ctx).send_to_master(msg);
+  }
+
+  fn mk_node_path(&self) -> TNodePath {
+    TabletContext::mk_node_path(self)
+  }
+
+  fn is_leader(&self) -> bool {
+    TabletContext::is_leader(self)
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  RMServerContext DropTable
+// -----------------------------------------------------------------------------------------------
+
+impl RMServerContext<DropTablePayloadTypes> for TabletContext {
   fn push_plm(&mut self, plm: TabletPLm) {
     self.tablet_bundle.push(plm);
   }
@@ -778,7 +781,7 @@ impl TabletContext {
               es.start_inserting(self, io_ctx);
             }
             DDLES::Drop(es) => {
-              es.start_inserting(self);
+              es.start_inserting(self, io_ctx);
             }
             DDLES::Dropped(_) => {}
           }
@@ -862,11 +865,16 @@ impl TabletContext {
               }
               TabletPLm::DropTablePrepared(prepared) => {
                 debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-                statuses.ddl_es = DDLES::Drop(DropTableES {
-                  query_id: prepared.query_id,
-                  prepared_timestamp: prepared.timestamp,
-                  state: State::Follower,
-                });
+                let mut es = DropTableES::new(
+                  prepared.query_id.clone(),
+                  DropTableRMInner {
+                    query_id: prepared.query_id,
+                    prepared_timestamp: prepared.payload.timestamp,
+                    committed_timestamp: None,
+                  },
+                );
+                es.init_follower(self, io_ctx);
+                statuses.ddl_es = DDLES::Drop(es);
               }
               TabletPLm::DropTableCommitted(committed_plm) => {
                 let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
@@ -1218,7 +1226,7 @@ impl TabletContext {
               es.handle_abort(self, io_ctx);
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-              // Send back a `CloseConfirm` to the Master.
+              // Send back a `Closed` to the Master.
               let this_node_path = self.mk_node_path();
               self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableClosed(Closed {
                 query_id: abort.query_id,
@@ -1232,7 +1240,7 @@ impl TabletContext {
               es.handle_commit(self, io_ctx, commit);
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-              // Send back a `CloseConfirm` to the Master.
+              // Send back a `Closed` to the Master.
               let this_node_path = self.mk_node_path();
               self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableClosed(Closed {
                 query_id: commit.query_id,
@@ -1258,11 +1266,14 @@ impl TabletContext {
 
               // Construct an DropTableES set it to `ddl_es`.
               let query_id = prepare.query_id;
-              statuses.ddl_es = DDLES::Drop(DropTableES {
-                query_id,
-                prepared_timestamp: timestamp,
-                state: State::WaitingInsertingPrepared,
-              });
+              statuses.ddl_es = DDLES::Drop(DropTableES::new(
+                query_id.clone(),
+                DropTableRMInner {
+                  query_id,
+                  prepared_timestamp: timestamp,
+                  committed_timestamp: None,
+                },
+              ));
             }
           }
           msg::TabletMessage::DropTableAbort(abort) => {
@@ -1270,23 +1281,27 @@ impl TabletContext {
               es.handle_abort(self, io_ctx);
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-              // Send back a `CloseConfirm` to the Master.
-              let rm = self.mk_node_path();
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
-                msg::DropTableCloseConfirm { query_id: abort.query_id, rm },
-              ));
+              // Send back a `Closed` to the Master.
+              let this_node_path = self.mk_node_path();
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableClosed(Closed {
+                query_id: abort.query_id,
+                rm: this_node_path,
+                payload: DropTableClosed {},
+              }));
             }
           }
           msg::TabletMessage::DropTableCommit(commit) => {
             if let DDLES::Drop(es) = &mut statuses.ddl_es {
-              es.handle_commit(self, commit);
+              es.handle_commit(self, io_ctx, commit);
             } else {
               debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-              // Send back a `CloseConfirm` to the Master.
-              let rm = self.mk_node_path();
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableCloseConfirm(
-                msg::DropTableCloseConfirm { query_id: commit.query_id, rm },
-              ));
+              // Send back a `Closed` to the Master.
+              let this_node_path = self.mk_node_path();
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableClosed(Closed {
+                query_id: commit.query_id,
+                rm: this_node_path,
+                payload: DropTableClosed {},
+              }));
             }
           }
         }
@@ -1731,7 +1746,7 @@ impl TabletContext {
           }
         }
         DDLES::Drop(es) => {
-          if req.timestamp < es.prepared_timestamp {
+          if req.timestamp < es.inner.prepared_timestamp {
             // Grant LocalLockedCols
             let query_id = req.query_id.clone();
             self.grant_local_locked_cols(io_ctx, statuses, query_id);
@@ -2221,15 +2236,19 @@ impl TabletContext {
     &mut self,
     statuses: &mut Statuses,
     _: QueryId,
-    action: DropTableAction,
+    action: STMPaxos2PCRMAction,
   ) {
     match action {
-      DropTableAction::Wait => {}
-      DropTableAction::Aborted => {
-        statuses.ddl_es = DDLES::None;
-      }
-      DropTableAction::Committed(timestamp) => {
-        statuses.ddl_es = DDLES::Dropped(timestamp);
+      STMPaxos2PCRMAction::Wait => {}
+      STMPaxos2PCRMAction::Exit => {
+        let es = cast!(DDLES::Drop, &statuses.ddl_es).unwrap();
+        if let Some(committed_timestamp) = es.inner.committed_timestamp {
+          // The ES Committed, and so we should mark this Tablet as dropped.
+          statuses.ddl_es = DDLES::Dropped(committed_timestamp);
+        } else {
+          // The ES Aborted, so we just reset it to `None`.
+          statuses.ddl_es = DDLES::None;
+        }
       }
     }
   }

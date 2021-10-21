@@ -11,20 +11,6 @@ use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::{plm, TabletContext, TabletPLm};
 
 // -----------------------------------------------------------------------------------------------
-//  Old
-// -----------------------------------------------------------------------------------------------
-#[derive(Debug)]
-pub enum State {
-  Follower,
-  WaitingInsertingPrepared,
-  InsertingPrepared,
-  Prepared,
-  InsertingCommitted,
-  InsertingPreparedAborted,
-  InsertingAborted,
-}
-
-// -----------------------------------------------------------------------------------------------
 //  AlterTableES Implementation
 // -----------------------------------------------------------------------------------------------
 
@@ -35,7 +21,7 @@ pub struct AlterTableRMInner {
   pub prepared_timestamp: Timestamp,
 }
 
-pub(crate) type AlterTableES = STMPaxos2PCRMOuter<AlterTablePayloadTypes, AlterTableRMInner>;
+pub type AlterTableES = STMPaxos2PCRMOuter<AlterTablePayloadTypes, AlterTableRMInner>;
 
 impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
   fn mk_closed<IO: BasicIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) -> AlterTableClosed {
