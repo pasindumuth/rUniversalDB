@@ -1,7 +1,8 @@
 use crate::common::BasicIOCtx;
-use crate::create_table_tm_es::ResponseData;
 use crate::master::{MasterContext, MasterPLm};
-use crate::model::common::{proc, QueryId, TNodePath, TSubNodePath, TablePath, Timestamp};
+use crate::model::common::{
+  proc, EndpointId, QueryId, RequestId, TNodePath, TSubNodePath, TablePath, Timestamp,
+};
 use crate::model::message as msg;
 use crate::stmpaxos2pc_tm::{
   Abort, Aborted, Closed, Commit, PayloadTypes, Prepare, Prepared, RMAbortedPLm, RMCommittedPLm,
@@ -103,19 +104,19 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type TMClosedPLm = AlterTableTMClosed;
 
   fn tm_prepared_plm(prepared_plm: TMPreparedPLm<Self>) -> MasterPLm {
-    MasterPLm::AlterTableTMPrepared2(prepared_plm)
+    MasterPLm::AlterTableTMPrepared(prepared_plm)
   }
 
   fn tm_committed_plm(committed_plm: TMCommittedPLm<Self>) -> MasterPLm {
-    MasterPLm::AlterTableTMCommitted2(committed_plm)
+    MasterPLm::AlterTableTMCommitted(committed_plm)
   }
 
   fn tm_aborted_plm(aborted_plm: TMAbortedPLm<Self>) -> MasterPLm {
-    MasterPLm::AlterTableTMAborted2(aborted_plm)
+    MasterPLm::AlterTableTMAborted(aborted_plm)
   }
 
   fn tm_closed_plm(closed_plm: TMClosedPLm<Self>) -> MasterPLm {
-    MasterPLm::AlterTableTMClosed2(closed_plm)
+    MasterPLm::AlterTableTMClosed(closed_plm)
   }
 
   // RM PLm
@@ -168,6 +169,15 @@ impl PayloadTypes for AlterTablePayloadTypes {
   fn tm_closed(closed: Closed<Self>) -> msg::MasterRemotePayload {
     msg::MasterRemotePayload::AlterTableClosed(closed)
   }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  General STMPaxos2PC TM Types
+// -----------------------------------------------------------------------------------------------
+#[derive(Debug)]
+pub struct ResponseData {
+  pub request_id: RequestId,
+  pub sender_eid: EndpointId,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -316,7 +326,13 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     AlterTableTMClosed {}
   }
 
-  fn closed_plm_inserted<IO: BasicIOCtx>(&mut self, _: &mut MasterContext, _: &mut IO) {}
+  fn closed_plm_inserted<IO: BasicIOCtx>(
+    &mut self,
+    _: &mut MasterContext,
+    _: &mut IO,
+    _: &TMClosedPLm<AlterTablePayloadTypes>,
+  ) {
+  }
 
   fn node_died<IO: BasicIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     maybe_respond_dead(&mut self.response_data, ctx, io_ctx);

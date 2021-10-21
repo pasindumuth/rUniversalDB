@@ -260,7 +260,7 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
 // -----------------------------------------------------------------------------------------------
 
 /// This is used to easily use the `ServerContextBase` methods in the Slave thread.
-pub struct MainSlaveServerContext<'a, IO: SlaveIOCtx> {
+pub struct MainSlaveServerContext<'a, IO: BasicIOCtx> {
   /// IO
   pub io_ctx: &'a mut IO,
 
@@ -271,7 +271,7 @@ pub struct MainSlaveServerContext<'a, IO: SlaveIOCtx> {
   pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
 }
 
-impl<'a, IO: SlaveIOCtx> ServerContextBase for MainSlaveServerContext<'a, IO> {
+impl<'a, IO: BasicIOCtx> ServerContextBase for MainSlaveServerContext<'a, IO> {
   fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
     self.leader_map
   }

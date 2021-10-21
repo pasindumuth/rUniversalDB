@@ -66,6 +66,7 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
   ) -> AlterTableRMCommitted {
     AlterTableRMCommitted { timestamp: commit.timestamp }
   }
+
   /// Apply the `alter_op` to this Tablet's `table_schema`.
   fn committed_plm_inserted<IO: BasicIOCtx>(
     &mut self,

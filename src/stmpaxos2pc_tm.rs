@@ -1,5 +1,4 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
-use crate::create_table_tm_es::ResponseData;
 use crate::model::common::{proc, PaxosGroupId, QueryId};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
@@ -233,8 +232,13 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
     io_ctx: &mut IO,
   ) -> T::TMClosedPLm;
 
-  /// Called after all RMs have processed the `Commit` or or `Abort` message.
-  fn closed_plm_inserted<IO: BasicIOCtx>(&mut self, ctx: &mut T::TMContext, io_ctx: &mut IO);
+  /// Called after ClosedPLm is inserted.
+  fn closed_plm_inserted<IO: BasicIOCtx>(
+    &mut self,
+    ctx: &mut T::TMContext,
+    io_ctx: &mut IO,
+    closed_plm: &TMClosedPLm<T>,
+  );
 
   // This is called when the node died.
   fn node_died<IO: BasicIOCtx>(&mut self, ctx: &mut T::TMContext, io_ctx: &mut IO);
@@ -514,14 +518,15 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
+    closed_plm: TMClosedPLm<T>,
   ) -> STMPaxos2PCTMAction {
     match &self.state {
       State::Following => {
-        self.inner.closed_plm_inserted(ctx, io_ctx);
+        self.inner.closed_plm_inserted(ctx, io_ctx, &closed_plm);
         STMPaxos2PCTMAction::Exit
       }
       State::InsertingTMClosed => {
-        self.inner.closed_plm_inserted(ctx, io_ctx);
+        self.inner.closed_plm_inserted(ctx, io_ctx, &closed_plm);
         STMPaxos2PCTMAction::Exit
       }
       _ => STMPaxos2PCTMAction::Wait,

@@ -522,6 +522,7 @@ pub enum TabletForwardMsg {
 //  Misc
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct TabletCreateHelper {
   pub rand_seed: [u8; 16],
 

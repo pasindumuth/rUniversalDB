@@ -1,10 +1,11 @@
 use crate::alter_table_es::State;
 use crate::common::{
-  lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, GossipData, OrigP,
-  RemoteLeaderChangedPLm, SlaveIOCtx, TMStatus, UUID,
+  lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx, GossipData,
+  OrigP, RemoteLeaderChangedPLm, SlaveIOCtx, TMStatus, UUID,
 };
 use crate::coord::CoordForwardMsg;
-use crate::create_table_es::{CreateTableAction, CreateTableES};
+use crate::create_table_es::{CreateTableES, CreateTableRMInner};
+use crate::create_table_tm_es::{CreateTableClosed, CreateTablePayloadTypes};
 use crate::model::common::{
   iast, proc, CTQueryPath, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, LeadershipId,
   NodeGroupId, PaxosGroupId, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
@@ -15,6 +16,9 @@ use crate::model::message as msg;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use crate::server::{MainSlaveServerContext, ServerContextBase};
+use crate::stmpaxos2pc_rm::STMPaxos2PCRMAction;
+use crate::stmpaxos2pc_tm as paxos2pc;
+use crate::stmpaxos2pc_tm::{Closed, RMServerContext};
 use crate::tablet::{GRQueryESWrapper, TabletBundle, TabletForwardMsg, TransTableReadESWrapper};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -26,39 +30,6 @@ use std::sync::Arc;
 //  SlavePLm
 // -----------------------------------------------------------------------------------------------
 
-pub mod plm {
-  use crate::model::common::{
-    proc, ColName, ColType, Gen, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
-    Timestamp,
-  };
-  use serde::{Deserialize, Serialize};
-
-  // CreateTable
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct CreateTablePrepared {
-    pub query_id: QueryId,
-
-    pub tablet_group_id: TabletGroupId,
-    pub table_path: TablePath,
-    pub gen: Gen,
-
-    pub key_range: TabletKeyRange,
-    pub key_cols: Vec<(ColName, ColType)>,
-    pub val_cols: Vec<(ColName, ColType)>,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct CreateTableCommitted {
-    pub query_id: QueryId,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct CreateTableAborted {
-    pub query_id: QueryId,
-  }
-}
-
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub struct SlaveBundle {
   remote_leader_changes: Vec<RemoteLeaderChangedPLm>,
@@ -68,9 +39,9 @@ pub struct SlaveBundle {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlavePLm {
-  CreateTablePrepared(plm::CreateTablePrepared),
-  CreateTableCommitted(plm::CreateTableCommitted),
-  CreateTableAborted(plm::CreateTableAborted),
+  CreateTablePrepared(paxos2pc::RMPreparedPLm<CreateTablePayloadTypes>),
+  CreateTableCommitted(paxos2pc::RMCommittedPLm<CreateTablePayloadTypes>),
+  CreateTableAborted(paxos2pc::RMAbortedPLm<CreateTablePayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -163,6 +134,28 @@ pub struct Statuses {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  RMServerContext
+// -----------------------------------------------------------------------------------------------
+
+impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
+  fn push_plm(&mut self, plm: SlavePLm) {
+    self.slave_bundle.plms.push(plm);
+  }
+
+  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, msg: msg::MasterRemotePayload) {
+    self.ctx(io_ctx).send_to_master(msg);
+  }
+
+  fn mk_node_path(&self) -> SlaveGroupId {
+    self.this_sid.clone()
+  }
+
+  fn is_leader(&self) -> bool {
+    SlaveContext::is_leader(self)
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Slave State
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
@@ -245,7 +238,7 @@ impl SlaveContext {
     }
   }
 
-  pub fn ctx<'a, IO: SlaveIOCtx>(
+  pub fn ctx<'a, IO: BasicIOCtx>(
     &'a mut self,
     io_ctx: &'a mut IO,
   ) -> MainSlaveServerContext<'a, IO> {
@@ -420,58 +413,58 @@ impl SlaveContext {
                 let query_id = prepared.query_id;
                 let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
                 let action = es.handle_prepared_plm(self, io_ctx);
-                self.handle_create_table_es_action(statuses, query_id, action);
+                self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
               }
               SlavePLm::CreateTableCommitted(committed) => {
-                let query_id = committed.query_id;
+                let query_id = committed.query_id.clone();
                 let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self, io_ctx);
-                self.handle_create_table_es_action(statuses, query_id, action);
+                let action = es.handle_committed_plm(self, io_ctx, committed);
+                self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
               }
               SlavePLm::CreateTableAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
                 let action = es.handle_aborted_plm(self, io_ctx);
-                self.handle_create_table_es_action(statuses, query_id, action);
+                self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
               }
             }
           }
 
           // Inform all ESs in WaitingInserting and start inserting a PLm.
           for (_, es) in &mut statuses.create_table_ess {
-            es.start_inserting::<IO>(self);
+            es.start_inserting(self, io_ctx);
           }
         } else {
           for paxos_log_msg in bundle {
             match paxos_log_msg {
               SlavePLm::CreateTablePrepared(prepared) => {
                 let query_id = prepared.query_id;
-                map_insert(
-                  &mut statuses.create_table_ess,
-                  &query_id.clone(),
-                  CreateTableES {
-                    query_id,
-                    tablet_group_id: prepared.tablet_group_id,
-                    table_path: prepared.table_path,
-                    gen: prepared.gen,
-                    key_range: prepared.key_range,
-                    key_cols: prepared.key_cols,
-                    val_cols: prepared.val_cols,
-                    state: State::Follower,
+                let mut es = CreateTableES::new(
+                  query_id.clone(),
+                  CreateTableRMInner {
+                    tablet_group_id: prepared.payload.tablet_group_id,
+                    table_path: prepared.payload.table_path,
+                    gen: prepared.payload.gen,
+                    key_range: prepared.payload.key_range,
+                    key_cols: prepared.payload.key_cols,
+                    val_cols: prepared.payload.val_cols,
+                    committed_helper: None,
                   },
                 );
+                es.init_follower(self, io_ctx);
+                map_insert(&mut statuses.create_table_ess, &query_id.clone(), es);
               }
               SlavePLm::CreateTableCommitted(committed) => {
-                let query_id = committed.query_id;
+                let query_id = committed.query_id.clone();
                 let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                let action = es.handle_committed_plm(self, io_ctx);
-                self.handle_create_table_es_action(statuses, query_id, action);
+                let action = es.handle_committed_plm(self, io_ctx, committed);
+                self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
               }
               SlavePLm::CreateTableAborted(aborted) => {
                 let query_id = aborted.query_id;
                 let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
                 let action = es.handle_aborted_plm(self, io_ctx);
-                self.handle_create_table_es_action(statuses, query_id, action);
+                self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
               }
             }
           }
@@ -492,76 +485,80 @@ impl SlaveContext {
         let cid = self.coord_positions.get(coord_index as usize).unwrap();
         io_ctx.coord_forward(cid, CoordForwardMsg::ExternalMessage(request));
       }
-      SlaveForwardMsg::SlaveRemotePayload(payload) => match payload {
-        msg::SlaveRemotePayload::RemoteLeaderChanged(_) => {}
-        msg::SlaveRemotePayload::CreateTablePrepare(prepare) => {
-          let query_id = prepare.query_id;
-          if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
-            let action = es.handle_prepare(self, io_ctx);
-            self.handle_create_table_es_action(statuses, query_id, action);
-          } else {
-            map_insert(
-              &mut statuses.create_table_ess,
-              &query_id.clone(),
-              CreateTableES {
-                query_id,
-                tablet_group_id: prepare.tablet_group_id,
-                table_path: prepare.table_path,
-                gen: prepare.gen,
-                key_range: prepare.key_range,
-                key_cols: prepare.key_cols,
-                val_cols: prepare.val_cols,
-                state: State::WaitingInsertingPrepared,
-              },
-            );
-          }
-        }
-        msg::SlaveRemotePayload::CreateTableCommit(commit) => {
-          let query_id = commit.query_id;
-          if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
-            let action = es.handle_commit(self);
-            self.handle_create_table_es_action(statuses, query_id, action);
-          } else {
-            // Send back a `CloseConfirm` to the Master.
-            let sid = self.this_sid.clone();
-            self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
-              msg::CreateTableCloseConfirm { query_id, sid },
-            ));
-          }
-        }
-        msg::SlaveRemotePayload::CreateTableAbort(abort) => {
-          let query_id = abort.query_id;
-          if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
-            let action = es.handle_abort(self, io_ctx);
-            self.handle_create_table_es_action(statuses, query_id, action);
-          } else {
-            // Send back a `CloseConfirm` to the Master.
-            let sid = self.this_sid.clone();
-            self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
-              msg::CreateTableCloseConfirm { query_id, sid },
-            ));
-          }
-        }
-        msg::SlaveRemotePayload::MasterGossip(master_gossip) => {
-          let incoming_gossip = master_gossip.gossip_data;
-          if self.gossip.gen < incoming_gossip.gen {
-            if let Some(cur_next_gossip) = &self.slave_bundle.gossip_data {
-              // Check if there is an existing GossipData about to be inserted.
-              if cur_next_gossip.gen < incoming_gossip.gen {
-                self.slave_bundle.gossip_data = Some(incoming_gossip);
-              }
+      SlaveForwardMsg::SlaveRemotePayload(payload) => {
+        match payload {
+          msg::SlaveRemotePayload::RemoteLeaderChanged(_) => {}
+          msg::SlaveRemotePayload::CreateTablePrepare(prepare) => {
+            let query_id = prepare.query_id;
+            if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
+              let action = es.handle_prepare(self, io_ctx);
+              self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
             } else {
-              self.slave_bundle.gossip_data = Some(incoming_gossip);
+              map_insert(
+                &mut statuses.create_table_ess,
+                &query_id,
+                CreateTableES::new(
+                  query_id.clone(),
+                  CreateTableRMInner {
+                    tablet_group_id: prepare.payload.tablet_group_id,
+                    table_path: prepare.payload.table_path,
+                    gen: prepare.payload.gen,
+                    key_range: prepare.payload.key_range,
+                    key_cols: prepare.payload.key_cols,
+                    val_cols: prepare.payload.val_cols,
+                    committed_helper: None,
+                  },
+                ),
+              );
             }
           }
+          msg::SlaveRemotePayload::CreateTableCommit(commit) => {
+            let query_id = commit.query_id.clone();
+            if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
+              let action = es.handle_commit(self, io_ctx, commit);
+              self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
+            } else {
+              // Send back a `CloseConfirm` to the Master.
+              let sid = self.this_sid.clone();
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableClosed(
+                Closed { query_id, rm: sid, payload: CreateTableClosed {} },
+              ));
+            }
+          }
+          msg::SlaveRemotePayload::CreateTableAbort(abort) => {
+            let query_id = abort.query_id;
+            if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
+              let action = es.handle_abort(self, io_ctx);
+              self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
+            } else {
+              // Send back a `CloseConfirm` to the Master.
+              let sid = self.this_sid.clone();
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableClosed(
+                Closed { query_id, rm: sid, payload: CreateTableClosed {} },
+              ));
+            }
+          }
+          msg::SlaveRemotePayload::MasterGossip(master_gossip) => {
+            let incoming_gossip = master_gossip.gossip_data;
+            if self.gossip.gen < incoming_gossip.gen {
+              if let Some(cur_next_gossip) = &self.slave_bundle.gossip_data {
+                // Check if there is an existing GossipData about to be inserted.
+                if cur_next_gossip.gen < incoming_gossip.gen {
+                  self.slave_bundle.gossip_data = Some(incoming_gossip);
+                }
+              } else {
+                self.slave_bundle.gossip_data = Some(incoming_gossip);
+              }
+            }
+          }
+          msg::SlaveRemotePayload::TabletMessage(tid, tablet_msg) => {
+            io_ctx.tablet_forward(&tid, TabletForwardMsg::TabletMessage(tablet_msg))
+          }
+          msg::SlaveRemotePayload::CoordMessage(cid, coord_msg) => {
+            io_ctx.coord_forward(&cid, CoordForwardMsg::CoordMessage(coord_msg))
+          }
         }
-        msg::SlaveRemotePayload::TabletMessage(tid, tablet_msg) => {
-          io_ctx.tablet_forward(&tid, TabletForwardMsg::TabletMessage(tablet_msg))
-        }
-        msg::SlaveRemotePayload::CoordMessage(cid, coord_msg) => {
-          io_ctx.coord_forward(&cid, CoordForwardMsg::CoordMessage(coord_msg))
-        }
-      },
+      }
       SlaveForwardMsg::GossipData(gossip) => {
         self.gossip = gossip;
       }
@@ -578,8 +575,8 @@ impl SlaveContext {
         let query_ids: Vec<QueryId> = statuses.create_table_ess.keys().cloned().collect();
         for query_id in query_ids {
           let create_query_es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-          let action = create_query_es.leader_changed::<IO>(self);
-          self.handle_create_table_es_action(statuses, query_id.clone(), action);
+          let action = create_query_es.leader_changed(self);
+          self.handle_create_table_es_action(io_ctx, statuses, query_id.clone(), action);
         }
 
         // Inform the NetworkDriver
@@ -594,16 +591,22 @@ impl SlaveContext {
   }
 
   /// Handles the actions produced by a CreateTableES.
-  fn handle_create_table_es_action(
+  fn handle_create_table_es_action<IO: SlaveIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: CreateTableAction,
+    action: STMPaxos2PCRMAction,
   ) {
     match action {
-      CreateTableAction::Wait => {}
-      CreateTableAction::Exit => {
-        statuses.create_table_ess.remove(&query_id);
+      STMPaxos2PCRMAction::Wait => {}
+      STMPaxos2PCRMAction::Exit => {
+        let es = statuses.create_table_ess.remove(&query_id).unwrap();
+        if let Some(helper) = es.inner.committed_helper {
+          // This means the ES had Committed, and we should use this `helper`
+          // to construct the Tablet.
+          io_ctx.create_tablet(helper);
+        }
       }
     }
   }

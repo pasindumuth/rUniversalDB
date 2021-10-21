@@ -1,23 +1,25 @@
-use crate::alter_table_es::State;
-use crate::common::{SlaveIOCtx, TableSchema};
+use crate::common::{BasicIOCtx, TableSchema};
+use crate::create_table_tm_es::{
+  CreateTableClosed, CreateTableCommit, CreateTablePayloadTypes, CreateTablePrepared,
+  CreateTableRMAborted, CreateTableRMCommitted, CreateTableRMPrepared,
+};
 use crate::model::common::{
   proc, ColName, ColType, Gen, QueryId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
-use crate::model::message as msg;
 use crate::multiversion_map::MVM;
 use crate::server::ServerContextBase;
 use crate::slave::SlaveContext;
-use crate::slave::{plm, SlavePLm};
-use crate::tablet::TabletCreateHelper;
+use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
+use crate::stmpaxos2pc_tm::RMCommittedPLm;
+use crate::tablet::{plm, TabletContext, TabletCreateHelper, TabletPLm};
 use rand::RngCore;
 
 // -----------------------------------------------------------------------------------------------
-//  CreateTableES
+//  CreateTableES Implementation
 // -----------------------------------------------------------------------------------------------
-#[derive(Debug)]
-pub struct CreateTableES {
-  pub query_id: QueryId,
 
+#[derive(Debug)]
+pub struct CreateTableRMInner {
   pub tablet_group_id: TabletGroupId,
   pub table_path: TablePath,
   pub gen: Gen,
@@ -26,117 +28,60 @@ pub struct CreateTableES {
   pub key_cols: Vec<(ColName, ColType)>,
   pub val_cols: Vec<(ColName, ColType)>,
 
-  pub state: State,
+  /// This is populated if this ES completes with a Success. We cannot construct the
+  /// new Tablet in here (since the IO type is BasicIOCtx), so we do this in the Slave node.
+  pub committed_helper: Option<TabletCreateHelper>,
 }
 
-pub enum CreateTableAction {
-  Wait,
-  Exit,
-}
+pub type CreateTableES = STMPaxos2PCRMOuter<CreateTablePayloadTypes, CreateTableRMInner>;
 
-// -----------------------------------------------------------------------------------------------
-//  Implementation
-// -----------------------------------------------------------------------------------------------
+impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
+  fn mk_closed<IO: BasicIOCtx>(&mut self, _: &mut SlaveContext, _: &mut IO) -> CreateTableClosed {
+    CreateTableClosed {}
+  }
 
-impl CreateTableES {
-  // STMPaxos2PC messages
+  fn mk_prepared_plm<IO: BasicIOCtx>(
+    &mut self,
+    _: &mut SlaveContext,
+    _: &mut IO,
+  ) -> CreateTableRMPrepared {
+    CreateTableRMPrepared {
+      tablet_group_id: self.tablet_group_id.clone(),
+      table_path: self.table_path.clone(),
+      gen: self.gen.clone(),
+      key_range: self.key_range.clone(),
+      key_cols: self.key_cols.clone(),
+      val_cols: self.val_cols.clone(),
+    }
+  }
 
-  pub fn handle_prepare<IO: SlaveIOCtx>(
+  fn prepared_plm_inserted<IO: BasicIOCtx>(
+    &mut self,
+    _: &mut SlaveContext,
+    _: &mut IO,
+  ) -> CreateTablePrepared {
+    CreateTablePrepared {}
+  }
+
+  fn mk_committed_plm<IO: BasicIOCtx>(
+    &mut self,
+    _: &mut SlaveContext,
+    _: &mut IO,
+    _: &CreateTableCommit,
+  ) -> CreateTableRMCommitted {
+    CreateTableRMCommitted {}
+  }
+
+  /// Construct `TabletCreateHelper` so an appropriate Tablet can be constructed.
+  fn committed_plm_inserted<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut SlaveContext,
     io_ctx: &mut IO,
-  ) -> CreateTableAction {
-    match &self.state {
-      State::Prepared => {
-        self.send_prepared(ctx, io_ctx);
-      }
-      _ => {}
-    }
-    CreateTableAction::Wait
-  }
-
-  pub fn handle_commit(&mut self, ctx: &mut SlaveContext) -> CreateTableAction {
-    match &self.state {
-      State::Prepared => {
-        ctx.slave_bundle.plms.push(SlavePLm::CreateTableCommitted(plm::CreateTableCommitted {
-          query_id: self.query_id.clone(),
-        }));
-        self.state = State::InsertingCommitted;
-      }
-      _ => {}
-    }
-    CreateTableAction::Wait
-  }
-
-  pub fn handle_abort<IO: SlaveIOCtx>(
-    &mut self,
-    ctx: &mut SlaveContext,
-    io_ctx: &mut IO,
-  ) -> CreateTableAction {
-    match &self.state {
-      State::WaitingInsertingPrepared => {
-        self.send_close_confirm(ctx, io_ctx);
-        CreateTableAction::Exit
-      }
-      State::InsertingPrepared => {
-        ctx.slave_bundle.plms.push(SlavePLm::CreateTableAborted(plm::CreateTableAborted {
-          query_id: self.query_id.clone(),
-        }));
-        self.state = State::InsertingPreparedAborted;
-        CreateTableAction::Wait
-      }
-      State::Prepared => {
-        ctx.slave_bundle.plms.push(SlavePLm::CreateTableAborted(plm::CreateTableAborted {
-          query_id: self.query_id.clone(),
-        }));
-        self.state = State::InsertingAborted;
-        CreateTableAction::Wait
-      }
-      _ => CreateTableAction::Wait,
-    }
-  }
-
-  // STMPaxos2PC PLm Insertions
-
-  pub fn handle_prepared_plm<IO: SlaveIOCtx>(
-    &mut self,
-    ctx: &mut SlaveContext,
-    io_ctx: &mut IO,
-  ) -> CreateTableAction {
-    match &self.state {
-      State::InsertingPrepared => {
-        self.send_prepared(ctx, io_ctx);
-        self.state = State::Prepared;
-      }
-      State::InsertingPreparedAborted => {
-        self.state = State::InsertingAborted;
-      }
-      _ => {}
-    }
-    CreateTableAction::Wait
-  }
-
-  pub fn handle_aborted_plm<IO: SlaveIOCtx>(
-    &mut self,
-    ctx: &mut SlaveContext,
-    io_ctx: &mut IO,
-  ) -> CreateTableAction {
-    match &self.state {
-      State::Follower => CreateTableAction::Exit,
-      State::InsertingAborted => {
-        self.send_close_confirm(ctx, io_ctx);
-        CreateTableAction::Exit
-      }
-      _ => CreateTableAction::Wait,
-    }
-  }
-
-  /// Create a Tablet as specified by this ES
-  fn create_table<IO: SlaveIOCtx>(&mut self, ctx: &mut SlaveContext, io_ctx: &mut IO) {
-    // Construct the Tablet
+    _: &RMCommittedPLm<CreateTablePayloadTypes>,
+  ) {
     let mut rand_seed = [0; 16];
     io_ctx.rand().fill_bytes(&mut rand_seed);
-    let helper = TabletCreateHelper {
+    self.committed_helper = Some(TabletCreateHelper {
       rand_seed,
       this_slave_group_id: ctx.this_sid.clone(),
       this_tablet_group_id: self.tablet_group_id.clone(),
@@ -149,89 +94,16 @@ impl CreateTableES {
         key_cols: self.key_cols.clone(),
         val_cols: MVM::init(self.val_cols.clone().into_iter().collect()),
       },
-    };
-    io_ctx.create_tablet(helper);
+    });
   }
 
-  pub fn handle_committed_plm<IO: SlaveIOCtx>(
+  fn mk_aborted_plm<IO: BasicIOCtx>(
     &mut self,
-    ctx: &mut SlaveContext,
-    io_ctx: &mut IO,
-  ) -> CreateTableAction {
-    match &self.state {
-      State::Follower => {
-        self.create_table(ctx, io_ctx);
-        CreateTableAction::Exit
-      }
-      State::InsertingCommitted => {
-        self.send_close_confirm(ctx, io_ctx);
-        self.create_table(ctx, io_ctx);
-        CreateTableAction::Exit
-      }
-      _ => CreateTableAction::Wait,
-    }
+    _: &mut SlaveContext,
+    _: &mut IO,
+  ) -> CreateTableRMAborted {
+    CreateTableRMAborted {}
   }
 
-  // Other
-
-  pub fn start_inserting<IO: SlaveIOCtx>(&mut self, ctx: &mut SlaveContext) -> CreateTableAction {
-    match &self.state {
-      State::WaitingInsertingPrepared => {
-        ctx.slave_bundle.plms.push(SlavePLm::CreateTablePrepared(plm::CreateTablePrepared {
-          query_id: self.query_id.clone(),
-          tablet_group_id: self.tablet_group_id.clone(),
-          table_path: self.table_path.clone(),
-          gen: self.gen.clone(),
-          key_range: self.key_range.clone(),
-          key_cols: self.key_cols.clone(),
-          val_cols: self.val_cols.clone(),
-        }));
-        self.state = State::InsertingPrepared;
-      }
-      _ => {}
-    }
-    CreateTableAction::Wait
-  }
-
-  pub fn leader_changed<IO: SlaveIOCtx>(&mut self, ctx: &mut SlaveContext) -> CreateTableAction {
-    match &self.state {
-      State::Follower => {
-        if ctx.is_leader() {
-          self.state = State::Prepared;
-        }
-        CreateTableAction::Wait
-      }
-      State::WaitingInsertingPrepared => CreateTableAction::Exit,
-      State::InsertingPrepared => CreateTableAction::Exit,
-      State::Prepared => {
-        self.state = State::Follower;
-        CreateTableAction::Wait
-      }
-      State::InsertingCommitted => {
-        self.state = State::Follower;
-        CreateTableAction::Wait
-      }
-      State::InsertingPreparedAborted => CreateTableAction::Exit,
-      State::InsertingAborted => {
-        self.state = State::Follower;
-        CreateTableAction::Wait
-      }
-    }
-  }
-
-  // Helpers
-
-  fn send_prepared<IO: SlaveIOCtx>(&self, ctx: &mut SlaveContext, io_ctx: &mut IO) {
-    let sid = ctx.this_sid.clone();
-    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTablePrepared(
-      msg::CreateTablePrepared { query_id: self.query_id.clone(), sid },
-    ));
-  }
-
-  fn send_close_confirm<IO: SlaveIOCtx>(&self, ctx: &mut SlaveContext, io_ctx: &mut IO) {
-    let sid = ctx.this_sid.clone();
-    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTableCloseConfirm(
-      msg::CreateTableCloseConfirm { query_id: self.query_id.clone(), sid },
-    ));
-  }
+  fn aborted_plm_inserted<IO: BasicIOCtx>(&mut self, _: &mut SlaveContext, _: &mut IO) {}
 }

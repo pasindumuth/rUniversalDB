@@ -1,6 +1,5 @@
-use crate::alter_table_tm_es::{get_rms, maybe_respond_dead};
+use crate::alter_table_tm_es::{get_rms, maybe_respond_dead, ResponseData};
 use crate::common::{MasterIOCtx, RemoteLeaderChangedPLm};
-use crate::create_table_tm_es::ResponseData;
 use crate::master::{plm, MasterContext, MasterPLm};
 use crate::model::common::{
   EndpointId, QueryId, RequestId, TNodePath, TSubNodePath, TablePath, TabletGroupId, Timestamp,
