@@ -141,7 +141,7 @@ impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
     self.slave_bundle.plms.push(plm);
   }
 
-  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, msg: msg::MasterRemotePayload) {
+  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, _: &(), msg: msg::MasterRemotePayload) {
     self.ctx(io_ctx).send_to_master(msg);
   }
 
@@ -440,6 +440,7 @@ impl SlaveContext {
                 let query_id = prepared.query_id;
                 let mut es = CreateTableES::new(
                   query_id.clone(),
+                  (),
                   CreateTableRMInner {
                     tablet_group_id: prepared.payload.tablet_group_id,
                     table_path: prepared.payload.table_path,
@@ -498,6 +499,7 @@ impl SlaveContext {
                 &query_id,
                 CreateTableES::new(
                   query_id.clone(),
+                  (),
                   CreateTableRMInner {
                     tablet_group_id: prepare.payload.tablet_group_id,
                     table_path: prepare.payload.table_path,

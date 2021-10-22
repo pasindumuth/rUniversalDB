@@ -533,7 +533,7 @@ impl RMServerContext<AlterTablePayloadTypes> for TabletContext {
     self.tablet_bundle.push(plm);
   }
 
-  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, msg: msg::MasterRemotePayload) {
+  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, _: &(), msg: msg::MasterRemotePayload) {
     self.ctx(io_ctx).send_to_master(msg);
   }
 
@@ -555,7 +555,7 @@ impl RMServerContext<DropTablePayloadTypes> for TabletContext {
     self.tablet_bundle.push(plm);
   }
 
-  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, msg: msg::MasterRemotePayload) {
+  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, _: &(), msg: msg::MasterRemotePayload) {
     self.ctx(io_ctx).send_to_master(msg);
   }
 
@@ -842,6 +842,7 @@ impl TabletContext {
                 debug_assert!(matches!(statuses.ddl_es, DDLES::None));
                 let mut es = AlterTableES::new(
                   prepared.query_id.clone(),
+                  (),
                   AlterTableRMInner {
                     query_id: prepared.query_id,
                     alter_op: prepared.payload.alter_op,
@@ -867,6 +868,7 @@ impl TabletContext {
                 debug_assert!(matches!(statuses.ddl_es, DDLES::None));
                 let mut es = DropTableES::new(
                   prepared.query_id.clone(),
+                  (),
                   DropTableRMInner {
                     query_id: prepared.query_id,
                     prepared_timestamp: prepared.payload.timestamp,
@@ -1213,6 +1215,7 @@ impl TabletContext {
               let query_id = prepare.query_id;
               statuses.ddl_es = DDLES::Alter(AlterTableES::new(
                 query_id.clone(),
+                (),
                 AlterTableRMInner {
                   query_id,
                   alter_op: prepare.payload.alter_op,
@@ -1268,6 +1271,7 @@ impl TabletContext {
               let query_id = prepare.query_id;
               statuses.ddl_es = DDLES::Drop(DropTableES::new(
                 query_id.clone(),
+                (),
                 DropTableRMInner {
                   query_id,
                   prepared_timestamp: timestamp,

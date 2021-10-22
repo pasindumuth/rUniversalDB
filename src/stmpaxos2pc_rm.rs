@@ -79,14 +79,21 @@ pub enum STMPaxos2PCRMAction {
 #[derive(Debug)]
 pub struct STMPaxos2PCRMOuter<T: PayloadTypes, InnerT> {
   pub query_id: QueryId,
+  pub tm: T::TMPath,
   pub follower: Option<Prepared<T>>,
   pub state: State<T>,
   pub inner: InnerT,
 }
 
 impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, InnerT> {
-  pub fn new(query_id: QueryId, inner: InnerT) -> STMPaxos2PCRMOuter<T, InnerT> {
-    STMPaxos2PCRMOuter { query_id, follower: None, state: State::WaitingInsertingPrepared, inner }
+  pub fn new(query_id: QueryId, tm: T::TMPath, inner: InnerT) -> STMPaxos2PCRMOuter<T, InnerT> {
+    STMPaxos2PCRMOuter {
+      query_id,
+      tm,
+      follower: None,
+      state: State::WaitingInsertingPrepared,
+      inner,
+    }
   }
 
   /// This is only called when the `PreparedPLm` is insert at a Follower node.
@@ -105,7 +112,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     match &self.state {
       State::Prepared(prepared) => {
         // Populate with TM. Hold it here in the RM.
-        ctx.send_to_tm(io_ctx, T::tm_prepared(prepared.clone()));
+        ctx.send_to_tm(io_ctx, &self.tm, T::tm_prepared(prepared.clone()));
       }
       _ => {}
     }
@@ -184,7 +191,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     match &self.state {
       State::InsertingPrepared => {
         let prepared = self._handle_prepared_plm(ctx, io_ctx);
-        ctx.send_to_tm(io_ctx, T::tm_prepared(prepared.clone()));
+        ctx.send_to_tm(io_ctx, &self.tm, T::tm_prepared(prepared.clone()));
         self.state = State::Prepared(prepared);
       }
       State::InsertingPreparedAborted => {
@@ -288,6 +295,6 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
       rm: this_node_path,
       payload: self.inner.mk_closed(ctx, io_ctx),
     };
-    ctx.send_to_tm(io_ctx, T::tm_closed(closed));
+    ctx.send_to_tm(io_ctx, &self.tm, T::tm_closed(closed));
   }
 }

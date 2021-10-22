@@ -251,6 +251,10 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
       }
     }
 
+    // Send out GossipData to all Slaves.
+    ctx.broadcast_gossip(io_ctx);
+
+    // Return Commit messages
     let mut commits = HashMap::<TNodePath, DropTableCommit>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
       commits.insert(rm.clone(), DropTableCommit { timestamp: commit_timestamp });

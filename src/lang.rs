@@ -13,6 +13,7 @@ macro_rules! collection {
 /// whose inside's we want to extract to. The second argument is the
 /// value we to extract from. If the value is a reference, the return
 /// value here is a reference. Otherwise, the value is moved.
+#[macro_export]
 macro_rules! cast {
   ($enum:path, $expr:expr) => {{
     if let $enum(item) = $expr {

@@ -183,10 +183,6 @@ impl TMServerContext<AlterTablePayloadTypes> for MasterContext {
     self.ctx(io_ctx).send_to_t(rm.clone(), msg);
   }
 
-  fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO) {
-    MasterContext::broadcast_gossip(self, io_ctx);
-  }
-
   fn is_leader(&self) -> bool {
     MasterContext::is_leader(self)
   }
@@ -210,10 +206,6 @@ impl TMServerContext<DropTablePayloadTypes> for MasterContext {
     self.ctx(io_ctx).send_to_t(rm.clone(), msg);
   }
 
-  fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO) {
-    MasterContext::broadcast_gossip(self, io_ctx);
-  }
-
   fn is_leader(&self) -> bool {
     MasterContext::is_leader(self)
   }
@@ -235,10 +227,6 @@ impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
     msg: msg::SlaveRemotePayload,
   ) {
     self.ctx(io_ctx).send_to_slave_common(rm.clone(), msg);
-  }
-
-  fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO) {
-    MasterContext::broadcast_gossip(self, io_ctx);
   }
 
   fn is_leader(&self) -> bool {

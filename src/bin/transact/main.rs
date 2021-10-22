@@ -2,6 +2,9 @@
 
 mod server;
 
+#[macro_use]
+extern crate runiversal;
+
 use crate::server::start_server;
 use runiversal::model::common::{EndpointId, SlaveGroupId};
 use runiversal::model::message as msg;
@@ -88,7 +91,8 @@ fn handle_self_conn(
   let to_server_sender = to_server_sender.clone();
   thread::spawn(move || loop {
     let data = from_server_receiver.recv().unwrap();
-    let slave_msg: msg::SlaveMessage = rmp_serde::from_read_ref(&data).unwrap();
+    let network_msg: msg::NetworkMessage = rmp_serde::from_read_ref(&data).unwrap();
+    let slave_msg = cast!(msg::NetworkMessage::Slave, network_msg).unwrap();
     to_server_sender.send(FullSlaveInput::SlaveMessage(slave_msg)).unwrap();
   });
 }

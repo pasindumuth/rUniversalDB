@@ -7,7 +7,7 @@ use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::model::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId, TabletGroupId, Timestamp,
 };
-use runiversal::model::message::NetworkMessage;
+use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
@@ -81,7 +81,7 @@ impl BasicIOCtx for ProdSlaveIOCtx {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
   }
 
-  fn send(&mut self, eid: &EndpointId, msg: NetworkMessage) {
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     let net_conn_map = self.net_conn_map.lock().unwrap();
     let sender = net_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
@@ -168,7 +168,7 @@ impl BasicIOCtx for ProdCoreIOCtx {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
   }
 
-  fn send(&mut self, eid: &EndpointId, msg: NetworkMessage) {
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     let net_conn_map = self.net_conn_map.lock().unwrap();
     let sender = net_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();

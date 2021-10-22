@@ -274,6 +274,10 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
       }
     }
 
+    // Send out GossipData to all Slaves.
+    ctx.broadcast_gossip(io_ctx);
+
+    // Return Commit messages
     let mut commits = HashMap::<TNodePath, AlterTableCommit>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
       commits.insert(rm.clone(), AlterTableCommit { timestamp: commit_timestamp });

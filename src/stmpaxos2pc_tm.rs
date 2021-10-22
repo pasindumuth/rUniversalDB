@@ -13,7 +13,7 @@ use std::hash::Hash;
 pub trait RMServerContext<T: PayloadTypes> {
   fn push_plm(&mut self, plm: T::RMPLm);
 
-  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, msg: T::TMMessage);
+  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, tm: &T::TMPath, msg: T::TMMessage);
 
   fn mk_node_path(&self) -> T::RMPath;
 
@@ -28,8 +28,6 @@ pub trait TMServerContext<T: PayloadTypes> {
   fn push_plm(&mut self, plm: T::TMPLm);
 
   fn send_to_rm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, rm: &T::RMPath, msg: T::RMMessage);
-
-  fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO);
 
   fn is_leader(&self) -> bool;
 }
@@ -464,9 +462,6 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
 
         // Change state to Committed
         self.advance_to_committed(ctx, io_ctx, commit_payloads);
-
-        // Broadcast a GossipData
-        ctx.broadcast_gossip(io_ctx);
       }
       _ => {}
     }
