@@ -4,7 +4,6 @@ use crate::stmpaxos2pc_tm::{
   Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMPreparedPLm,
   RMServerContext, TMCommittedPLm,
 };
-use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------------------------
 //  STMPaxos2PCRMInner

@@ -15,7 +15,7 @@ use crate::stmpaxos2pc_tm::{
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
 //  Payloads
@@ -283,9 +283,9 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
     &mut self,
     ctx: &mut MasterContext,
     _: &mut IO,
-  ) -> HashMap<SlaveGroupId, CreateTablePrepare> {
+  ) -> BTreeMap<SlaveGroupId, CreateTablePrepare> {
     // The RMs are just the shards. Each shard should be in its own Slave.
-    let mut prepares = HashMap::<SlaveGroupId, CreateTablePrepare>::new();
+    let mut prepares = BTreeMap::<SlaveGroupId, CreateTablePrepare>::new();
     let gen = self.compute_gen(ctx);
     for (key_range, tid, sid) in &self.shards {
       prepares.insert(
@@ -308,7 +308,7 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
     &mut self,
     _: &mut MasterContext,
     _: &mut IO,
-    _: &HashMap<SlaveGroupId, CreateTablePrepared>,
+    _: &BTreeMap<SlaveGroupId, CreateTablePrepared>,
   ) -> CreateTableTMCommitted {
     CreateTableTMCommitted {}
   }
@@ -320,11 +320,11 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
     _: &mut MasterContext,
     _: &mut IO,
     _: &TMCommittedPLm<CreateTablePayloadTypes>,
-  ) -> HashMap<SlaveGroupId, CreateTableCommit> {
+  ) -> BTreeMap<SlaveGroupId, CreateTableCommit> {
     self.timestamp_hint = None;
 
     // The RMs are just the shards. Each shard should be in its own Slave.
-    let mut commits = HashMap::<SlaveGroupId, CreateTableCommit>::new();
+    let mut commits = BTreeMap::<SlaveGroupId, CreateTableCommit>::new();
     for (_, _, sid) in &self.shards {
       commits.insert(sid.clone(), CreateTableCommit {});
     }
@@ -344,7 +344,7 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-  ) -> HashMap<SlaveGroupId, CreateTableAbort> {
+  ) -> BTreeMap<SlaveGroupId, CreateTableAbort> {
     self.timestamp_hint = Some(io_ctx.now());
 
     // Potentially respond to the External if we are the leader.
@@ -364,7 +364,7 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
       }
     }
 
-    let mut aborts = HashMap::<SlaveGroupId, CreateTableAbort>::new();
+    let mut aborts = BTreeMap::<SlaveGroupId, CreateTableAbort>::new();
     for (_, _, sid) in &self.shards {
       aborts.insert(sid.clone(), CreateTableAbort {});
     }

@@ -2,7 +2,7 @@ use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::model::common::{proc, PaxosGroupId, QueryId};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -54,7 +54,7 @@ pub trait PayloadTypes: Clone {
   // Meta
   type RMPLm: Debug + Clone;
   type TMPLm: Debug + Clone;
-  type RMPath: Debug + Clone + Hash + PartialEq + Eq + RMPathTrait;
+  type RMPath: Debug + Clone + PartialEq + Eq + PartialOrd + Ord + RMPathTrait;
   type TMPath: Debug + Clone;
   type RMMessage: Debug + Clone;
   type TMMessage: Debug + Clone;
@@ -202,14 +202,14 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-  ) -> HashMap<T::RMPath, T::Prepare>;
+  ) -> BTreeMap<T::RMPath, T::Prepare>;
 
   /// Called after all RMs have Prepared.
   fn mk_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-    prepared: &HashMap<T::RMPath, T::Prepared>,
+    prepared: &BTreeMap<T::RMPath, T::Prepared>,
   ) -> T::TMCommittedPLm;
 
   /// Called after CommittedPLm is inserted.
@@ -218,7 +218,7 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
     committed_plm: &TMCommittedPLm<T>,
-  ) -> HashMap<T::RMPath, T::Commit>;
+  ) -> BTreeMap<T::RMPath, T::Commit>;
 
   /// Called if one of the RMs returned Aborted.
   fn mk_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
@@ -232,7 +232,7 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-  ) -> HashMap<T::RMPath, T::Abort>;
+  ) -> BTreeMap<T::RMPath, T::Abort>;
 
   /// Called after all RMs have processed the `Commit` or or `Abort` message.
   fn mk_closed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
@@ -263,25 +263,25 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
 
 #[derive(Debug)]
 pub struct PreparingSt<T: PayloadTypes> {
-  rms_remaining: HashSet<T::RMPath>,
-  prepared: HashMap<T::RMPath, T::Prepared>,
+  rms_remaining: BTreeSet<T::RMPath>,
+  prepared: BTreeMap<T::RMPath, T::Prepared>,
 }
 
 #[derive(Debug)]
 pub struct CommittedSt<T: PayloadTypes> {
-  rms_remaining: HashSet<T::RMPath>,
+  rms_remaining: BTreeSet<T::RMPath>,
 }
 
 #[derive(Debug)]
 pub struct AbortedSt<T: PayloadTypes> {
-  rms_remaining: HashSet<T::RMPath>,
+  rms_remaining: BTreeSet<T::RMPath>,
 }
 
 #[derive(Debug)]
 pub enum FollowerState<T: PayloadTypes> {
-  Preparing(HashMap<T::RMPath, T::Prepare>),
-  Committed(HashMap<T::RMPath, T::Commit>),
-  Aborted(HashMap<T::RMPath, T::Abort>),
+  Preparing(BTreeMap<T::RMPath, T::Prepare>),
+  Committed(BTreeMap<T::RMPath, T::Commit>),
+  Aborted(BTreeMap<T::RMPath, T::Abort>),
 }
 
 #[derive(Debug)]
@@ -418,9 +418,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-    prepare_payloads: HashMap<T::RMPath, T::Prepare>,
+    prepare_payloads: BTreeMap<T::RMPath, T::Prepare>,
   ) {
-    let mut rms_remaining = HashSet::<T::RMPath>::new();
+    let mut rms_remaining = BTreeSet::<T::RMPath>::new();
     for (rm, payload) in prepare_payloads.clone() {
       let prepare = Prepare { query_id: self.query_id.clone(), payload };
       ctx.send_to_rm(io_ctx, &rm, T::rm_prepare(prepare));
@@ -451,9 +451,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-    commit_payloads: HashMap<T::RMPath, T::Commit>,
+    commit_payloads: BTreeMap<T::RMPath, T::Commit>,
   ) {
-    let mut rms_remaining = HashSet::<T::RMPath>::new();
+    let mut rms_remaining = BTreeSet::<T::RMPath>::new();
     for (rm, payload) in commit_payloads.clone() {
       let commit = Commit { query_id: self.query_id.clone(), payload };
       ctx.send_to_rm(io_ctx, &rm, T::rm_commit(commit));
@@ -492,9 +492,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
-    abort_payloads: HashMap<T::RMPath, T::Abort>,
+    abort_payloads: BTreeMap<T::RMPath, T::Abort>,
   ) {
-    let mut rms_remaining = HashSet::<T::RMPath>::new();
+    let mut rms_remaining = BTreeSet::<T::RMPath>::new();
     for (rm, payload) in abort_payloads.clone() {
       let abort = Abort { query_id: self.query_id.clone(), payload };
       ctx.send_to_rm(io_ctx, &rm, T::rm_abort(abort));

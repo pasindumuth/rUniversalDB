@@ -13,7 +13,7 @@ use crate::stmpaxos2pc_tm::{
 use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
 //  Payloads
@@ -198,8 +198,8 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     &mut self,
     ctx: &mut MasterContext,
     _: &mut IO,
-  ) -> HashMap<TNodePath, DropTablePrepare> {
-    let mut prepares = HashMap::<TNodePath, DropTablePrepare>::new();
+  ) -> BTreeMap<TNodePath, DropTablePrepare> {
+    let mut prepares = BTreeMap::<TNodePath, DropTablePrepare>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
       prepares.insert(rm.clone(), DropTablePrepare {});
     }
@@ -210,7 +210,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     &mut self,
     _: &mut MasterContext,
     io_ctx: &mut IO,
-    prepared: &HashMap<TNodePath, DropTablePrepared>,
+    prepared: &BTreeMap<TNodePath, DropTablePrepared>,
   ) -> DropTableTMCommitted {
     let mut timestamp_hint = io_ctx.now();
     for (_, prepared) in prepared {
@@ -226,7 +226,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
     committed_plm: &TMCommittedPLm<DropTablePayloadTypes>,
-  ) -> HashMap<TNodePath, DropTableCommit> {
+  ) -> BTreeMap<TNodePath, DropTableCommit> {
     // Compute the resolved timestamp
     let mut commit_timestamp = committed_plm.payload.timestamp_hint;
     commit_timestamp = max(commit_timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
@@ -256,7 +256,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     ctx.broadcast_gossip(io_ctx);
 
     // Return Commit messages
-    let mut commits = HashMap::<TNodePath, DropTableCommit>::new();
+    let mut commits = BTreeMap::<TNodePath, DropTableCommit>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
       commits.insert(rm.clone(), DropTableCommit { timestamp: commit_timestamp });
     }
@@ -275,7 +275,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-  ) -> HashMap<TNodePath, DropTableAbort> {
+  ) -> BTreeMap<TNodePath, DropTableAbort> {
     // Potentially respond to the External if we are the leader.
     if ctx.is_leader() {
       if let Some(response_data) = &self.response_data {
@@ -293,7 +293,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
       }
     }
 
-    let mut aborts = HashMap::<TNodePath, DropTableAbort>::new();
+    let mut aborts = BTreeMap::<TNodePath, DropTableAbort>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
       aborts.insert(rm.clone(), DropTableAbort {});
     }

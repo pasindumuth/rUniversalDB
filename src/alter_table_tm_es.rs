@@ -12,7 +12,7 @@ use crate::stmpaxos2pc_tm::{
 use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
 //  Payloads
@@ -211,8 +211,8 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     &mut self,
     ctx: &mut MasterContext,
     _: &mut IO,
-  ) -> HashMap<TNodePath, AlterTablePrepare> {
-    let mut prepares = HashMap::<TNodePath, AlterTablePrepare>::new();
+  ) -> BTreeMap<TNodePath, AlterTablePrepare> {
+    let mut prepares = BTreeMap::<TNodePath, AlterTablePrepare>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
       prepares.insert(rm.clone(), AlterTablePrepare { alter_op: self.alter_op.clone() });
     }
@@ -223,7 +223,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     &mut self,
     _: &mut MasterContext,
     io_ctx: &mut IO,
-    prepared: &HashMap<TNodePath, AlterTablePrepared>,
+    prepared: &BTreeMap<TNodePath, AlterTablePrepared>,
   ) -> AlterTableTMCommitted {
     let mut timestamp_hint = io_ctx.now();
     for (_, prepared) in prepared {
@@ -239,7 +239,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
     committed_plm: &TMCommittedPLm<AlterTablePayloadTypes>,
-  ) -> HashMap<TNodePath, AlterTableCommit> {
+  ) -> BTreeMap<TNodePath, AlterTableCommit> {
     let gen = ctx.table_generation.get_last_version(&self.table_path).unwrap();
     let table_schema = ctx.db_schema.get_mut(&(self.table_path.clone(), gen.clone())).unwrap();
 
@@ -279,7 +279,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     ctx.broadcast_gossip(io_ctx);
 
     // Return Commit messages
-    let mut commits = HashMap::<TNodePath, AlterTableCommit>::new();
+    let mut commits = BTreeMap::<TNodePath, AlterTableCommit>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
       commits.insert(rm.clone(), AlterTableCommit { timestamp: commit_timestamp });
     }
@@ -298,7 +298,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-  ) -> HashMap<TNodePath, AlterTableAbort> {
+  ) -> BTreeMap<TNodePath, AlterTableAbort> {
     // Potentially respond to the External if we are the leader.
     if ctx.is_leader() {
       if let Some(response_data) = &self.response_data {
@@ -316,7 +316,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
       }
     }
 
-    let mut aborts = HashMap::<TNodePath, AlterTableAbort>::new();
+    let mut aborts = BTreeMap::<TNodePath, AlterTableAbort>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
       aborts.insert(rm.clone(), AlterTableAbort {});
     }
