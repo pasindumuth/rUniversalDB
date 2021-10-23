@@ -85,12 +85,13 @@ pub struct DropTablePayloadTypes {}
 
 impl PayloadTypes for DropTablePayloadTypes {
   // Master
-  type TMPLm = MasterPLm;
   type RMPLm = TabletPLm;
+  type TMPLm = MasterPLm;
   type RMPath = TNodePath;
   type TMPath = ();
   type RMMessage = msg::TabletMessage;
   type TMMessage = msg::MasterRemotePayload;
+  type NetworkMessageT = msg::NetworkMessage;
   type RMContext = TabletContext;
   type TMContext = MasterContext;
 

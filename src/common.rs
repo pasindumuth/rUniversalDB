@@ -21,13 +21,13 @@ use std::hash::Hash;
 //  Basic
 // -----------------------------------------------------------------------------------------------
 
-pub trait BasicIOCtx {
+pub trait BasicIOCtx<NetworkMessageT = msg::NetworkMessage> {
   type RngCoreT: RngCore + Debug;
 
   // Basic
   fn rand(&mut self) -> &mut Self::RngCoreT;
   fn now(&mut self) -> Timestamp;
-  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
+  fn send(&mut self, eid: &EndpointId, msg: NetworkMessageT);
 }
 
 // -----------------------------------------------------------------------------------------------

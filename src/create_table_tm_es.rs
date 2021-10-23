@@ -103,12 +103,13 @@ pub struct CreateTablePayloadTypes {}
 
 impl PayloadTypes for CreateTablePayloadTypes {
   // Master
-  type TMPLm = MasterPLm;
   type RMPLm = SlavePLm;
+  type TMPLm = MasterPLm;
   type RMPath = SlaveGroupId;
   type TMPath = ();
   type RMMessage = msg::SlaveRemotePayload;
   type TMMessage = msg::MasterRemotePayload;
+  type NetworkMessageT = msg::NetworkMessage;
   type RMContext = SlaveContext;
   type TMContext = MasterContext;
 

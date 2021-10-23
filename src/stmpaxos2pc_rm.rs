@@ -13,24 +13,28 @@ use std::collections::HashMap;
 pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
   /// This is called at various times, like after `CommittedPLm` and `AbortedPLM` are inserted,
   /// and while in `WaitingInsertingPrepared`, when an `Abort` arrives.
-  fn mk_closed<IO: BasicIOCtx>(&mut self, ctx: &mut T::RMContext, io_ctx: &mut IO) -> T::Closed;
+  fn mk_closed<IO: BasicIOCtx<T::NetworkMessageT>>(
+    &mut self,
+    ctx: &mut T::RMContext,
+    io_ctx: &mut IO,
+  ) -> T::Closed;
 
   /// Called in order to get the `RMPreparedPLm` to insert.
-  fn mk_prepared_plm<IO: BasicIOCtx>(
+  fn mk_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> T::RMPreparedPLm;
 
   /// Called after PreparedPLm is inserted.
-  fn prepared_plm_inserted<IO: BasicIOCtx>(
+  fn prepared_plm_inserted<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> T::Prepared;
 
   /// Called after all RMs have Prepared.
-  fn mk_committed_plm<IO: BasicIOCtx>(
+  fn mk_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -38,7 +42,7 @@ pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
   ) -> T::RMCommittedPLm;
 
   /// Called after CommittedPLm is inserted.
-  fn committed_plm_inserted<IO: BasicIOCtx>(
+  fn committed_plm_inserted<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -46,14 +50,18 @@ pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
   );
 
   /// Called if one of the RMs returned Aborted.
-  fn mk_aborted_plm<IO: BasicIOCtx>(
+  fn mk_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> T::RMAbortedPLm;
 
   /// Called after AbortedPLm is inserted.
-  fn aborted_plm_inserted<IO: BasicIOCtx>(&mut self, ctx: &mut T::RMContext, io_ctx: &mut IO);
+  fn aborted_plm_inserted<IO: BasicIOCtx<T::NetworkMessageT>>(
+    &mut self,
+    ctx: &mut T::RMContext,
+    io_ctx: &mut IO,
+  );
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -97,14 +105,18 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
   }
 
   /// This is only called when the `PreparedPLm` is insert at a Follower node.
-  pub fn init_follower<IO: BasicIOCtx>(&mut self, ctx: &mut T::RMContext, io_ctx: &mut IO) {
+  pub fn init_follower<IO: BasicIOCtx<T::NetworkMessageT>>(
+    &mut self,
+    ctx: &mut T::RMContext,
+    io_ctx: &mut IO,
+  ) {
     self._handle_prepared_plm(ctx, io_ctx);
     self.state = State::Follower;
   }
 
   // STMPaxos2PC messages
 
-  pub fn handle_prepare<IO: BasicIOCtx>(
+  pub fn handle_prepare<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -119,7 +131,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn handle_commit<IO: BasicIOCtx>(
+  pub fn handle_commit<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -139,7 +151,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn handle_abort<IO: BasicIOCtx>(
+  pub fn handle_abort<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -168,7 +180,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
 
   // STMPaxos2PC PLm Insertions
 
-  fn _handle_prepared_plm<IO: BasicIOCtx>(
+  fn _handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -183,7 +195,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     prepared
   }
 
-  pub fn handle_prepared_plm<IO: BasicIOCtx>(
+  pub fn handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -208,7 +220,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn handle_committed_plm<IO: BasicIOCtx>(
+  pub fn handle_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -228,7 +240,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     }
   }
 
-  pub fn handle_aborted_plm<IO: BasicIOCtx>(
+  pub fn handle_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -249,7 +261,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
 
   // Other
 
-  pub fn start_inserting<IO: BasicIOCtx>(
+  pub fn start_inserting<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -288,7 +300,11 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
   }
 
   // Helpers
-  pub fn send_closed<IO: BasicIOCtx>(&mut self, ctx: &mut T::RMContext, io_ctx: &mut IO) {
+  pub fn send_closed<IO: BasicIOCtx<T::NetworkMessageT>>(
+    &mut self,
+    ctx: &mut T::RMContext,
+    io_ctx: &mut IO,
+  ) {
     let this_node_path = ctx.mk_node_path();
     let closed = Closed {
       query_id: self.query_id.clone(),
