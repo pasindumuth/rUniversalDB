@@ -39,6 +39,8 @@ pub trait TMServerContext<T: PayloadTypes> {
     msg: T::RMMessage,
   );
 
+  fn mk_node_path(&self) -> T::TMPath;
+
   fn is_leader(&self) -> bool;
 }
 
@@ -150,6 +152,7 @@ pub struct RMAbortedPLm<T: PayloadTypes> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Prepare<T: PayloadTypes> {
   pub query_id: QueryId,
+  pub tm: T::TMPath,
   pub payload: T::Prepare,
 }
 
@@ -423,7 +426,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   ) {
     let mut rms_remaining = BTreeSet::<T::RMPath>::new();
     for (rm, payload) in prepare_payloads.clone() {
-      let prepare = Prepare { query_id: self.query_id.clone(), payload };
+      let prepare = Prepare { query_id: self.query_id.clone(), tm: ctx.mk_node_path(), payload };
       ctx.send_to_rm(io_ctx, &rm, T::rm_prepare(prepare));
       rms_remaining.insert(rm);
     }
@@ -623,7 +626,8 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
           // If the RM has not responded and its Leadership changed, we resend Prepare.
           if rm.to_gid() == remote_leader_changed.gid {
             let payload = prepare_payloads.get(rm).unwrap().clone();
-            let prepare = Prepare { query_id: self.query_id.clone(), payload };
+            let prepare =
+              Prepare { query_id: self.query_id.clone(), tm: ctx.mk_node_path(), payload };
             ctx.send_to_rm(io_ctx, &rm, T::rm_prepare(prepare));
           }
         }

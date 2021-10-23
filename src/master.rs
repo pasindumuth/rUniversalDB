@@ -183,6 +183,10 @@ impl TMServerContext<AlterTablePayloadTypes> for MasterContext {
     self.ctx(io_ctx).send_to_t(rm.clone(), msg);
   }
 
+  fn mk_node_path(&self) -> () {
+    ()
+  }
+
   fn is_leader(&self) -> bool {
     MasterContext::is_leader(self)
   }
@@ -206,6 +210,10 @@ impl TMServerContext<DropTablePayloadTypes> for MasterContext {
     self.ctx(io_ctx).send_to_t(rm.clone(), msg);
   }
 
+  fn mk_node_path(&self) -> () {
+    ()
+  }
+
   fn is_leader(&self) -> bool {
     MasterContext::is_leader(self)
   }
@@ -227,6 +235,10 @@ impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
     msg: msg::SlaveRemotePayload,
   ) {
     self.ctx(io_ctx).send_to_slave_common(rm.clone(), msg);
+  }
+
+  fn mk_node_path(&self) -> () {
+    ()
   }
 
   fn is_leader(&self) -> bool {
@@ -567,7 +579,6 @@ impl MasterContext {
                   query_id.clone(),
                   CreateTableTMInner {
                     response_data: None,
-                    query_id: query_id.clone(),
                     table_path: prepared.payload.table_path,
                     key_cols: prepared.payload.key_cols,
                     val_cols: prepared.payload.val_cols,
@@ -603,7 +614,6 @@ impl MasterContext {
                   query_id.clone(),
                   AlterTableTMInner {
                     response_data: None,
-                    query_id: query_id.clone(),
                     table_path: prepared.payload.table_path,
                     alter_op: prepared.payload.alter_op,
                   },
@@ -634,11 +644,7 @@ impl MasterContext {
                 let query_id = prepared.query_id;
                 let mut es = DropTableTMES::new(
                   query_id.clone(),
-                  DropTableTMInner {
-                    response_data: None,
-                    query_id: query_id.clone(),
-                    table_path: prepared.payload.table_path,
-                  },
+                  DropTableTMInner { response_data: None, table_path: prepared.payload.table_path },
                 );
                 es.init_follower(self, io_ctx);
                 btree_map_insert(&mut statuses.drop_table_tm_ess, &query_id.clone(), es);
@@ -693,7 +699,6 @@ impl MasterContext {
                         query_id.clone(),
                         CreateTableTMInner {
                           response_data: Some(ResponseData { request_id, sender_eid }),
-                          query_id: query_id.clone(),
                           table_path: create_table.table_path,
                           key_cols: create_table.key_cols,
                           val_cols: create_table.val_cols,
@@ -712,7 +717,6 @@ impl MasterContext {
                         query_id.clone(),
                         AlterTableTMInner {
                           response_data: Some(ResponseData { request_id, sender_eid }),
-                          query_id: query_id.clone(),
                           table_path: alter_table.table_path,
                           alter_op: alter_table.alter_op,
                         },
@@ -728,7 +732,6 @@ impl MasterContext {
                         query_id.clone(),
                         DropTableTMInner {
                           response_data: Some(ResponseData { request_id, sender_eid }),
-                          query_id: query_id.clone(),
                           table_path: drop_table.table_path,
                         },
                       ),

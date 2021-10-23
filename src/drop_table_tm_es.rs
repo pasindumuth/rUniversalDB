@@ -181,7 +181,6 @@ pub struct DropTableTMInner {
   pub response_data: Option<ResponseData>,
 
   // DropTable Query data
-  pub query_id: QueryId,
   pub table_path: TablePath,
 }
 

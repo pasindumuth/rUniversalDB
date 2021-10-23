@@ -193,7 +193,6 @@ pub struct AlterTableTMInner {
   pub response_data: Option<ResponseData>,
 
   // AlterTable Query data
-  pub query_id: QueryId,
   pub table_path: TablePath,
   pub alter_op: proc::AlterOp,
 }

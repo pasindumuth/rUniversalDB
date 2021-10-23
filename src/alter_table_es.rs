@@ -16,7 +16,6 @@ use crate::tablet::{plm, TabletContext, TabletPLm};
 
 #[derive(Debug)]
 pub struct AlterTableRMInner {
-  pub query_id: QueryId,
   pub alter_op: proc::AlterOp,
   pub prepared_timestamp: Timestamp,
 }

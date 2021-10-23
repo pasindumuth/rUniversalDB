@@ -16,7 +16,6 @@ use crate::tablet::{plm, TabletContext, TabletPLm};
 
 #[derive(Debug)]
 pub struct DropTableRMInner {
-  pub query_id: QueryId,
   pub prepared_timestamp: Timestamp,
 
   /// This is populated if this ES completes with a Success. The Tablet will mark itself as

@@ -199,12 +199,9 @@ pub struct CreateTableTMInner {
   pub response_data: Option<ResponseData>,
 
   // CreateTable Query data
-  pub query_id: QueryId,
   pub table_path: TablePath,
-
   pub key_cols: Vec<(ColName, ColType)>,
   pub val_cols: Vec<(ColName, ColType)>,
-
   pub shards: Vec<(TabletKeyRange, TabletGroupId, SlaveGroupId)>,
 
   /// This is set when `Committed` or `Aborted` gets inserted

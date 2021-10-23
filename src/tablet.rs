@@ -841,10 +841,9 @@ impl TabletContext {
               TabletPLm::AlterTablePrepared(prepared) => {
                 debug_assert!(matches!(statuses.ddl_es, DDLES::None));
                 let mut es = AlterTableES::new(
-                  prepared.query_id.clone(),
+                  prepared.query_id,
                   prepared.tm,
                   AlterTableRMInner {
-                    query_id: prepared.query_id,
                     alter_op: prepared.payload.alter_op,
                     prepared_timestamp: prepared.payload.timestamp,
                   },
@@ -867,10 +866,9 @@ impl TabletContext {
               TabletPLm::DropTablePrepared(prepared) => {
                 debug_assert!(matches!(statuses.ddl_es, DDLES::None));
                 let mut es = DropTableES::new(
-                  prepared.query_id.clone(),
+                  prepared.query_id,
                   prepared.tm,
                   DropTableRMInner {
-                    query_id: prepared.query_id,
                     prepared_timestamp: prepared.payload.timestamp,
                     committed_timestamp: None,
                   },
@@ -1212,12 +1210,10 @@ impl TabletContext {
               timestamp += 1;
 
               // Construct an AlterTableES and set it to `ddl_es`.
-              let query_id = prepare.query_id;
               statuses.ddl_es = DDLES::Alter(AlterTableES::new(
-                query_id.clone(),
-                (),
+                prepare.query_id,
+                prepare.tm,
                 AlterTableRMInner {
-                  query_id,
                   alter_op: prepare.payload.alter_op,
                   prepared_timestamp: timestamp,
                 },
@@ -1268,15 +1264,10 @@ impl TabletContext {
               timestamp += 1;
 
               // Construct an DropTableES set it to `ddl_es`.
-              let query_id = prepare.query_id;
               statuses.ddl_es = DDLES::Drop(DropTableES::new(
-                query_id.clone(),
-                (),
-                DropTableRMInner {
-                  query_id,
-                  prepared_timestamp: timestamp,
-                  committed_timestamp: None,
-                },
+                prepare.query_id,
+                prepare.tm,
+                DropTableRMInner { prepared_timestamp: timestamp, committed_timestamp: None },
               ));
             }
           }

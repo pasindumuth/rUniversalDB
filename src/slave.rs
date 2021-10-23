@@ -437,9 +437,9 @@ impl SlaveContext {
           for paxos_log_msg in bundle {
             match paxos_log_msg {
               SlavePLm::CreateTablePrepared(prepared) => {
-                let query_id = prepared.query_id;
+                let query_id = prepared.query_id.clone();
                 let mut es = CreateTableES::new(
-                  query_id.clone(),
+                  prepared.query_id,
                   prepared.tm,
                   CreateTableRMInner {
                     tablet_group_id: prepared.payload.tablet_group_id,
@@ -452,7 +452,7 @@ impl SlaveContext {
                   },
                 );
                 es.init_follower(self, io_ctx);
-                map_insert(&mut statuses.create_table_ess, &query_id.clone(), es);
+                map_insert(&mut statuses.create_table_ess, &query_id, es);
               }
               SlavePLm::CreateTableCommitted(committed) => {
                 let query_id = committed.query_id.clone();
@@ -499,7 +499,7 @@ impl SlaveContext {
                 &query_id,
                 CreateTableES::new(
                   query_id.clone(),
-                  (),
+                  prepare.tm,
                   CreateTableRMInner {
                     tablet_group_id: prepare.payload.tablet_group_id,
                     table_path: prepare.payload.table_path,
