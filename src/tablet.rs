@@ -842,7 +842,7 @@ impl TabletContext {
                 debug_assert!(matches!(statuses.ddl_es, DDLES::None));
                 let mut es = AlterTableES::new(
                   prepared.query_id.clone(),
-                  (),
+                  prepared.tm,
                   AlterTableRMInner {
                     query_id: prepared.query_id,
                     alter_op: prepared.payload.alter_op,
@@ -868,7 +868,7 @@ impl TabletContext {
                 debug_assert!(matches!(statuses.ddl_es, DDLES::None));
                 let mut es = DropTableES::new(
                   prepared.query_id.clone(),
-                  (),
+                  prepared.tm,
                   DropTableRMInner {
                     query_id: prepared.query_id,
                     prepared_timestamp: prepared.payload.timestamp,

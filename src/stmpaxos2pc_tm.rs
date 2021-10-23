@@ -130,6 +130,7 @@ pub struct TMClosedPLm<T: PayloadTypes> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RMPreparedPLm<T: PayloadTypes> {
   pub query_id: QueryId,
+  pub tm: T::TMPath,
   pub payload: T::RMPreparedPLm,
 }
 

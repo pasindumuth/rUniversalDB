@@ -269,6 +269,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
       State::WaitingInsertingPrepared => {
         let prepared_plm = RMPreparedPLm {
           query_id: self.query_id.clone(),
+          tm: self.tm.clone(),
           payload: self.inner.mk_prepared_plm(ctx, io_ctx),
         };
         ctx.push_plm(T::rm_prepared_plm(prepared_plm));
