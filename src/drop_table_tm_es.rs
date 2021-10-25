@@ -149,6 +149,14 @@ pub struct DropTableTMInner {
 }
 
 impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
+  fn new_follower<IO: BasicIOCtx>(
+    _: &mut MasterContext,
+    _: &mut IO,
+    payload: DropTableTMPrepared,
+  ) -> DropTableTMInner {
+    DropTableTMInner { response_data: None, table_path: payload.table_path }
+  }
+
   fn mk_prepared_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut MasterContext,

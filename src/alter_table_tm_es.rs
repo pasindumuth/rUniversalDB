@@ -162,6 +162,18 @@ pub struct AlterTableTMInner {
 }
 
 impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
+  fn new_follower<IO: BasicIOCtx>(
+    _: &mut MasterContext,
+    _: &mut IO,
+    payload: AlterTableTMPrepared,
+  ) -> AlterTableTMInner {
+    AlterTableTMInner {
+      response_data: None,
+      table_path: payload.table_path,
+      alter_op: payload.alter_op,
+    }
+  }
+
   fn mk_prepared_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut MasterContext,

@@ -227,6 +227,21 @@ impl CreateTableTMInner {
 }
 
 impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
+  fn new_follower<IO: BasicIOCtx>(
+    _: &mut MasterContext,
+    _: &mut IO,
+    payload: CreateTableTMPrepared,
+  ) -> CreateTableTMInner {
+    CreateTableTMInner {
+      response_data: None,
+      table_path: payload.table_path,
+      key_cols: payload.key_cols,
+      val_cols: payload.val_cols,
+      shards: payload.shards,
+      timestamp_hint: None,
+    }
+  }
+
   fn mk_prepared_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut MasterContext,

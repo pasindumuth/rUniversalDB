@@ -29,7 +29,8 @@ use crate::server::{
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::{
-  PayloadTypes, RMPathTrait, STMPaxos2PCTMAction, State, TMMessage, TMPLm, TMServerContext,
+  handle_tm_msg, handle_tm_plm, PayloadTypes, RMPathTrait, STMPaxos2PCTMAction, State, TMMessage,
+  TMPLm, TMServerContext,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -449,86 +450,23 @@ impl MasterContext {
                 }
               }
               // CreateTable
-              MasterPLm::CreateTable(plm) => match plm {
-                TMPLm::Prepared(prepared) => {
-                  let query_id = prepared.query_id;
-                  let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_prepared_plm(self, io_ctx);
-                  self.handle_create_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Committed(committed) => {
-                  let query_id = committed.query_id.clone();
-                  let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_committed_plm(self, io_ctx, committed);
-                  self.handle_create_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Aborted(aborted) => {
-                  let query_id = aborted.query_id;
-                  let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_aborted_plm(self, io_ctx);
-                  self.handle_create_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Closed(closed) => {
-                  let query_id = closed.query_id.clone();
-                  let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_closed_plm(self, io_ctx, closed);
-                  self.handle_create_table_es_action(statuses, query_id, action);
-                }
-              },
+              MasterPLm::CreateTable(plm) => {
+                let (query_id, action) =
+                  handle_tm_plm(self, io_ctx, &mut statuses.create_table_tm_ess, plm);
+                self.handle_create_table_es_action(statuses, query_id, action);
+              }
               // AlterTable
-              MasterPLm::AlterTable(plm) => match plm {
-                TMPLm::Prepared(prepared) => {
-                  let query_id = prepared.query_id;
-                  let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_prepared_plm(self, io_ctx);
-                  self.handle_alter_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Committed(committed) => {
-                  let query_id = committed.query_id.clone();
-                  let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_committed_plm(self, io_ctx, committed);
-                  self.handle_alter_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Aborted(aborted) => {
-                  let query_id = aborted.query_id;
-                  let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_aborted_plm(self, io_ctx);
-                  self.handle_alter_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Closed(closed) => {
-                  let query_id = closed.query_id.clone();
-                  let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_closed_plm(self, io_ctx, closed);
-                  self.handle_alter_table_es_action(statuses, query_id, action);
-                }
-              },
+              MasterPLm::AlterTable(plm) => {
+                let (query_id, action) =
+                  handle_tm_plm(self, io_ctx, &mut statuses.alter_table_tm_ess, plm);
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
               // DropTable
-              MasterPLm::DropTable(plm) => match plm {
-                TMPLm::Prepared(prepared) => {
-                  let query_id = prepared.query_id;
-                  let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_prepared_plm(self, io_ctx);
-                  self.handle_drop_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Committed(committed) => {
-                  let query_id = committed.query_id.clone();
-                  let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_committed_plm(self, io_ctx, committed);
-                  self.handle_drop_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Aborted(aborted) => {
-                  let query_id = aborted.query_id;
-                  let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_aborted_plm(self, io_ctx);
-                  self.handle_drop_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Closed(closed) => {
-                  let query_id = closed.query_id.clone();
-                  let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_closed_plm(self, io_ctx, closed);
-                  self.handle_drop_table_es_action(statuses, query_id, action);
-                }
-              },
+              MasterPLm::DropTable(plm) => {
+                let (query_id, action) =
+                  handle_tm_plm(self, io_ctx, &mut statuses.drop_table_tm_ess, plm);
+                self.handle_drop_table_es_action(statuses, query_id, action);
+              }
             }
           }
 
@@ -570,109 +508,23 @@ impl MasterContext {
                 master_query_planning_post(self, planning_plm);
               }
               // CreateTable
-              MasterPLm::CreateTable(plm) => match plm {
-                TMPLm::Prepared(prepared) => {
-                  let query_id = prepared.query_id;
-                  let mut es = CreateTableTMES::new(
-                    query_id.clone(),
-                    CreateTableTMInner {
-                      response_data: None,
-                      table_path: prepared.payload.table_path,
-                      key_cols: prepared.payload.key_cols,
-                      val_cols: prepared.payload.val_cols,
-                      shards: prepared.payload.shards,
-                      timestamp_hint: None,
-                    },
-                  );
-                  es.init_follower(self, io_ctx);
-                  btree_map_insert(&mut statuses.create_table_tm_ess, &query_id, es);
-                }
-                TMPLm::Committed(committed) => {
-                  let query_id = committed.query_id.clone();
-                  let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_committed_plm(self, io_ctx, committed);
-                  self.handle_create_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Aborted(aborted) => {
-                  let query_id = aborted.query_id;
-                  let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_aborted_plm(self, io_ctx);
-                  self.handle_create_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Closed(closed) => {
-                  let query_id = closed.query_id.clone();
-                  let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_closed_plm(self, io_ctx, closed);
-                  self.handle_create_table_es_action(statuses, query_id, action);
-                }
-              },
+              MasterPLm::CreateTable(plm) => {
+                let (query_id, action) =
+                  handle_tm_plm(self, io_ctx, &mut statuses.create_table_tm_ess, plm);
+                self.handle_create_table_es_action(statuses, query_id, action);
+              }
               // AlterTable
-              MasterPLm::AlterTable(plm) => match plm {
-                TMPLm::Prepared(prepared) => {
-                  let query_id = prepared.query_id;
-                  let mut es = AlterTableTMES::new(
-                    query_id.clone(),
-                    AlterTableTMInner {
-                      response_data: None,
-                      table_path: prepared.payload.table_path,
-                      alter_op: prepared.payload.alter_op,
-                    },
-                  );
-                  es.init_follower(self, io_ctx);
-                  btree_map_insert(&mut statuses.alter_table_tm_ess, &query_id.clone(), es);
-                }
-                TMPLm::Committed(committed) => {
-                  let query_id = committed.query_id.clone();
-                  let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_committed_plm(self, io_ctx, committed);
-                  self.handle_alter_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Aborted(aborted) => {
-                  let query_id = aborted.query_id;
-                  let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_aborted_plm(self, io_ctx);
-                  self.handle_alter_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Closed(closed) => {
-                  let query_id = closed.query_id.clone();
-                  let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_closed_plm(self, io_ctx, closed);
-                  self.handle_alter_table_es_action(statuses, query_id, action);
-                }
-              },
+              MasterPLm::AlterTable(plm) => {
+                let (query_id, action) =
+                  handle_tm_plm(self, io_ctx, &mut statuses.alter_table_tm_ess, plm);
+                self.handle_alter_table_es_action(statuses, query_id, action);
+              }
               // DropTable
-              MasterPLm::DropTable(plm) => match plm {
-                TMPLm::Prepared(prepared) => {
-                  let query_id = prepared.query_id;
-                  let mut es = DropTableTMES::new(
-                    query_id.clone(),
-                    DropTableTMInner {
-                      response_data: None,
-                      table_path: prepared.payload.table_path,
-                    },
-                  );
-                  es.init_follower(self, io_ctx);
-                  btree_map_insert(&mut statuses.drop_table_tm_ess, &query_id.clone(), es);
-                }
-                TMPLm::Committed(committed) => {
-                  let query_id = committed.query_id.clone();
-                  let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_committed_plm(self, io_ctx, committed);
-                  self.handle_drop_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Aborted(aborted) => {
-                  let query_id = aborted.query_id;
-                  let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_aborted_plm(self, io_ctx);
-                  self.handle_drop_table_es_action(statuses, query_id, action);
-                }
-                TMPLm::Closed(closed) => {
-                  let query_id = closed.query_id.clone();
-                  let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_closed_plm(self, io_ctx, closed);
-                  self.handle_drop_table_es_action(statuses, query_id, action);
-                }
-              },
+              MasterPLm::DropTable(plm) => {
+                let (query_id, action) =
+                  handle_tm_plm(self, io_ctx, &mut statuses.drop_table_tm_ess, plm);
+                self.handle_drop_table_es_action(statuses, query_id, action);
+              }
             }
           }
         }
@@ -796,68 +648,23 @@ impl MasterContext {
             statuses.planning_ess.remove(&cancel_query_planning.query_id);
           }
           // CreateTable
-          MasterRemotePayload::CreateTable(msg) => match msg {
-            TMMessage::Prepared(prepared) => {
-              let query_id = prepared.query_id.clone();
-              let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.handle_prepared(self, io_ctx, prepared);
-              self.handle_create_table_es_action(statuses, query_id, action);
-            }
-            TMMessage::Aborted(aborted) => {
-              let query_id = aborted.query_id.clone();
-              let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.handle_aborted(self, io_ctx);
-              self.handle_create_table_es_action(statuses, query_id, action);
-            }
-            TMMessage::Closed(closed) => {
-              let query_id = closed.query_id.clone();
-              let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.handle_close_confirmed(self, io_ctx, closed);
-              self.handle_create_table_es_action(statuses, query_id, action);
-            }
-          },
+          MasterRemotePayload::CreateTable(message) => {
+            let (query_id, action) =
+              handle_tm_msg(self, io_ctx, &mut statuses.create_table_tm_ess, message);
+            self.handle_create_table_es_action(statuses, query_id, action);
+          }
           // AlterTable
-          MasterRemotePayload::AlterTable(msg) => match msg {
-            TMMessage::Prepared(prepared) => {
-              let query_id = prepared.query_id.clone();
-              let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.handle_prepared(self, io_ctx, prepared);
-              self.handle_alter_table_es_action(statuses, query_id, action);
-            }
-            TMMessage::Aborted(aborted) => {
-              let query_id = aborted.query_id.clone();
-              let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.handle_aborted(self, io_ctx);
-              self.handle_alter_table_es_action(statuses, query_id, action);
-            }
-            TMMessage::Closed(closed) => {
-              let query_id = closed.query_id.clone();
-              let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.handle_close_confirmed(self, io_ctx, closed);
-              self.handle_alter_table_es_action(statuses, query_id, action);
-            }
-          },
+          MasterRemotePayload::AlterTable(message) => {
+            let (query_id, action) =
+              handle_tm_msg(self, io_ctx, &mut statuses.alter_table_tm_ess, message);
+            self.handle_alter_table_es_action(statuses, query_id, action);
+          }
           // DropTable
-          MasterRemotePayload::DropTable(msg) => match msg {
-            TMMessage::Prepared(prepared) => {
-              let query_id = prepared.query_id.clone();
-              let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.handle_prepared(self, io_ctx, prepared);
-              self.handle_drop_table_es_action(statuses, query_id, action);
-            }
-            TMMessage::Aborted(aborted) => {
-              let query_id = aborted.query_id.clone();
-              let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.handle_aborted(self, io_ctx);
-              self.handle_drop_table_es_action(statuses, query_id, action);
-            }
-            TMMessage::Closed(closed) => {
-              let query_id = closed.query_id.clone();
-              let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.handle_close_confirmed(self, io_ctx, closed);
-              self.handle_drop_table_es_action(statuses, query_id, action);
-            }
-          },
+          MasterRemotePayload::DropTable(message) => {
+            let (query_id, action) =
+              handle_tm_msg(self, io_ctx, &mut statuses.drop_table_tm_ess, message);
+            self.handle_drop_table_es_action(statuses, query_id, action);
+          }
           MasterRemotePayload::MasterGossipRequest(_) => {}
         }
 
@@ -869,7 +676,7 @@ impl MasterContext {
         let lid = remote_leader_changed.lid.clone();
         self.leader_map.insert(gid.clone(), lid.clone()); // Update the LeadershipId
 
-        // Create
+        // CreateTable
         let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
         for query_id in query_ids {
           let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();

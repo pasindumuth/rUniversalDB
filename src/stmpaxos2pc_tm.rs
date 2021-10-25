@@ -226,6 +226,14 @@ pub enum TMMessage<T: PayloadTypes> {
 // -----------------------------------------------------------------------------------------------
 
 pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
+  /// Constructs an instance of `STMPaxos2PCTMInner` from a Prepared PLm. This is used primarily
+  /// by the Follower.
+  fn new_follower<IO: BasicIOCtx<T::NetworkMessageT>>(
+    ctx: &mut T::TMContext,
+    io_ctx: &mut IO,
+    payload: T::TMPreparedPLm,
+  ) -> Self;
+
   /// Called in order to get the `TMPreparedPLm` to insert.
   fn mk_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
@@ -690,5 +698,100 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
       _ => {}
     }
     STMPaxos2PCTMAction::Wait
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Aggregate STM ES Management
+// -----------------------------------------------------------------------------------------------
+pub trait AggregateContainer<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> {
+  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut STMPaxos2PCTMOuter<T, InnerT>>;
+
+  fn insert(&mut self, query_id: QueryId, es: STMPaxos2PCTMOuter<T, InnerT>);
+}
+
+/// Implementation for HashMap, which is the common case.
+impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> AggregateContainer<T, InnerT>
+  for BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>
+{
+  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut STMPaxos2PCTMOuter<T, InnerT>> {
+    self.get_mut(query_id)
+  }
+
+  fn insert(&mut self, query_id: QueryId, es: STMPaxos2PCTMOuter<T, InnerT>) {
+    self.insert(query_id, es);
+  }
+}
+
+/// Function to handle the insertion of an `TMPLm` for a given `AggregateContainer`.
+pub fn handle_tm_plm<
+  T: PayloadTypes,
+  InnerT: STMPaxos2PCTMInner<T>,
+  ConT: AggregateContainer<T, InnerT>,
+  IO: BasicIOCtx<T::NetworkMessageT>,
+>(
+  ctx: &mut T::TMContext,
+  io_ctx: &mut IO,
+  con: &mut ConT,
+  plm: TMPLm<T>,
+) -> (QueryId, STMPaxos2PCTMAction) {
+  match plm {
+    TMPLm::Prepared(prepared) => {
+      if ctx.is_leader() {
+        let es = con.get_mut(&prepared.query_id).unwrap();
+        (prepared.query_id, es.handle_prepared_plm(ctx, io_ctx))
+      } else {
+        // Recall that for a Follower, for a Prepared, we must contruct
+        // the ES for the first time.
+        let mut outer = STMPaxos2PCTMOuter::new(
+          prepared.query_id.clone(),
+          InnerT::new_follower(ctx, io_ctx, prepared.payload),
+        );
+        outer.init_follower(ctx, io_ctx);
+        con.insert(prepared.query_id.clone(), outer);
+        (prepared.query_id, STMPaxos2PCTMAction::Wait)
+      }
+    }
+    TMPLm::Committed(committed) => {
+      let query_id = committed.query_id.clone();
+      let es = con.get_mut(&query_id).unwrap();
+      (query_id, es.handle_committed_plm(ctx, io_ctx, committed))
+    }
+    TMPLm::Aborted(aborted) => {
+      let es = con.get_mut(&aborted.query_id).unwrap();
+      (aborted.query_id, es.handle_aborted_plm(ctx, io_ctx))
+    }
+    TMPLm::Closed(closed) => {
+      let es = con.get_mut(&closed.query_id).unwrap();
+      (closed.query_id.clone(), es.handle_closed_plm(ctx, io_ctx, closed))
+    }
+  }
+}
+
+/// Function to handle the arrive of an `TMMessage` for a given `AggregateContainer`.
+pub fn handle_tm_msg<
+  T: PayloadTypes,
+  InnerT: STMPaxos2PCTMInner<T>,
+  ConT: AggregateContainer<T, InnerT>,
+  IO: BasicIOCtx<T::NetworkMessageT>,
+>(
+  ctx: &mut T::TMContext,
+  io_ctx: &mut IO,
+  con: &mut ConT,
+  msg: TMMessage<T>,
+) -> (QueryId, STMPaxos2PCTMAction) {
+  match msg {
+    TMMessage::Prepared(prepared) => {
+      let es = con.get_mut(&prepared.query_id).unwrap();
+      (prepared.query_id.clone(), es.handle_prepared(ctx, io_ctx, prepared))
+    }
+    TMMessage::Aborted(aborted) => {
+      let es = con.get_mut(&aborted.query_id).unwrap();
+      (aborted.query_id, es.handle_aborted(ctx, io_ctx))
+    }
+    TMMessage::Closed(closed) => {
+      let es = con.get_mut(&closed.query_id).unwrap();
+      (closed.query_id.clone(), es.handle_close_confirmed(ctx, io_ctx, closed))
+    }
   }
 }
