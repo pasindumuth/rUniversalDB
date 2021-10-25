@@ -1,5 +1,6 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::model::common::{proc, PaxosGroupId, QueryId};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,53 +55,52 @@ pub trait RMPathTrait {
 
 pub trait PayloadTypes: Clone {
   // Meta
-  type RMPLm: Debug + Clone;
-  type TMPLm: Debug + Clone;
-  type RMPath: Debug + Clone + PartialEq + Eq + PartialOrd + Ord + RMPathTrait;
-  type TMPath: Debug + Clone;
-  type RMMessage: Debug + Clone;
-  type TMMessage: Debug + Clone;
+  type RMPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type TMPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type RMPath: Serialize
+    + DeserializeOwned
+    + Debug
+    + Clone
+    + PartialEq
+    + Eq
+    + PartialOrd
+    + Ord
+    + RMPathTrait;
+  type TMPath: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type RMMessage: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type TMMessage: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
   type NetworkMessageT;
   type RMContext: RMServerContext<Self>;
   type TMContext: TMServerContext<Self>;
 
   // TM PLm
-  type TMPreparedPLm: Debug + Clone;
-  type TMCommittedPLm: Debug + Clone;
-  type TMAbortedPLm: Debug + Clone;
-  type TMClosedPLm: Debug + Clone;
+  type TMPreparedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type TMCommittedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type TMAbortedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type TMClosedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
 
-  fn tm_prepared_plm(prepared_plm: TMPreparedPLm<Self>) -> Self::TMPLm;
-  fn tm_committed_plm(committed_plm: TMCommittedPLm<Self>) -> Self::TMPLm;
-  fn tm_aborted_plm(aborted_plm: TMAbortedPLm<Self>) -> Self::TMPLm;
-  fn tm_closed_plm(closed_plm: TMClosedPLm<Self>) -> Self::TMPLm;
+  fn tm_plm(plm: TMPLm<Self>) -> Self::TMPLm;
 
   // RM PLm
-  type RMPreparedPLm: Debug + Clone;
-  type RMCommittedPLm: Debug + Clone;
-  type RMAbortedPLm: Debug + Clone;
+  type RMPreparedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type RMCommittedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type RMAbortedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
 
-  fn rm_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> Self::RMPLm;
-  fn rm_committed_plm(committed_plm: RMCommittedPLm<Self>) -> Self::RMPLm;
-  fn rm_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> Self::RMPLm;
+  fn rm_plm(plm: RMPLm<Self>) -> Self::RMPLm;
 
   // TM-to-RM Messages
-  type Prepare: Debug + Clone;
-  type Abort: Debug + Clone;
-  type Commit: Debug + Clone;
+  type Prepare: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type Abort: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type Commit: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
 
-  fn rm_prepare(prepare: Prepare<Self>) -> Self::RMMessage;
-  fn rm_commit(commit: Commit<Self>) -> Self::RMMessage;
-  fn rm_abort(abort: Abort<Self>) -> Self::RMMessage;
+  fn rm_msg(msg: RMMessage<Self>) -> Self::RMMessage;
 
   // RM-to-TM Messages
-  type Prepared: Debug + Clone;
-  type Aborted: Debug + Clone;
-  type Closed: Debug + Clone;
+  type Prepared: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type Aborted: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type Closed: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
 
-  fn tm_prepared(prepared: Prepared<Self>) -> Self::TMMessage;
-  fn tm_aborted(aborted: Aborted<Self>) -> Self::TMMessage;
-  fn tm_closed(closed: Closed<Self>) -> Self::TMMessage;
+  fn tm_msg(msg: TMMessage<Self>) -> Self::TMMessage;
 }
 
 // TM PLm
@@ -128,6 +128,14 @@ pub struct TMClosedPLm<T: PayloadTypes> {
   pub payload: T::TMClosedPLm,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum TMPLm<T: PayloadTypes> {
+  Prepared(TMPreparedPLm<T>),
+  Committed(TMCommittedPLm<T>),
+  Aborted(TMAbortedPLm<T>),
+  Closed(TMClosedPLm<T>),
+}
+
 // RM PLm
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RMPreparedPLm<T: PayloadTypes> {
@@ -146,6 +154,13 @@ pub struct RMCommittedPLm<T: PayloadTypes> {
 pub struct RMAbortedPLm<T: PayloadTypes> {
   pub query_id: QueryId,
   pub payload: T::RMAbortedPLm,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum RMPLm<T: PayloadTypes> {
+  Prepared(RMPreparedPLm<T>),
+  Committed(RMCommittedPLm<T>),
+  Aborted(RMAbortedPLm<T>),
 }
 
 // TM-to-RM Messages
@@ -168,6 +183,13 @@ pub struct Commit<T: PayloadTypes> {
   pub payload: T::Commit,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum RMMessage<T: PayloadTypes> {
+  Prepare(Prepare<T>),
+  Abort(Abort<T>),
+  Commit(Commit<T>),
+}
+
 // RM-to-TM Messages
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Prepared<T: PayloadTypes> {
@@ -187,6 +209,13 @@ pub struct Closed<T: PayloadTypes> {
   pub query_id: QueryId,
   pub rm: T::RMPath,
   pub payload: T::Closed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum TMMessage<T: PayloadTypes> {
+  Prepared(Prepared<T>),
+  Aborted(Aborted<T>),
+  Closed(Closed<T>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -344,10 +373,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         if preparing.rms_remaining.remove(&prepared.rm) {
           preparing.prepared.insert(prepared.rm.clone(), prepared.payload);
           if preparing.rms_remaining.is_empty() {
-            let committed_plm = T::tm_committed_plm(TMCommittedPLm {
+            let committed_plm = T::tm_plm(TMPLm::Committed(TMCommittedPLm {
               query_id: self.query_id.clone(),
               payload: self.inner.mk_committed_plm(ctx, io_ctx, &preparing.prepared),
-            });
+            }));
             ctx.push_plm(committed_plm);
             self.state = State::InsertingTMCommitted;
           }
@@ -365,10 +394,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   ) -> STMPaxos2PCTMAction {
     match &mut self.state {
       State::Preparing(_) => {
-        let aborted_plm = T::tm_aborted_plm(TMAbortedPLm {
+        let aborted_plm = T::tm_plm(TMPLm::Aborted(TMAbortedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_aborted_plm(ctx, io_ctx),
-        });
+        }));
         ctx.push_plm(aborted_plm);
         self.state = State::InsertingTMAborted;
       }
@@ -388,10 +417,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         if committed.rms_remaining.remove(&closed.rm) {
           if committed.rms_remaining.is_empty() {
             // All RMs have committed
-            let closed_plm = T::tm_closed_plm(TMClosedPLm {
+            let closed_plm = T::tm_plm(TMPLm::Closed(TMClosedPLm {
               query_id: self.query_id.clone(),
               payload: self.inner.mk_closed_plm(ctx, io_ctx),
-            });
+            }));
             ctx.push_plm(closed_plm);
             self.state = State::InsertingTMClosed;
           }
@@ -401,10 +430,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         if aborted.rms_remaining.remove(&closed.rm) {
           if aborted.rms_remaining.is_empty() {
             // All RMs have aborted
-            let closed_plm = T::tm_closed_plm(TMClosedPLm {
+            let closed_plm = T::tm_plm(TMPLm::Closed(TMClosedPLm {
               query_id: self.query_id.clone(),
               payload: self.inner.mk_closed_plm(ctx, io_ctx),
-            });
+            }));
             ctx.push_plm(closed_plm);
             self.state = State::InsertingTMClosed;
           }
@@ -427,7 +456,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     let mut rms_remaining = BTreeSet::<T::RMPath>::new();
     for (rm, payload) in prepare_payloads.clone() {
       let prepare = Prepare { query_id: self.query_id.clone(), tm: ctx.mk_node_path(), payload };
-      ctx.send_to_rm(io_ctx, &rm, T::rm_prepare(prepare));
+      ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Prepare(prepare)));
       rms_remaining.insert(rm);
     }
 
@@ -460,7 +489,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     let mut rms_remaining = BTreeSet::<T::RMPath>::new();
     for (rm, payload) in commit_payloads.clone() {
       let commit = Commit { query_id: self.query_id.clone(), payload };
-      ctx.send_to_rm(io_ctx, &rm, T::rm_commit(commit));
+      ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Commit(commit)));
       rms_remaining.insert(rm);
     }
 
@@ -501,7 +530,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     let mut rms_remaining = BTreeSet::<T::RMPath>::new();
     for (rm, payload) in abort_payloads.clone() {
       let abort = Abort { query_id: self.query_id.clone(), payload };
-      ctx.send_to_rm(io_ctx, &rm, T::rm_abort(abort));
+      ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Abort(abort)));
       rms_remaining.insert(rm);
     }
 
@@ -560,10 +589,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   ) -> STMPaxos2PCTMAction {
     match &self.state {
       State::WaitingInsertTMPrepared => {
-        let prepared = T::tm_prepared_plm(TMPreparedPLm {
+        let prepared = T::tm_plm(TMPLm::Prepared(TMPreparedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_prepared_plm(ctx, io_ctx),
-        });
+        }));
         ctx.push_plm(prepared);
         self.state = State::InsertTMPreparing;
       }
@@ -628,7 +657,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
             let payload = prepare_payloads.get(rm).unwrap().clone();
             let prepare =
               Prepare { query_id: self.query_id.clone(), tm: ctx.mk_node_path(), payload };
-            ctx.send_to_rm(io_ctx, &rm, T::rm_prepare(prepare));
+            ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Prepare(prepare)));
           }
         }
       }
@@ -639,7 +668,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
           if rm.to_gid() == remote_leader_changed.gid {
             let payload = commit_payloads.get(rm).unwrap().clone();
             let commit = Commit { query_id: self.query_id.clone(), payload };
-            ctx.send_to_rm(io_ctx, &rm, T::rm_commit(commit));
+            ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Commit(commit)));
           }
         }
       }
@@ -650,7 +679,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
           if rm.to_gid() == remote_leader_changed.gid {
             let payload = abort_payloads.get(rm).unwrap().clone();
             let abort = Abort { query_id: self.query_id.clone(), payload };
-            ctx.send_to_rm(io_ctx, &rm, T::rm_abort(abort));
+            ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Abort(abort)));
           }
         }
       }

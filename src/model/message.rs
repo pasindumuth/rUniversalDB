@@ -95,20 +95,9 @@ pub enum MasterRemotePayload {
   PerformMasterQueryPlanning(PerformMasterQueryPlanning),
   CancelMasterQueryPlanning(CancelMasterQueryPlanning),
 
-  // CreateTable TM Messages
-  CreateTablePrepared(stmpaxos2pc_tm::Prepared<CreateTablePayloadTypes>),
-  CreateTableAborted(stmpaxos2pc_tm::Aborted<CreateTablePayloadTypes>),
-  CreateTableClosed(stmpaxos2pc_tm::Closed<CreateTablePayloadTypes>),
-
-  // AlterTable TM Messages
-  AlterTablePrepared(stmpaxos2pc_tm::Prepared<AlterTablePayloadTypes>),
-  AlterTableAborted(stmpaxos2pc_tm::Aborted<AlterTablePayloadTypes>),
-  AlterTableClosed(stmpaxos2pc_tm::Closed<AlterTablePayloadTypes>),
-
-  // DropTable TM Messages
-  DropTablePrepared(stmpaxos2pc_tm::Prepared<DropTablePayloadTypes>),
-  DropTableAborted(stmpaxos2pc_tm::Aborted<DropTablePayloadTypes>),
-  DropTableClosed(stmpaxos2pc_tm::Closed<DropTablePayloadTypes>),
+  CreateTable(stmpaxos2pc_tm::TMMessage<CreateTablePayloadTypes>),
+  AlterTable(stmpaxos2pc_tm::TMMessage<AlterTablePayloadTypes>),
+  DropTable(stmpaxos2pc_tm::TMMessage<DropTablePayloadTypes>),
 
   // Gossip
   MasterGossipRequest(MasterGossipRequest),
@@ -122,10 +111,9 @@ pub enum SlaveRemotePayload {
   RemoteLeaderChanged(RemoteLeaderChanged),
 
   // CreateTable RM Messages
-  CreateTablePrepare(stmpaxos2pc_tm::Prepare<CreateTablePayloadTypes>),
-  CreateTableCommit(stmpaxos2pc_tm::Commit<CreateTablePayloadTypes>),
-  CreateTableAbort(stmpaxos2pc_tm::Abort<CreateTablePayloadTypes>),
+  CreateTable(stmpaxos2pc_tm::RMMessage<CreateTablePayloadTypes>),
 
+  // Gossip
   MasterGossip(MasterGossip),
 
   // Forwarding Messages
@@ -146,15 +134,9 @@ pub enum TabletMessage {
   FinishQueryCommit(FinishQueryCommit),
   FinishQueryCheckPrepared(FinishQueryCheckPrepared),
 
-  // AlterTable RM Messages
-  AlterTablePrepare(stmpaxos2pc_tm::Prepare<AlterTablePayloadTypes>),
-  AlterTableAbort(stmpaxos2pc_tm::Abort<AlterTablePayloadTypes>),
-  AlterTableCommit(stmpaxos2pc_tm::Commit<AlterTablePayloadTypes>),
-
-  // DropTable RM Messages
-  DropTablePrepare(stmpaxos2pc_tm::Prepare<DropTablePayloadTypes>),
-  DropTableAbort(stmpaxos2pc_tm::Abort<DropTablePayloadTypes>),
-  DropTableCommit(stmpaxos2pc_tm::Commit<DropTablePayloadTypes>),
+  // DDL RM Messages
+  AlterTable(stmpaxos2pc_tm::RMMessage<AlterTablePayloadTypes>),
+  DropTable(stmpaxos2pc_tm::RMMessage<DropTablePayloadTypes>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

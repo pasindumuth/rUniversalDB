@@ -42,7 +42,7 @@ use crate::server::{
 use crate::slave::SlaveBackMessage;
 use crate::stmpaxos2pc_rm::STMPaxos2PCRMAction;
 use crate::stmpaxos2pc_tm as paxos2pc;
-use crate::stmpaxos2pc_tm::{Closed, PayloadTypes, RMServerContext};
+use crate::stmpaxos2pc_tm::{Closed, PayloadTypes, RMMessage, RMPLm, RMServerContext, TMMessage};
 use crate::storage::{compress_updates_views, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
@@ -477,12 +477,8 @@ pub enum TabletPLm {
   FinishQueryPrepared(plm::FinishQueryPrepared),
   FinishQueryCommitted(plm::FinishQueryCommitted),
   FinishQueryAborted(plm::FinishQueryAborted),
-  AlterTablePrepared(paxos2pc::RMPreparedPLm<AlterTablePayloadTypes>),
-  AlterTableCommitted(paxos2pc::RMCommittedPLm<AlterTablePayloadTypes>),
-  AlterTableAborted(paxos2pc::RMAbortedPLm<AlterTablePayloadTypes>),
-  DropTablePrepared(paxos2pc::RMPreparedPLm<DropTablePayloadTypes>),
-  DropTableCommitted(paxos2pc::RMCommittedPLm<DropTablePayloadTypes>),
-  DropTableAborted(paxos2pc::RMAbortedPLm<DropTablePayloadTypes>),
+  AlterTable(paxos2pc::RMPLm<AlterTablePayloadTypes>),
+  DropTable(paxos2pc::RMPLm<DropTablePayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -711,6 +707,7 @@ impl TabletContext {
                   self.handle_read_es_action(io_ctx, statuses, query_id, action);
                 }
               }
+              // FinishQuery
               TabletPLm::FinishQueryPrepared(prepared) => {
                 let query_id = prepared.query_id;
                 let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
@@ -729,42 +726,48 @@ impl TabletContext {
                 let action = finish_query_es.handle_aborted_plm(self);
                 self.handle_finish_query_es_action(statuses, query_id, action);
               }
-              TabletPLm::AlterTablePrepared(_) => {
-                let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_prepared_plm(self, io_ctx);
-                let query_id = es.query_id.clone();
-                self.handle_alter_table_es_action(statuses, query_id, action);
-              }
-              TabletPLm::AlterTableCommitted(committed_plm) => {
-                let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_committed_plm(self, io_ctx, committed_plm);
-                let query_id = es.query_id.clone();
-                self.handle_alter_table_es_action(statuses, query_id, action);
-              }
-              TabletPLm::AlterTableAborted(_) => {
-                let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_aborted_plm(self, io_ctx);
-                let query_id = es.query_id.clone();
-                self.handle_alter_table_es_action(statuses, query_id, action);
-              }
-              TabletPLm::DropTablePrepared(_) => {
-                let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_prepared_plm(self, io_ctx);
-                let query_id = es.query_id.clone();
-                self.handle_drop_table_es_action(statuses, query_id, action);
-              }
-              TabletPLm::DropTableCommitted(committed_plm) => {
-                let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_committed_plm(self, io_ctx, committed_plm);
-                let query_id = es.query_id.clone();
-                self.handle_drop_table_es_action(statuses, query_id, action);
-              }
-              TabletPLm::DropTableAborted(_) => {
-                let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_aborted_plm(self, io_ctx);
-                let query_id = es.query_id.clone();
-                self.handle_drop_table_es_action(statuses, query_id, action);
-              }
+              // AlterTable
+              TabletPLm::AlterTable(plm) => match plm {
+                RMPLm::Prepared(_) => {
+                  let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
+                  let action = es.handle_prepared_plm(self, io_ctx);
+                  let query_id = es.query_id.clone();
+                  self.handle_alter_table_es_action(statuses, query_id, action);
+                }
+                RMPLm::Committed(committed_plm) => {
+                  let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
+                  let action = es.handle_committed_plm(self, io_ctx, committed_plm);
+                  let query_id = es.query_id.clone();
+                  self.handle_alter_table_es_action(statuses, query_id, action);
+                }
+                RMPLm::Aborted(_) => {
+                  let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
+                  let action = es.handle_aborted_plm(self, io_ctx);
+                  let query_id = es.query_id.clone();
+                  self.handle_alter_table_es_action(statuses, query_id, action);
+                }
+              },
+              // DropTable
+              TabletPLm::DropTable(plm) => match plm {
+                RMPLm::Prepared(_) => {
+                  let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
+                  let action = es.handle_prepared_plm(self, io_ctx);
+                  let query_id = es.query_id.clone();
+                  self.handle_drop_table_es_action(statuses, query_id, action);
+                }
+                RMPLm::Committed(committed_plm) => {
+                  let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
+                  let action = es.handle_committed_plm(self, io_ctx, committed_plm);
+                  let query_id = es.query_id.clone();
+                  self.handle_drop_table_es_action(statuses, query_id, action);
+                }
+                RMPLm::Aborted(_) => {
+                  let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
+                  let action = es.handle_aborted_plm(self, io_ctx);
+                  let query_id = es.query_id.clone();
+                  self.handle_drop_table_es_action(statuses, query_id, action);
+                }
+              },
             }
           }
 
@@ -808,6 +811,7 @@ impl TabletContext {
                   read_protected.region,
                 );
               }
+              // FinishQuery
               TabletPLm::FinishQueryPrepared(prepared) => {
                 let query_id = prepared.query_id;
                 let timestamp = prepared.timestamp;
@@ -838,56 +842,62 @@ impl TabletContext {
                 let action = finish_query_es.handle_aborted_plm(self);
                 self.handle_finish_query_es_action(statuses, query_id, action);
               }
-              TabletPLm::AlterTablePrepared(prepared) => {
-                debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-                let mut es = AlterTableES::new(
-                  prepared.query_id,
-                  prepared.tm,
-                  AlterTableRMInner {
-                    alter_op: prepared.payload.alter_op,
-                    prepared_timestamp: prepared.payload.timestamp,
-                  },
-                );
-                es.init_follower(self, io_ctx);
-                statuses.ddl_es = DDLES::Alter(es);
-              }
-              TabletPLm::AlterTableCommitted(committed_plm) => {
-                let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_committed_plm(self, io_ctx, committed_plm);
-                let query_id = es.query_id.clone();
-                self.handle_alter_table_es_action(statuses, query_id, action);
-              }
-              TabletPLm::AlterTableAborted(_) => {
-                let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_aborted_plm(self, io_ctx);
-                let query_id = es.query_id.clone();
-                self.handle_alter_table_es_action(statuses, query_id, action);
-              }
-              TabletPLm::DropTablePrepared(prepared) => {
-                debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-                let mut es = DropTableES::new(
-                  prepared.query_id,
-                  prepared.tm,
-                  DropTableRMInner {
-                    prepared_timestamp: prepared.payload.timestamp,
-                    committed_timestamp: None,
-                  },
-                );
-                es.init_follower(self, io_ctx);
-                statuses.ddl_es = DDLES::Drop(es);
-              }
-              TabletPLm::DropTableCommitted(committed_plm) => {
-                let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_committed_plm(self, io_ctx, committed_plm);
-                let query_id = es.query_id.clone();
-                self.handle_drop_table_es_action(statuses, query_id, action);
-              }
-              TabletPLm::DropTableAborted(_) => {
-                let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
-                let action = es.handle_aborted_plm(self, io_ctx);
-                let query_id = es.query_id.clone();
-                self.handle_drop_table_es_action(statuses, query_id, action);
-              }
+              // AlterTable
+              TabletPLm::AlterTable(plm) => match plm {
+                RMPLm::Prepared(prepared) => {
+                  debug_assert!(matches!(statuses.ddl_es, DDLES::None));
+                  let mut es = AlterTableES::new(
+                    prepared.query_id,
+                    prepared.tm,
+                    AlterTableRMInner {
+                      alter_op: prepared.payload.alter_op,
+                      prepared_timestamp: prepared.payload.timestamp,
+                    },
+                  );
+                  es.init_follower(self, io_ctx);
+                  statuses.ddl_es = DDLES::Alter(es);
+                }
+                RMPLm::Committed(committed_plm) => {
+                  let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
+                  let action = es.handle_committed_plm(self, io_ctx, committed_plm);
+                  let query_id = es.query_id.clone();
+                  self.handle_alter_table_es_action(statuses, query_id, action);
+                }
+                RMPLm::Aborted(_) => {
+                  let es = cast!(DDLES::Alter, &mut statuses.ddl_es).unwrap();
+                  let action = es.handle_aborted_plm(self, io_ctx);
+                  let query_id = es.query_id.clone();
+                  self.handle_alter_table_es_action(statuses, query_id, action);
+                }
+              },
+              // DropTable
+              TabletPLm::DropTable(plm) => match plm {
+                RMPLm::Prepared(prepared) => {
+                  debug_assert!(matches!(statuses.ddl_es, DDLES::None));
+                  let mut es = DropTableES::new(
+                    prepared.query_id,
+                    prepared.tm,
+                    DropTableRMInner {
+                      prepared_timestamp: prepared.payload.timestamp,
+                      committed_timestamp: None,
+                    },
+                  );
+                  es.init_follower(self, io_ctx);
+                  statuses.ddl_es = DDLES::Drop(es);
+                }
+                RMPLm::Committed(committed_plm) => {
+                  let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
+                  let action = es.handle_committed_plm(self, io_ctx, committed_plm);
+                  let query_id = es.query_id.clone();
+                  self.handle_drop_table_es_action(statuses, query_id, action);
+                }
+                RMPLm::Aborted(_) => {
+                  let es = cast!(DDLES::Drop, &mut statuses.ddl_es).unwrap();
+                  let action = es.handle_aborted_plm(self, io_ctx);
+                  let query_id = es.query_id.clone();
+                  self.handle_drop_table_es_action(statuses, query_id, action);
+                }
+              },
             }
           }
         }
@@ -1191,112 +1201,128 @@ impl TabletContext {
               self.handle_finish_query_es_action(statuses, query_id, action);
             }
           }
-          msg::TabletMessage::AlterTablePrepare(prepare) => {
-            if let DDLES::Alter(es) = &mut statuses.ddl_es {
-              es.handle_prepare(self, io_ctx);
-            } else {
-              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-              // Construct the `preparing_timestamp`
-              let mut timestamp = io_ctx.now();
-              let col_name = &prepare.payload.alter_op.col_name;
-              timestamp = max(timestamp, self.table_schema.val_cols.get_lat(col_name));
-              for (_, req) in
-                self.waiting_locked_cols.iter().chain(self.inserting_locked_cols.iter())
-              {
-                if req.cols.contains(col_name) {
-                  timestamp = max(timestamp, req.timestamp);
+          msg::TabletMessage::AlterTable(msg) => {
+            match msg {
+              RMMessage::Prepare(prepare) => {
+                if let DDLES::Alter(es) = &mut statuses.ddl_es {
+                  es.handle_prepare(self, io_ctx);
+                } else {
+                  debug_assert!(matches!(statuses.ddl_es, DDLES::None));
+                  // Construct the `preparing_timestamp`
+                  let mut timestamp = io_ctx.now();
+                  let col_name = &prepare.payload.alter_op.col_name;
+                  timestamp = max(timestamp, self.table_schema.val_cols.get_lat(col_name));
+                  for (_, req) in
+                    self.waiting_locked_cols.iter().chain(self.inserting_locked_cols.iter())
+                  {
+                    if req.cols.contains(col_name) {
+                      timestamp = max(timestamp, req.timestamp);
+                    }
+                  }
+                  timestamp += 1;
+
+                  // Construct an AlterTableES and set it to `ddl_es`.
+                  statuses.ddl_es = DDLES::Alter(AlterTableES::new(
+                    prepare.query_id,
+                    prepare.tm,
+                    AlterTableRMInner {
+                      alter_op: prepare.payload.alter_op,
+                      prepared_timestamp: timestamp,
+                    },
+                  ));
                 }
               }
-              timestamp += 1;
-
-              // Construct an AlterTableES and set it to `ddl_es`.
-              statuses.ddl_es = DDLES::Alter(AlterTableES::new(
-                prepare.query_id,
-                prepare.tm,
-                AlterTableRMInner {
-                  alter_op: prepare.payload.alter_op,
-                  prepared_timestamp: timestamp,
-                },
-              ));
-            }
-          }
-          msg::TabletMessage::AlterTableAbort(abort) => {
-            if let DDLES::Alter(es) = &mut statuses.ddl_es {
-              es.handle_abort(self, io_ctx);
-            } else {
-              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-              // Send back a `Closed` to the Master.
-              let this_node_path = self.mk_node_path();
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableClosed(Closed {
-                query_id: abort.query_id,
-                rm: this_node_path,
-                payload: AlterTableClosed {},
-              }));
-            }
-          }
-          msg::TabletMessage::AlterTableCommit(commit) => {
-            if let DDLES::Alter(es) = &mut statuses.ddl_es {
-              es.handle_commit(self, io_ctx, commit);
-            } else {
-              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-              // Send back a `Closed` to the Master.
-              let this_node_path = self.mk_node_path();
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTableClosed(Closed {
-                query_id: commit.query_id,
-                rm: this_node_path,
-                payload: AlterTableClosed {},
-              }));
-            }
-          }
-          msg::TabletMessage::DropTablePrepare(prepare) => {
-            if let DDLES::Drop(es) = &mut statuses.ddl_es {
-              es.handle_prepare(self, io_ctx);
-            } else {
-              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-              // Construct the `preparing_timestamp`
-              let mut timestamp = io_ctx.now();
-              timestamp = max(timestamp, self.table_schema.val_cols.get_latest_lat());
-              for (_, req) in
-                self.waiting_locked_cols.iter().chain(self.inserting_locked_cols.iter())
-              {
-                timestamp = max(timestamp, req.timestamp);
+              RMMessage::Abort(abort) => {
+                if let DDLES::Alter(es) = &mut statuses.ddl_es {
+                  es.handle_abort(self, io_ctx);
+                } else {
+                  debug_assert!(matches!(statuses.ddl_es, DDLES::None));
+                  // Send back a `Closed` to the Master.
+                  let this_node_path = self.mk_node_path();
+                  self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTable(
+                    TMMessage::Closed(Closed {
+                      query_id: abort.query_id,
+                      rm: this_node_path,
+                      payload: AlterTableClosed {},
+                    }),
+                  ));
+                }
               }
-              timestamp += 1;
+              RMMessage::Commit(commit) => {
+                if let DDLES::Alter(es) = &mut statuses.ddl_es {
+                  es.handle_commit(self, io_ctx, commit);
+                } else {
+                  debug_assert!(matches!(statuses.ddl_es, DDLES::None));
+                  // Send back a `Closed` to the Master.
+                  let this_node_path = self.mk_node_path();
+                  self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::AlterTable(
+                    TMMessage::Closed(Closed {
+                      query_id: commit.query_id,
+                      rm: this_node_path,
+                      payload: AlterTableClosed {},
+                    }),
+                  ));
+                }
+              }
+            }
+          }
+          msg::TabletMessage::DropTable(msg) => {
+            match msg {
+              RMMessage::Prepare(prepare) => {
+                if let DDLES::Drop(es) = &mut statuses.ddl_es {
+                  es.handle_prepare(self, io_ctx);
+                } else {
+                  debug_assert!(matches!(statuses.ddl_es, DDLES::None));
+                  // Construct the `preparing_timestamp`
+                  let mut timestamp = io_ctx.now();
+                  timestamp = max(timestamp, self.table_schema.val_cols.get_latest_lat());
+                  for (_, req) in
+                    self.waiting_locked_cols.iter().chain(self.inserting_locked_cols.iter())
+                  {
+                    timestamp = max(timestamp, req.timestamp);
+                  }
+                  timestamp += 1;
 
-              // Construct an DropTableES set it to `ddl_es`.
-              statuses.ddl_es = DDLES::Drop(DropTableES::new(
-                prepare.query_id,
-                prepare.tm,
-                DropTableRMInner { prepared_timestamp: timestamp, committed_timestamp: None },
-              ));
-            }
-          }
-          msg::TabletMessage::DropTableAbort(abort) => {
-            if let DDLES::Drop(es) = &mut statuses.ddl_es {
-              es.handle_abort(self, io_ctx);
-            } else {
-              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-              // Send back a `Closed` to the Master.
-              let this_node_path = self.mk_node_path();
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableClosed(Closed {
-                query_id: abort.query_id,
-                rm: this_node_path,
-                payload: DropTableClosed {},
-              }));
-            }
-          }
-          msg::TabletMessage::DropTableCommit(commit) => {
-            if let DDLES::Drop(es) = &mut statuses.ddl_es {
-              es.handle_commit(self, io_ctx, commit);
-            } else {
-              debug_assert!(matches!(statuses.ddl_es, DDLES::None));
-              // Send back a `Closed` to the Master.
-              let this_node_path = self.mk_node_path();
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTableClosed(Closed {
-                query_id: commit.query_id,
-                rm: this_node_path,
-                payload: DropTableClosed {},
-              }));
+                  // Construct an DropTableES set it to `ddl_es`.
+                  statuses.ddl_es = DDLES::Drop(DropTableES::new(
+                    prepare.query_id,
+                    prepare.tm,
+                    DropTableRMInner { prepared_timestamp: timestamp, committed_timestamp: None },
+                  ));
+                }
+              }
+              RMMessage::Abort(abort) => {
+                if let DDLES::Drop(es) = &mut statuses.ddl_es {
+                  es.handle_abort(self, io_ctx);
+                } else {
+                  debug_assert!(matches!(statuses.ddl_es, DDLES::None));
+                  // Send back a `Closed` to the Master.
+                  let this_node_path = self.mk_node_path();
+                  self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTable(
+                    TMMessage::Closed(Closed {
+                      query_id: abort.query_id,
+                      rm: this_node_path,
+                      payload: DropTableClosed {},
+                    }),
+                  ));
+                }
+              }
+              RMMessage::Commit(commit) => {
+                if let DDLES::Drop(es) = &mut statuses.ddl_es {
+                  es.handle_commit(self, io_ctx, commit);
+                } else {
+                  debug_assert!(matches!(statuses.ddl_es, DDLES::None));
+                  // Send back a `Closed` to the Master.
+                  let this_node_path = self.mk_node_path();
+                  self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::DropTable(
+                    TMMessage::Closed(Closed {
+                      query_id: commit.query_id,
+                      rm: this_node_path,
+                      payload: DropTableClosed {},
+                    }),
+                  ));
+                }
+              }
             }
           }
         }

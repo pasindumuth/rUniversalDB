@@ -10,8 +10,8 @@ use crate::multiversion_map::MVM;
 use crate::slave::{SlaveContext, SlavePLm};
 use crate::stmpaxos2pc_tm::{
   Abort, Aborted, Closed, Commit, PayloadTypes, Prepare, Prepared, RMAbortedPLm, RMCommittedPLm,
-  RMPreparedPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMAbortedPLm, TMClosedPLm, TMCommittedPLm,
-  TMPreparedPLm,
+  RMMessage, RMPLm, RMPreparedPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMAbortedPLm,
+  TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm, TMPreparedPLm,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
@@ -119,20 +119,8 @@ impl PayloadTypes for CreateTablePayloadTypes {
   type TMAbortedPLm = CreateTableTMAborted;
   type TMClosedPLm = CreateTableTMClosed;
 
-  fn tm_prepared_plm(prepared_plm: TMPreparedPLm<Self>) -> MasterPLm {
-    MasterPLm::CreateTableTMPrepared(prepared_plm)
-  }
-
-  fn tm_committed_plm(committed_plm: TMCommittedPLm<Self>) -> MasterPLm {
-    MasterPLm::CreateTableTMCommitted(committed_plm)
-  }
-
-  fn tm_aborted_plm(aborted_plm: TMAbortedPLm<Self>) -> MasterPLm {
-    MasterPLm::CreateTableTMAborted(aborted_plm)
-  }
-
-  fn tm_closed_plm(closed_plm: TMClosedPLm<Self>) -> MasterPLm {
-    MasterPLm::CreateTableTMClosed(closed_plm)
+  fn tm_plm(plm: TMPLm<Self>) -> Self::TMPLm {
+    MasterPLm::CreateTable(plm)
   }
 
   // RM PLm
@@ -140,16 +128,8 @@ impl PayloadTypes for CreateTablePayloadTypes {
   type RMCommittedPLm = CreateTableRMCommitted;
   type RMAbortedPLm = CreateTableRMAborted;
 
-  fn rm_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> SlavePLm {
-    SlavePLm::CreateTablePrepared(prepared_plm)
-  }
-
-  fn rm_committed_plm(committed_plm: RMCommittedPLm<Self>) -> SlavePLm {
-    SlavePLm::CreateTableCommitted(committed_plm)
-  }
-
-  fn rm_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> SlavePLm {
-    SlavePLm::CreateTableAborted(aborted_plm)
+  fn rm_plm(plm: RMPLm<Self>) -> Self::RMPLm {
+    SlavePLm::CreateTable(plm)
   }
 
   // TM-to-RM Messages
@@ -157,16 +137,8 @@ impl PayloadTypes for CreateTablePayloadTypes {
   type Abort = CreateTableAbort;
   type Commit = CreateTableCommit;
 
-  fn rm_prepare(prepare: Prepare<Self>) -> msg::SlaveRemotePayload {
-    msg::SlaveRemotePayload::CreateTablePrepare(prepare)
-  }
-
-  fn rm_commit(commit: Commit<Self>) -> msg::SlaveRemotePayload {
-    msg::SlaveRemotePayload::CreateTableCommit(commit)
-  }
-
-  fn rm_abort(abort: Abort<Self>) -> msg::SlaveRemotePayload {
-    msg::SlaveRemotePayload::CreateTableAbort(abort)
+  fn rm_msg(msg: RMMessage<Self>) -> Self::RMMessage {
+    msg::SlaveRemotePayload::CreateTable(msg)
   }
 
   // RM-to-TM Messages
@@ -174,16 +146,8 @@ impl PayloadTypes for CreateTablePayloadTypes {
   type Aborted = CreateTableAborted;
   type Closed = CreateTableClosed;
 
-  fn tm_prepared(prepared: Prepared<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::CreateTablePrepared(prepared)
-  }
-
-  fn tm_aborted(aborted: Aborted<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::CreateTableAborted(aborted)
-  }
-
-  fn tm_closed(closed: Closed<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::CreateTableClosed(closed)
+  fn tm_msg(msg: TMMessage<Self>) -> Self::TMMessage {
+    msg::MasterRemotePayload::CreateTable(msg)
   }
 }
 

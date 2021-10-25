@@ -7,8 +7,8 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::stmpaxos2pc_tm::{
   Abort, Aborted, Closed, Commit, PayloadTypes, Prepare, Prepared, RMAbortedPLm, RMCommittedPLm,
-  RMPreparedPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMAbortedPLm, TMClosedPLm, TMCommittedPLm,
-  TMPreparedPLm,
+  RMMessage, RMPLm, RMPreparedPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMAbortedPLm,
+  TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm, TMPreparedPLm,
 };
 use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
@@ -101,20 +101,8 @@ impl PayloadTypes for DropTablePayloadTypes {
   type TMAbortedPLm = DropTableTMAborted;
   type TMClosedPLm = DropTableTMClosed;
 
-  fn tm_prepared_plm(prepared_plm: TMPreparedPLm<Self>) -> MasterPLm {
-    MasterPLm::DropTableTMPrepared(prepared_plm)
-  }
-
-  fn tm_committed_plm(committed_plm: TMCommittedPLm<Self>) -> MasterPLm {
-    MasterPLm::DropTableTMCommitted(committed_plm)
-  }
-
-  fn tm_aborted_plm(aborted_plm: TMAbortedPLm<Self>) -> MasterPLm {
-    MasterPLm::DropTableTMAborted(aborted_plm)
-  }
-
-  fn tm_closed_plm(closed_plm: TMClosedPLm<Self>) -> MasterPLm {
-    MasterPLm::DropTableTMClosed(closed_plm)
+  fn tm_plm(plm: TMPLm<Self>) -> Self::TMPLm {
+    MasterPLm::DropTable(plm)
   }
 
   // RM PLm
@@ -122,16 +110,8 @@ impl PayloadTypes for DropTablePayloadTypes {
   type RMCommittedPLm = DropTableRMCommitted;
   type RMAbortedPLm = DropTableRMAborted;
 
-  fn rm_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> TabletPLm {
-    TabletPLm::DropTablePrepared(prepared_plm)
-  }
-
-  fn rm_committed_plm(committed_plm: RMCommittedPLm<Self>) -> TabletPLm {
-    TabletPLm::DropTableCommitted(committed_plm)
-  }
-
-  fn rm_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> TabletPLm {
-    TabletPLm::DropTableAborted(aborted_plm)
+  fn rm_plm(plm: RMPLm<Self>) -> Self::RMPLm {
+    TabletPLm::DropTable(plm)
   }
 
   // TM-to-RM Messages
@@ -139,16 +119,8 @@ impl PayloadTypes for DropTablePayloadTypes {
   type Abort = DropTableAbort;
   type Commit = DropTableCommit;
 
-  fn rm_prepare(prepare: Prepare<Self>) -> msg::TabletMessage {
-    msg::TabletMessage::DropTablePrepare(prepare)
-  }
-
-  fn rm_commit(commit: Commit<Self>) -> msg::TabletMessage {
-    msg::TabletMessage::DropTableCommit(commit)
-  }
-
-  fn rm_abort(abort: Abort<Self>) -> msg::TabletMessage {
-    msg::TabletMessage::DropTableAbort(abort)
+  fn rm_msg(msg: RMMessage<Self>) -> Self::RMMessage {
+    msg::TabletMessage::DropTable(msg)
   }
 
   // RM-to-TM Messages
@@ -156,16 +128,8 @@ impl PayloadTypes for DropTablePayloadTypes {
   type Aborted = DropTableAborted;
   type Closed = DropTableClosed;
 
-  fn tm_prepared(prepared: Prepared<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::DropTablePrepared(prepared)
-  }
-
-  fn tm_aborted(aborted: Aborted<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::DropTableAborted(aborted)
-  }
-
-  fn tm_closed(closed: Closed<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::DropTableClosed(closed)
+  fn tm_msg(msg: TMMessage<Self>) -> Self::TMMessage {
+    msg::MasterRemotePayload::DropTable(msg)
   }
 }
 

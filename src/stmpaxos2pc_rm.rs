@@ -1,8 +1,8 @@
 use crate::common::BasicIOCtx;
 use crate::model::common::{proc, QueryId};
 use crate::stmpaxos2pc_tm::{
-  Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMPreparedPLm,
-  RMServerContext, TMCommittedPLm,
+  Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMPLm, RMPreparedPLm,
+  RMServerContext, TMCommittedPLm, TMMessage,
 };
 
 // -----------------------------------------------------------------------------------------------
@@ -123,7 +123,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     match &self.state {
       State::Prepared(prepared) => {
         // Populate with TM. Hold it here in the RM.
-        ctx.send_to_tm(io_ctx, &self.tm, T::tm_prepared(prepared.clone()));
+        ctx.send_to_tm(io_ctx, &self.tm, T::tm_msg(TMMessage::Prepared(prepared.clone())));
       }
       _ => {}
     }
@@ -138,10 +138,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
   ) -> STMPaxos2PCRMAction {
     match &self.state {
       State::Prepared(_) => {
-        let committed_plm = T::rm_committed_plm(RMCommittedPLm {
+        let committed_plm = T::rm_plm(RMPLm::Committed(RMCommittedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_committed_plm(ctx, io_ctx, &commit.payload),
-        });
+        }));
         ctx.push_plm(committed_plm);
         self.state = State::InsertingCommitted;
       }
@@ -165,10 +165,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
         STMPaxos2PCRMAction::Wait
       }
       State::Prepared(_) => {
-        let aborted_plm = T::rm_aborted_plm(RMAbortedPLm {
+        let aborted_plm = T::rm_plm(RMPLm::Aborted(RMAbortedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_aborted_plm(ctx, io_ctx),
-        });
+        }));
         ctx.push_plm(aborted_plm);
         self.state = State::InsertingAborted;
         STMPaxos2PCRMAction::Wait
@@ -202,15 +202,15 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     match &self.state {
       State::InsertingPrepared => {
         let prepared = self._handle_prepared_plm(ctx, io_ctx);
-        ctx.send_to_tm(io_ctx, &self.tm, T::tm_prepared(prepared.clone()));
+        ctx.send_to_tm(io_ctx, &self.tm, T::tm_msg(TMMessage::Prepared(prepared.clone())));
         self.state = State::Prepared(prepared);
       }
       State::InsertingPreparedAborted => {
         self._handle_prepared_plm(ctx, io_ctx);
-        let aborted_plm = T::rm_aborted_plm(RMAbortedPLm {
+        let aborted_plm = T::rm_plm(RMPLm::Aborted(RMAbortedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_aborted_plm(ctx, io_ctx),
-        });
+        }));
         ctx.push_plm(aborted_plm);
         self.state = State::InsertingAborted;
       }
@@ -272,7 +272,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
           tm: self.tm.clone(),
           payload: self.inner.mk_prepared_plm(ctx, io_ctx),
         };
-        ctx.push_plm(T::rm_prepared_plm(prepared_plm));
+        ctx.push_plm(T::rm_plm(RMPLm::Prepared(prepared_plm)));
         self.state = State::InsertingPrepared;
       }
       _ => {}
@@ -311,6 +311,6 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
       rm: this_node_path,
       payload: self.inner.mk_closed(ctx, io_ctx),
     };
-    ctx.send_to_tm(io_ctx, &self.tm, T::tm_closed(closed));
+    ctx.send_to_tm(io_ctx, &self.tm, T::tm_msg(TMMessage::Closed(closed)));
   }
 }

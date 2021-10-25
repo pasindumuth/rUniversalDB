@@ -6,8 +6,8 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::stmpaxos2pc_tm::{
   Abort, Aborted, Closed, Commit, PayloadTypes, Prepare, Prepared, RMAbortedPLm, RMCommittedPLm,
-  RMPreparedPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMAbortedPLm, TMClosedPLm, TMCommittedPLm,
-  TMPreparedPLm,
+  RMMessage, RMPLm, RMPreparedPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMAbortedPLm,
+  TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm, TMPreparedPLm,
 };
 use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
@@ -104,20 +104,8 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type TMAbortedPLm = AlterTableTMAborted;
   type TMClosedPLm = AlterTableTMClosed;
 
-  fn tm_prepared_plm(prepared_plm: TMPreparedPLm<Self>) -> MasterPLm {
-    MasterPLm::AlterTableTMPrepared(prepared_plm)
-  }
-
-  fn tm_committed_plm(committed_plm: TMCommittedPLm<Self>) -> MasterPLm {
-    MasterPLm::AlterTableTMCommitted(committed_plm)
-  }
-
-  fn tm_aborted_plm(aborted_plm: TMAbortedPLm<Self>) -> MasterPLm {
-    MasterPLm::AlterTableTMAborted(aborted_plm)
-  }
-
-  fn tm_closed_plm(closed_plm: TMClosedPLm<Self>) -> MasterPLm {
-    MasterPLm::AlterTableTMClosed(closed_plm)
+  fn tm_plm(plm: TMPLm<Self>) -> Self::TMPLm {
+    MasterPLm::AlterTable(plm)
   }
 
   // RM PLm
@@ -125,16 +113,8 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type RMCommittedPLm = AlterTableRMCommitted;
   type RMAbortedPLm = AlterTableRMAborted;
 
-  fn rm_prepared_plm(prepared_plm: RMPreparedPLm<Self>) -> TabletPLm {
-    TabletPLm::AlterTablePrepared(prepared_plm)
-  }
-
-  fn rm_committed_plm(committed_plm: RMCommittedPLm<Self>) -> TabletPLm {
-    TabletPLm::AlterTableCommitted(committed_plm)
-  }
-
-  fn rm_aborted_plm(aborted_plm: RMAbortedPLm<Self>) -> TabletPLm {
-    TabletPLm::AlterTableAborted(aborted_plm)
+  fn rm_plm(plm: RMPLm<Self>) -> Self::RMPLm {
+    TabletPLm::AlterTable(plm)
   }
 
   // TM-to-RM Messages
@@ -142,16 +122,8 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type Abort = AlterTableAbort;
   type Commit = AlterTableCommit;
 
-  fn rm_prepare(prepare: Prepare<Self>) -> msg::TabletMessage {
-    msg::TabletMessage::AlterTablePrepare(prepare)
-  }
-
-  fn rm_commit(commit: Commit<Self>) -> msg::TabletMessage {
-    msg::TabletMessage::AlterTableCommit(commit)
-  }
-
-  fn rm_abort(abort: Abort<Self>) -> msg::TabletMessage {
-    msg::TabletMessage::AlterTableAbort(abort)
+  fn rm_msg(msg: RMMessage<Self>) -> Self::RMMessage {
+    msg::TabletMessage::AlterTable(msg)
   }
 
   // RM-to-TM Messages
@@ -159,16 +131,8 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type Aborted = AlterTableAborted;
   type Closed = AlterTableClosed;
 
-  fn tm_prepared(prepared: Prepared<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::AlterTablePrepared(prepared)
-  }
-
-  fn tm_aborted(aborted: Aborted<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::AlterTableAborted(aborted)
-  }
-
-  fn tm_closed(closed: Closed<Self>) -> msg::MasterRemotePayload {
-    msg::MasterRemotePayload::AlterTableClosed(closed)
+  fn tm_msg(msg: TMMessage<Self>) -> Self::TMMessage {
+    msg::MasterRemotePayload::AlterTable(msg)
   }
 }
 
