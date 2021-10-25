@@ -1,22 +1,37 @@
 use crate::common::BasicIOCtx;
 use crate::model::common::{proc, QueryId};
 use crate::stmpaxos2pc_tm::{
-  Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMPLm, RMPreparedPLm,
-  RMServerContext, TMCommittedPLm, TMMessage,
+  Abort, Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm,
+  RMPreparedPLm, RMServerContext, TMCommittedPLm, TMMessage,
 };
+use std::collections::{BTreeMap, HashMap};
 
 // -----------------------------------------------------------------------------------------------
 //  STMPaxos2PCRMInner
 // -----------------------------------------------------------------------------------------------
 
 pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
-  /// This is called at various times, like after `CommittedPLm` and `AbortedPLM` are inserted,
-  /// and while in `WaitingInsertingPrepared`, when an `Abort` arrives.
-  fn mk_closed<IO: BasicIOCtx<T::NetworkMessageT>>(
-    &mut self,
+  /// Constructs an instance of `STMPaxos2PCRMInner` from a Prepared PLm. This is used primarily
+  /// by the Follower.
+  fn new<IO: BasicIOCtx<T::NetworkMessageT>>(
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-  ) -> T::Closed;
+    payload: T::Prepare,
+  ) -> Self;
+
+  /// Constructs an instance of `STMPaxos2PCRMInner` from a Prepared PLm. This is used primarily
+  /// by the Follower.
+  fn new_follower<IO: BasicIOCtx<T::NetworkMessageT>>(
+    ctx: &mut T::RMContext,
+    io_ctx: &mut IO,
+    payload: T::RMPreparedPLm,
+  ) -> Self;
+
+  /// This is called at various times, like after `CommittedPLm` and `AbortedPLM` are inserted,
+  /// and while in `WaitingInsertingPrepared`, when an `Abort` arrives.
+  /// NOTE: this has to be a static method because it has to be sendable when the RM has cleaned
+  /// up the ES, but then a late Commit/Abort message arrives.
+  fn mk_closed() -> T::Closed;
 
   /// Called in order to get the `RMPreparedPLm` to insert.
   fn mk_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
@@ -306,11 +321,119 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     io_ctx: &mut IO,
   ) {
     let this_node_path = ctx.mk_node_path();
-    let closed = Closed {
-      query_id: self.query_id.clone(),
-      rm: this_node_path,
-      payload: self.inner.mk_closed(ctx, io_ctx),
-    };
+    let closed =
+      Closed { query_id: self.query_id.clone(), rm: this_node_path, payload: InnerT::mk_closed() };
     ctx.send_to_tm(io_ctx, &self.tm, T::tm_msg(TMMessage::Closed(closed)));
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Aggregate STM ES Management
+// -----------------------------------------------------------------------------------------------
+pub trait AggregateContainer<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> {
+  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut STMPaxos2PCRMOuter<T, InnerT>>;
+
+  fn insert(&mut self, query_id: QueryId, es: STMPaxos2PCRMOuter<T, InnerT>);
+}
+
+/// Implementation for HashMap, which is the common case.
+impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> AggregateContainer<T, InnerT>
+  for HashMap<QueryId, STMPaxos2PCRMOuter<T, InnerT>>
+{
+  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut STMPaxos2PCRMOuter<T, InnerT>> {
+    self.get_mut(query_id)
+  }
+
+  fn insert(&mut self, query_id: QueryId, es: STMPaxos2PCRMOuter<T, InnerT>) {
+    self.insert(query_id, es);
+  }
+}
+
+/// Function to handle the insertion of an `RMPLm` for a given `AggregateContainer`.
+pub fn handle_rm_plm<
+  T: PayloadTypes,
+  InnerT: STMPaxos2PCRMInner<T>,
+  ConT: AggregateContainer<T, InnerT>,
+  IO: BasicIOCtx<T::NetworkMessageT>,
+>(
+  ctx: &mut T::RMContext,
+  io_ctx: &mut IO,
+  con: &mut ConT,
+  plm: RMPLm<T>,
+) -> (QueryId, STMPaxos2PCRMAction) {
+  match plm {
+    RMPLm::Prepared(prepared) => {
+      if ctx.is_leader() {
+        let es = con.get_mut(&prepared.query_id).unwrap();
+        (prepared.query_id, es.handle_prepared_plm(ctx, io_ctx))
+      } else {
+        // Recall that for a Follower, for a Prepared, we must contruct
+        // the ES for the first time.
+        let mut outer = STMPaxos2PCRMOuter::new(
+          prepared.query_id.clone(),
+          prepared.tm,
+          InnerT::new_follower(ctx, io_ctx, prepared.payload),
+        );
+        outer.init_follower(ctx, io_ctx);
+        con.insert(prepared.query_id.clone(), outer);
+        (prepared.query_id, STMPaxos2PCRMAction::Wait)
+      }
+    }
+    RMPLm::Committed(committed) => {
+      let query_id = committed.query_id.clone();
+      let es = con.get_mut(&query_id).unwrap();
+      (query_id, es.handle_committed_plm(ctx, io_ctx, committed))
+    }
+    RMPLm::Aborted(aborted) => {
+      let es = con.get_mut(&aborted.query_id).unwrap();
+      (aborted.query_id, es.handle_aborted_plm(ctx, io_ctx))
+    }
+  }
+}
+
+/// Function to handle the arrive of an `RMMessage` for a given `AggregateContainer`.
+pub fn handle_rm_msg<
+  T: PayloadTypes,
+  InnerT: STMPaxos2PCRMInner<T>,
+  ConT: AggregateContainer<T, InnerT>,
+  IO: BasicIOCtx<T::NetworkMessageT>,
+>(
+  ctx: &mut T::RMContext,
+  io_ctx: &mut IO,
+  con: &mut ConT,
+  msg: RMMessage<T>,
+) -> (QueryId, STMPaxos2PCRMAction) {
+  match msg {
+    RMMessage::Prepare(prepare) => {
+      if let Some(es) = con.get_mut(&prepare.query_id) {
+        (prepare.query_id, es.handle_prepare(ctx, io_ctx))
+      } else {
+        let outer = STMPaxos2PCRMOuter::new(
+          prepare.query_id.clone(),
+          prepare.tm,
+          InnerT::new(ctx, io_ctx, prepare.payload),
+        );
+        con.insert(prepare.query_id.clone(), outer);
+        (prepare.query_id, STMPaxos2PCRMAction::Wait)
+      }
+    }
+    RMMessage::Abort(Abort { query_id, tm, .. })
+    | RMMessage::Commit(Commit { query_id, tm, .. }) => {
+      if let Some(es) = con.get_mut(&query_id) {
+        (query_id, es.handle_abort(ctx, io_ctx))
+      } else {
+        let this_node_path = ctx.mk_node_path();
+        ctx.send_to_tm(
+          io_ctx,
+          &tm,
+          T::tm_msg(TMMessage::Closed(Closed {
+            query_id: query_id.clone(),
+            rm: this_node_path,
+            payload: InnerT::mk_closed(),
+          })),
+        );
+        (query_id, STMPaxos2PCRMAction::Wait)
+      }
+    }
   }
 }

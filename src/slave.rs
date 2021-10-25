@@ -15,7 +15,7 @@ use crate::model::message as msg;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use crate::server::{MainSlaveServerContext, ServerContextBase};
-use crate::stmpaxos2pc_rm::STMPaxos2PCRMAction;
+use crate::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::{Closed, RMMessage, RMPLm, RMServerContext, TMMessage};
 use crate::tablet::{GRQueryESWrapper, TabletBundle, TabletForwardMsg, TransTableReadESWrapper};
@@ -406,26 +406,11 @@ impl SlaveContext {
         if self.is_leader() {
           for paxos_log_msg in bundle {
             match paxos_log_msg {
-              SlavePLm::CreateTable(plm) => match plm {
-                RMPLm::Prepared(prepared) => {
-                  let query_id = prepared.query_id;
-                  let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_prepared_plm(self, io_ctx);
-                  self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
-                }
-                RMPLm::Committed(committed) => {
-                  let query_id = committed.query_id.clone();
-                  let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_committed_plm(self, io_ctx, committed);
-                  self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
-                }
-                RMPLm::Aborted(aborted) => {
-                  let query_id = aborted.query_id;
-                  let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_aborted_plm(self, io_ctx);
-                  self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
-                }
-              },
+              SlavePLm::CreateTable(plm) => {
+                let (query_id, action) =
+                  handle_rm_plm(self, io_ctx, &mut statuses.create_table_ess, plm);
+                self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
+              }
             }
           }
 
@@ -436,38 +421,11 @@ impl SlaveContext {
         } else {
           for paxos_log_msg in bundle {
             match paxos_log_msg {
-              SlavePLm::CreateTable(plm) => match plm {
-                RMPLm::Prepared(prepared) => {
-                  let query_id = prepared.query_id.clone();
-                  let mut es = CreateTableES::new(
-                    prepared.query_id,
-                    prepared.tm,
-                    CreateTableRMInner {
-                      tablet_group_id: prepared.payload.tablet_group_id,
-                      table_path: prepared.payload.table_path,
-                      gen: prepared.payload.gen,
-                      key_range: prepared.payload.key_range,
-                      key_cols: prepared.payload.key_cols,
-                      val_cols: prepared.payload.val_cols,
-                      committed_helper: None,
-                    },
-                  );
-                  es.init_follower(self, io_ctx);
-                  map_insert(&mut statuses.create_table_ess, &query_id, es);
-                }
-                RMPLm::Committed(committed) => {
-                  let query_id = committed.query_id.clone();
-                  let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_committed_plm(self, io_ctx, committed);
-                  self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
-                }
-                RMPLm::Aborted(aborted) => {
-                  let query_id = aborted.query_id;
-                  let es = statuses.create_table_ess.get_mut(&query_id).unwrap();
-                  let action = es.handle_aborted_plm(self, io_ctx);
-                  self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
-                }
-              },
+              SlavePLm::CreateTable(plm) => {
+                let (query_id, action) =
+                  handle_rm_plm(self, io_ctx, &mut statuses.create_table_ess, plm);
+                self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
+              }
             }
           }
         }
@@ -490,60 +448,10 @@ impl SlaveContext {
       SlaveForwardMsg::SlaveRemotePayload(payload) => {
         match payload {
           msg::SlaveRemotePayload::RemoteLeaderChanged(_) => {}
-          msg::SlaveRemotePayload::CreateTable(plm) => {
-            match plm {
-              RMMessage::Prepare(prepare) => {
-                let query_id = prepare.query_id;
-                if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
-                  let action = es.handle_prepare(self, io_ctx);
-                  self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
-                } else {
-                  map_insert(
-                    &mut statuses.create_table_ess,
-                    &query_id,
-                    CreateTableES::new(
-                      query_id.clone(),
-                      prepare.tm,
-                      CreateTableRMInner {
-                        tablet_group_id: prepare.payload.tablet_group_id,
-                        table_path: prepare.payload.table_path,
-                        gen: prepare.payload.gen,
-                        key_range: prepare.payload.key_range,
-                        key_cols: prepare.payload.key_cols,
-                        val_cols: prepare.payload.val_cols,
-                        committed_helper: None,
-                      },
-                    ),
-                  );
-                }
-              }
-              RMMessage::Commit(commit) => {
-                let query_id = commit.query_id.clone();
-                if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
-                  let action = es.handle_commit(self, io_ctx, commit);
-                  self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
-                } else {
-                  // Send back a `CloseConfirm` to the Master.
-                  let sid = self.this_sid.clone();
-                  self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTable(
-                    TMMessage::Closed(Closed { query_id, rm: sid, payload: CreateTableClosed {} }),
-                  ));
-                }
-              }
-              RMMessage::Abort(abort) => {
-                let query_id = abort.query_id;
-                if let Some(es) = statuses.create_table_ess.get_mut(&query_id) {
-                  let action = es.handle_abort(self, io_ctx);
-                  self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
-                } else {
-                  // Send back a `CloseConfirm` to the Master.
-                  let sid = self.this_sid.clone();
-                  self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CreateTable(
-                    TMMessage::Closed(Closed { query_id, rm: sid, payload: CreateTableClosed {} }),
-                  ));
-                }
-              }
-            }
+          msg::SlaveRemotePayload::CreateTable(message) => {
+            let (query_id, action) =
+              handle_rm_msg(self, io_ctx, &mut statuses.create_table_ess, message);
+            self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
           }
           msg::SlaveRemotePayload::MasterGossip(master_gossip) => {
             let incoming_gossip = master_gossip.gossip_data;

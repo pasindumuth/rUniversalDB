@@ -1,14 +1,15 @@
 use crate::common::BasicIOCtx;
 use crate::drop_table_tm_es::{
-  DropTableClosed, DropTableCommit, DropTablePayloadTypes, DropTablePrepared, DropTableRMAborted,
-  DropTableRMCommitted, DropTableRMPrepared,
+  DropTableClosed, DropTableCommit, DropTablePayloadTypes, DropTablePrepare, DropTablePrepared,
+  DropTableRMAborted, DropTableRMCommitted, DropTableRMPrepared,
 };
 use crate::model::common::{proc, QueryId, Timestamp};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
-use crate::stmpaxos2pc_tm::RMCommittedPLm;
+use crate::stmpaxos2pc_tm::{PayloadTypes, RMCommittedPLm};
 use crate::tablet::{plm, TabletContext, TabletPLm};
+use std::cmp::max;
 
 // -----------------------------------------------------------------------------------------------
 //  DropTableES Implementation
@@ -26,7 +27,31 @@ pub struct DropTableRMInner {
 pub type DropTableES = STMPaxos2PCRMOuter<DropTablePayloadTypes, DropTableRMInner>;
 
 impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
-  fn mk_closed<IO: BasicIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) -> DropTableClosed {
+  fn new<IO: BasicIOCtx>(
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+    _: DropTablePrepare,
+  ) -> DropTableRMInner {
+    // Construct the `preparing_timestamp`
+    let mut timestamp = io_ctx.now();
+    timestamp = max(timestamp, ctx.table_schema.val_cols.get_latest_lat());
+    for (_, req) in ctx.waiting_locked_cols.iter().chain(ctx.inserting_locked_cols.iter()) {
+      timestamp = max(timestamp, req.timestamp);
+    }
+    timestamp += 1;
+
+    DropTableRMInner { prepared_timestamp: timestamp, committed_timestamp: None }
+  }
+
+  fn new_follower<IO: BasicIOCtx>(
+    _: &mut TabletContext,
+    _: &mut IO,
+    payload: DropTableRMPrepared,
+  ) -> DropTableRMInner {
+    DropTableRMInner { prepared_timestamp: payload.timestamp, committed_timestamp: None }
+  }
+
+  fn mk_closed() -> DropTableClosed {
     DropTableClosed {}
   }
 

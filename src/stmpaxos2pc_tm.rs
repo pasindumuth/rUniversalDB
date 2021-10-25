@@ -1,5 +1,6 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::model::common::{proc, PaxosGroupId, QueryId};
+use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
@@ -174,12 +175,14 @@ pub struct Prepare<T: PayloadTypes> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Abort<T: PayloadTypes> {
   pub query_id: QueryId,
+  pub tm: T::TMPath,
   pub payload: T::Abort,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Commit<T: PayloadTypes> {
   pub query_id: QueryId,
+  pub tm: T::TMPath,
   pub payload: T::Commit,
 }
 
@@ -488,7 +491,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   ) {
     let mut rms_remaining = BTreeSet::<T::RMPath>::new();
     for (rm, payload) in commit_payloads.clone() {
-      let commit = Commit { query_id: self.query_id.clone(), payload };
+      let commit = Commit { query_id: self.query_id.clone(), tm: ctx.mk_node_path(), payload };
       ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Commit(commit)));
       rms_remaining.insert(rm);
     }
@@ -529,7 +532,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   ) {
     let mut rms_remaining = BTreeSet::<T::RMPath>::new();
     for (rm, payload) in abort_payloads.clone() {
-      let abort = Abort { query_id: self.query_id.clone(), payload };
+      let abort = Abort { query_id: self.query_id.clone(), tm: ctx.mk_node_path(), payload };
       ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Abort(abort)));
       rms_remaining.insert(rm);
     }
@@ -667,7 +670,8 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
           // If the RM has not responded and its Leadership changed, we resend Commit.
           if rm.to_gid() == remote_leader_changed.gid {
             let payload = commit_payloads.get(rm).unwrap().clone();
-            let commit = Commit { query_id: self.query_id.clone(), payload };
+            let commit =
+              Commit { query_id: self.query_id.clone(), tm: ctx.mk_node_path(), payload };
             ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Commit(commit)));
           }
         }
@@ -678,7 +682,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
           // If the RM has not responded and its Leadership changed, we resend Abort.
           if rm.to_gid() == remote_leader_changed.gid {
             let payload = abort_payloads.get(rm).unwrap().clone();
-            let abort = Abort { query_id: self.query_id.clone(), payload };
+            let abort = Abort { query_id: self.query_id.clone(), tm: ctx.mk_node_path(), payload };
             ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Abort(abort)));
           }
         }

@@ -1,6 +1,6 @@
 use crate::alter_table_tm_es::{
-  AlterTableClosed, AlterTableCommit, AlterTablePayloadTypes, AlterTablePrepared,
-  AlterTableRMAborted, AlterTableRMCommitted, AlterTableRMPrepared,
+  AlterTableClosed, AlterTableCommit, AlterTablePayloadTypes, AlterTablePrepare,
+  AlterTablePrepared, AlterTableRMAborted, AlterTableRMCommitted, AlterTableRMPrepared,
 };
 use crate::common::BasicIOCtx;
 use crate::model::common::{proc, QueryId, Timestamp};
@@ -9,6 +9,7 @@ use crate::server::ServerContextBase;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::{plm, TabletContext, TabletPLm};
+use std::cmp::max;
 
 // -----------------------------------------------------------------------------------------------
 //  AlterTableES Implementation
@@ -23,7 +24,34 @@ pub struct AlterTableRMInner {
 pub type AlterTableES = STMPaxos2PCRMOuter<AlterTablePayloadTypes, AlterTableRMInner>;
 
 impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
-  fn mk_closed<IO: BasicIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) -> AlterTableClosed {
+  fn new<IO: BasicIOCtx>(
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+    payload: AlterTablePrepare,
+  ) -> AlterTableRMInner {
+    // Construct the `preparing_timestamp`
+    let mut timestamp = io_ctx.now();
+    let col_name = &payload.alter_op.col_name;
+    timestamp = max(timestamp, ctx.table_schema.val_cols.get_lat(col_name));
+    for (_, req) in ctx.waiting_locked_cols.iter().chain(ctx.inserting_locked_cols.iter()) {
+      if req.cols.contains(col_name) {
+        timestamp = max(timestamp, req.timestamp);
+      }
+    }
+    timestamp += 1;
+
+    AlterTableRMInner { alter_op: payload.alter_op, prepared_timestamp: timestamp }
+  }
+
+  fn new_follower<IO: BasicIOCtx>(
+    _: &mut TabletContext,
+    _: &mut IO,
+    payload: AlterTableRMPrepared,
+  ) -> AlterTableRMInner {
+    AlterTableRMInner { alter_op: payload.alter_op, prepared_timestamp: payload.timestamp }
+  }
+
+  fn mk_closed() -> AlterTableClosed {
     AlterTableClosed {}
   }
 

@@ -1,7 +1,7 @@
 use crate::common::{BasicIOCtx, TableSchema};
 use crate::create_table_tm_es::{
-  CreateTableClosed, CreateTableCommit, CreateTablePayloadTypes, CreateTablePrepared,
-  CreateTableRMAborted, CreateTableRMCommitted, CreateTableRMPrepared,
+  CreateTableClosed, CreateTableCommit, CreateTablePayloadTypes, CreateTablePrepare,
+  CreateTablePrepared, CreateTableRMAborted, CreateTableRMCommitted, CreateTableRMPrepared,
 };
 use crate::model::common::{
   proc, ColName, ColType, Gen, QueryId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
@@ -10,7 +10,7 @@ use crate::multiversion_map::MVM;
 use crate::server::ServerContextBase;
 use crate::slave::SlaveContext;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
-use crate::stmpaxos2pc_tm::RMCommittedPLm;
+use crate::stmpaxos2pc_tm::{PayloadTypes, RMCommittedPLm};
 use crate::tablet::{plm, TabletContext, TabletCreateHelper, TabletPLm};
 use rand::RngCore;
 
@@ -36,7 +36,39 @@ pub struct CreateTableRMInner {
 pub type CreateTableES = STMPaxos2PCRMOuter<CreateTablePayloadTypes, CreateTableRMInner>;
 
 impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
-  fn mk_closed<IO: BasicIOCtx>(&mut self, _: &mut SlaveContext, _: &mut IO) -> CreateTableClosed {
+  fn new<IO: BasicIOCtx>(
+    _: &mut SlaveContext,
+    _: &mut IO,
+    payload: CreateTablePrepare,
+  ) -> CreateTableRMInner {
+    CreateTableRMInner {
+      tablet_group_id: payload.tablet_group_id,
+      table_path: payload.table_path,
+      gen: payload.gen,
+      key_range: payload.key_range,
+      key_cols: payload.key_cols,
+      val_cols: payload.val_cols,
+      committed_helper: None,
+    }
+  }
+
+  fn new_follower<IO: BasicIOCtx>(
+    _: &mut SlaveContext,
+    _: &mut IO,
+    payload: CreateTableRMPrepared,
+  ) -> CreateTableRMInner {
+    CreateTableRMInner {
+      tablet_group_id: payload.tablet_group_id,
+      table_path: payload.table_path,
+      gen: payload.gen,
+      key_range: payload.key_range,
+      key_cols: payload.key_cols,
+      val_cols: payload.val_cols,
+      committed_helper: None,
+    }
+  }
+
+  fn mk_closed() -> CreateTableClosed {
     CreateTableClosed {}
   }
 
