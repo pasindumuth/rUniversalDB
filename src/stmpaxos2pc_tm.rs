@@ -361,7 +361,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   }
 
   /// This is only called when the `PreparedPLm` is insert at a Follower node.
-  pub fn init_follower<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn init_follower<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -373,7 +373,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
 
   // STMPaxos2PC messages
 
-  pub fn handle_prepared<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_prepared<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -398,7 +398,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     STMPaxos2PCTMAction::Wait
   }
 
-  pub fn handle_aborted<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_aborted<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -417,7 +417,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     STMPaxos2PCTMAction::Wait
   }
 
-  pub fn handle_close_confirmed<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_close_confirmed<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -475,7 +475,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     self.state = State::Preparing(PreparingSt { rms_remaining, prepared: Default::default() });
   }
 
-  pub fn handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -508,7 +508,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     self.state = State::Committed(CommittedSt { rms_remaining });
   }
 
-  pub fn handle_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -549,7 +549,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     self.state = State::Aborted(AbortedSt { rms_remaining });
   }
 
-  pub fn handle_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -572,7 +572,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   }
 
   /// Simply return Exit in the appropriate states.
-  pub fn handle_closed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_closed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,

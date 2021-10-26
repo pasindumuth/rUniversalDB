@@ -119,7 +119,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
   }
 
   /// This is only called when the `PreparedPLm` is insert at a Follower node.
-  pub fn init_follower<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn init_follower<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -130,7 +130,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
 
   // STMPaxos2PC messages
 
-  pub fn handle_prepare<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_prepare<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -145,7 +145,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn handle_commit<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_commit<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -165,7 +165,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn handle_abort<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_abort<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -209,7 +209,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     prepared
   }
 
-  pub fn handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -234,7 +234,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn handle_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -254,7 +254,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     }
   }
 
-  pub fn handle_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -315,7 +315,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
   }
 
   // Helpers
-  pub fn send_closed<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn send_closed<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -417,15 +417,32 @@ pub fn handle_rm_msg<
         (prepare.query_id, STMPaxos2PCRMAction::Wait)
       }
     }
-    RMMessage::Abort(Abort { query_id, tm, .. })
-    | RMMessage::Commit(Commit { query_id, tm, .. }) => {
-      if let Some(es) = con.get_mut(&query_id) {
-        (query_id, es.handle_abort(ctx, io_ctx))
+    RMMessage::Abort(abort) => {
+      if let Some(es) = con.get_mut(&abort.query_id) {
+        (abort.query_id, es.handle_abort(ctx, io_ctx))
       } else {
         let this_node_path = ctx.mk_node_path();
         ctx.send_to_tm(
           io_ctx,
-          &tm,
+          &abort.tm,
+          T::tm_msg(TMMessage::Closed(Closed {
+            query_id: abort.query_id.clone(),
+            rm: this_node_path,
+            payload: InnerT::mk_closed(),
+          })),
+        );
+        (abort.query_id, STMPaxos2PCRMAction::Wait)
+      }
+    }
+    RMMessage::Commit(commit) => {
+      let query_id = commit.query_id.clone();
+      if let Some(es) = con.get_mut(&query_id) {
+        (query_id, es.handle_commit(ctx, io_ctx, commit.clone()))
+      } else {
+        let this_node_path = ctx.mk_node_path();
+        ctx.send_to_tm(
+          io_ctx,
+          &commit.tm,
           T::tm_msg(TMMessage::Closed(Closed {
             query_id: query_id.clone(),
             rm: this_node_path,

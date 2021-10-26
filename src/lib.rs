@@ -2,14 +2,14 @@
 
 #[macro_use]
 pub mod lang;
-pub mod alter_table_es;
+pub mod alter_table_rm_es;
 pub mod alter_table_tm_es;
 pub mod col_usage;
 pub mod common;
 pub mod coord;
-pub mod create_table_es;
+pub mod create_table_rm_es;
 pub mod create_table_tm_es;
-pub mod drop_table_es;
+pub mod drop_table_rm_es;
 pub mod drop_table_tm_es;
 pub mod experimental;
 pub mod expression;

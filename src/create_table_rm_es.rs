@@ -33,7 +33,7 @@ pub struct CreateTableRMInner {
   pub committed_helper: Option<TabletCreateHelper>,
 }
 
-pub type CreateTableES = STMPaxos2PCRMOuter<CreateTablePayloadTypes, CreateTableRMInner>;
+pub type CreateTableRMES = STMPaxos2PCRMOuter<CreateTablePayloadTypes, CreateTableRMInner>;
 
 impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
   fn new<IO: BasicIOCtx>(

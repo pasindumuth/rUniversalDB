@@ -24,7 +24,7 @@ pub struct DropTableRMInner {
   pub committed_timestamp: Option<Timestamp>,
 }
 
-pub type DropTableES = STMPaxos2PCRMOuter<DropTablePayloadTypes, DropTableRMInner>;
+pub type DropTableRMES = STMPaxos2PCRMOuter<DropTablePayloadTypes, DropTableRMInner>;
 
 impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
   fn new<IO: BasicIOCtx>(

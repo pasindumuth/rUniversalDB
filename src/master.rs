@@ -364,12 +364,12 @@ impl MasterContext {
         }
       }
       MasterMessage::PaxosDriverMessage(paxos_message) => {
-        let bundles = self.paxos_driver.handle_paxos_message(
+        let pl_entries = self.paxos_driver.handle_paxos_message(
           &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
           paxos_message,
         );
-        for shared_bundle in bundles {
-          match shared_bundle {
+        for pl_entry in pl_entries {
+          match pl_entry {
             msg::PLEntry::Bundle(master_bundle) => {
               // Dispatch RemoteLeaderChanges
               for remote_change in master_bundle.remote_leader_changes.clone() {

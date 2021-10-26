@@ -21,7 +21,7 @@ pub struct AlterTableRMInner {
   pub prepared_timestamp: Timestamp,
 }
 
-pub type AlterTableES = STMPaxos2PCRMOuter<AlterTablePayloadTypes, AlterTableRMInner>;
+pub type AlterTableRMES = STMPaxos2PCRMOuter<AlterTablePayloadTypes, AlterTableRMInner>;
 
 impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
   fn new<IO: BasicIOCtx>(

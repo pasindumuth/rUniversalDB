@@ -1,4 +1,4 @@
-use crate::alter_table_es::{AlterTableES, AlterTableRMInner};
+use crate::alter_table_rm_es::{AlterTableRMES, AlterTableRMInner};
 use crate::alter_table_tm_es::{AlterTableClosed, AlterTablePayloadTypes};
 use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, collect_update_subqueries,
@@ -10,7 +10,7 @@ use crate::common::{
   mk_qid, remove_item, BasicIOCtx, ColBound, CoreIOCtx, GossipData, KeyBound, OrigP, PolyColBound,
   RemoteLeaderChangedPLm, SingleBound, TMStatus, TableRegion, TableSchema,
 };
-use crate::drop_table_es::{DropTableES, DropTableRMInner};
+use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::{DropTableClosed, DropTablePayloadTypes};
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
@@ -313,8 +313,8 @@ pub struct Statuses {
 #[derive(Debug)]
 pub enum DDLES {
   None,
-  Alter(AlterTableES),
-  Drop(DropTableES),
+  Alter(AlterTableRMES),
+  Drop(DropTableRMES),
   Dropped(Timestamp),
 }
 
@@ -330,7 +330,7 @@ impl Default for DDLES {
 /// Implementation for DDLES
 
 impl AggregateContainer<AlterTablePayloadTypes, AlterTableRMInner> for DDLES {
-  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut AlterTableES> {
+  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut AlterTableRMES> {
     if let DDLES::Alter(es) = self {
       // Recall that our DDL Coordination scheme requires the previous the previous DDL
       // STMPaxos2PC to be totally done before the next, so we should never get
@@ -344,13 +344,13 @@ impl AggregateContainer<AlterTablePayloadTypes, AlterTableRMInner> for DDLES {
     }
   }
 
-  fn insert(&mut self, _: QueryId, es: AlterTableES) {
+  fn insert(&mut self, _: QueryId, es: AlterTableRMES) {
     *self = DDLES::Alter(es);
   }
 }
 
 impl AggregateContainer<DropTablePayloadTypes, DropTableRMInner> for DDLES {
-  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut DropTableES> {
+  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut DropTableRMES> {
     if let DDLES::Drop(es) = self {
       // Recall that our DDL Coordination scheme requires the previous the previous DDL
       // STMPaxos2PC to be totally done before the next, so we should never get
@@ -364,7 +364,7 @@ impl AggregateContainer<DropTablePayloadTypes, DropTableRMInner> for DDLES {
     }
   }
 
-  fn insert(&mut self, _: QueryId, es: DropTableES) {
+  fn insert(&mut self, _: QueryId, es: DropTableRMES) {
     *self = DDLES::Drop(es);
   }
 }

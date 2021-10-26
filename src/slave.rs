@@ -3,7 +3,7 @@ use crate::common::{
   OrigP, RemoteLeaderChangedPLm, SlaveIOCtx, TMStatus, UUID,
 };
 use crate::coord::CoordForwardMsg;
-use crate::create_table_es::{CreateTableES, CreateTableRMInner};
+use crate::create_table_rm_es::{CreateTableRMES, CreateTableRMInner};
 use crate::create_table_tm_es::{CreateTableClosed, CreateTablePayloadTypes};
 use crate::model::common::{
   iast, proc, CTQueryPath, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, LeadershipId,
@@ -127,7 +127,7 @@ pub enum FullSlaveInput {
 /// other members here.
 #[derive(Debug, Default)]
 pub struct Statuses {
-  create_table_ess: HashMap<QueryId, CreateTableES>,
+  create_table_ess: HashMap<QueryId, CreateTableRMES>,
 }
 
 // -----------------------------------------------------------------------------------------------
