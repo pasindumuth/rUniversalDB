@@ -537,18 +537,6 @@ impl Simulation {
     }
   }
 
-  /// Drops messages until `num_msgs` have been dropped, or until
-  /// there are no more messages to drop.
-  pub fn drop_messages(&mut self, num_msgs: i32) {
-    for _ in 0..num_msgs {
-      if self.nonempty_queues.len() > 0 {
-        let r = self.rand.next_u32() as usize % self.nonempty_queues.len();
-        let (from_eid, to_eid) = self.nonempty_queues.get(r).unwrap().clone();
-        self.poll_msg(&from_eid, &to_eid);
-      }
-    }
-  }
-
   /// This function simply increments the `true_time` by 1ms and delivers 1ms worth of
   /// messages. For simplicity, we assume that this means that every non-empty queue
   /// of messages delivers about one message in this time.

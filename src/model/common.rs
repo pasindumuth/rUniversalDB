@@ -232,6 +232,13 @@ pub type TQueryPath = SlaveQueryPath<TSubNodePath>;
 /// `CQueryPath`
 pub type CQueryPath = SlaveQueryPath<CSubNodePath>;
 
+// Gen
+impl Gen {
+  pub fn next(&self) -> Gen {
+    Gen(self.0 + 1)
+  }
+}
+
 // -------------------------------------------------------------------------------------------------
 //  Paxos
 // -------------------------------------------------------------------------------------------------

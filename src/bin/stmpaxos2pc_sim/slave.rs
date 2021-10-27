@@ -293,6 +293,7 @@ impl SlaveContext {
         }
       },
       SlaveForwardMsg::SlaveRemotePayload(payload) => match payload {
+        SlaveRemotePayload::RemoteLeaderChanged(_) => {}
         SlaveRemotePayload::RMMessage(message) => {
           let (query_id, action) =
             handle_rm_msg(self, io_ctx, &mut statuses.simple_rm_ess, message);

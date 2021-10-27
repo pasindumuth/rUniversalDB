@@ -610,7 +610,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
       self.leader_heartbeat += 1;
       if self.leader_heartbeat > HEARTBEAT_THRESHOLD {
         // This node tries proposing itself as the leader.
-        let gen = Gen(self.leader.gen.0 + 1);
+        let gen = self.leader.gen.next();
         let eid = ctx.this_eid().clone();
         self.propose_next_index(
           ctx,

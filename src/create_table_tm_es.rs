@@ -177,7 +177,7 @@ impl CreateTableTMInner {
   /// Recompute the Gen of the Table that we are trying to create.
   fn compute_gen(&self, ctx: &mut MasterContext) -> Gen {
     if let Some(gen) = ctx.table_generation.get_last_present_version(&self.table_path) {
-      Gen(gen.0 + 1)
+      gen.next()
     } else {
       Gen(0)
     }
