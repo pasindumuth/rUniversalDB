@@ -1,10 +1,10 @@
 use crate::common::BasicIOCtx;
-use crate::model::common::{proc, QueryId};
+use crate::model::common::QueryId;
 use crate::stmpaxos2pc_tm::{
   Abort, Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm,
   RMPreparedPLm, RMServerContext, TMCommittedPLm, TMMessage,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------------------------
 //  STMPaxos2PCRMInner

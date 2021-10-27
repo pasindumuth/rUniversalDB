@@ -3,9 +3,7 @@ use crate::alter_table_tm_es::{
   AlterTablePrepared, AlterTableRMAborted, AlterTableRMCommitted, AlterTableRMPrepared,
 };
 use crate::common::BasicIOCtx;
-use crate::model::common::{proc, QueryId, Timestamp};
-use crate::model::message as msg;
-use crate::server::ServerContextBase;
+use crate::model::common::{proc, Timestamp};
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::{plm, TabletContext, TabletPLm};

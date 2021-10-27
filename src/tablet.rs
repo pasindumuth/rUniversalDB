@@ -1,5 +1,5 @@
 use crate::alter_table_rm_es::{AlterTableRMES, AlterTableRMInner};
-use crate::alter_table_tm_es::{AlterTableClosed, AlterTablePayloadTypes};
+use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::{
   collect_select_subqueries, collect_top_level_cols, collect_update_subqueries,
   node_external_trans_tables, nodes_external_cols, nodes_external_trans_tables, ColUsagePlanner,
@@ -11,7 +11,7 @@ use crate::common::{
   RemoteLeaderChangedPLm, SingleBound, TMStatus, TableRegion, TableSchema,
 };
 use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
-use crate::drop_table_tm_es::{DropTableClosed, DropTablePayloadTypes};
+use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::expression::{
   compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
   construct_kb_expr, does_intersect, evaluate_c_expr, is_true, CExpr, EvalError,
@@ -50,7 +50,6 @@ use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::{Add, Bound, Deref, Sub};
 use std::rc::Rc;
@@ -469,7 +468,7 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
 
 pub mod plm {
   use crate::common::TableRegion;
-  use crate::model::common::{proc, CQueryPath, TQueryPath};
+  use crate::model::common::{CQueryPath, TQueryPath};
   use crate::model::common::{ColName, QueryId, Timestamp};
   use crate::storage::GenericTable;
   use crate::tablet::ReadWriteRegion;

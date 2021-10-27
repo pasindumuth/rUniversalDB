@@ -10,7 +10,7 @@ use crate::multiversion_map::MVM;
 use crate::server::ServerContextBase;
 use crate::slave::SlaveContext;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
-use crate::stmpaxos2pc_tm::{PayloadTypes, RMCommittedPLm};
+use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::{plm, TabletContext, TabletCreateHelper, TabletPLm};
 use rand::RngCore;
 

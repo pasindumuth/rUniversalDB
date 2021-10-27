@@ -2,11 +2,8 @@ use crate::message as msg;
 use crate::message::{ExternalMessage, SlaveMessage, SlaveRemotePayload};
 use crate::simple_rm_es::SimpleRMES;
 use crate::simple_tm_es::{SimplePayloadTypes, SimpleTMES, SimpleTMInner};
-use crate::simulation::{ISlaveIOCtx, SlaveIOCtx};
+use crate::simulation::ISlaveIOCtx;
 use runiversal::common::{BasicIOCtx, RemoteLeaderChangedPLm};
-use runiversal::coord::CoordForwardMsg;
-use runiversal::create_table_rm_es::{CreateTableRMES, CreateTableRMInner};
-use runiversal::create_table_tm_es::{CreateTableClosed, CreateTablePayloadTypes};
 use runiversal::model::common::{
   iast, proc, CTQueryPath, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, LeadershipId,
   NodeGroupId, PaxosGroupId, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
@@ -14,22 +11,16 @@ use runiversal::model::common::{
 };
 use runiversal::model::common::{EndpointId, QueryId};
 use runiversal::network_driver::{NetworkDriver, NetworkDriverContext};
-use runiversal::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
-use runiversal::server::{MainSlaveServerContext, ServerContextBase};
+use runiversal::paxos::PaxosContextBase;
+use runiversal::server::ServerContextBase;
 use runiversal::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
 use runiversal::stmpaxos2pc_tm as paxos2pc;
 use runiversal::stmpaxos2pc_tm::{
   handle_tm_msg, handle_tm_plm, Closed, PayloadTypes, RMMessage, RMPLm, RMServerContext,
   STMPaxos2PCTMAction, TMMessage, TMServerContext,
 };
-use runiversal::tablet::{
-  GRQueryESWrapper, TabletBundle, TabletForwardMsg, TransTableReadESWrapper,
-};
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
 //  SlavePLm
@@ -147,7 +138,7 @@ pub struct SlaveState {
 pub struct SlaveContext {
   // Metadata
   pub this_sid: SlaveGroupId,
-  pub this_gid: PaxosGroupId, // self.this_slave_group_id.to_gid()
+  pub this_gid: PaxosGroupId, // self.this_sid.to_gid()
   pub this_eid: EndpointId,
 
   /// LeaderMap

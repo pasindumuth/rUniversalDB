@@ -1,12 +1,10 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
-use crate::model::common::{proc, PaxosGroupId, QueryId};
-use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
+use crate::model::common::{PaxosGroupId, QueryId};
+use crate::stmpaxos2pc_rm::STMPaxos2PCRMInner;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
-use std::hash::Hash;
 
 // -----------------------------------------------------------------------------------------------
 //  RMServerContext

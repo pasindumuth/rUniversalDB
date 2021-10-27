@@ -1,6 +1,6 @@
 use crate::message as msg;
 use crate::slave::{SlaveBundle, SlaveContext, SlaveState};
-use rand::{RngCore, SeedableRng};
+use rand::SeedableRng;
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{rvec, BasicIOCtx};
 use runiversal::model::common::{EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId};

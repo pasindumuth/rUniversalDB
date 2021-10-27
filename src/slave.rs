@@ -3,8 +3,8 @@ use crate::common::{
   OrigP, RemoteLeaderChangedPLm, SlaveIOCtx, TMStatus, UUID,
 };
 use crate::coord::CoordForwardMsg;
-use crate::create_table_rm_es::{CreateTableRMES, CreateTableRMInner};
-use crate::create_table_tm_es::{CreateTableClosed, CreateTablePayloadTypes};
+use crate::create_table_rm_es::CreateTableRMES;
+use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::model::common::{
   iast, proc, CTQueryPath, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, LeadershipId,
   NodeGroupId, PaxosGroupId, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
@@ -169,7 +169,7 @@ pub struct SlaveContext {
 
   // Metadata
   pub this_sid: SlaveGroupId,
-  pub this_gid: PaxosGroupId, // self.this_slave_group_id.to_gid()
+  pub this_gid: PaxosGroupId, // self.this_sid.to_gid()
   pub this_eid: EndpointId,
 
   /// Gossip

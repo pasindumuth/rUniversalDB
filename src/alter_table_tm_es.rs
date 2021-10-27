@@ -1,7 +1,7 @@
 use crate::common::BasicIOCtx;
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
-  proc, EndpointId, QueryId, RequestId, TNodePath, TSubNodePath, TablePath, Timestamp,
+  proc, EndpointId, RequestId, TNodePath, TSubNodePath, TablePath, Timestamp,
 };
 use crate::model::message as msg;
 use crate::stmpaxos2pc_tm::{

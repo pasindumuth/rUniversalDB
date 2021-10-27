@@ -4,10 +4,9 @@ use crate::simple_tm_es::{
   SimpleRMCommitted, SimpleRMPrepared,
 };
 use crate::slave::SlaveContext;
-use rand::RngCore;
 use runiversal::common::BasicIOCtx;
 use runiversal::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
-use runiversal::stmpaxos2pc_tm::{PayloadTypes, RMCommittedPLm};
+use runiversal::stmpaxos2pc_tm::RMCommittedPLm;
 
 // -----------------------------------------------------------------------------------------------
 //  SimpleES Implementation
