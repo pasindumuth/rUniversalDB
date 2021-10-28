@@ -61,6 +61,17 @@ impl<'a> ISlaveIOCtx for SlaveIOCtx<'a> {
 //  Simulation
 // -------------------------------------------------------------------------------------------------
 
+/// These are values that control the execution of the simulation that can be varied
+/// from the outside during the middle of a simulation.
+#[derive(Debug)]
+pub struct SimParams {
+  /// The probability (in %) of `PLEntry` delivery.
+  pub pl_entry_delivery_prob: u32,
+  /// The probability (in %) of Global PL insertion. The remaining % is the probability
+  /// that there is a Leadership Change.
+  pub global_pl_insertion_prob: u32,
+}
+
 #[derive(Debug)]
 pub struct Simulation {
   pub rand: XorShiftRng,
@@ -86,10 +97,15 @@ pub struct Simulation {
   /// If empty, there will be no entry in this map.
   insert_queues: BTreeMap<EndpointId, VecDeque<msg::PLEntry<SlaveBundle>>>,
   /// The current set of Leaders according to the Global PaxosLog
-  leader_map: HashMap<SlaveGroupId, LeadershipId>,
+  pub leader_map: HashMap<SlaveGroupId, LeadershipId>,
+  /// Non-`LeaderChanged``PLEntry` inserted into every PaxosGroups Global PL.
+  pub global_pls: HashMap<SlaveGroupId, Vec<SlaveBundle>>,
 
   /// Meta
   true_timestamp: u128,
+
+  // Configurables
+  pub sim_params: SimParams,
 }
 
 impl Simulation {
@@ -111,13 +127,15 @@ impl Simulation {
       pending_insert: Default::default(),
       insert_queues: Default::default(),
       leader_map: Default::default(),
+      global_pls: Default::default(),
       true_timestamp: Default::default(),
+      sim_params: SimParams { pl_entry_delivery_prob: 70, global_pl_insertion_prob: 25 },
     };
 
     // Setup eids
     let slave_eids: Vec<EndpointId> =
       slave_address_config.values().cloned().into_iter().flatten().collect();
-    let client_eids: Vec<EndpointId> = rvec(0, num_clients).iter().map(client_eid).collect();
+    let client_eids: Vec<EndpointId> = rvec(0, num_clients).iter().map(mk_client_eid).collect();
     let all_eids: Vec<EndpointId> = vec![]
       .into_iter()
       .chain(slave_eids.iter().cloned())
@@ -159,10 +177,11 @@ impl Simulation {
       }
     }
 
-    // LeaderMap
+    // LeaderMap and Paxos
     for (sid, eids) in slave_address_config {
       let eid = eids[0].clone();
-      sim.leader_map.insert(sid, LeadershipId { gen: Gen(0), eid });
+      sim.leader_map.insert(sid.clone(), LeadershipId { gen: Gen(0), eid });
+      sim.global_pls.insert(sid, vec![]);
     }
 
     // Metadata
@@ -240,6 +259,10 @@ impl Simulation {
   /// Adds the `pl_entry` to the `insert_queues` of all nodes in the PaxosGroup `sid`, and also
   /// clears the `pending_insert` for nodes.
   fn global_pl_insert(&mut self, sid: &SlaveGroupId, pl_entry: msg::PLEntry<SlaveBundle>) {
+    if let msg::PLEntry::Bundle(slave_bundle) = &pl_entry {
+      // If this is a SlaveBundle, then we should record it in `global_pls`.
+      self.global_pls.get_mut(sid).unwrap().push(slave_bundle.clone());
+    }
     for eid in self.slave_address_config.get(sid).unwrap() {
       self.pending_insert.remove(eid);
       if !self.insert_queues.contains_key(eid) {
@@ -255,35 +278,39 @@ impl Simulation {
     // 2. Choose a message to queue up all insert queues.
     // 3. Randomly queue up a Leadership change.
     let rnd = self.rand.next_u32() % 100;
-    if rnd < 70 {
+    if rnd < self.sim_params.pl_entry_delivery_prob {
       // Here, we simply Deliver a PLEntry to a node with a 70% chance.
+      if !self.insert_queues.is_empty() {
+        // Pick a eid that has a non-empty insert_queue
+        let i = self.rand.next_u32() % self.insert_queues.len() as u32;
+        let eids: Vec<EndpointId> = self.insert_queues.keys().cloned().collect();
+        let eid = &eids[i as usize];
 
-      // Pick a eid that has a non-empty insert_queue
-      let i = self.rand.next_u32() % self.insert_queues.len() as u32;
-      let eids: Vec<EndpointId> = self.insert_queues.keys().cloned().collect();
-      let eid = &eids[i as usize];
+        // Poll a PLEntry from it
+        let queue = self.insert_queues.get_mut(&eid).unwrap();
+        let pl_entry = queue.pop_front().unwrap();
+        if queue.is_empty() {
+          self.insert_queues.remove(&eid);
+        }
 
-      // Poll a PLEntry from it
-      let mut queue = self.insert_queues.get_mut(&eid).unwrap();
-      let pl_entry = queue.pop_front().unwrap();
-      if queue.is_empty() {
-        self.insert_queues.remove(&eid);
+        // Deliver the PLEntry
+        self.deliver_slave_input(&eid, FullSlaveInput::PaxosMessage(pl_entry));
       }
-
-      // Deliver the PLEntry
-      self.deliver_slave_input(&eid, FullSlaveInput::PaxosMessage(pl_entry));
-    } else if rnd < 95 {
+    } else if rnd
+      < self.sim_params.pl_entry_delivery_prob + self.sim_params.global_pl_insertion_prob
+    {
       // Here, we choose the next PLEntry in the GlobalPaxosLog of a PaxosGroup with 15% chance.
+      if !self.pending_insert.is_empty() {
+        // Pick a eid that has a non-empty pending_insert
+        let i = self.rand.next_u32() % self.pending_insert.len() as u32;
+        let eids: Vec<EndpointId> = self.pending_insert.keys().cloned().collect();
+        let eid = &eids[i as usize];
+        let pl_entry = self.pending_insert.get(eid).unwrap();
 
-      // Pick a eid that has a non-empty pending_insert
-      let i = self.rand.next_u32() % self.pending_insert.len() as u32;
-      let eids: Vec<EndpointId> = self.pending_insert.keys().cloned().collect();
-      let eid = &eids[i as usize];
-      let pl_entry = self.pending_insert.get(eid).unwrap();
-
-      // Add the entry to even EndpointId in the PaxosGroup
-      let sid = self.slave_address_config_inverse.get(eid).unwrap();
-      self.global_pl_insert(&sid.clone(), pl_entry.clone());
+        // Add the entry to even EndpointId in the PaxosGroup
+        let sid = self.slave_address_config_inverse.get(eid).unwrap();
+        self.global_pl_insert(&sid.clone(), pl_entry.clone());
+      }
     } else {
       // Here, we randomly change the Leadership of a PaxosGroup with a 5% chance.
 
@@ -325,7 +352,7 @@ impl Simulation {
     self.deliver_pl_entry();
   }
 
-  pub fn simulate_n_ms(&mut self, n: i32) {
+  pub fn simulate_n_ms(&mut self, n: u32) {
     for _ in 0..n {
       self.simulate1ms();
     }
@@ -352,12 +379,12 @@ impl Simulation {
 // -----------------------------------------------------------------------------------------------
 
 // Construct the Slave id of the slave at the given index.
-pub fn slave_eid(i: &i32) -> EndpointId {
+pub fn mk_slave_eid(i: &i32) -> EndpointId {
   EndpointId(format!("se{}", i))
 }
 
 // Construct the Client id of the slave at the given index.
-pub fn client_eid(i: &i32) -> EndpointId {
+pub fn mk_client_eid(i: &i32) -> EndpointId {
   EndpointId(format!("ce{}", i))
 }
 

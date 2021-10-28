@@ -1,8 +1,9 @@
 use crate::message as msg;
 use crate::message::{ExternalMessage, SlaveMessage, SlaveRemotePayload};
 use crate::simple_rm_es::SimpleRMES;
-use crate::simple_tm_es::{SimplePayloadTypes, SimpleTMES, SimpleTMInner};
+use crate::simple_tm_es::{SimpleAborted, SimplePayloadTypes, SimpleTMES, SimpleTMInner};
 use crate::simulation::ISlaveIOCtx;
+use rand::RngCore;
 use runiversal::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use runiversal::model::common::{
   iast, proc, CTQueryPath, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, LeadershipId,
@@ -16,7 +17,7 @@ use runiversal::server::ServerContextBase;
 use runiversal::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
 use runiversal::stmpaxos2pc_tm as paxos2pc;
 use runiversal::stmpaxos2pc_tm::{
-  handle_tm_msg, handle_tm_plm, Closed, PayloadTypes, RMMessage, RMPLm, RMServerContext,
+  handle_tm_msg, handle_tm_plm, Aborted, Closed, PayloadTypes, RMMessage, RMPLm, RMServerContext,
   STMPaxos2PCTMAction, TMMessage, TMServerContext,
 };
 use serde::{Deserialize, Serialize};
@@ -29,7 +30,7 @@ use std::collections::{BTreeMap, HashMap};
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub struct SlaveBundle {
   remote_leader_changes: Vec<RemoteLeaderChangedPLm>,
-  plms: Vec<SlavePLm>,
+  pub plms: Vec<SlavePLm>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -295,6 +296,25 @@ impl SlaveContext {
       SlaveForwardMsg::SlaveRemotePayload(payload) => match payload {
         SlaveRemotePayload::RemoteLeaderChanged(_) => {}
         SlaveRemotePayload::RMMessage(message) => {
+          if let RMMessage::Prepare(prepare) = message.clone() {
+            // Here, we randomly decide whether to accept the `Prepare` and proceed to
+            // insert `Prepared`, or whether to respond immediately with an `Aborted`.
+            let r = io_ctx.rand().next_u32() % 100;
+            if r < 5 {
+              // We respond with an `Aborted` with a 5% chance.
+              self.send(
+                io_ctx,
+                &prepare.tm,
+                msg::SlaveRemotePayload::TMMessage(TMMessage::Aborted(Aborted {
+                  query_id: prepare.query_id,
+                  payload: SimpleAborted {},
+                })),
+              );
+              return;
+            }
+          }
+
+          // If we do not abort, we just forward the `Prepare` to `simple_rm_ess`.
           let (query_id, action) =
             handle_rm_msg(self, io_ctx, &mut statuses.simple_rm_ess, message);
           self.handle_simple_rm_es_action(statuses, query_id, action);

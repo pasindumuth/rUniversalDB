@@ -223,6 +223,9 @@ pub enum TMMessage<T: PayloadTypes> {
 //  STMPaxos2PCTMInner
 // -----------------------------------------------------------------------------------------------
 
+/// Properties that must be satisfied by an implementation.
+/// 1. All calls to `*_plm_inserted` must return the same set of keys, i.e. RMs.
+/// 2. The set of RMs must be non-empty (otherwise we deadlock).
 pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
   /// Constructs an instance of `STMPaxos2PCTMInner` from a Prepared PLm. This is used primarily
   /// by the Follower.
