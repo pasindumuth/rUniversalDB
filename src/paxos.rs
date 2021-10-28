@@ -5,6 +5,7 @@ use crate::model::message::{
   LeaderChanged, PLEntry, PLIndex, PaxosDriverMessage, PaxosMessage, Rnd,
 };
 use rand::RngCore;
+use sqlparser::dialect::keywords::Keyword::NEXT;
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, HashMap};
 
@@ -617,6 +618,9 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
         );
       }
     }
+
+    // Schedule another `LeaderHeartbeat`
+    ctx.defer(HEARTBEAT_PRIOD, PaxosTimerEvent::LeaderHeartbeat);
   }
 
   fn next_index_timer<PaxosContextBaseT: PaxosContextBase<BundleT>>(
@@ -633,5 +637,8 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
         }),
       );
     }
+
+    // Schedule another `NextIndex`
+    ctx.defer(NEXT_INDEX_PERIOD, PaxosTimerEvent::NextIndex);
   }
 }

@@ -688,13 +688,14 @@ impl TabletContext {
     }
   }
 
-  pub fn ctx<'a, IO: BasicIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
+  pub fn ctx<'a, IO: BasicIOCtx>(&'a self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
     SlaveServerContext {
       io_ctx,
-      this_slave_group_id: &self.this_sid,
+      this_sid: &self.this_sid,
+      this_eid: &self.this_eid,
       sub_node_path: &self.sub_node_path,
       leader_map: &self.leader_map,
-      gossip: &mut self.gossip,
+      gossip: &self.gossip,
     }
   }
 

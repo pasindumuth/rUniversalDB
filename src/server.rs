@@ -21,6 +21,7 @@ pub trait ServerContextBase {
 
   fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId>;
   fn this_gid(&self) -> PaxosGroupId;
+  fn this_eid(&self) -> &EndpointId;
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
 
   // Send utilities
@@ -139,6 +140,12 @@ pub trait ServerContextBase {
       msg::NetworkMessage::Master(msg::MasterMessage::RemoteMessage(remote_message)),
     );
   }
+
+  /// Returns true iff this is the Leader.
+  fn is_leader(&self) -> bool {
+    let lid = self.leader_map().get(&self.this_gid()).unwrap();
+    &lid.eid == self.this_eid()
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -152,14 +159,15 @@ pub struct SlaveServerContext<'a, IO: BasicIOCtx> {
   pub io_ctx: &'a mut IO,
 
   /// Metadata
-  pub this_slave_group_id: &'a SlaveGroupId,
+  pub this_sid: &'a SlaveGroupId,
+  pub this_eid: &'a EndpointId,
   pub sub_node_path: &'a CTSubNodePath,
 
   /// Paxos
   pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
 
   /// Gossip
-  pub gossip: &'a mut Arc<GossipData>,
+  pub gossip: &'a Arc<GossipData>,
 }
 
 impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
@@ -173,10 +181,7 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
   /// Make a `CTQueryPath` of an ES at this node with `query_id`.
   pub fn mk_this_query_path(&self, query_id: QueryId) -> CTQueryPath {
     CTQueryPath {
-      node_path: CTNodePath {
-        sid: self.this_slave_group_id.clone(),
-        sub: self.sub_node_path.clone(),
-      },
+      node_path: CTNodePath { sid: self.this_sid.clone(), sub: self.sub_node_path.clone() },
       query_id,
     }
   }
@@ -243,7 +248,11 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
 
   /// Gets the `PaxosGroupId` of the Slave.
   fn this_gid(&self) -> PaxosGroupId {
-    PaxosGroupId::Slave(self.this_slave_group_id.clone())
+    PaxosGroupId::Slave(self.this_sid.clone())
+  }
+
+  fn this_eid(&self) -> &EndpointId {
+    self.this_eid
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
@@ -261,7 +270,8 @@ pub struct MainSlaveServerContext<'a, IO: BasicIOCtx> {
   pub io_ctx: &'a mut IO,
 
   /// Metadata
-  pub this_slave_group_id: &'a SlaveGroupId,
+  pub this_sid: &'a SlaveGroupId,
+  pub this_eid: &'a EndpointId,
 
   /// Paxos
   pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
@@ -274,7 +284,11 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for MainSlaveServerContext<'a, IO> {
 
   /// Gets the `PaxosGroupId` of the Slave.
   fn this_gid(&self) -> PaxosGroupId {
-    PaxosGroupId::Slave(self.this_slave_group_id.clone())
+    PaxosGroupId::Slave(self.this_sid.clone())
+  }
+
+  fn this_eid(&self) -> &EndpointId {
+    self.this_eid
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
@@ -292,6 +306,9 @@ pub struct MasterServerContext<'a, IO> {
   /// IO
   pub io_ctx: &'a mut IO,
 
+  /// Metadata
+  pub this_eid: &'a EndpointId,
+
   /// Paxos
   pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
 }
@@ -304,6 +321,10 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for MasterServerContext<'a, IO> {
   /// Gets the `PaxosGroupId` of the Master.
   fn this_gid(&self) -> PaxosGroupId {
     PaxosGroupId::Master
+  }
+
+  fn this_eid(&self) -> &EndpointId {
+    self.this_eid
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {

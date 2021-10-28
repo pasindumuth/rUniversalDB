@@ -25,6 +25,7 @@ use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
+use std::convert::TryInto;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -129,7 +130,8 @@ impl CoordContext {
   pub fn ctx<'a, IO: CoreIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
     SlaveServerContext {
       io_ctx,
-      this_slave_group_id: &self.this_sid,
+      this_sid: &self.this_sid,
+      this_eid: &self.this_eid,
       sub_node_path: &self.sub_node_path,
       leader_map: &self.leader_map,
       gossip: &mut self.gossip,

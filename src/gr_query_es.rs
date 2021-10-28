@@ -426,10 +426,8 @@ impl GRQueryES {
     // Construct the QueryPlan. We amend this Slave to the `query_leader_map`.
     let (_, (_, col_usage_node)) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
     let mut query_leader_map = self.query_plan.query_leader_map.clone();
-    query_leader_map.insert(
-      ctx.this_slave_group_id.clone(),
-      ctx.leader_map.get(&ctx.this_slave_group_id.to_gid()).unwrap().clone(),
-    );
+    query_leader_map
+      .insert(ctx.this_sid.clone(), ctx.leader_map.get(&ctx.this_sid.to_gid()).unwrap().clone());
     let query_plan = QueryPlan {
       tier_map: self.query_plan.tier_map.clone(),
       query_leader_map: query_leader_map.clone(),

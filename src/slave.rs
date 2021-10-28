@@ -104,6 +104,9 @@ pub enum SlaveBackMessage {
 #[derive(Debug)]
 pub enum SlaveTimerInput {
   PaxosTimerEvent(PaxosTimerEvent),
+  /// This is used to periodically propagate out RemoteLeaderChanged. It is
+  /// only used by the Leader.
+  RemoteLeaderChanged,
 }
 
 pub enum FullSlaveInput {
@@ -111,6 +114,12 @@ pub enum FullSlaveInput {
   SlaveBackMessage(SlaveBackMessage),
   SlaveTimerInput(SlaveTimerInput),
 }
+
+// -----------------------------------------------------------------------------------------------
+//  Constants
+// -----------------------------------------------------------------------------------------------
+
+const REMOTE_LEADER_CHANGED_PERIOD: u128 = 1;
 
 // -----------------------------------------------------------------------------------------------
 //  Status
@@ -228,13 +237,11 @@ impl SlaveContext {
     }
   }
 
-  pub fn ctx<'a, IO: BasicIOCtx>(
-    &'a mut self,
-    io_ctx: &'a mut IO,
-  ) -> MainSlaveServerContext<'a, IO> {
+  pub fn ctx<'a, IO: BasicIOCtx>(&'a self, io_ctx: &'a mut IO) -> MainSlaveServerContext<'a, IO> {
     MainSlaveServerContext {
       io_ctx,
-      this_slave_group_id: &self.this_sid,
+      this_sid: &self.this_sid,
+      this_eid: &self.this_eid,
       leader_map: &self.leader_map,
     }
   }
@@ -393,6 +400,27 @@ impl SlaveContext {
           self
             .paxos_driver
             .timer_event(&mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid }, timer_event);
+        }
+        SlaveTimerInput::RemoteLeaderChanged => {
+          if self.is_leader() {
+            // If this node is the Leader, then send out RemoteLeaderChanged to all other
+            // PaxosGroups to help maintain their LeaderMaps.
+            for (pid, _) in &self.leader_map {
+              match pid {
+                PaxosGroupId::Master => self.ctx(io_ctx).send_to_master(
+                  msg::MasterRemotePayload::RemoteLeaderChanged(msg::RemoteLeaderChanged {}),
+                ),
+                PaxosGroupId::Slave(sid) => self.ctx(io_ctx).send_to_slave_common(
+                  sid.clone(),
+                  msg::SlaveRemotePayload::RemoteLeaderChanged(msg::RemoteLeaderChanged {}),
+                ),
+              }
+            }
+          }
+
+          // We schedule this both for all nodes, not just Leaders, so that when a Follower
+          // becomes the Leader, these timer events will already be working.
+          io_ctx.defer(REMOTE_LEADER_CHANGED_PERIOD, SlaveTimerInput::RemoteLeaderChanged);
         }
       },
       SlaveForwardMsg::SlaveBundle(bundle) => {
