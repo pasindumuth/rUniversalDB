@@ -2,9 +2,9 @@ use crate::col_usage::FrozenColUsageNode;
 use crate::coord::CoordForwardMsg;
 use crate::master::MasterTimerInput;
 use crate::model::common::{
-  proc, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColType, CoordGroupId, EndpointId, Gen,
-  LeadershipId, NodeGroupId, PaxosGroupId, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
-  TabletGroupId, TabletKeyRange, TierMap, Timestamp, TransTableName,
+  CTNodePath, ColName, ColType, CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId,
+  SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap,
+  Timestamp,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;

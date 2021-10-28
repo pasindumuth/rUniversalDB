@@ -1,8 +1,8 @@
 use crate::common::BasicIOCtx;
 use crate::model::common::QueryId;
 use crate::stmpaxos2pc_tm::{
-  Abort, Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm,
-  RMPreparedPLm, RMServerContext, TMCommittedPLm, TMMessage,
+  Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm,
+  RMPreparedPLm, RMServerContext, TMMessage,
 };
 use std::collections::HashMap;
 

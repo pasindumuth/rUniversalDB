@@ -1,6 +1,7 @@
 use crate::model::common::{iast, proc, ColName, TablePath, TransTableName};
 use crate::model::message as msg;
 use std::collections::{HashMap, HashSet};
+use std::iter::FromIterator;
 
 pub fn convert_to_msquery(query: iast::Query) -> Result<proc::MSQuery, msg::ExternalAbortedData> {
   // First, we rename all TransTable definitions and references so that they're
@@ -10,7 +11,7 @@ pub fn convert_to_msquery(query: iast::Query) -> Result<proc::MSQuery, msg::Exte
   let mut ctx =
     RenameContext { trans_table_map: HashMap::new(), counter: 0, table_names: HashSet::new() };
   let mut renamed_query = query.clone();
-  rename_trans_tables_query_R(&mut ctx, &mut renamed_query);
+  rename_trans_tables_query_r(&mut ctx, &mut renamed_query);
 
   // Next, we flatten the `renamed_query` to produce an MSQuery. Since we renamed
   // all TransTable references, this won't change the semantics.
@@ -53,9 +54,9 @@ struct RenameContext {
 
 /// This functions renames the TransTables in `query` by prepending 'tt\\n\\',
 /// where 'n' is a counter the increments by 1 for every TransTable.
-fn rename_trans_tables_query_R(ctx: &mut RenameContext, query: &mut iast::Query) {
+fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query) {
   for (trans_table_name, cte_query) in &mut query.ctes {
-    rename_trans_tables_query_R(ctx, cte_query); // Recurse
+    rename_trans_tables_query_r(ctx, cte_query); // Recurse
 
     // Add the TransTable name and its new name to the context.
     let renamed_trans_table_name = unique_name(&mut ctx.counter, trans_table_name);
@@ -70,7 +71,7 @@ fn rename_trans_tables_query_R(ctx: &mut RenameContext, query: &mut iast::Query)
   // Then, rename the top-level QueryBody.
   match &mut query.body {
     iast::QueryBody::Query(child_query) => {
-      rename_trans_tables_query_R(ctx, child_query);
+      rename_trans_tables_query_r(ctx, child_query);
     }
     iast::QueryBody::SuperSimpleSelect(select) => {
       // Rename the Table to select if it's a TransTable.
@@ -81,7 +82,7 @@ fn rename_trans_tables_query_R(ctx: &mut RenameContext, query: &mut iast::Query)
       }
 
       // Rename the Where Clause
-      rename_trans_tables_val_expr_R(ctx, &mut select.selection);
+      rename_trans_tables_val_expr_r(ctx, &mut select.selection);
     }
     iast::QueryBody::Update(update) => {
       // Rename the Table to update if it's a TransTable.
@@ -93,11 +94,11 @@ fn rename_trans_tables_query_R(ctx: &mut RenameContext, query: &mut iast::Query)
 
       // Rename the Set Clause
       for (_, val_expr) in &mut update.assignments {
-        rename_trans_tables_val_expr_R(ctx, val_expr);
+        rename_trans_tables_val_expr_r(ctx, val_expr);
       }
 
       // Rename the Where Clause
-      rename_trans_tables_val_expr_R(ctx, &mut update.selection);
+      rename_trans_tables_val_expr_r(ctx, &mut update.selection);
     }
   }
 
@@ -112,19 +113,19 @@ fn rename_trans_tables_query_R(ctx: &mut RenameContext, query: &mut iast::Query)
   }
 }
 
-fn rename_trans_tables_val_expr_R(ctx: &mut RenameContext, val_expr: &mut iast::ValExpr) {
+fn rename_trans_tables_val_expr_r(ctx: &mut RenameContext, val_expr: &mut iast::ValExpr) {
   match val_expr {
     iast::ValExpr::ColumnRef { .. } => {} // Nothing to rename
     iast::ValExpr::UnaryExpr { expr, .. } => {
-      rename_trans_tables_val_expr_R(ctx, expr);
+      rename_trans_tables_val_expr_r(ctx, expr);
     }
     iast::ValExpr::BinaryExpr { left, right, .. } => {
-      rename_trans_tables_val_expr_R(ctx, left);
-      rename_trans_tables_val_expr_R(ctx, right);
+      rename_trans_tables_val_expr_r(ctx, left);
+      rename_trans_tables_val_expr_r(ctx, right);
     }
     iast::ValExpr::Value { .. } => {} // Nothing to rename
     iast::ValExpr::Subquery { query } => {
-      rename_trans_tables_query_R(ctx, query);
+      rename_trans_tables_query_r(ctx, query);
     }
   }
 }
@@ -143,7 +144,7 @@ fn flatten_top_level_query(
     trans_tables: Vec::default(),
     returning: TransTableName(aux_table_name.clone()),
   };
-  flatten_top_level_query_R(&aux_table_name, query, counter, &mut ms_query.trans_tables)?;
+  flatten_top_level_query_r(&aux_table_name, query, counter, &mut ms_query.trans_tables)?;
   Ok(ms_query)
 }
 
@@ -152,7 +153,7 @@ fn flatten_top_level_query(
 /// name of `assignment_name` and add it into the map as well.
 /// Note: we need `counter` because we need to create auxiliary TransTables
 /// for the query bodies.
-fn flatten_top_level_query_R(
+fn flatten_top_level_query_r(
   assignment_name: &String,
   query: &iast::Query,
   counter: &mut u32,
@@ -160,19 +161,19 @@ fn flatten_top_level_query_R(
 ) -> Result<(), msg::ExternalAbortedData> {
   // First, have the CTEs flatten their Querys and add their TransTables to the map.
   for (trans_table_name, cte_query) in &query.ctes {
-    flatten_top_level_query_R(trans_table_name, cte_query, counter, trans_table_map)?;
+    flatten_top_level_query_r(trans_table_name, cte_query, counter, trans_table_map)?;
   }
 
   // Then, add this QueryBody as a TransTable
   match &query.body {
     iast::QueryBody::Query(child_query) => {
-      flatten_top_level_query_R(assignment_name, child_query, counter, trans_table_map)
+      flatten_top_level_query_r(assignment_name, child_query, counter, trans_table_map)
     }
     iast::QueryBody::SuperSimpleSelect(select) => {
       let ms_select = proc::SuperSimpleSelect {
         projection: select.projection.iter().map(|x| ColName(x.clone())).collect(),
         from: to_table_ref(&select.from),
-        selection: flatten_val_expr_R(&select.selection, counter)?,
+        selection: flatten_val_expr_r(&select.selection, counter)?,
       };
       trans_table_map.push((
         TransTableName(assignment_name.clone()),
@@ -184,12 +185,12 @@ fn flatten_top_level_query_R(
       let mut ms_update = proc::Update {
         table: TablePath(update.table.clone()),
         assignment: Vec::new(),
-        selection: flatten_val_expr_R(&update.selection, counter)?,
+        selection: flatten_val_expr_r(&update.selection, counter)?,
       };
       for (col_name, val_expr) in &update.assignments {
         ms_update
           .assignment
-          .push((ColName(col_name.clone()), flatten_val_expr_R(val_expr, counter)?))
+          .push((ColName(col_name.clone()), flatten_val_expr_r(val_expr, counter)?))
       }
       trans_table_map
         .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Update(ms_update)));
@@ -198,7 +199,7 @@ fn flatten_top_level_query_R(
   }
 }
 
-fn flatten_val_expr_R(
+fn flatten_val_expr_r(
   val_expr: &iast::ValExpr,
   counter: &mut u32,
 ) -> Result<proc::ValExpr, msg::ExternalAbortedData> {
@@ -208,12 +209,12 @@ fn flatten_val_expr_R(
     }
     iast::ValExpr::UnaryExpr { op, expr } => Ok(proc::ValExpr::UnaryExpr {
       op: op.clone(),
-      expr: Box::new(flatten_val_expr_R(expr, counter)?),
+      expr: Box::new(flatten_val_expr_r(expr, counter)?),
     }),
     iast::ValExpr::BinaryExpr { op, left, right } => Ok(proc::ValExpr::BinaryExpr {
       op: op.clone(),
-      left: Box::new(flatten_val_expr_R(left, counter)?),
-      right: Box::new(flatten_val_expr_R(right, counter)?),
+      left: Box::new(flatten_val_expr_r(left, counter)?),
+      right: Box::new(flatten_val_expr_r(right, counter)?),
     }),
     iast::ValExpr::Value { val } => Ok(proc::ValExpr::Value { val: val.clone() }),
     iast::ValExpr::Subquery { query } => {
@@ -225,13 +226,13 @@ fn flatten_val_expr_R(
         trans_tables: Vec::default(),
         returning: TransTableName(aux_table_name.clone()),
       };
-      flatten_sub_query_R(&aux_table_name, &query, counter, &mut gr_query.trans_tables)?;
+      flatten_sub_query_r(&aux_table_name, &query, counter, &mut gr_query.trans_tables)?;
       Ok(proc::ValExpr::Subquery { query: Box::from(gr_query) })
     }
   }
 }
 
-fn flatten_sub_query_R(
+fn flatten_sub_query_r(
   assignment_name: &String,
   query: &iast::Query,
   counter: &mut u32,
@@ -239,19 +240,19 @@ fn flatten_sub_query_R(
 ) -> Result<(), msg::ExternalAbortedData> {
   // First, have the CTEs flatten their Querys and add their TransTables to the map.
   for (trans_table_name, cte_query) in &query.ctes {
-    flatten_sub_query_R(trans_table_name, cte_query, counter, trans_table_map)?;
+    flatten_sub_query_r(trans_table_name, cte_query, counter, trans_table_map)?;
   }
 
   // Then, add this QueryBody as a TransTable
   match &query.body {
     iast::QueryBody::Query(child_query) => {
-      flatten_sub_query_R(assignment_name, child_query, counter, trans_table_map)
+      flatten_sub_query_r(assignment_name, child_query, counter, trans_table_map)
     }
     iast::QueryBody::SuperSimpleSelect(select) => {
       let ms_select = proc::SuperSimpleSelect {
         projection: select.projection.iter().map(|x| ColName(x.clone())).collect(),
         from: to_table_ref(&select.from),
-        selection: flatten_val_expr_R(&select.selection, counter)?,
+        selection: flatten_val_expr_r(&select.selection, counter)?,
       };
       trans_table_map.push((
         TransTableName(assignment_name.clone()),
@@ -305,7 +306,7 @@ mod rename_test {
       counter: 0,
       table_names: Default::default(),
     };
-    rename_trans_tables_query_R(&mut ctx, &mut in_query);
+    rename_trans_tables_query_r(&mut ctx, &mut in_query);
 
     // Verify the result.
     assert_eq!(

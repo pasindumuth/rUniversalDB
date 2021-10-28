@@ -1,6 +1,5 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::model::common::{PaxosGroupId, QueryId};
-use crate::stmpaxos2pc_rm::STMPaxos2PCRMInner;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

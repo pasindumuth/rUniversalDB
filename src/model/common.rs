@@ -127,13 +127,6 @@ pub struct CoordGroupId(pub String);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestId(pub String);
 
-/// This is often used when there is behavior that's common between Table and Slave.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum NodeGroupId {
-  Tablet(TabletGroupId),
-  Slave(SlaveGroupId),
-}
-
 // -------------------------------------------------------------------------------------------------
 //  QueryPath
 // -------------------------------------------------------------------------------------------------

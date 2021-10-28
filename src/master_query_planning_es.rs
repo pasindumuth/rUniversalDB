@@ -2,7 +2,7 @@ use crate::col_usage::{
   collect_table_paths, compute_all_tier_maps, compute_query_plan_data, iterate_stage_ms_query,
   ColUsagePlanner, FrozenColUsageNode, GeneralStage,
 };
-use crate::common::{btree_map_insert, lookup, MasterIOCtx, TableSchema};
+use crate::common::{lookup, TableSchema};
 use crate::master::{plm, MasterContext};
 use crate::model::common::{proc, CQueryPath, ColName, QueryId, Timestamp, TransTableName};
 use crate::model::message as msg;

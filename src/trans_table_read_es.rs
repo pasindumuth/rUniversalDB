@@ -1,13 +1,10 @@
-use crate::col_usage::{
-  collect_select_subqueries, collect_top_level_cols, nodes_external_cols,
-  nodes_external_trans_tables, ColUsagePlanner,
-};
-use crate::common::{lookup_pos, mk_qid, CoreIOCtx, OrigP, QueryESResult, QueryPlan};
+use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
+use crate::common::{mk_qid, CoreIOCtx, QueryESResult, QueryPlan};
 use crate::expression::{is_true, EvalError};
-use crate::gr_query_es::{GRExecutionS, GRQueryConstructorView, GRQueryES, GRQueryPlan};
+use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, CQueryPath, ColName, ColType, ColValN, ContextRow, ContextSchema, Gen, TQueryPath,
-  TableView, Timestamp, TransTableName,
+  proc, CQueryPath, ColName, ColValN, ContextRow, ContextSchema, TQueryPath, TableView, Timestamp,
+  TransTableName,
 };
 use crate::model::common::{CTQueryPath, Context, QueryId, TransTableLocationPrefix};
 use crate::model::message as msg;

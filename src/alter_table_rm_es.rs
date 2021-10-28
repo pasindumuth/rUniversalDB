@@ -6,7 +6,7 @@ use crate::common::BasicIOCtx;
 use crate::model::common::{proc, Timestamp};
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
-use crate::tablet::{plm, TabletContext, TabletPLm};
+use crate::tablet::TabletContext;
 use std::cmp::max;
 
 // -----------------------------------------------------------------------------------------------

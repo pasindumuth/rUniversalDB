@@ -1,9 +1,7 @@
 use crate::alter_table_tm_es::{
   AlterTablePayloadTypes, AlterTableTMES, AlterTableTMInner, ResponseData,
 };
-use crate::common::{
-  btree_map_insert, lookup, mk_qid, mk_sid, mk_tid, GossipData, MasterIOCtx, TableSchema, UUID,
-};
+use crate::common::{btree_map_insert, mk_qid, mk_tid, GossipData, MasterIOCtx, TableSchema};
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
 use crate::drop_table_tm_es::{DropTablePayloadTypes, DropTableTMES, DropTableTMInner};
@@ -12,9 +10,8 @@ use crate::master_query_planning_es::{
   MasterQueryPlanningES,
 };
 use crate::model::common::{
-  proc, CQueryPath, ColName, EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId, RequestId,
-  SlaveGroupId, SlaveQueryPath, TNodePath, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
-  TransTableName,
+  EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId, RequestId, SlaveGroupId, TNodePath,
+  TablePath, TabletGroupId, TabletKeyRange,
 };
 use crate::model::message as msg;
 use crate::model::message::{
@@ -23,14 +20,11 @@ use crate::model::message::{
 use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
-use crate::server::{
-  weak_contains_col, weak_contains_col_latest, CommonQuery, MasterServerContext, ServerContextBase,
-};
+use crate::server::{weak_contains_col_latest, MasterServerContext, ServerContextBase};
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::{
-  handle_tm_msg, handle_tm_plm, PayloadTypes, RMPathTrait, STMPaxos2PCTMAction, State, TMMessage,
-  TMPLm, TMServerContext,
+  handle_tm_msg, handle_tm_plm, RMPathTrait, STMPaxos2PCTMAction, TMServerContext,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -45,10 +39,7 @@ use std::iter::FromIterator;
 // -----------------------------------------------------------------------------------------------
 
 pub mod plm {
-  use crate::model::common::{
-    proc, ColName, ColType, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
-    Timestamp,
-  };
+  use crate::model::common::{proc, QueryId, Timestamp};
   use serde::{Deserialize, Serialize};
 
   // MasterQueryPlanning

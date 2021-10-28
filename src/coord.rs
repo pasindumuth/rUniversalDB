@@ -1,6 +1,5 @@
 use crate::common::{
-  lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, GossipData, OrigP,
-  TMStatus, TableSchema,
+  map_insert, merge_table_views, mk_qid, remove_item, GossipData, OrigP, TMStatus,
 };
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::finish_query_tm_es::{
@@ -8,10 +7,8 @@ use crate::finish_query_tm_es::{
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
-  iast, proc, CNodePath, CQueryPath, CSubNodePath, CTQueryPath, CTSubNodePath, ColName, ColType,
-  Context, ContextRow, CoordGroupId, Gen, LeadershipId, NodeGroupId, PaxosGroupId, SlaveGroupId,
-  TQueryPath, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
-  TransTableLocationPrefix, TransTableName,
+  proc, CNodePath, CQueryPath, CSubNodePath, CTSubNodePath, ColName, CoordGroupId, LeadershipId,
+  PaxosGroupId, SlaveGroupId, TQueryPath, TableView,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
@@ -654,7 +651,7 @@ impl CoordContext {
     statuses: &mut Statuses,
     gr_query_ess: Vec<GRQueryES>,
   ) {
-    /// Here, we have to add in the GRQueryESs and start them.
+    // Here, we have to add in the GRQueryESs and start them.
     let mut subquery_ids = Vec::<QueryId>::new();
     for gr_query_es in gr_query_ess {
       let subquery_id = gr_query_es.query_id.clone();

@@ -1,15 +1,8 @@
-use crate::common::{
-  lookup, lookup_pos, map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx, GossipData,
-  OrigP, RemoteLeaderChangedPLm, SlaveIOCtx, TMStatus, UUID,
-};
+use crate::common::{BasicIOCtx, GossipData, RemoteLeaderChangedPLm, SlaveIOCtx};
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::CreateTableRMES;
 use crate::create_table_tm_es::CreateTablePayloadTypes;
-use crate::model::common::{
-  iast, proc, CTQueryPath, ColName, ColType, Context, ContextRow, CoordGroupId, Gen, LeadershipId,
-  NodeGroupId, PaxosGroupId, SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
-  TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
-};
+use crate::model::common::{CoordGroupId, LeadershipId, PaxosGroupId, SlaveGroupId, TabletGroupId};
 use crate::model::common::{EndpointId, QueryId};
 use crate::model::message as msg;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
@@ -17,8 +10,8 @@ use crate::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use crate::server::{MainSlaveServerContext, ServerContextBase};
 use crate::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
 use crate::stmpaxos2pc_tm as paxos2pc;
-use crate::stmpaxos2pc_tm::{Closed, RMMessage, RMPLm, RMServerContext, TMMessage};
-use crate::tablet::{GRQueryESWrapper, TabletBundle, TabletForwardMsg, TransTableReadESWrapper};
+use crate::stmpaxos2pc_tm::RMServerContext;
+use crate::tablet::{TabletBundle, TabletForwardMsg};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -199,7 +192,7 @@ impl SlaveState {
         self.context.handle_incoming_message(io_ctx, &mut self.statuses, message);
       }
       FullSlaveInput::SlaveBackMessage(message) => {
-        /// Handles messages that were send from the Tablets back to the Slave.
+        // Handles messages that were send from the Tablets back to the Slave.
         let forward_msg = SlaveForwardMsg::SlaveBackMessage(message);
         self.context.handle_input(io_ctx, &mut self.statuses, forward_msg);
       }

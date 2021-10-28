@@ -304,7 +304,6 @@ impl FinishQueryES {
           es.state = Follower;
           FinishQueryAction::Wait
         }
-        _ => FinishQueryAction::Wait,
       },
       _ => FinishQueryAction::Wait,
     }

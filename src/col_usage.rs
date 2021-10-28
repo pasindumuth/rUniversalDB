@@ -1,8 +1,5 @@
 use crate::common::TableSchema;
-use crate::model::common::{
-  iast, proc, ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
-  TierMap, Timestamp, TransTableName,
-};
+use crate::model::common::{proc, ColName, Gen, TablePath, TierMap, Timestamp, TransTableName};
 use crate::multiversion_map::MVM;
 use crate::server::weak_contains_col;
 use serde::{Deserialize, Serialize};
@@ -523,6 +520,7 @@ pub fn compute_query_plan_data(
 #[cfg(test)]
 mod test {
   use super::*;
+  use crate::model::common::ColType;
   use crate::test_utils::{cn, mk_tab, mk_ttab};
   use std::collections::HashMap;
 

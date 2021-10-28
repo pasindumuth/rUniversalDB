@@ -5,8 +5,8 @@ mod simulation;
 use crate::simulation::{client_eid, slave_eid, Simulation};
 use runiversal::common::TableSchema;
 use runiversal::model::common::{
-  ColName, ColType, ColVal, EndpointId, Gen, PrimaryKey, RequestId, SlaveGroupId, TablePath,
-  TabletGroupId, TabletKeyRange,
+  ColType, EndpointId, Gen, PrimaryKey, RequestId, SlaveGroupId, TablePath, TabletGroupId,
+  TabletKeyRange,
 };
 use runiversal::model::message as msg;
 use runiversal::test_utils::{cn, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};

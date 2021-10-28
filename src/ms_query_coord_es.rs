@@ -6,9 +6,9 @@ use crate::common::{lookup, mk_qid, OrigP, QueryPlan, TMStatus};
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::model::common::{
-  proc, CTQueryPath, ColName, Context, ContextRow, EndpointId, Gen, LeadershipId, NodeGroupId,
-  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
-  TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
+  proc, ColName, Context, ContextRow, Gen, LeadershipId, PaxosGroupId, QueryId, SlaveGroupId,
+  TQueryPath, TablePath, TableView, TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::model::message::MasteryQueryPlanningResult;

@@ -5,10 +5,9 @@ use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::master::MasterBundle;
 use crate::model::common::{
-  proc, CQueryPath, CSubNodePath, CTQueryPath, ColName, ColType, Context, CoordGroupId, EndpointId,
-  Gen, LeadershipId, NodeGroupId, PaxosGroupId, QueryId, RequestId, SlaveGroupId, TNodePath,
-  TQueryPath, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, Timestamp,
-  TransTableLocationPrefix, TransTableName,
+  proc, CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
+  PaxosGroupId, QueryId, RequestId, TQueryPath, TablePath, TableView, TabletGroupId, TierMap,
+  Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::slave::SharedPaxosBundle;
 use crate::stmpaxos2pc_tm;

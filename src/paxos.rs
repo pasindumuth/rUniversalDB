@@ -4,7 +4,6 @@ use crate::model::message as msg;
 use crate::model::message::{
   LeaderChanged, PLEntry, PLIndex, PaxosDriverMessage, PaxosMessage, Rnd,
 };
-use crate::server::ServerContextBase;
 use rand::RngCore;
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, HashMap};

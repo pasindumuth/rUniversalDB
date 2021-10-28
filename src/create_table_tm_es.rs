@@ -2,16 +2,14 @@ use crate::alter_table_tm_es::{maybe_respond_dead, ResponseData};
 use crate::common::{BasicIOCtx, TableSchema};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
-  proc, ColName, ColType, Gen, QueryId, SlaveGroupId, TSubNodePath, TablePath, TabletGroupId,
-  TabletKeyRange, Timestamp,
+  ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
 use crate::slave::{SlaveContext, SlavePLm};
 use crate::stmpaxos2pc_tm::{
-  Abort, Aborted, Closed, Commit, PayloadTypes, Prepare, Prepared, RMAbortedPLm, RMCommittedPLm,
-  RMMessage, RMPLm, RMPreparedPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMAbortedPLm,
-  TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm, TMPreparedPLm,
+  PayloadTypes, RMMessage, RMPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm,
+  TMCommittedPLm, TMMessage, TMPLm,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::max;

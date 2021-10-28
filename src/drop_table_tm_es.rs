@@ -1,14 +1,11 @@
 use crate::alter_table_tm_es::{get_rms, maybe_respond_dead, ResponseData};
 use crate::common::BasicIOCtx;
 use crate::master::{MasterContext, MasterPLm};
-use crate::model::common::{
-  proc, EndpointId, QueryId, RequestId, TNodePath, TSubNodePath, TablePath, Timestamp,
-};
+use crate::model::common::{TNodePath, TablePath, Timestamp};
 use crate::model::message as msg;
 use crate::stmpaxos2pc_tm::{
-  Abort, Aborted, Closed, Commit, PayloadTypes, Prepare, Prepared, RMAbortedPLm, RMCommittedPLm,
-  RMMessage, RMPLm, RMPreparedPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMAbortedPLm,
-  TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm, TMPreparedPLm,
+  PayloadTypes, RMMessage, RMPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm,
+  TMCommittedPLm, TMMessage, TMPLm,
 };
 use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};

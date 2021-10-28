@@ -5,20 +5,19 @@ use crate::common::{
 use crate::expression::{compress_row_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, CQueryPath, CTQueryPath, ColName, ColValN, Context, ContextRow, Gen, QueryId, TQueryPath,
-  TableView, TierMap, Timestamp, TransTableName,
+  proc, CQueryPath, ColName, ColValN, Context, ContextRow, QueryId, TQueryPath, TableView,
+  Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::{
-  contains_col, evaluate_super_simple_select, mk_eval_error, weak_contains_col, CommonQuery,
-  ContextConstructor, ServerContextBase,
+  evaluate_super_simple_select, mk_eval_error, weak_contains_col, ContextConstructor,
+  ServerContextBase,
 };
 use crate::storage::MSStorageView;
 use crate::tablet::{
   compute_subqueries, ColumnsLocking, ContextKeyboundComputer, Executing, MSQueryES, Pending,
   QueryReplanningSqlView, RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable,
-  SubqueryFinished, SubqueryLockingSchemas, SubqueryPending, SubqueryPendingReadRegion,
-  TabletContext,
+  SubqueryFinished, SubqueryPending, TabletContext,
 };
 use std::collections::HashSet;
 use std::iter::FromIterator;

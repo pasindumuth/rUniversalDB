@@ -1,57 +1,45 @@
 use crate::alter_table_rm_es::{AlterTableRMES, AlterTableRMInner};
 use crate::alter_table_tm_es::AlterTablePayloadTypes;
-use crate::col_usage::{
-  collect_select_subqueries, collect_top_level_cols, collect_update_subqueries,
-  node_external_trans_tables, nodes_external_cols, nodes_external_trans_tables, ColUsagePlanner,
-  FrozenColUsageNode,
-};
+use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
 use crate::common::{
-  btree_multimap_insert, btree_multimap_remove, lookup, lookup_pos, map_insert, merge_table_views,
-  mk_qid, remove_item, BasicIOCtx, ColBound, CoreIOCtx, GossipData, KeyBound, OrigP, PolyColBound,
-  RemoteLeaderChangedPLm, SingleBound, TMStatus, TableRegion, TableSchema,
+  btree_multimap_insert, lookup, map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx,
+  CoreIOCtx, GossipData, KeyBound, OrigP, RemoteLeaderChangedPLm, TMStatus, TableRegion,
+  TableSchema,
 };
 use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;
-use crate::expression::{
-  compress_row_region, compute_key_region, compute_poly_col_bounds, construct_cexpr,
-  construct_kb_expr, does_intersect, evaluate_c_expr, is_true, CExpr, EvalError,
-};
+use crate::expression::{compute_key_region, does_intersect, EvalError};
 use crate::finish_query_es::{
   FinishQueryAction, FinishQueryES, FinishQueryExecuting, OrigTMLeadership, Paxos2PCRMState,
 };
-use crate::gr_query_es::{
-  GRExecutionS, GRQueryAction, GRQueryConstructorView, GRQueryES, GRQueryPlan, ReadStage,
-  SubqueryComputableSql,
+use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
+use crate::model::common::{
+  proc, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColValN, Context, ContextRow,
+  ContextSchema, LeadershipId, PaxosGroupId, TNodePath, TQueryPath, TSubNodePath, TableView,
+  TransTableName,
 };
 use crate::model::common::{
-  proc, CQueryPath, CSubNodePath, CTQueryPath, CTSubNodePath, ColType, ColValN, Context,
-  ContextRow, ContextSchema, Gen, LeadershipId, NodeGroupId, PaxosGroupId, TNodePath, TQueryPath,
-  TSubNodePath, TableView, TierMap, TransTableLocationPrefix, TransTableName,
-};
-use crate::model::common::{
-  ColName, ColVal, EndpointId, PrimaryKey, QueryId, SlaveGroupId, TablePath, TabletGroupId,
-  TabletKeyRange, Timestamp,
+  ColName, EndpointId, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
 use crate::ms_table_read_es::{MSReadExecutionS, MSTableReadAction, MSTableReadES};
 use crate::ms_table_write_es::{MSTableWriteAction, MSTableWriteES, MSWriteExecutionS};
 use crate::server::{
-  are_cols_locked, contains_col, evaluate_super_simple_select, evaluate_update, mk_eval_error,
-  CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
+  contains_col, CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
 };
 use crate::slave::SlaveBackMessage;
 use crate::stmpaxos2pc_rm::{
   handle_rm_msg, handle_rm_plm, AggregateContainer, STMPaxos2PCRMAction,
 };
 use crate::stmpaxos2pc_tm as paxos2pc;
-use crate::stmpaxos2pc_tm::{Closed, PayloadTypes, RMMessage, RMPLm, RMServerContext, TMMessage};
+use crate::stmpaxos2pc_tm::RMServerContext;
 use crate::storage::{compress_updates_views, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::ops::{Add, Bound, Deref, Sub};
+use std::ops::Bound;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -337,7 +325,7 @@ impl AggregateContainer<AlterTablePayloadTypes, AlterTableRMInner> for DDLES {
       debug_assert_eq!(&es.query_id, query_id);
       Some(es)
     } else {
-      /// Similarly, if there is no AlterTable, there should not be a DropTable here either.
+      // Similarly, if there is no AlterTable, there should not be a DropTable here either.
       debug_assert!(matches!(self, DDLES::None));
       None
     }
@@ -357,7 +345,7 @@ impl AggregateContainer<DropTablePayloadTypes, DropTableRMInner> for DDLES {
       debug_assert_eq!(&es.query_id, query_id);
       Some(es)
     } else {
-      /// Similarly, if there is no DropTable, there should not be a AlterTable here either.
+      // Similarly, if there is no DropTable, there should not be a AlterTable here either.
       debug_assert!(matches!(self, DDLES::None));
       None
     }
@@ -2084,7 +2072,7 @@ impl TabletContext {
     statuses: &mut Statuses,
     gr_query_ess: Vec<GRQueryES>,
   ) {
-    /// Here, we have to add in the GRQueryESs and start them.
+    // Here, we have to add in the GRQueryESs and start them.
     let mut subquery_ids = Vec::<QueryId>::new();
     for gr_query_es in gr_query_ess {
       let subquery_id = gr_query_es.query_id.clone();
@@ -2592,9 +2580,9 @@ impl ContextKeyboundComputer {
       }
     }
 
-    /// Map the `external_cols` to their position in the parent context. Recall that
-    /// every element `external_cols` should exist in the parent_context, so we
-    /// assert as such.
+    // Map the `external_cols` to their position in the parent context. Recall that
+    // every element `external_cols` should exist in the parent_context, so we
+    // assert as such.
     let mut context_col_index = HashMap::<ColName, usize>::new();
     for (index, col) in parent_context_schema.column_context_schema.iter().enumerate() {
       if external_cols.contains(col) {

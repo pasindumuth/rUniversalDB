@@ -4,9 +4,9 @@ use crate::col_usage::{
 };
 use crate::common::{lookup, lookup_pos, mk_qid, CoreIOCtx, OrigP, QueryPlan, TMStatus};
 use crate::model::common::{
-  proc, CQueryPath, CTQueryPath, CTSubNodePath, ColName, Context, ContextRow, ContextSchema, Gen,
-  LeadershipId, NodeGroupId, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
-  TabletGroupId, TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
+  proc, CQueryPath, ColName, Context, ContextRow, ContextSchema, Gen, LeadershipId, QueryId,
+  SlaveGroupId, TQueryPath, TablePath, TableView, TierMap, Timestamp, TransTableLocationPrefix,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::ServerContextBase;

@@ -1,13 +1,9 @@
-use crate::common::{
-  lookup_pos, BasicIOCtx, CoreIOCtx, GossipData, KeyBound, MasterIOCtx, OrigP, SlaveIOCtx,
-  TableSchema,
-};
+use crate::common::{lookup_pos, BasicIOCtx, GossipData, TableSchema};
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
-  proc, CNodePath, CQueryPath, CSubNodePath, CTNodePath, CTQueryPath, CTSubNodePath, ColName,
-  ColType, ColVal, ColValN, ContextRow, ContextSchema, CoordGroupId, EndpointId, Gen, LeadershipId,
-  NodeGroupId, PaxosGroupId, QueryId, SlaveGroupId, TNodePath, TQueryPath, TSubNodePath, TablePath,
-  TableView, TabletGroupId, TabletKeyRange, Timestamp, TransTableName,
+  proc, CNodePath, CSubNodePath, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColVal, ColValN,
+  ContextRow, ContextSchema, EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId, SlaveGroupId,
+  TNodePath, TSubNodePath, TablePath, TableView, TabletGroupId, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
 use std::collections::{HashMap, HashSet};

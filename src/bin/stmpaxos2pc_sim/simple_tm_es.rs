@@ -1,11 +1,10 @@
 use crate::message as msg;
 use crate::slave::{SlaveContext, SlavePLm};
 use runiversal::common::BasicIOCtx;
-use runiversal::model::common::{EndpointId, QueryId, RequestId, SlaveGroupId, Timestamp};
+use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId};
 use runiversal::stmpaxos2pc_tm::{
-  Abort, Aborted, Closed, Commit, PayloadTypes, Prepare, Prepared, RMAbortedPLm, RMCommittedPLm,
-  RMMessage, RMPLm, RMPreparedPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMAbortedPLm,
-  TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm, TMPreparedPLm,
+  PayloadTypes, RMMessage, RMPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm,
+  TMCommittedPLm, TMMessage, TMPLm,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

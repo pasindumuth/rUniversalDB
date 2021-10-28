@@ -3,15 +3,12 @@ use crate::create_table_tm_es::{
   CreateTableClosed, CreateTableCommit, CreateTablePayloadTypes, CreateTablePrepare,
   CreateTablePrepared, CreateTableRMAborted, CreateTableRMCommitted, CreateTableRMPrepared,
 };
-use crate::model::common::{
-  proc, ColName, ColType, Gen, QueryId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
-};
+use crate::model::common::{ColName, ColType, Gen, TablePath, TabletGroupId, TabletKeyRange};
 use crate::multiversion_map::MVM;
-use crate::server::ServerContextBase;
 use crate::slave::SlaveContext;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
-use crate::tablet::{plm, TabletContext, TabletCreateHelper, TabletPLm};
+use crate::tablet::TabletCreateHelper;
 use rand::RngCore;
 
 // -----------------------------------------------------------------------------------------------
