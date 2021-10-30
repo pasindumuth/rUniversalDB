@@ -32,23 +32,28 @@ pub trait ServerContextBase {
     to_sid: SlaveGroupId,
     to_lid: LeadershipId,
   ) {
-    let to_gid = to_sid.to_gid();
+    if self.is_leader() {
+      // Only send out messages if this node is the Leader. This ensures that
+      // followers do not leak out Leadership information of this PaxosGroup.
 
-    let this_gid = self.this_gid();
-    let this_lid = self.leader_map().get(&this_gid).unwrap();
+      let to_gid = to_sid.to_gid();
 
-    let remote_message = msg::RemoteMessage {
-      payload,
-      from_lid: this_lid.clone(),
-      from_gid: this_gid,
-      to_lid: to_lid.clone(),
-      to_gid,
-    };
+      let this_gid = self.this_gid();
+      let this_lid = self.leader_map().get(&this_gid).unwrap();
 
-    self.send(
-      &to_lid.eid,
-      msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteMessage(remote_message)),
-    );
+      let remote_message = msg::RemoteMessage {
+        payload,
+        from_lid: this_lid.clone(),
+        from_gid: this_gid,
+        to_lid: to_lid.clone(),
+        to_gid,
+      };
+
+      self.send(
+        &to_lid.eid,
+        msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteMessage(remote_message)),
+      );
+    }
   }
 
   fn send_to_slave_common(&mut self, to_sid: SlaveGroupId, payload: msg::SlaveRemotePayload) {
@@ -121,24 +126,29 @@ pub trait ServerContextBase {
   // send_to_master
 
   fn send_to_master(&mut self, payload: msg::MasterRemotePayload) {
-    let master_gid = PaxosGroupId::Master;
-    let master_lid = self.leader_map().get(&master_gid).unwrap().clone();
+    if self.is_leader() {
+      // Only send out messages if this node is the Leader. This ensures that
+      // followers do not leak out Leadership information of this PaxosGroup.
 
-    let this_gid = self.this_gid();
-    let this_lid = self.leader_map().get(&this_gid).unwrap();
+      let master_gid = PaxosGroupId::Master;
+      let master_lid = self.leader_map().get(&master_gid).unwrap().clone();
 
-    let remote_message = msg::RemoteMessage {
-      payload,
-      from_lid: this_lid.clone(),
-      from_gid: this_gid,
-      to_lid: master_lid.clone(),
-      to_gid: master_gid,
-    };
+      let this_gid = self.this_gid();
+      let this_lid = self.leader_map().get(&this_gid).unwrap();
 
-    self.send(
-      &master_lid.eid,
-      msg::NetworkMessage::Master(msg::MasterMessage::RemoteMessage(remote_message)),
-    );
+      let remote_message = msg::RemoteMessage {
+        payload,
+        from_lid: this_lid.clone(),
+        from_gid: this_gid,
+        to_lid: master_lid.clone(),
+        to_gid: master_gid,
+      };
+
+      self.send(
+        &master_lid.eid,
+        msg::NetworkMessage::Master(msg::MasterMessage::RemoteMessage(remote_message)),
+      );
+    }
   }
 
   /// Returns true iff this is the Leader.

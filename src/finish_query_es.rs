@@ -1,6 +1,5 @@
 use crate::common::CoreIOCtx;
 use crate::common::RemoteLeaderChangedPLm;
-use crate::finish_query_es::Paxos2PCRMState::Follower;
 use crate::model::common::{CQueryPath, LeadershipId, QueryId, TQueryPath, Timestamp};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
@@ -126,13 +125,13 @@ impl FinishQueryES {
   ) -> FinishQueryAction {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &es.state {
+        Paxos2PCRMState::Follower => {}
         Paxos2PCRMState::WaitingInsertingPrepared(_) => es.send_wait(ctx, io_ctx),
         Paxos2PCRMState::InsertingPrepared(_) => es.send_wait(ctx, io_ctx),
         Paxos2PCRMState::Prepared => es.send_prepared(ctx, io_ctx),
         Paxos2PCRMState::InsertingCommitted => es.send_prepared(ctx, io_ctx),
         Paxos2PCRMState::InsertingPrepareAborted => es.send_wait(ctx, io_ctx),
         Paxos2PCRMState::InsertingAborted => es.send_prepared(ctx, io_ctx),
-        _ => {}
       },
       FinishQueryES::Committed => {
         let this_query_path = ctx.mk_query_path(check_prepared.query_id.clone());
@@ -289,11 +288,11 @@ impl FinishQueryES {
           FinishQueryAction::Exit
         }
         Paxos2PCRMState::Prepared => {
-          es.state = Follower;
+          es.state = Paxos2PCRMState::Follower;
           FinishQueryAction::Wait
         }
         Paxos2PCRMState::InsertingCommitted => {
-          es.state = Follower;
+          es.state = Paxos2PCRMState::Follower;
           FinishQueryAction::Wait
         }
         Paxos2PCRMState::InsertingPrepareAborted => {
@@ -301,7 +300,7 @@ impl FinishQueryES {
           FinishQueryAction::Exit
         }
         Paxos2PCRMState::InsertingAborted => {
-          es.state = Follower;
+          es.state = Paxos2PCRMState::Follower;
           FinishQueryAction::Wait
         }
       },

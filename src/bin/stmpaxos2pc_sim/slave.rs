@@ -249,6 +249,7 @@ impl SlaveContext {
     slave_input: SlaveForwardMsg,
   ) {
     match slave_input {
+      // TODO: broadcast RemoteLeaderChanged
       SlaveForwardMsg::SlaveBundle(bundle) => {
         for paxos_log_msg in bundle {
           match paxos_log_msg {
@@ -356,8 +357,12 @@ impl SlaveContext {
         self.network_driver.leader_changed();
 
         if !self.is_leader() {
-          // Clear SlaveBundle
+          // If this node ceases to be or continues to not be the Leader, then clear SlaveBundle.
           self.slave_bundle = SlaveBundle::default();
+        } else {
+          // If this node becomes the Leader, then start the insert cycle.
+          let bundle = std::mem::replace(&mut self.slave_bundle, SlaveBundle::default());
+          io_ctx.insert_bundle(bundle);
         }
       }
     }
@@ -399,29 +404,34 @@ impl SlaveContext {
     sid: &SlaveGroupId,
     payload: msg::SlaveRemotePayload,
   ) {
-    let this_gid = self.this_gid.clone();
-    let this_lid = self.leader_map.get(&this_gid).unwrap();
+    if self.is_leader() {
+      // Only send out messages if this node is the Leader. This ensures that
+      // followers do not leak out Leadership information of this PaxosGroup.
 
-    let to_gid = sid.to_gid();
-    let to_lid = self.leader_map.get(&to_gid).unwrap();
+      let this_gid = self.this_gid.clone();
+      let this_lid = self.leader_map.get(&this_gid).unwrap();
 
-    let remote_message = msg::RemoteMessage {
-      payload,
-      from_lid: this_lid.clone(),
-      from_gid: this_gid,
-      to_lid: to_lid.clone(),
-      to_gid,
-    };
+      let to_gid = sid.to_gid();
+      let to_lid = self.leader_map.get(&to_gid).unwrap();
 
-    io_ctx.send(
-      &to_lid.eid,
-      msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteMessage(remote_message)),
-    );
+      let remote_message = msg::RemoteMessage {
+        payload,
+        from_lid: this_lid.clone(),
+        from_gid: this_gid,
+        to_lid: to_lid.clone(),
+        to_gid,
+      };
+
+      io_ctx.send(
+        &to_lid.eid,
+        msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteMessage(remote_message)),
+      );
+    }
   }
 
   /// Returns true iff this is the Leader.
   pub fn is_leader(&self) -> bool {
-    let lid = self.leader_map.get(&self.this_sid.to_gid()).unwrap();
+    let lid = self.leader_map.get(&self.this_gid).unwrap();
     lid.eid == self.this_eid
   }
 }

@@ -382,17 +382,10 @@ impl SlaveContext {
     match slave_input {
       SlaveForwardMsg::SlaveBackMessage(slave_back_msg) => match slave_back_msg {
         SlaveBackMessage::TabletBundle(tid, tablet_bundle) => {
+          // TODO: Attach the Leadership Id to these `SlaveBackMessage::TabletBundle` messages
+          //  and filter for them here.
           self.tablet_bundles.insert(tid, tablet_bundle);
-          if self.tablet_bundles.len() == io_ctx.num_tablets() {
-            let shared_bundle = SharedPaxosBundle {
-              slave: std::mem::replace(&mut self.slave_bundle, SlaveBundle::default()),
-              tablet: std::mem::replace(&mut self.tablet_bundles, HashMap::default()),
-            };
-            self.paxos_driver.insert_bundle(
-              &mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid },
-              shared_bundle,
-            );
-          }
+          self.maybe_start_insert(io_ctx);
         }
       },
       SlaveForwardMsg::SlaveTimerInput(timer_input) => match timer_input {
@@ -439,6 +432,7 @@ impl SlaveContext {
           for (_, es) in &mut statuses.create_table_ess {
             es.start_inserting(self, io_ctx);
           }
+          self.maybe_start_insert(io_ctx);
         } else {
           for paxos_log_msg in bundle {
             match paxos_log_msg {
@@ -519,10 +513,28 @@ impl SlaveContext {
         self.network_driver.leader_changed();
 
         if !self.is_leader() {
-          // Clear SlaveBundle
+          // If this node ceases to be or continues to not be the Leader, then clear SlaveBundle.
+          // TODO: Clear the TabletBundles
           self.slave_bundle = SlaveBundle::default();
+        } else {
+          // If this node becomes the Leader, then start the insert cycle.
+          self.maybe_start_insert(io_ctx);
         }
       }
+    }
+  }
+
+  /// Checks whether all Tablets have forwarded their `TabletBundle`s back up to the Slave, and
+  /// if so, send it to the PaxosDriver for insertion. We also clear the current set of Bundles.
+  fn maybe_start_insert<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
+    if self.tablet_bundles.len() == io_ctx.num_tablets() {
+      let shared_bundle = SharedPaxosBundle {
+        slave: std::mem::replace(&mut self.slave_bundle, SlaveBundle::default()),
+        tablet: std::mem::replace(&mut self.tablet_bundles, HashMap::default()),
+      };
+      self
+        .paxos_driver
+        .insert_bundle(&mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid }, shared_bundle);
     }
   }
 
@@ -549,7 +561,7 @@ impl SlaveContext {
 
   /// Returns true iff this is the Leader.
   pub fn is_leader(&self) -> bool {
-    let lid = self.leader_map.get(&self.this_sid.to_gid()).unwrap();
+    let lid = self.leader_map.get(&self.this_gid).unwrap();
     lid.eid == self.this_eid
   }
 }

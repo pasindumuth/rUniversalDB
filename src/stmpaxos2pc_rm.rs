@@ -194,6 +194,8 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
 
   // STMPaxos2PC PLm Insertions
 
+  /// Construct the `Prepared` RM-to-TM message to send back, and hold it
+  /// in the Follower state.
   fn _handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
@@ -321,9 +323,15 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     io_ctx: &mut IO,
   ) {
     let this_node_path = ctx.mk_node_path();
-    let closed =
-      Closed { query_id: self.query_id.clone(), rm: this_node_path, payload: InnerT::mk_closed() };
-    ctx.send_to_tm(io_ctx, &self.tm, T::tm_msg(TMMessage::Closed(closed)));
+    ctx.send_to_tm(
+      io_ctx,
+      &self.tm,
+      T::tm_msg(TMMessage::Closed(Closed {
+        query_id: self.query_id.clone(),
+        rm: this_node_path,
+        payload: InnerT::mk_closed(),
+      })),
+    );
   }
 }
 

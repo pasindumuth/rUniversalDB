@@ -1330,6 +1330,11 @@ impl TabletContext {
 
           // Clear TabletBundle
           self.tablet_bundle = Vec::new();
+        } else {
+          // If this node becomes the Leader, then start the insert cycle.
+          let tid = self.this_tid.clone();
+          let tablet_bundle = std::mem::replace(&mut self.tablet_bundle, Vec::default());
+          io_ctx.slave_forward(SlaveBackMessage::TabletBundle(tid, tablet_bundle));
         }
       }
     }

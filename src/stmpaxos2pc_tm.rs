@@ -278,7 +278,7 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
     io_ctx: &mut IO,
   ) -> BTreeMap<T::RMPath, T::Abort>;
 
-  /// Called after all RMs have processed the `Commit` or or `Abort` message.
+  /// Called after all RMs have processed the `Commit` or `Abort` message.
   fn mk_closed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
@@ -350,6 +350,7 @@ pub enum STMPaxos2PCTMAction {
 #[derive(Debug)]
 pub struct STMPaxos2PCTMOuter<T: PayloadTypes, InnerT> {
   pub query_id: QueryId,
+  /// This is only `None` when no related paxos messages have been inserted.
   pub follower: Option<FollowerState<T>>,
   pub state: State<T>,
   pub inner: InnerT,
@@ -417,29 +418,17 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     STMPaxos2PCTMAction::Wait
   }
 
-  fn handle_close_confirmed<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_closed<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
     closed: Closed<T>,
   ) -> STMPaxos2PCTMAction {
     match &mut self.state {
-      State::Committed(committed) => {
-        if committed.rms_remaining.remove(&closed.rm) {
-          if committed.rms_remaining.is_empty() {
-            // All RMs have committed
-            let closed_plm = T::tm_plm(TMPLm::Closed(TMClosedPLm {
-              query_id: self.query_id.clone(),
-              payload: self.inner.mk_closed_plm(ctx, io_ctx),
-            }));
-            ctx.push_plm(closed_plm);
-            self.state = State::InsertingTMClosed;
-          }
-        }
-      }
-      State::Aborted(aborted) => {
-        if aborted.rms_remaining.remove(&closed.rm) {
-          if aborted.rms_remaining.is_empty() {
+      State::Committed(CommittedSt { rms_remaining })
+      | State::Aborted(AbortedSt { rms_remaining }) => {
+        if rms_remaining.remove(&closed.rm) {
+          if rms_remaining.is_empty() {
             // All RMs have aborted
             let closed_plm = T::tm_plm(TMPLm::Closed(TMClosedPLm {
               query_id: self.query_id.clone(),
@@ -521,9 +510,6 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
       }
       State::InsertingTMCommitted => {
         let commit_payloads = self.inner.committed_plm_inserted(ctx, io_ctx, &committed_plm);
-        self.follower = Some(FollowerState::Committed(commit_payloads.clone()));
-
-        // Change state to Committed
         self.advance_to_committed(ctx, io_ctx, commit_payloads);
       }
       _ => {}
@@ -561,9 +547,6 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
       }
       State::InsertingTMAborted => {
         let abort_payloads = self.inner.aborted_plm_inserted(ctx, io_ctx);
-        self.follower = Some(FollowerState::Aborted(abort_payloads.clone()));
-
-        // Change state to Aborted
         self.advance_to_aborted(ctx, io_ctx, abort_payloads);
       }
       _ => {}
@@ -786,12 +769,14 @@ pub fn handle_tm_msg<
       (prepared.query_id.clone(), es.handle_prepared(ctx, io_ctx, prepared))
     }
     TMMessage::Aborted(aborted) => {
+      // We can `unwrap` here because in order for the ES to disappear, all `Closed` messages
+      // must arrive, meaning all Aborted messages sent back to the TM must also arrive before.
       let es = con.get_mut(&aborted.query_id).unwrap();
       (aborted.query_id, es.handle_aborted(ctx, io_ctx))
     }
     TMMessage::Closed(closed) => {
       let es = con.get_mut(&closed.query_id).unwrap();
-      (closed.query_id.clone(), es.handle_close_confirmed(ctx, io_ctx, closed))
+      (closed.query_id.clone(), es.handle_closed(ctx, io_ctx, closed))
     }
   }
 }
