@@ -693,7 +693,7 @@ pub trait AggregateContainer<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> {
   fn insert(&mut self, query_id: QueryId, es: STMPaxos2PCTMOuter<T, InnerT>);
 }
 
-/// Implementation for HashMap, which is the common case.
+/// Implementation for BTreeMap, which is the common case.
 impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> AggregateContainer<T, InnerT>
   for BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>
 {

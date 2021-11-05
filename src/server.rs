@@ -6,7 +6,7 @@ use crate::model::common::{
   TNodePath, TSubNodePath, TablePath, TableView, TabletGroupId, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ use std::sync::Arc;
 pub trait ServerContextBase {
   // Getters
 
-  fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId>;
+  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId>;
   fn this_gid(&self) -> PaxosGroupId;
   fn this_eid(&self) -> &EndpointId;
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
@@ -174,7 +174,7 @@ pub struct SlaveServerContext<'a, IO: BasicIOCtx> {
   pub sub_node_path: &'a CTSubNodePath,
 
   /// Paxos
-  pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: &'a BTreeMap<PaxosGroupId, LeadershipId>,
 
   /// Gossip
   pub gossip: &'a Arc<GossipData>,
@@ -240,7 +240,7 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
     // TODO: fix this logic
     let tablet_groups = self.gossip.sharding_config.get(&(table_path.clone(), Gen(0))).unwrap();
     let key_cols = &self.gossip.db_schema.get(&(table_path.clone(), Gen(0))).unwrap().key_cols;
-    match &compute_key_region(selection, HashMap::new(), key_cols) {
+    match &compute_key_region(selection, BTreeMap::new(), key_cols) {
       Ok(_) => {
         // We use a trivial implementation for now, where we just return all TabletGroupIds
         tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone());
@@ -252,7 +252,7 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
 }
 
 impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
-  fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
+  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId> {
     self.leader_map
   }
 
@@ -284,11 +284,11 @@ pub struct MainSlaveServerContext<'a, IO: BasicIOCtx> {
   pub this_eid: &'a EndpointId,
 
   /// Paxos
-  pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: &'a BTreeMap<PaxosGroupId, LeadershipId>,
 }
 
 impl<'a, IO: BasicIOCtx> ServerContextBase for MainSlaveServerContext<'a, IO> {
-  fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
+  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId> {
     self.leader_map
   }
 
@@ -320,11 +320,11 @@ pub struct MasterServerContext<'a, IO> {
   pub this_eid: &'a EndpointId,
 
   /// Paxos
-  pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: &'a BTreeMap<PaxosGroupId, LeadershipId>,
 }
 
 impl<'a, IO: BasicIOCtx> ServerContextBase for MasterServerContext<'a, IO> {
-  fn leader_map(&self) -> &HashMap<PaxosGroupId, LeadershipId> {
+  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId> {
     self.leader_map
   }
 
@@ -396,8 +396,8 @@ pub fn mk_col_map(
   column_context_row: &Vec<Option<ColVal>>,
   subtable_schema: &Vec<ColName>,
   subtable_row: &Vec<Option<ColVal>>,
-) -> HashMap<ColName, ColValN> {
-  let mut col_map = HashMap::<ColName, ColValN>::new();
+) -> BTreeMap<ColName, ColValN> {
+  let mut col_map = BTreeMap::<ColName, ColValN>::new();
   assert_eq!(subtable_schema.len(), subtable_row.len());
   for i in 0..subtable_schema.len() {
     let col_name = subtable_schema.get(i).unwrap().clone();
@@ -454,7 +454,7 @@ pub fn evaluate_super_simple_select(
   raw_subquery_vals: &Vec<TableView>,
 ) -> Result<EvaluatedSuperSimpleSelect, EvalError> {
   // We map all ColNames to their ColValNs using the Context and subtable.
-  let mut col_map = HashMap::<ColName, ColValN>::new();
+  let mut col_map = BTreeMap::<ColName, ColValN>::new();
   for i in 0..col_names.len() {
     col_map.insert(col_names.get(i).unwrap().clone(), col_vals.get(i).unwrap().clone());
   }
@@ -490,7 +490,7 @@ pub fn evaluate_update(
   raw_subquery_vals: &Vec<TableView>,
 ) -> Result<EvaluatedUpdate, EvalError> {
   // We map all ColNames to their ColValNs.
-  let mut col_map = HashMap::<ColName, ColValN>::new();
+  let mut col_map = BTreeMap::<ColName, ColValN>::new();
   for i in 0..col_names.len() {
     col_map.insert(col_names.get(i).unwrap().clone(), col_vals.get(i).unwrap().clone());
   }
@@ -588,10 +588,10 @@ struct ContextConverter {
 
   /// This maps the `ColName`s in `external_split` to their positions in the
   /// parent ColumnContextSchema.
-  context_col_index: HashMap<ColName, usize>,
+  context_col_index: BTreeMap<ColName, usize>,
   /// This maps the `TransTableName`s in `trans_table_split` to their positions in the
   /// parent TransTableContextSchema.
-  context_trans_table_index: HashMap<TransTableName, usize>,
+  context_trans_table_index: BTreeMap<TransTableName, usize>,
 }
 
 impl ContextConverter {
@@ -693,9 +693,9 @@ impl ContextConverter {
   /// Extracts the column values for the ColNames in `external_split`. Here,
   /// `parent_context_row` must have the schema of `parent_context_schema` that was passed
   /// into the construct, as usual.
-  pub fn compute_col_context(&self, parent_context_row: &ContextRow) -> HashMap<ColName, ColValN> {
+  pub fn compute_col_context(&self, parent_context_row: &ContextRow) -> BTreeMap<ColName, ColValN> {
     // First, map all columns in `external_split` to their values in this ContextRow.
-    let mut col_context = HashMap::<ColName, ColValN>::new();
+    let mut col_context = BTreeMap::<ColName, ColValN>::new();
     for (col, index) in &self.context_col_index {
       col_context
         .insert(col.clone(), parent_context_row.column_context_row.get(*index).unwrap().clone());
@@ -779,7 +779,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
     // Compute the set of all columns that we have to read from the LocalTable. First,
     // figure out which of the ColNames in `extra_cols` are in the LocalTable, and then,
     // figure the which of the `ColName`s in each child are in the LocalTable.
-    let mut local_schema_set = HashSet::<ColName>::new();
+    let mut local_schema_set = BTreeSet::<ColName>::new();
     for col in &extra_cols {
       if self.local_table.contains_col(col) {
         local_schema_set.insert(col.clone());
@@ -792,9 +792,9 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
 
     // Iterate through all parent ContextRows, compute the local rows, then iterate through those,
     // construct child ContextRows, populate `child_context_row_maps`, then run the callback.
-    let mut child_context_row_maps = Vec::<HashMap<ContextRow, usize>>::new();
+    let mut child_context_row_maps = Vec::<BTreeMap<ContextRow, usize>>::new();
     for _ in 0..self.converters.len() {
-      child_context_row_maps.push(HashMap::new());
+      child_context_row_maps.push(BTreeMap::new());
     }
 
     for parent_context_row_idx in 0..parent_context_rows.len() {

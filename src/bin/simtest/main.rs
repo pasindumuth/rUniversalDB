@@ -10,7 +10,7 @@ use runiversal::model::common::{
 };
 use runiversal::model::message as msg;
 use runiversal::test_utils::{cn, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn main() {
   // Fundamental seed used for all random number generation,
@@ -20,7 +20,7 @@ fn main() {
     seed[i] = i as u8;
   }
 
-  let slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>> = vec![
+  let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
     (mk_sid("s0"), vec![slave_eid(&0)]),
     (mk_sid("s1"), vec![slave_eid(&1)]),
     (mk_sid("s2"), vec![slave_eid(&2)]),
@@ -34,7 +34,7 @@ fn main() {
     vec![mk_eid("m0"), mk_eid("m1"), mk_eid("m2"), mk_eid("m3"), mk_eid("m4")];
 
   // We just have one Tablet per Slave for now.
-  let _tablet_address_config: HashMap<TabletGroupId, SlaveGroupId> = vec![
+  let _tablet_address_config: BTreeMap<TabletGroupId, SlaveGroupId> = vec![
     (mk_tid("t0"), mk_sid("s0")),
     (mk_tid("t1"), mk_sid("s1")),
     (mk_tid("t2"), mk_sid("s2")),
@@ -44,7 +44,7 @@ fn main() {
   .into_iter()
   .collect();
 
-  let _schema: HashMap<(TablePath, Gen), TableSchema> = vec![
+  let _schema: BTreeMap<(TablePath, Gen), TableSchema> = vec![
     (
       (mk_tab("tab0"), Gen(0)),
       TableSchema::new(vec![(cn("id0"), ColType::String)], vec![(cn("c1"), ColType::Int)]),
@@ -68,7 +68,7 @@ fn main() {
   .collect();
 
   #[rustfmt::skip]
-  let _sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>> = vec![
+  let _sharding_config: BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>> = vec![
     (
       (mk_tab("tab0"), Gen(0)),
       vec![

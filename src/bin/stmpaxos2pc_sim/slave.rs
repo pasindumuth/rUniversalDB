@@ -15,7 +15,7 @@ use runiversal::stmpaxos2pc_tm::{
   TMMessage, TMServerContext,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
 //  SlavePLm
@@ -61,7 +61,7 @@ pub enum FullSlaveInput {
 /// other members here.
 #[derive(Debug, Default)]
 pub struct Statuses {
-  simple_rm_ess: HashMap<QueryId, SimpleRMES>,
+  simple_rm_ess: BTreeMap<QueryId, SimpleRMES>,
   simple_tm_ess: BTreeMap<QueryId, SimpleTMES>,
 }
 
@@ -137,7 +137,7 @@ pub struct SlaveContext {
   pub this_eid: EndpointId,
 
   /// LeaderMap
-  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
 
   /// NetworkDriver
   pub network_driver: NetworkDriver<msg::SlaveRemotePayload>,
@@ -160,7 +160,7 @@ impl SlaveContext {
   pub fn new(
     this_sid: SlaveGroupId,
     this_eid: EndpointId,
-    leader_map: HashMap<PaxosGroupId, LeadershipId>,
+    leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
   ) -> SlaveContext {
     let all_gids = leader_map.keys().cloned().collect();
     SlaveContext {

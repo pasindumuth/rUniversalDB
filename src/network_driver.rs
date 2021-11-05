@@ -1,23 +1,23 @@
 use crate::common::RemoteLeaderChangedPLm;
 use crate::model::common::{EndpointId, LeadershipId, PaxosGroupId};
 use crate::model::message as msg;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 pub struct NetworkDriverContext<'a> {
   pub this_gid: &'a PaxosGroupId,
   pub this_eid: &'a EndpointId,
-  pub leader_map: &'a HashMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: &'a BTreeMap<PaxosGroupId, LeadershipId>,
   pub remote_leader_changes: &'a mut Vec<RemoteLeaderChangedPLm>,
 }
 
 #[derive(Debug)]
 pub struct NetworkDriver<PayloadT> {
-  network_buffer: HashMap<PaxosGroupId, Vec<msg::RemoteMessage<PayloadT>>>,
+  network_buffer: BTreeMap<PaxosGroupId, Vec<msg::RemoteMessage<PayloadT>>>,
 }
 
 impl<PayloadT: Clone> NetworkDriver<PayloadT> {
   pub fn new(all_gids: Vec<PaxosGroupId>) -> NetworkDriver<PayloadT> {
-    let mut network_buffer = HashMap::<PaxosGroupId, Vec<msg::RemoteMessage<PayloadT>>>::new();
+    let mut network_buffer = BTreeMap::<PaxosGroupId, Vec<msg::RemoteMessage<PayloadT>>>::new();
     for gid in all_gids {
       network_buffer.insert(gid, Vec::new());
     }

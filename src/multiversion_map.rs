@@ -1,25 +1,25 @@
 use crate::model::common::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::hash::Hash;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct MVM<K: Eq + Hash + Clone, V> {
-  pub map: HashMap<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>,
+pub struct MVM<K: Eq + Ord + Clone, V> {
+  pub map: BTreeMap<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>,
 }
 
 impl<K, V> MVM<K, V>
 where
-  K: Eq + Hash + Clone,
+  K: Eq + Ord + Clone,
   V: Clone,
 {
   pub fn new() -> MVM<K, V> {
-    MVM { map: HashMap::new() }
+    MVM { map: BTreeMap::new() }
   }
 
-  pub fn init(init_vals: HashMap<K, V>) -> MVM<K, V> {
-    let mut map = HashMap::<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>::new();
+  pub fn init(init_vals: BTreeMap<K, V>) -> MVM<K, V> {
+    let mut map = BTreeMap::<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>::new();
     for (key, value) in init_vals {
       map.insert(key, (0, vec![(0, Some(value))]));
     }
@@ -110,8 +110,8 @@ where
 
   /// Returns the values for all keys that are present at the given
   /// `timestamp`. This is done statically, so no lats are updated.
-  pub fn static_snapshot_read(&self, timestamp: Timestamp) -> HashMap<K, V> {
-    let mut snapshot = HashMap::new();
+  pub fn static_snapshot_read(&self, timestamp: Timestamp) -> BTreeMap<K, V> {
+    let mut snapshot = BTreeMap::new();
     for (key, (_, versions)) in &self.map {
       if let Some(value) = find_version(versions, timestamp) {
         snapshot.insert(key.clone(), value.clone());

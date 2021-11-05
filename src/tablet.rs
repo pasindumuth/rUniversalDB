@@ -38,7 +38,7 @@ use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -208,7 +208,7 @@ pub struct MSQueryES {
   pub update_views: BTreeMap<u32, GenericTable>,
   /// This holds all `MSTable*ES`s that belong to this MSQueryES. We make sure
   /// that every ES reference here exist.
-  pub pending_queries: HashSet<QueryId>,
+  pub pending_queries: BTreeSet<QueryId>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -282,16 +282,16 @@ pub struct GRQueryESWrapper {
 #[derive(Debug, Default)]
 pub struct Statuses {
   // Paxos2PC
-  finish_query_ess: HashMap<QueryId, FinishQueryES>,
+  finish_query_ess: BTreeMap<QueryId, FinishQueryES>,
 
   // TP
-  gr_query_ess: HashMap<QueryId, GRQueryESWrapper>,
-  table_read_ess: HashMap<QueryId, TableReadESWrapper>,
-  trans_table_read_ess: HashMap<QueryId, TransTableReadESWrapper>,
-  tm_statuss: HashMap<QueryId, TMStatus>,
-  ms_query_ess: HashMap<QueryId, MSQueryES>,
-  ms_table_read_ess: HashMap<QueryId, MSTableReadESWrapper>,
-  ms_table_write_ess: HashMap<QueryId, MSTableWriteESWrapper>,
+  gr_query_ess: BTreeMap<QueryId, GRQueryESWrapper>,
+  table_read_ess: BTreeMap<QueryId, TableReadESWrapper>,
+  trans_table_read_ess: BTreeMap<QueryId, TransTableReadESWrapper>,
+  tm_statuss: BTreeMap<QueryId, TMStatus>,
+  ms_query_ess: BTreeMap<QueryId, MSQueryES>,
+  ms_table_read_ess: BTreeMap<QueryId, MSTableReadESWrapper>,
+  ms_table_write_ess: BTreeMap<QueryId, MSTableWriteESWrapper>,
 
   // DDL
   ddl_es: DDLES,
@@ -432,7 +432,7 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
   ) -> Result<Vec<(Vec<ColValN>, u64)>, EvalError> {
     // We extract all `ColNames` in `parent_context_schema` that aren't shadowed by the LocalTable,
     // and then map them to their values in `parent_context_row`.
-    let mut col_map = HashMap::<ColName, ColValN>::new();
+    let mut col_map = BTreeMap::<ColName, ColValN>::new();
     let context_col_names = &parent_context_schema.column_context_schema;
     let context_col_vals = &parent_context_row.column_context_row;
     for i in 0..context_col_names.len() {
@@ -546,7 +546,7 @@ pub struct TabletCreateHelper {
   pub gossip: Arc<GossipData>,
 
   /// LeaderMap
-  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
 
   // Storage
   pub this_table_path: TablePath,
@@ -620,7 +620,7 @@ pub struct TabletContext {
   pub gossip: Arc<GossipData>,
 
   /// LeaderMap
-  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
 
   // Storage
   pub storage: GenericMVTable,
@@ -639,13 +639,13 @@ pub struct TabletContext {
   pub read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
 
   // Schema Change and Locking
-  pub waiting_locked_cols: HashMap<QueryId, RequestedLockedCols>,
-  pub inserting_locked_cols: HashMap<QueryId, RequestedLockedCols>,
+  pub waiting_locked_cols: BTreeMap<QueryId, RequestedLockedCols>,
+  pub inserting_locked_cols: BTreeMap<QueryId, RequestedLockedCols>,
 
   /// For every `MSQueryES`, this maps its corresponding `root_query_id` to its `query_id`.
   /// This is for use when a MSTable*ES is constructed. This needs to be updated whenever an
   /// `MSQueryES` is added or removed.
-  pub ms_root_query_map: HashMap<QueryId, QueryId>,
+  pub ms_root_query_map: BTreeMap<QueryId, QueryId>,
 
   // Paxos
   pub tablet_bundle: TabletBundle,
@@ -1349,7 +1349,7 @@ impl TabletContext {
     statuses: &mut Statuses,
     root_query_path: CQueryPath,
     timestamp: Timestamp,
-    query_leader_map: &HashMap<SlaveGroupId, LeadershipId>,
+    query_leader_map: &BTreeMap<SlaveGroupId, LeadershipId>,
   ) -> Result<QueryId, msg::QueryError> {
     let root_query_id = root_query_path.query_id.clone();
     if let Some(ms_query_id) = self.ms_root_query_map.get(&root_query_id) {
@@ -1983,7 +1983,7 @@ impl TabletContext {
     statuses: &mut Statuses,
     orig_p: OrigP,
     subquery_id: QueryId,
-    subquery_new_rms: HashSet<TQueryPath>,
+    subquery_new_rms: BTreeSet<TQueryPath>,
     result: (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
@@ -2556,7 +2556,7 @@ impl TabletContext {
 pub struct ContextKeyboundComputer {
   /// The `ColName`s here are the ones we must read from the Context, and the `usize`
   /// points to them in the ContextRows.
-  context_col_index: HashMap<ColName, usize>,
+  context_col_index: BTreeMap<ColName, usize>,
   selection: proc::ValExpr,
   /// These are the KeyColumns we are trying to tighten.
   key_cols: Vec<(ColName, ColType)>,
@@ -2579,7 +2579,7 @@ impl ContextKeyboundComputer {
   ) -> ContextKeyboundComputer {
     // Compute the ColNames directly used in the `selection` that's not part of
     // the TableSchema (i.e. part of the external Context).
-    let mut external_cols = HashSet::<ColName>::new();
+    let mut external_cols = BTreeSet::<ColName>::new();
     for col in collect_top_level_cols(selection) {
       if !contains_col(table_schema, &col, timestamp) {
         external_cols.insert(col);
@@ -2589,7 +2589,7 @@ impl ContextKeyboundComputer {
     // Map the `external_cols` to their position in the parent context. Recall that
     // every element `external_cols` should exist in the parent_context, so we
     // assert as such.
-    let mut context_col_index = HashMap::<ColName, usize>::new();
+    let mut context_col_index = BTreeMap::<ColName, usize>::new();
     for (index, col) in parent_context_schema.column_context_schema.iter().enumerate() {
       if external_cols.contains(col) {
         context_col_index.insert(col.clone(), index);
@@ -2614,7 +2614,7 @@ impl ContextKeyboundComputer {
   ) -> Result<Vec<KeyBound>, EvalError> {
     // First, map all External Columns names to the corresponding values
     // in this ContextRow
-    let mut col_context = HashMap::<ColName, ColValN>::new();
+    let mut col_context = BTreeMap::<ColName, ColValN>::new();
     for (col, index) in &self.context_col_index {
       let col_val = parent_context_row.column_context_row.get(*index).unwrap().clone();
       col_context.insert(col.clone(), col_val);

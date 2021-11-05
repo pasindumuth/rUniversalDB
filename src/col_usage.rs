@@ -3,7 +3,7 @@ use crate::model::common::{proc, ColName, Gen, TablePath, TierMap, Timestamp, Tr
 use crate::multiversion_map::MVM;
 use crate::server::weak_contains_col;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 // -----------------------------------------------------------------------------------------------
@@ -62,7 +62,7 @@ impl FrozenColUsageNode {
 ///
 /// Users of this algorithm must verify these facts first.
 pub struct ColUsagePlanner<'a> {
-  pub db_schema: &'a HashMap<(TablePath, Gen), TableSchema>,
+  pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
   pub table_generation: &'a MVM<TablePath, Gen>,
   pub timestamp: Timestamp,
 }
@@ -75,7 +75,7 @@ impl<'a> ColUsagePlanner<'a> {
   /// since TransTableNames are all uniques anyways.
   pub fn compute_frozen_col_usage_node(
     &mut self,
-    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
+    trans_table_ctx: &mut BTreeMap<TransTableName, Vec<ColName>>,
     table_ref: &proc::TableRef,
     exprs: &Vec<proc::ValExpr>,
   ) -> FrozenColUsageNode {
@@ -88,7 +88,7 @@ impl<'a> ColUsagePlanner<'a> {
     }
 
     // Determine which columns are safe, and which are external.
-    let mut all_cols = HashSet::<ColName>::new();
+    let mut all_cols = BTreeSet::<ColName>::new();
     for child_map in &node.children {
       for (_, (_, child)) in child_map {
         for col in &child.external_cols {
@@ -135,7 +135,7 @@ impl<'a> ColUsagePlanner<'a> {
   /// Construct a `FrozenColUsageNode` for the `select`.
   pub fn plan_select(
     &mut self,
-    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
+    trans_table_ctx: &mut BTreeMap<TransTableName, Vec<ColName>>,
     select: &proc::SuperSimpleSelect,
   ) -> (Vec<ColName>, FrozenColUsageNode) {
     (
@@ -151,7 +151,7 @@ impl<'a> ColUsagePlanner<'a> {
   /// Construct a `FrozenColUsageNode` for the `update`.
   pub fn plan_update(
     &mut self,
-    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
+    trans_table_ctx: &mut BTreeMap<TransTableName, Vec<ColName>>,
     update: &proc::Update,
   ) -> (Vec<ColName>, FrozenColUsageNode) {
     let mut projection = Vec::new();
@@ -182,7 +182,7 @@ impl<'a> ColUsagePlanner<'a> {
   /// Construct a `FrozenColUsageNode` for the `stage_query`.
   pub fn plan_ms_query_stage(
     &mut self,
-    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
+    trans_table_ctx: &mut BTreeMap<TransTableName, Vec<ColName>>,
     stage_query: &proc::MSQueryStage,
   ) -> (Vec<ColName>, FrozenColUsageNode) {
     match stage_query {
@@ -194,7 +194,7 @@ impl<'a> ColUsagePlanner<'a> {
   /// Construct a `FrozenColUsageNode` for the `gr_query`.
   pub fn plan_gr_query(
     &mut self,
-    trans_table_ctx: &mut HashMap<TransTableName, Vec<ColName>>,
+    trans_table_ctx: &mut BTreeMap<TransTableName, Vec<ColName>>,
     gr_query: &proc::GRQuery,
   ) -> Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> {
     let mut children = Vec::<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>::new();
@@ -215,7 +215,7 @@ impl<'a> ColUsagePlanner<'a> {
     &mut self,
     ms_query: &proc::MSQuery,
   ) -> Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> {
-    let mut trans_table_ctx = HashMap::<TransTableName, Vec<ColName>>::new();
+    let mut trans_table_ctx = BTreeMap::<TransTableName, Vec<ColName>>::new();
     let mut children = Vec::<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>::new();
     for (trans_table_name, child_query) in &ms_query.trans_tables {
       let (cols, node) = self.plan_ms_query_stage(&mut trans_table_ctx, child_query);
@@ -294,7 +294,7 @@ fn collect_expr_subqueries_r(expr: &proc::ValExpr, subqueries: &mut Vec<proc::GR
 /// Recall that all `TransTablesName`s are unique. This should be determinisitic.
 pub fn node_external_trans_tables(col_usage_node: &FrozenColUsageNode) -> Vec<TransTableName> {
   let mut accum = Vec::<TransTableName>::new();
-  node_external_trans_tables_r(col_usage_node, &mut HashSet::new(), &mut accum);
+  node_external_trans_tables_r(col_usage_node, &mut BTreeSet::new(), &mut accum);
   accum
 }
 
@@ -303,7 +303,7 @@ pub fn nodes_external_trans_tables(
   nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 ) -> Vec<TransTableName> {
   let mut accum = Vec::<TransTableName>::new();
-  nodes_external_trans_tables_r(nodes, &mut HashSet::new(), &mut accum);
+  nodes_external_trans_tables_r(nodes, &mut BTreeSet::new(), &mut accum);
   accum
 }
 
@@ -313,7 +313,7 @@ pub fn nodes_external_trans_tables(
 /// Here, `defined_trans_tables` should remain unchanged, and `accum` should be determinisitic.
 fn node_external_trans_tables_r(
   node: &FrozenColUsageNode,
-  defined_trans_tables: &mut HashSet<TransTableName>,
+  defined_trans_tables: &mut BTreeSet<TransTableName>,
   accum: &mut Vec<TransTableName>,
 ) {
   if let proc::TableRef::TransTableName(trans_table_name) = &node.table_ref {
@@ -329,7 +329,7 @@ fn node_external_trans_tables_r(
 /// Same as the above function, except for multiple `nodes`.
 fn nodes_external_trans_tables_r(
   nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
-  defined_trans_tables: &mut HashSet<TransTableName>,
+  defined_trans_tables: &mut BTreeSet<TransTableName>,
   accum: &mut Vec<TransTableName>,
 ) {
   for (trans_table_name, (_, node)) in nodes {
@@ -345,7 +345,7 @@ fn nodes_external_trans_tables_r(
 pub fn nodes_external_cols(
   nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 ) -> Vec<ColName> {
-  let mut col_name_set = HashSet::<ColName>::new();
+  let mut col_name_set = BTreeSet::<ColName>::new();
   for (_, (_, node)) in nodes {
     col_name_set.extend(node.external_cols.clone())
   }
@@ -417,8 +417,8 @@ pub fn iterate_stage_ms_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
 // -----------------------------------------------------------------------------------------------
 
 /// Gather every reference to a `TablePath` found in the `query`.
-pub fn collect_table_paths(query: &proc::MSQuery) -> HashSet<TablePath> {
-  let mut table_paths = HashSet::<TablePath>::new();
+pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
+  let mut table_paths = BTreeSet::<TablePath>::new();
   iterate_stage_ms_query(
     &mut |stage: GeneralStage| match stage {
       GeneralStage::SuperSimpleSelect(query) => {
@@ -440,9 +440,9 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> HashSet<TablePath> {
 /// The Tier should be where every Read query should be reading from, except
 /// if the current stage is an Update, which should be one Tier ahead (i.e.
 /// lower) for that TablePath.
-pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> HashMap<TransTableName, TierMap> {
-  let mut all_tier_maps = HashMap::<TransTableName, TierMap>::new();
-  let mut cur_tier_map = HashMap::<TablePath, u32>::new();
+pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableName, TierMap> {
+  let mut all_tier_maps = BTreeMap::<TransTableName, TierMap>::new();
+  let mut cur_tier_map = BTreeMap::<TablePath, u32>::new();
   for (_, stage) in &ms_query.trans_tables {
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
@@ -469,9 +469,9 @@ pub fn compute_query_plan_data(
   ms_query: &proc::MSQuery,
   table_generation: &MVM<TablePath, Gen>,
   timestamp: Timestamp,
-) -> (HashMap<TablePath, Gen>, HashMap<TablePath, Vec<ColName>>) {
-  let mut table_location_map = HashMap::<TablePath, Gen>::new();
-  let mut extra_req_cols = HashMap::<TablePath, Vec<ColName>>::new();
+) -> (BTreeMap<TablePath, Gen>, BTreeMap<TablePath, Vec<ColName>>) {
+  let mut table_location_map = BTreeMap::<TablePath, Gen>::new();
+  let mut extra_req_cols = BTreeMap::<TablePath, Vec<ColName>>::new();
   iterate_stage_ms_query(
     &mut |stage: GeneralStage| match stage {
       GeneralStage::SuperSimpleSelect(query) => {
@@ -522,7 +522,7 @@ mod test {
   use super::*;
   use crate::model::common::ColType;
   use crate::test_utils::{cn, mk_tab, mk_ttab};
-  use std::collections::HashMap;
+  use std::collections::BTreeMap;
 
   #[test]
   fn basic_test() {
@@ -531,7 +531,7 @@ mod test {
     table_generation.write(&mk_tab("t2"), Some(Gen(0)), 1);
     table_generation.write(&mk_tab("t3"), Some(Gen(0)), 1);
 
-    let db_schema: HashMap<(TablePath, Gen), TableSchema> = vec![
+    let db_schema: BTreeMap<(TablePath, Gen), TableSchema> = vec![
       (
         (mk_tab("t1"), Gen(0)),
         TableSchema::new(vec![(cn("c1"), ColType::String)], vec![(cn("c2"), ColType::Int)]),

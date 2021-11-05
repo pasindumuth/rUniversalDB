@@ -13,7 +13,7 @@ use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
 };
 use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -30,14 +30,14 @@ const TIMER_INCREMENT: u64 = 250;
 pub struct ProdSlaveIOCtx {
   // Basic
   rand: XorShiftRng,
-  net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
+  net_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
 
   // Constructing and communicating with Tablets
   to_slave: Sender<FullSlaveInput>,
-  tablet_map: HashMap<TabletGroupId, Sender<TabletForwardMsg>>,
+  tablet_map: BTreeMap<TabletGroupId, Sender<TabletForwardMsg>>,
 
   // Coord
-  coord_map: HashMap<CoordGroupId, Sender<CoordForwardMsg>>,
+  coord_map: BTreeMap<CoordGroupId, Sender<CoordForwardMsg>>,
 
   // Deferred timer tasks
   tasks: Arc<Mutex<BTreeMap<Timestamp, Vec<SlaveTimerInput>>>>,
@@ -151,7 +151,7 @@ impl SlaveIOCtx for ProdSlaveIOCtx {
 pub struct ProdCoreIOCtx {
   // Basic
   rand: XorShiftRng,
-  net_conn_map: Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
+  net_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
 
   // Slave
   to_slave: Sender<FullSlaveInput>,
@@ -193,10 +193,10 @@ const NUM_COORDS: u32 = 3;
 pub fn start_server(
   to_server_sender: Sender<FullSlaveInput>,
   to_server_receiver: Receiver<FullSlaveInput>,
-  net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
+  net_conn_map: &Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
   this_eid: EndpointId,
   this_sid: SlaveGroupId,
-  slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
+  slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
   master_address_config: Vec<EndpointId>,
 ) {
   // Create Slave RNG.
@@ -214,7 +214,7 @@ pub fn start_server(
   });
 
   // Construct LeaderMap
-  let mut leader_map = HashMap::<PaxosGroupId, LeadershipId>::new();
+  let mut leader_map = BTreeMap::<PaxosGroupId, LeadershipId>::new();
   leader_map.insert(
     PaxosGroupId::Master,
     LeadershipId { gen: Gen(0), eid: master_address_config[0].clone() },
@@ -224,7 +224,7 @@ pub fn start_server(
   }
 
   // Create the Coord
-  let mut coord_map = HashMap::<CoordGroupId, Sender<CoordForwardMsg>>::new();
+  let mut coord_map = BTreeMap::<CoordGroupId, Sender<CoordForwardMsg>>::new();
   let mut coord_positions: Vec<CoordGroupId> = Vec::new();
   for _ in 0..NUM_COORDS {
     let coord_group_id = mk_cid(&mut rand);

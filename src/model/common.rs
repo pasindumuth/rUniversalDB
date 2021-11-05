@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// These are common PODs that form the core data objects
 /// of the system.
@@ -89,7 +89,7 @@ pub struct TableView {
 /// being updated should be one ahead (i.e. lower).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TierMap {
-  pub map: HashMap<TablePath, u32>,
+  pub map: BTreeMap<TablePath, u32>,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -124,7 +124,7 @@ impl SlaveGroupId {
 pub struct CoordGroupId(pub String);
 
 /// A request Id that globally identifies a request.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(pub String);
 
 // -------------------------------------------------------------------------------------------------

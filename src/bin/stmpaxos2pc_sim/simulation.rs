@@ -5,7 +5,7 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::{rvec, BasicIOCtx};
 use runiversal::model::common::{EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId};
 use runiversal::model::message::LeaderChanged;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 // -------------------------------------------------------------------------------------------------
 //  SlaveIOCtx
@@ -20,7 +20,7 @@ pub trait ISlaveIOCtx: BasicIOCtx<msg::NetworkMessage> {
 pub struct SlaveIOCtx<'a> {
   rand: &'a mut XorShiftRng,
   current_time: u128,
-  queues: &'a mut HashMap<EndpointId, HashMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
+  queues: &'a mut BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
   nonempty_queues: &'a mut Vec<(EndpointId, EndpointId)>,
 
   // Metadata
@@ -77,18 +77,18 @@ pub struct Simulation {
   pub rand: XorShiftRng,
 
   /// Message queues between all nodes in the network
-  queues: HashMap<EndpointId, HashMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
+  queues: BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
   /// The set of queues that have messages to deliver
   nonempty_queues: Vec<(EndpointId, EndpointId)>,
 
   /// SlaveState
-  slave_states: HashMap<EndpointId, SlaveState>,
+  slave_states: BTreeMap<EndpointId, SlaveState>,
   /// Accumulated client responses for each client
-  client_msgs_received: HashMap<EndpointId, Vec<msg::NetworkMessage>>,
+  client_msgs_received: BTreeMap<EndpointId, Vec<msg::NetworkMessage>>,
 
   // Paxos Configuration for Master and Slaves
-  slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
-  slave_address_config_inverse: HashMap<EndpointId, SlaveGroupId>,
+  slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
+  slave_address_config_inverse: BTreeMap<EndpointId, SlaveGroupId>,
 
   // Global Paxos
   /// Maps nodes that are currently proposing a PLEntry to the PLEntry that it is proposing.
@@ -97,9 +97,9 @@ pub struct Simulation {
   /// If empty, there will be no entry in this map.
   insert_queues: BTreeMap<EndpointId, VecDeque<msg::PLEntry<SlaveBundle>>>,
   /// The current set of Leaders according to the Global PaxosLog
-  pub leader_map: HashMap<SlaveGroupId, LeadershipId>,
+  pub leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   /// Non-`LeaderChanged``PLEntry` inserted into every PaxosGroups Global PL.
-  pub global_pls: HashMap<SlaveGroupId, Vec<SlaveBundle>>,
+  pub global_pls: BTreeMap<SlaveGroupId, Vec<SlaveBundle>>,
 
   /// Meta
   true_timestamp: u128,
@@ -114,7 +114,7 @@ impl Simulation {
   pub fn new(
     seed: [u8; 16],
     num_clients: i32,
-    slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
+    slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
   ) -> Simulation {
     let mut sim = Simulation {
       rand: XorShiftRng::from_seed(seed),
@@ -150,7 +150,7 @@ impl Simulation {
     }
 
     // Construct LeaderMap
-    let mut leader_map = HashMap::<PaxosGroupId, LeadershipId>::new();
+    let mut leader_map = BTreeMap::<PaxosGroupId, LeadershipId>::new();
     for (sid, eids) in &slave_address_config {
       leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
     }
@@ -322,7 +322,7 @@ impl Simulation {
       // Here, we randomly change the Leadership of a PaxosGroup with a 5% chance.
 
       // Pick a random EndpointId to make a leader of
-      let mut eids: HashSet<EndpointId> =
+      let mut eids: BTreeSet<EndpointId> =
         self.slave_address_config_inverse.keys().cloned().collect();
       for (_, lid) in &self.leader_map {
         // Remove existing leaders
@@ -397,7 +397,7 @@ pub fn mk_client_eid(i: &i32) -> EndpointId {
 
 /// Add a message between two nodes in the network.
 fn add_msg(
-  queues: &mut HashMap<EndpointId, HashMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
+  queues: &mut BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
   nonempty_queues: &mut Vec<(EndpointId, EndpointId)>,
   msg: msg::NetworkMessage,
   from_eid: &EndpointId,

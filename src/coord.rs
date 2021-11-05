@@ -24,7 +24,7 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -60,13 +60,13 @@ struct MSCoordESWrapper {
 #[derive(Debug, Default)]
 pub struct Statuses {
   // Paxos2PC
-  finish_query_tm_ess: HashMap<QueryId, FinishQueryTMES>,
+  finish_query_tm_ess: BTreeMap<QueryId, FinishQueryTMES>,
 
   // TP
-  ms_coord_ess: HashMap<QueryId, MSCoordESWrapper>,
-  gr_query_ess: HashMap<QueryId, GRQueryESWrapper>,
-  trans_table_read_ess: HashMap<QueryId, TransTableReadESWrapper>,
-  tm_statuss: HashMap<QueryId, TMStatus>,
+  ms_coord_ess: BTreeMap<QueryId, MSCoordESWrapper>,
+  gr_query_ess: BTreeMap<QueryId, GRQueryESWrapper>,
+  trans_table_read_ess: BTreeMap<QueryId, TransTableReadESWrapper>,
+  tm_statuss: BTreeMap<QueryId, TMStatus>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -91,11 +91,11 @@ pub struct CoordContext {
   pub gossip: Arc<GossipData>,
 
   /// Paxos
-  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
 
   /// There is an entry here exactly when there is a corresponding `MSCoordES`, and it
   /// is used to cancel an `MSCoordES` when when a CancelQueryExteral arrives.
-  pub external_request_id_map: HashMap<RequestId, QueryId>,
+  pub external_request_id_map: BTreeMap<RequestId, QueryId>,
 }
 
 impl CoordState {
@@ -114,7 +114,7 @@ impl CoordContext {
     this_coord_group_id: CoordGroupId,
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
-    leader_map: HashMap<PaxosGroupId, LeadershipId>,
+    leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
   ) -> CoordContext {
     CoordContext {
       this_sid: this_slave_group_id,
@@ -424,7 +424,7 @@ impl CoordContext {
           // This means this node lost Leadership.
 
           // Wink away MSCoordESs
-          for (_, ms_coord_es) in statuses.ms_coord_ess.drain() {
+          for (_, ms_coord_es) in std::mem::replace(&mut statuses.ms_coord_ess, BTreeMap::new()) {
             io_ctx.send(
               &ms_coord_es.sender_eid,
               msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
@@ -437,7 +437,9 @@ impl CoordContext {
           }
 
           // Wink away FinishQueryTMESs
-          for (_, finish_query_es) in statuses.finish_query_tm_ess.drain() {
+          for (_, finish_query_es) in
+            std::mem::replace(&mut statuses.finish_query_tm_ess, BTreeMap::new())
+          {
             if let Some(response_data) = finish_query_es.response_data {
               io_ctx.send(
                 &response_data.sender_eid,
@@ -531,7 +533,7 @@ impl CoordContext {
     statuses: &mut Statuses,
     orig_p: OrigP,
     tm_qid: QueryId,
-    new_rms: HashSet<TQueryPath>,
+    new_rms: BTreeSet<TQueryPath>,
     merged_result: (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
@@ -598,7 +600,7 @@ impl CoordContext {
     statuses: &mut Statuses,
     orig_p: OrigP,
     subquery_id: QueryId,
-    subquery_new_rms: HashSet<TQueryPath>,
+    subquery_new_rms: BTreeSet<TQueryPath>,
     result: (Vec<ColName>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;

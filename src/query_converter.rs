@@ -1,6 +1,6 @@
 use crate::model::common::{iast, proc, ColName, TablePath, TransTableName};
 use crate::model::message as msg;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
 
 pub fn convert_to_msquery(query: iast::Query) -> Result<proc::MSQuery, msg::ExternalAbortedData> {
@@ -9,7 +9,7 @@ pub fn convert_to_msquery(query: iast::Query) -> Result<proc::MSQuery, msg::Exte
   // from a counter. This guarantees uniqueness, since backslashes aren't allowed in
   // Table names.
   let mut ctx =
-    RenameContext { trans_table_map: HashMap::new(), counter: 0, table_names: HashSet::new() };
+    RenameContext { trans_table_map: BTreeMap::new(), counter: 0, table_names: BTreeSet::new() };
   let mut renamed_query = query.clone();
   rename_trans_tables_query_r(&mut ctx, &mut renamed_query);
 
@@ -47,9 +47,9 @@ fn to_table_ref(table_ref: &String) -> proc::TableRef {
 // -----------------------------------------------------------------------------------------------
 
 struct RenameContext {
-  trans_table_map: HashMap<String, Vec<String>>, // This stays unmuted across a function call
-  counter: u32,                                  // This is incremented
-  table_names: HashSet<String>, // The set of regular table names we detect. This is needed
+  trans_table_map: BTreeMap<String, Vec<String>>, // This stays unmuted across a function call
+  counter: u32,                                   // This is incremented
+  table_names: BTreeSet<String>, // The set of regular table names we detect. This is needed
 }
 
 /// This functions renames the TransTables in `query` by prepending 'tt\\n\\',
@@ -326,7 +326,7 @@ mod rename_test {
       )
     );
 
-    assert_eq!(ctx.table_names, HashSet::from_iter(vec!["t2".to_string()].into_iter()))
+    assert_eq!(ctx.table_names, BTreeSet::from_iter(vec!["t2".to_string()].into_iter()))
   }
 
   // This tests for a basic flattening of the Query.

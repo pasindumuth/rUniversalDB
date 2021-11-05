@@ -12,7 +12,7 @@ use crate::model::common::{
 use crate::slave::SharedPaxosBundle;
 use crate::stmpaxos2pc_tm;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // -------------------------------------------------------------------------------------------------
 //  NetworkMessage
@@ -504,9 +504,9 @@ pub struct MasterQueryPlanningAborted {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterQueryPlan {
-  pub all_tier_maps: HashMap<TransTableName, TierMap>,
-  pub table_location_map: HashMap<TablePath, Gen>,
-  pub extra_req_cols: HashMap<TablePath, Vec<ColName>>,
+  pub all_tier_maps: BTreeMap<TransTableName, TierMap>,
+  pub table_location_map: BTreeMap<TablePath, Gen>,
+  pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
   pub col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 }
 

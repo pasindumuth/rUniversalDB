@@ -14,7 +14,7 @@ use crate::model::message as msg;
 use crate::model::message::MasteryQueryPlanningResult;
 use crate::server::{weak_contains_col, CommonQuery, ServerContextBase};
 use crate::trans_table_read_es::TransTableSource;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 // -----------------------------------------------------------------------------------------------
 //  MSCoordES
@@ -22,10 +22,10 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct CoordQueryPlan {
-  all_tier_maps: HashMap<TransTableName, TierMap>,
-  query_leader_map: HashMap<SlaveGroupId, LeadershipId>,
-  table_location_map: HashMap<TablePath, Gen>,
-  extra_req_cols: HashMap<TablePath, Vec<ColName>>,
+  all_tier_maps: BTreeMap<TransTableName, TierMap>,
+  query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
+  table_location_map: BTreeMap<TablePath, Gen>,
+  extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
   col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 }
 
@@ -72,14 +72,14 @@ pub struct MSCoordES {
   pub query_plan: CoordQueryPlan,
 
   // The dynamically evolving fields.
-  pub all_rms: HashSet<TQueryPath>,
+  pub all_rms: BTreeSet<TQueryPath>,
   pub trans_table_views: Vec<(TransTableName, (Vec<ColName>, TableView))>,
   pub state: CoordState,
 
   /// Recall that since we remove a `TQueryPath` when its Leadership changes, that means that
   /// the LeadershipId of the PaxosGroup of a `TQueryPath`s here is the same as the one
   /// when this `TQueryPath` came in.
-  pub registered_queries: HashSet<TQueryPath>,
+  pub registered_queries: BTreeSet<TQueryPath>,
 }
 
 impl TransTableSource for MSCoordES {
@@ -189,7 +189,7 @@ impl FullMSCoordES {
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
     tm_qid: QueryId,
-    new_rms: HashSet<TQueryPath>,
+    new_rms: BTreeSet<TQueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
@@ -753,9 +753,9 @@ impl QueryPlanningES {
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
-    table_location_map: &HashMap<TablePath, Gen>,
-  ) -> HashMap<SlaveGroupId, LeadershipId> {
-    let mut query_leader_map = HashMap::<SlaveGroupId, LeadershipId>::new();
+    table_location_map: &BTreeMap<TablePath, Gen>,
+  ) -> BTreeMap<SlaveGroupId, LeadershipId> {
+    let mut query_leader_map = BTreeMap::<SlaveGroupId, LeadershipId>::new();
     for (table_path, gen) in table_location_map {
       let shards = ctx.gossip.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap();
       for (_, tid) in shards.clone() {

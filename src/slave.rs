@@ -14,7 +14,7 @@ use crate::stmpaxos2pc_tm::RMServerContext;
 use crate::tablet::{TabletBundle, TabletForwardMsg};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ pub enum SlavePLm {
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub struct SharedPaxosBundle {
   slave: SlaveBundle,
-  tablet: HashMap<TabletGroupId, TabletBundle>,
+  tablet: BTreeMap<TabletGroupId, TabletBundle>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -129,7 +129,7 @@ const REMOTE_LEADER_CHANGED_PERIOD: u128 = 1;
 /// other members here.
 #[derive(Debug, Default)]
 pub struct Statuses {
-  create_table_ess: HashMap<QueryId, CreateTableRMES>,
+  create_table_ess: BTreeMap<QueryId, CreateTableRMES>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -178,7 +178,7 @@ pub struct SlaveContext {
   pub gossip: Arc<GossipData>,
 
   /// LeaderMap
-  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
 
   /// NetworkDriver
   pub network_driver: NetworkDriver<msg::SlaveRemotePayload>,
@@ -186,7 +186,7 @@ pub struct SlaveContext {
   // Paxos
   pub slave_bundle: SlaveBundle,
   /// After a `SharedPaxosBundle` is inserted, this is cleared.
-  pub tablet_bundles: HashMap<TabletGroupId, TabletBundle>,
+  pub tablet_bundles: BTreeMap<TabletGroupId, TabletBundle>,
   pub paxos_driver: PaxosDriver<SharedPaxosBundle>,
 }
 
@@ -219,7 +219,7 @@ impl SlaveContext {
     this_slave_group_id: SlaveGroupId,
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
-    leader_map: HashMap<PaxosGroupId, LeadershipId>,
+    leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
   ) -> SlaveContext {
     let all_gids = leader_map.keys().cloned().collect();
     let paxos_nodes = gossip.slave_address_config.get(&this_slave_group_id).unwrap().clone();
@@ -530,7 +530,7 @@ impl SlaveContext {
     if self.tablet_bundles.len() == io_ctx.num_tablets() {
       let shared_bundle = SharedPaxosBundle {
         slave: std::mem::replace(&mut self.slave_bundle, SlaveBundle::default()),
-        tablet: std::mem::replace(&mut self.tablet_bundles, HashMap::default()),
+        tablet: std::mem::replace(&mut self.tablet_bundles, BTreeMap::default()),
       };
       self
         .paxos_driver

@@ -14,7 +14,7 @@ use crate::server::{
 use crate::tablet::{
   compute_contexts, Executing, SingleSubqueryStatus, SubqueryFinished, SubqueryPending,
 };
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -47,7 +47,7 @@ pub struct TransTableReadES {
   pub query_plan: QueryPlan,
 
   // Dynamically evolving fields.
-  pub new_rms: HashSet<TQueryPath>,
+  pub new_rms: BTreeSet<TQueryPath>,
   pub state: TransExecutionS,
 
   // Convenience fields
@@ -225,7 +225,7 @@ impl TransTableReadES {
     ctx: &mut SlaveServerContext<IO>,
     trans_table_source: &SourceT,
     subquery_id: QueryId,
-    subquery_new_rms: HashSet<TQueryPath>,
+    subquery_new_rms: BTreeSet<TQueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> TransTableAction {
     // Add the subquery results into the TableReadES.
@@ -277,7 +277,7 @@ impl TransTableReadES {
     );
 
     // These are all of the `ColNames` we need in order to evaluate the Select.
-    let mut top_level_cols_set = HashSet::<ColName>::new();
+    let mut top_level_cols_set = BTreeSet::<ColName>::new();
     top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
     top_level_cols_set.extend(self.sql_query.projection.clone());
     let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());

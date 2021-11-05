@@ -5,7 +5,7 @@ use rand::RngCore;
 use runiversal::common::mk_qid;
 use runiversal::model::common::{EndpointId, SlaveGroupId};
 use runiversal::stmpaxos2pc_tm::RMPLm;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// This checks for 2PC Consistency among the Global PLs in the simulation. Recall that
 /// 2PC Consistency is where some RMs do not commit if any other RM aborts
@@ -59,7 +59,7 @@ pub fn test() {
   // Setup Simulation
 
   // Create 5 SlaveGroups, each with 3 nodes.
-  let mut slave_address_config = HashMap::<SlaveGroupId, Vec<EndpointId>>::new();
+  let mut slave_address_config = BTreeMap::<SlaveGroupId, Vec<EndpointId>>::new();
   for i in 0..5 {
     let mut eids = Vec::<EndpointId>::new();
     for j in 0..3 {
@@ -111,7 +111,7 @@ pub fn test() {
     sim.simulate_n_ms(MS_PER_ITERATION);
     if !check_consistency(&mut sim) {
       let time_elapsed = i * MS_PER_ITERATION;
-      print!("Test Failed: Consistency check after {}ms failed.", time_elapsed);
+      println!("Test Failed: Consistency check after {}ms failed.", time_elapsed);
       return;
     }
   }
@@ -129,14 +129,14 @@ pub fn test() {
   sim.simulate_n_ms(EXPECTED_COOLDOWN_MS);
 
   if !check_consistency(&mut sim) {
-    print!("Test Failed: Consistency check after cooldown failed.");
+    println!("Test Failed: Consistency check after cooldown failed.");
     return;
   }
 
   if !check_completion(&mut sim) {
-    print!("Test Failed: STMPaxos2PC did not complete after cooldown.");
+    println!("Test Failed: STMPaxos2PC did not complete after cooldown.");
     return;
   }
 
-  print!("Test Successful!");
+  println!("Test Successful!");
 }

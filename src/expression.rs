@@ -1,7 +1,7 @@
 use crate::common::{ColBound, KeyBound, PolyColBound, SingleBound, TableRegion};
 use crate::model::common::proc::ValExpr;
 use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
 use std::ops::Deref;
 
@@ -74,7 +74,7 @@ pub fn construct_colvaln(val: iast::Value) -> Result<ColValN, EvalError> {
 /// should be increment to point passed the final subquery_val that was used.
 pub fn construct_cexpr(
   sql_expr: &proc::ValExpr,
-  col_map: &HashMap<ColName, ColValN>,
+  col_map: &BTreeMap<ColName, ColValN>,
   subquery_vals: &Vec<ColValN>,
   next_subquery_idx: &mut usize,
 ) -> Result<CExpr, EvalError> {
@@ -199,7 +199,7 @@ pub fn evaluate_c_expr(c_expr: &CExpr) -> Result<ColValN, EvalError> {
 /// use), and `key_cols` are the Key Columns of the Table.  
 pub fn construct_kb_expr(
   expr: proc::ValExpr,
-  col_map: &HashMap<ColName, ColValN>,
+  col_map: &BTreeMap<ColName, ColValN>,
   key_cols: &Vec<ColName>,
 ) -> Result<KBExpr, EvalError> {
   let kb_expr = match expr {
@@ -543,7 +543,7 @@ pub fn compress_row_region(row_region: Vec<KeyBound>) -> Vec<KeyBound> {
 /// values that we substitute into `expr` first. This returns the compressed regions.
 pub fn compute_key_region(
   expr: &proc::ValExpr,
-  col_map: HashMap<ColName, ColValN>,
+  col_map: BTreeMap<ColName, ColValN>,
   key_cols: &Vec<(ColName, ColType)>,
 ) -> Result<Vec<KeyBound>, EvalError> {
   let key_col_names = Vec::from_iter(key_cols.iter().map(|(name, _)| name.clone()));

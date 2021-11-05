@@ -11,7 +11,7 @@ use runiversal::model::message as msg;
 use runiversal::net::{recv, send};
 use runiversal::slave::FullSlaveInput;
 use runiversal::test_utils as tu;
-use std::collections::{HashMap, LinkedList};
+use std::collections::{BTreeMap, LinkedList};
 use std::env;
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::Sender;
@@ -44,7 +44,7 @@ use std::thread;
 const SERVER_PORT: u32 = 1610;
 
 fn handle_conn(
-  net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
+  net_conn_map: &Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
   to_server_sender: &Sender<FullSlaveInput>,
   stream: TcpStream,
 ) -> EndpointId {
@@ -78,7 +78,7 @@ fn handle_conn(
 
 fn handle_self_conn(
   endpoint_id: &EndpointId,
-  net_conn_map: &Arc<Mutex<HashMap<EndpointId, Sender<Vec<u8>>>>>,
+  net_conn_map: &Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
   to_server_sender: &Sender<FullSlaveInput>,
 ) {
   // This is the FromServer Queue.
@@ -123,7 +123,7 @@ fn main() {
   let (to_server_sender, to_server_receiver) = mpsc::channel::<FullSlaveInput>();
   // The map mapping the IP addresses to a FromServer Queue, used to
   // communicate with the ToNetwork Threads to send data out.
-  let net_conn_map = Arc::new(Mutex::new(HashMap::<EndpointId, Sender<Vec<u8>>>::new()));
+  let net_conn_map = Arc::new(Mutex::new(BTreeMap::<EndpointId, Sender<Vec<u8>>>::new()));
 
   // Start the Accepting Thread
   {
@@ -163,7 +163,7 @@ fn main() {
   );
 }
 
-pub fn mk_slave_address_config() -> HashMap<SlaveGroupId, Vec<EndpointId>> {
+pub fn mk_slave_address_config() -> BTreeMap<SlaveGroupId, Vec<EndpointId>> {
   vec![
     (tu::mk_sid("s0"), vec![tu::mk_eid("e0")]),
     (tu::mk_sid("s1"), vec![tu::mk_eid("e1")]),

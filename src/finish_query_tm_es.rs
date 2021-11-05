@@ -5,7 +5,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 // -----------------------------------------------------------------------------------------------
 //  FinishQueryOrigTMES
@@ -28,8 +28,8 @@ pub struct ResponseData {
 pub enum Paxos2PCTMState {
   Start,
   // These holds the set of remaining RMs.
-  Preparing(HashSet<TQueryPath>),
-  CheckPreparing(HashSet<TQueryPath>),
+  Preparing(BTreeSet<TQueryPath>),
+  CheckPreparing(BTreeSet<TQueryPath>),
 }
 
 #[derive(Debug)]
@@ -58,7 +58,7 @@ impl FinishQueryTMES {
     io_ctx: &mut IO,
   ) -> FinishQueryTMAction {
     // Send out FinishQueryPrepare to all RMs
-    let mut state = HashSet::<TQueryPath>::new();
+    let mut state = BTreeSet::<TQueryPath>::new();
     for rm in &self.all_rms {
       state.insert(rm.clone());
       send_prepare(ctx, io_ctx, self.query_id.clone(), rm.clone(), self.all_rms.clone());
@@ -73,7 +73,7 @@ impl FinishQueryTMES {
     io_ctx: &mut IO,
   ) -> FinishQueryTMAction {
     // Send out FinishQueryCheckPrepared to all RMs
-    let mut state = HashSet::<TQueryPath>::new();
+    let mut state = BTreeSet::<TQueryPath>::new();
     for rm in &self.all_rms {
       state.insert(rm.clone());
       send_check_prepared(ctx, io_ctx, self.query_id.clone(), rm.clone());

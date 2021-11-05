@@ -7,7 +7,7 @@ use crate::model::message::{
 use rand::RngCore;
 use sqlparser::dialect::keywords::Keyword::NEXT;
 use std::cmp::{max, min};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
 //  Single Paxos State
@@ -25,7 +25,7 @@ pub struct Proposal<BundleT> {
 
 #[derive(Debug)]
 pub struct ProposerState<BundleT> {
-  proposals: HashMap<Crnd, Proposal<BundleT>>,
+  proposals: BTreeMap<Crnd, Proposal<BundleT>>,
   /// This is the maximum key in `proposals`, or 0 otherwise.
   latest_crnd: u32,
 }
@@ -38,7 +38,7 @@ pub struct AcceptorState<BundleT> {
 
 #[derive(Debug)]
 pub struct LearnerState {
-  learned: HashMap<Vrnd, u32>,
+  learned: BTreeMap<Vrnd, u32>,
   /// The small `Vrnd` with a majority count.
   learned_vrnd: Option<Vrnd>,
 }
@@ -108,7 +108,7 @@ pub struct PaxosDriver<BundleT> {
 
   /// Maps all PaxosNodes in this PaxosGroup to the last known `PLIndex` that was returned
   /// by a `NextIndexResponse`.
-  pub remote_next_indices: HashMap<EndpointId, PLIndex>,
+  pub remote_next_indices: BTreeMap<EndpointId, PLIndex>,
   pub next_index: PLIndex,
   pub paxos_instances: BTreeMap<PLIndex, PaxosInstance<BundleT>>,
 
@@ -123,7 +123,7 @@ pub struct PaxosDriver<BundleT> {
 impl<BundleT: Clone> PaxosDriver<BundleT> {
   /// Constructs a `PaxosDriver` for a Slave that is part of the initial system bootstrap.
   pub fn new(paxos_nodes: Vec<EndpointId>) -> PaxosDriver<BundleT> {
-    let mut remote_next_indices = HashMap::<EndpointId, PLIndex>::new();
+    let mut remote_next_indices = BTreeMap::<EndpointId, PLIndex>::new();
     for node in &paxos_nodes {
       remote_next_indices.insert(node.clone(), 0);
     }

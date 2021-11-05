@@ -12,7 +12,7 @@ use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::server::{CommonQuery, SlaveServerContext};
 use crate::trans_table_read_es::TransTableSource;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 // -----------------------------------------------------------------------------------------------
@@ -24,7 +24,7 @@ pub enum InternalError {
 }
 
 pub struct GRQueryResult {
-  pub new_rms: HashSet<TQueryPath>,
+  pub new_rms: BTreeSet<TQueryPath>,
   pub schema: Vec<ColName>,
   pub result: Vec<TableView>,
 }
@@ -66,13 +66,13 @@ pub enum GRExecutionS {
 }
 
 // Recall that the elements don't need to preserve the order of the TransTables, since the
-// sql_query does that for us (thus, we can use HashMaps).
+// sql_query does that for us (thus, we can use BTreeMaps).
 #[derive(Debug)]
 pub struct GRQueryPlan {
   pub tier_map: TierMap,
-  pub query_leader_map: HashMap<SlaveGroupId, LeadershipId>,
-  pub table_location_map: HashMap<TablePath, Gen>,
-  pub extra_req_cols: HashMap<TablePath, Vec<ColName>>,
+  pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
+  pub table_location_map: BTreeMap<TablePath, Gen>,
+  pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
   pub col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
 }
 
@@ -98,7 +98,7 @@ pub struct GRQueryES {
   pub query_plan: GRQueryPlan,
 
   // The dynamically evolving fields.
-  pub new_rms: HashSet<TQueryPath>,
+  pub new_rms: BTreeSet<TQueryPath>,
   pub trans_table_views: Vec<(TransTableName, (Vec<ColName>, Vec<TableView>))>,
   pub state: GRExecutionS,
 
@@ -209,7 +209,7 @@ impl GRQueryES {
     &mut self,
     ctx: &mut SlaveServerContext<IO>,
     tm_qid: QueryId,
-    new_rms: HashSet<TQueryPath>,
+    new_rms: BTreeSet<TQueryPath>,
     (schema, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
@@ -383,7 +383,7 @@ impl GRQueryES {
     // This contains the ContextRows of the child Context we're creating.
     let mut new_context_rows = Vec::<ContextRow>::new();
     // This maps the above ContextRows back to the index in which they appear.
-    let mut reverse_map = HashMap::<ContextRow, usize>::new();
+    let mut reverse_map = BTreeMap::<ContextRow, usize>::new();
     // Elements here correspond to the parent ContextRows that have been processed, which
     // index that the corresponding child ContextRow takes on above.
     let mut parent_context_map = Vec::<usize>::new();

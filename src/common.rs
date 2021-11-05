@@ -13,7 +13,7 @@ use crate::tablet::{TabletCreateHelper, TabletForwardMsg};
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -94,11 +94,11 @@ pub fn remove_item<V: Eq>(vec: &mut Vec<V>, item: &V) {
   }
 }
 
-/// This is a simple insert-get operation for HashMaps. We usually want to create a value
+/// This is a simple insert-get operation for BTreeMaps. We usually want to create a value
 /// in the same expression as the insert operation, but we also want to get a &mut to the
 /// inserted value. This function does this.
-pub fn map_insert<'a, K: Clone + Eq + Hash, V>(
-  map: &'a mut HashMap<K, V>,
+pub fn map_insert<'a, K: Clone + Eq + Ord, V>(
+  map: &'a mut BTreeMap<K, V>,
   key: &K,
   value: V,
 ) -> &'a mut V {
@@ -189,13 +189,13 @@ impl TableSchema {
 pub struct GossipData {
   /// Database Schema
   pub gen: Gen,
-  pub db_schema: HashMap<(TablePath, Gen), TableSchema>,
+  pub db_schema: BTreeMap<(TablePath, Gen), TableSchema>,
   pub table_generation: MVM<TablePath, Gen>,
 
   /// Distribution
-  pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
+  pub sharding_config: BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: BTreeMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
   pub master_address_config: Vec<EndpointId>,
 }
 
@@ -219,13 +219,13 @@ pub struct TMStatus {
   /// This is the QueryId of the PerformQuery. We keep this distinct from the TMStatus'
   /// QueryId, since one of the RMs might be this node.
   pub child_query_id: QueryId,
-  pub new_rms: HashSet<TQueryPath>,
+  pub new_rms: BTreeSet<TQueryPath>,
   /// The current set of Leaderships that this TMStatus is waiting on. Thus, in order to
   /// contact an RM, we just use the `LeadershipId` found here.
-  pub leaderships: HashMap<SlaveGroupId, LeadershipId>,
+  pub leaderships: BTreeMap<SlaveGroupId, LeadershipId>,
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   pub responded_count: usize,
-  pub tm_state: HashMap<CTNodePath, Option<(Vec<ColName>, Vec<TableView>)>>,
+  pub tm_state: BTreeMap<CTNodePath, Option<(Vec<ColName>, Vec<TableView>)>>,
   pub orig_p: OrigP,
 }
 
@@ -299,15 +299,15 @@ pub fn merge_table_views(
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QueryPlan {
   pub tier_map: TierMap,
-  pub query_leader_map: HashMap<SlaveGroupId, LeadershipId>,
-  pub table_location_map: HashMap<TablePath, Gen>,
+  pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
+  pub table_location_map: BTreeMap<TablePath, Gen>,
   /// These are additional required columns that the QueryPlan expects that these `TablePaths`
   /// to have. These are columns that are not already present in the `col_usage_node`, such as
   /// projected columns in SELECT queries or assigned columns in UPDATE queries. While a TP is
   /// happen is happening, we must verify the presence of these `ColName`.
   ///
   /// Note: not all `TablePaths` used in the MSQuery needs to be here.
-  pub extra_req_cols: HashMap<TablePath, Vec<ColName>>,
+  pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
   pub col_usage_node: FrozenColUsageNode,
 }
 

@@ -4,7 +4,7 @@ use crate::stmpaxos2pc_tm::{
   Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm,
   RMPreparedPLm, RMServerContext, TMMessage,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
 //  STMPaxos2PCRMInner
@@ -344,9 +344,9 @@ pub trait AggregateContainer<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> {
   fn insert(&mut self, query_id: QueryId, es: STMPaxos2PCRMOuter<T, InnerT>);
 }
 
-/// Implementation for HashMap, which is the common case.
+/// Implementation for BTreeMap, which is the common case.
 impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> AggregateContainer<T, InnerT>
-  for HashMap<QueryId, STMPaxos2PCRMOuter<T, InnerT>>
+  for BTreeMap<QueryId, STMPaxos2PCRMOuter<T, InnerT>>
 {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut STMPaxos2PCRMOuter<T, InnerT>> {
     self.get_mut(query_id)

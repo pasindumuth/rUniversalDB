@@ -20,7 +20,7 @@ use crate::tablet::{
   QueryReplanningSqlView, RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable,
   SubqueryFinished, SubqueryPending, TabletContext,
 };
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use std::rc::Rc;
 
@@ -51,8 +51,8 @@ pub struct TableReadES {
   pub query_plan: QueryPlan,
 
   // Dynamically evolving fields.
-  pub new_rms: HashSet<TQueryPath>,
-  pub waiting_global_locks: HashSet<QueryId>,
+  pub new_rms: BTreeSet<TQueryPath>,
+  pub waiting_global_locks: BTreeSet<QueryId>,
   pub state: ExecutionS,
 }
 
@@ -76,7 +76,7 @@ impl TableReadES {
     // First, we lock the columns that the QueryPlan requires certain properties of.
     assert!(matches!(self.state, ExecutionS::Start));
 
-    let mut all_cols = HashSet::<ColName>::new();
+    let mut all_cols = BTreeSet::<ColName>::new();
     all_cols.extend(self.query_plan.col_usage_node.external_cols.clone());
     all_cols.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
 
@@ -273,7 +273,7 @@ impl TableReadES {
     row_region = compress_row_region(row_region);
 
     // Compute the Column Region.
-    let mut col_region = HashSet::<ColName>::new();
+    let mut col_region = BTreeSet::<ColName>::new();
     col_region.extend(self.sql_query.projection.clone());
     col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
 
@@ -387,7 +387,7 @@ impl TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     subquery_id: QueryId,
-    subquery_new_rms: HashSet<TQueryPath>,
+    subquery_new_rms: BTreeSet<TQueryPath>,
     (_, table_views): (Vec<ColName>, Vec<TableView>),
   ) -> TableAction {
     // Add the subquery results into the TableReadES.
@@ -443,7 +443,7 @@ impl TableReadES {
     );
 
     // These are all of the `ColNames` we need in order to evaluate the Select.
-    let mut top_level_cols_set = HashSet::<ColName>::new();
+    let mut top_level_cols_set = BTreeSet::<ColName>::new();
     top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
     top_level_cols_set.extend(self.sql_query.projection.clone());
     let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());

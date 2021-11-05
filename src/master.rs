@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
 
 // -----------------------------------------------------------------------------------------------
@@ -263,23 +263,23 @@ pub struct MasterContext {
 
   // Database Schema
   pub gen: Gen,
-  pub db_schema: HashMap<(TablePath, Gen), TableSchema>,
+  pub db_schema: BTreeMap<(TablePath, Gen), TableSchema>,
   pub table_generation: MVM<TablePath, Gen>,
 
   // Distribution
-  pub sharding_config: HashMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: HashMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
+  pub sharding_config: BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: BTreeMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
   pub master_address_config: Vec<EndpointId>,
 
   /// LeaderMap
-  pub leader_map: HashMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
 
   /// NetworkDriver
   pub network_driver: NetworkDriver<msg::MasterRemotePayload>,
 
   /// Request Management
-  pub external_request_id_map: HashMap<RequestId, QueryId>,
+  pub external_request_id_map: BTreeMap<RequestId, QueryId>,
 
   // Paxos
   pub master_bundle: MasterBundle,
@@ -307,9 +307,9 @@ impl MasterState {
 impl MasterContext {
   pub fn new(
     this_eid: EndpointId,
-    slave_address_config: HashMap<SlaveGroupId, Vec<EndpointId>>,
+    slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     master_address_config: Vec<EndpointId>,
-    leader_map: HashMap<PaxosGroupId, LeadershipId>,
+    leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
   ) -> MasterContext {
     let all_gids = leader_map.keys().cloned().collect();
     MasterContext {
@@ -806,7 +806,7 @@ impl MasterContext {
     statuses: &mut Statuses,
   ) -> bool {
     // First, we accumulate all TablePaths that currently have a a DDL Query running for them.
-    let mut tables_being_modified = HashSet::<TablePath>::new();
+    let mut tables_being_modified = BTreeSet::<TablePath>::new();
     for (_, es) in &statuses.create_table_tm_ess {
       if let paxos2pc::State::Start = &es.state {
       } else {
