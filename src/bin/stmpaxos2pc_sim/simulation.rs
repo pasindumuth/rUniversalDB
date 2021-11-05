@@ -180,10 +180,11 @@ impl Simulation {
     // LeaderMap and Paxos
     for (sid, eids) in slave_address_config {
       let eid = eids[0].clone();
-      sim.leader_map.insert(sid.clone(), LeadershipId { gen: Gen(0), eid });
+      sim.leader_map.insert(sid.clone(), LeadershipId { gen: Gen(0), eid: eid.clone() });
       // We insert an initial `SlaveBundle::default()` to every Global PL to warm
       // up the Paxos insertion cycle.
-      sim.global_pls.insert(sid, vec![SlaveBundle::default()]);
+      sim.pending_insert.insert(eid, msg::PLEntry::Bundle(SlaveBundle::default()));
+      sim.global_pls.insert(sid, vec![]);
       for eid in eids {
         let mut queue = VecDeque::<msg::PLEntry<SlaveBundle>>::new();
         queue.push_back(msg::PLEntry::Bundle(SlaveBundle::default()));
