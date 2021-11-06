@@ -1,74 +1,101 @@
 use crate::message as msg;
+use crate::simple_tm_es::SimplePayloadTypes;
 use crate::simulation::{mk_client_eid, mk_slave_eid, Simulation};
 use crate::slave::SlavePLm;
-use rand::RngCore;
+use rand::{RngCore, SeedableRng};
+use rand_xorshift::XorShiftRng;
 use runiversal::common::mk_qid;
 use runiversal::model::common::{EndpointId, SlaveGroupId};
 use runiversal::stmpaxos2pc_tm::{RMPLm, TMPLm};
 use runiversal::test_utils::mk_sid;
 use std::collections::BTreeMap;
 
-/// This checks for 2PC Consistency among the Global PLs in the simulation. Recall that
-/// 2PC Consistency is where some RMs do not commit if any other RM aborts
-fn check_consistency(sim: &Simulation) -> bool {
-  // Check whether a Committed PLm is among the RM PLs. Same with Aborted PLms.
-  let mut exists_committed = false;
-  let mut exists_aborted = false;
-  for (_, pl_entries) in &sim.global_pls {
-    for pl_entry in pl_entries {
-      if let msg::PLEntry::Bundle(bundle) = pl_entry {
-        for plm in &bundle.plms {
-          if let SlavePLm::SimpleRM(RMPLm::Committed(_)) = plm {
-            exists_committed = true;
-          }
-          if let SlavePLm::SimpleRM(RMPLm::Aborted(_)) = plm {
-            exists_aborted = true;
-          }
-        }
-      }
-    }
-  }
-
-  !(exists_committed && exists_aborted)
+enum CompletionResult {
+  Invalid,
+  SuccessfullyCommitted,
+  SuccessfullyAborted,
+  SuccessfullyTrivial,
 }
 
 /// This checks for 2PC Completion. Recall that 2PC Completion is where every
 /// RM either Commits or Aborts.
-fn check_completion(sim: &Simulation, rms: &Vec<SlaveGroupId>, tm: &SlaveGroupId) -> bool {
-  'outer: for rm in rms {
-    for pl_entry in sim.global_pls.get(rm).unwrap() {
-      if let msg::PLEntry::Bundle(bundle) = pl_entry {
-        for plm in &bundle.plms {
-          if let SlavePLm::SimpleRM(RMPLm::Committed(_)) = plm {
-            continue 'outer;
-          }
-          if let SlavePLm::SimpleRM(RMPLm::Aborted(_)) = plm {
-            continue 'outer;
-          }
-        }
-      }
-    }
-    return false;
-  }
+fn check_completion(
+  sim: &Simulation,
+  rms: &Vec<SlaveGroupId>,
+  tm: &SlaveGroupId,
+) -> CompletionResult {
+  let mut tm_plms = Vec::<TMPLm<SimplePayloadTypes>>::new();
+  let mut rms_plms = BTreeMap::<SlaveGroupId, Vec<RMPLm<SimplePayloadTypes>>>::new();
+
+  // Add TMPLms
   for pl_entry in sim.global_pls.get(tm).unwrap() {
     if let msg::PLEntry::Bundle(bundle) = pl_entry {
       for plm in &bundle.plms {
-        if let SlavePLm::SimpleTM(TMPLm::Closed(_)) = plm {
-          return true;
+        if let SlavePLm::SimpleTM(tm_plm) = plm {
+          tm_plms.push(tm_plm.clone());
         }
       }
     }
   }
-  return false;
+
+  // Add RMPLms
+  for rm in rms {
+    rms_plms.insert(rm.clone(), vec![]);
+    for pl_entry in sim.global_pls.get(rm).unwrap() {
+      if let msg::PLEntry::Bundle(bundle) = pl_entry {
+        for plm in &bundle.plms {
+          if let SlavePLm::SimpleRM(rm_plm) = plm {
+            rms_plms.get_mut(rm).unwrap().push(rm_plm.clone());
+          }
+        }
+      }
+    }
+  }
+
+  // For every valid value of `tm_plms`, we verify that all `rms_plms` are as expected.
+  match tm_plms[..] {
+    [TMPLm::Prepared(_), TMPLm::Committed(_), TMPLm::Closed(_)] => {
+      for (_, rm_plms) in &rms_plms {
+        match rm_plms[..] {
+          [RMPLm::Prepared(_), RMPLm::Committed(_)] => continue,
+          _ => return CompletionResult::Invalid,
+        }
+      }
+      CompletionResult::SuccessfullyCommitted
+    }
+    [TMPLm::Prepared(_), TMPLm::Aborted(_), TMPLm::Closed(_)] => {
+      for (_, rm_plms) in &rms_plms {
+        match rm_plms[..] {
+          [] | [RMPLm::Prepared(_), RMPLm::Aborted(_)] => continue,
+          _ => return CompletionResult::Invalid,
+        }
+      }
+      CompletionResult::SuccessfullyAborted
+    }
+    [] => {
+      for (_, rm_plms) in &rms_plms {
+        match rm_plms[..] {
+          [] => continue,
+          _ => return CompletionResult::Invalid,
+        }
+      }
+      CompletionResult::SuccessfullyTrivial
+    }
+    _ => CompletionResult::Invalid,
+  }
 }
 
+/// Run `test_single()` multiple times, each with a different seed.
 pub fn test() {
-  // The fundamental seed used for all random number generation,
-  // providing determinism. We choose a seed such that we get non-trivial behavior
-  // For instance, if the External Message gets dropped or the receiver server goes down
-  // too early, then the behavior is trivial.
-  let seed: [u8; 16] = [0, 5, 2, 5, 4, 14, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+  let mut orig_rand = XorShiftRng::from_seed([0; 16]);
+  for _ in 0..100 {
+    let mut seed = [0; 16];
+    orig_rand.fill_bytes(&mut seed);
+    test_single(seed)
+  }
+}
 
+pub fn test_single(seed: [u8; 16]) {
   // Setup Simulation
 
   // Create 5 SlaveGroups, each with 3 nodes.
@@ -120,14 +147,7 @@ pub fn test() {
   const MS_PER_ITERATION: u32 = 5;
 
   // Continue simulating, checking 2PC Consistency after each round
-  for i in 0..NUM_CONSISTENCY_ITERATIONS {
-    sim.simulate_n_ms(MS_PER_ITERATION);
-    if !check_consistency(&mut sim) {
-      let time_elapsed = i * MS_PER_ITERATION;
-      println!("Test Failed: Consistency check after {}ms failed.", time_elapsed);
-      return;
-    }
-  }
+  sim.simulate_n_ms(NUM_CONSISTENCY_ITERATIONS * MS_PER_ITERATION);
 
   // Finally, run the Simulation in Cooldown Mode and test for STMPaxos2PC
   // completion at end. "Cooldown Mode" is defined to be where no Leadership changes occur.
@@ -141,16 +161,19 @@ pub fn test() {
 
   sim.simulate_n_ms(EXPECTED_COOLDOWN_MS);
 
-  if !check_consistency(&mut sim) {
-    println!("Test Failed: Consistency check after cooldown failed.");
-    return;
+  match check_completion(&mut sim, &rms, &tm) {
+    CompletionResult::Invalid => {
+      println!("Test Failed: Invalid PLs after cooldown. Seed: {:?}", seed);
+      println!("{:#?}", sim);
+    }
+    CompletionResult::SuccessfullyCommitted => {
+      println!("SuccessfullyCommitted!");
+    }
+    CompletionResult::SuccessfullyAborted => {
+      println!("SuccessfullyAborted!");
+    }
+    CompletionResult::SuccessfullyTrivial => {
+      println!("SuccessfullyTrivial!");
+    }
   }
-
-  if !check_completion(&mut sim, &rms, &tm) {
-    println!("Test Failed: STMPaxos2PC did not complete after cooldown.");
-    println!("{:#?}", sim);
-    return;
-  }
-
-  println!("Test Successful!");
 }
