@@ -8,6 +8,7 @@ use runiversal::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use runiversal::model::common::{EndpointId, QueryId};
 use runiversal::model::common::{LeadershipId, PaxosGroupId, SlaveGroupId};
 use runiversal::network_driver::{NetworkDriver, NetworkDriverContext};
+use runiversal::slave::REMOTE_LEADER_CHANGED_PERIOD;
 use runiversal::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
 use runiversal::stmpaxos2pc_tm as paxos2pc;
 use runiversal::stmpaxos2pc_tm::{
@@ -42,15 +43,22 @@ pub enum SlaveForwardMsg {
   SlaveRemotePayload(msg::SlaveRemotePayload),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(msg::LeaderChanged),
+  SlaveTimerInput(SlaveTimerInput),
 }
 
 // -----------------------------------------------------------------------------------------------
 //  Full Slave Input
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Debug)]
+pub enum SlaveTimerInput {
+  RemoteLeaderChanged,
+}
+
 pub enum FullSlaveInput {
   SlaveMessage(msg::SlaveMessage),
   PaxosMessage(msg::PLEntry<SlaveBundle>),
+  SlaveTimerInput(SlaveTimerInput),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -154,6 +162,15 @@ impl SlaveState {
   pub fn handle_full_input<IO: ISlaveIOCtx>(&mut self, io_ctx: &mut IO, input: FullSlaveInput) {
     self.context.handle_full_input(io_ctx, &mut self.statuses, input);
   }
+
+  pub fn initialize<IO: ISlaveIOCtx>(&mut self, io_ctx: &mut IO) {
+    // Start the RemoteLeaderChange dispatch cycle
+    io_ctx.defer(REMOTE_LEADER_CHANGED_PERIOD, SlaveTimerInput::RemoteLeaderChanged);
+    if self.context.is_leader() {
+      // Start the bundle insertion cycle for this PaxosGroup.
+      io_ctx.insert_bundle(SlaveBundle::default());
+    }
+  }
 }
 
 impl SlaveContext {
@@ -238,6 +255,9 @@ impl SlaveContext {
           }
         }
       }
+      FullSlaveInput::SlaveTimerInput(timer_input) => {
+        self.handle_input(io_ctx, statuses, SlaveForwardMsg::SlaveTimerInput(timer_input));
+      }
     }
   }
 
@@ -249,7 +269,6 @@ impl SlaveContext {
     slave_input: SlaveForwardMsg,
   ) {
     match slave_input {
-      // TODO: broadcast RemoteLeaderChanged
       SlaveForwardMsg::SlaveBundle(bundle) => {
         for paxos_log_msg in bundle {
           match paxos_log_msg {
@@ -323,14 +342,17 @@ impl SlaveContext {
       SlaveForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
         let gid = remote_leader_changed.gid.clone();
         let lid = remote_leader_changed.lid.clone();
-        self.leader_map.insert(gid.clone(), lid.clone()); // Update the LeadershipId
+        if lid.gen > self.leader_map.get(&gid).unwrap().gen {
+          // Only update the LeadershipId if the new one increases the old one.
+          self.leader_map.insert(gid.clone(), lid.clone());
 
-        // Inform SimpleTM
-        let query_ids: Vec<QueryId> = statuses.simple_tm_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let es = statuses.simple_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-          self.handle_simple_tm_es_action(statuses, query_id, action);
+          // Inform SimpleTM
+          let query_ids: Vec<QueryId> = statuses.simple_tm_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let es = statuses.simple_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+            self.handle_simple_tm_es_action(statuses, query_id, action);
+          }
         }
       }
       SlaveForwardMsg::LeaderChanged(leader_changed) => {
@@ -360,11 +382,40 @@ impl SlaveContext {
           // If this node ceases to be or continues to not be the Leader, then clear SlaveBundle.
           self.slave_bundle = SlaveBundle::default();
         } else {
+          // If this node is the Leader, then send out RemoteLeaderChanged.
+          self.broadcast_leadership(io_ctx);
+
           // If this node becomes the Leader, then start the insert cycle.
           let bundle = std::mem::replace(&mut self.slave_bundle, SlaveBundle::default());
           io_ctx.insert_bundle(bundle);
         }
       }
+      SlaveForwardMsg::SlaveTimerInput(timer_input) => {
+        match timer_input {
+          SlaveTimerInput::RemoteLeaderChanged => {
+            if self.is_leader() {
+              // If this node is the Leader, then send out RemoteLeaderChanged.
+              self.broadcast_leadership(io_ctx);
+            }
+
+            // Do this again 5 ms later.
+            io_ctx.defer(REMOTE_LEADER_CHANGED_PERIOD, SlaveTimerInput::RemoteLeaderChanged);
+          }
+        }
+      }
+    }
+  }
+
+  /// Used to broadcast out `RemoteLeaderChanged` to all other
+  /// PaxosGroups to help maintain their LeaderMaps.
+  fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
+    for (pid, _) in &self.leader_map {
+      let sid = cast!(PaxosGroupId::Slave, pid).unwrap();
+      self.send(
+        io_ctx,
+        sid,
+        msg::SlaveRemotePayload::RemoteLeaderChanged(msg::RemoteLeaderChanged {}),
+      );
     }
   }
 
@@ -399,7 +450,7 @@ impl SlaveContext {
   }
 
   pub fn send<IO: BasicIOCtx<msg::NetworkMessage>>(
-    &mut self,
+    &self,
     io_ctx: &mut IO,
     sid: &SlaveGroupId,
     payload: msg::SlaveRemotePayload,

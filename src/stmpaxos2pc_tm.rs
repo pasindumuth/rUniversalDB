@@ -641,9 +641,9 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     io_ctx: &mut IO,
     remote_leader_changed: RemoteLeaderChangedPLm,
   ) -> STMPaxos2PCTMAction {
-    let follower = self.follower.as_ref().unwrap();
     match &self.state {
       State::Preparing(preparing) => {
+        let follower = self.follower.as_ref().unwrap();
         let prepare_payloads = cast!(FollowerState::Preparing, follower).unwrap();
         for rm in &preparing.rms_remaining {
           // If the RM has not responded and its Leadership changed, we resend Prepare.
@@ -656,6 +656,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         }
       }
       State::Committed(committed) => {
+        let follower = self.follower.as_ref().unwrap();
         let commit_payloads = cast!(FollowerState::Committed, follower).unwrap();
         for rm in &committed.rms_remaining {
           // If the RM has not responded and its Leadership changed, we resend Commit.
@@ -668,6 +669,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         }
       }
       State::Aborted(aborted) => {
+        let follower = self.follower.as_ref().unwrap();
         let abort_payloads = cast!(FollowerState::Aborted, follower).unwrap();
         for rm in &aborted.rms_remaining {
           // If the RM has not responded and its Leadership changed, we resend Abort.
@@ -765,6 +767,8 @@ pub fn handle_tm_msg<
 ) -> (QueryId, STMPaxos2PCTMAction) {
   match msg {
     TMMessage::Prepared(prepared) => {
+      // We can `unwrap` here because in order for the ES to disappear, all `Closed` messages
+      // must arrive, meaning all Prepared messages sent back to the TM must also arrive before.
       let es = con.get_mut(&prepared.query_id).unwrap();
       (prepared.query_id.clone(), es.handle_prepared(ctx, io_ctx, prepared))
     }

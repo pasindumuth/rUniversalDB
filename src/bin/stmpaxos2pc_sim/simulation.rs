@@ -1,9 +1,11 @@
 use crate::message as msg;
-use crate::slave::{FullSlaveInput, SlaveBundle, SlaveContext, SlaveState};
+use crate::slave::{FullSlaveInput, SlaveBundle, SlaveContext, SlaveState, SlaveTimerInput};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{rvec, BasicIOCtx};
-use runiversal::model::common::{EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId};
+use runiversal::model::common::{
+  EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId, Timestamp,
+};
 use runiversal::model::message::LeaderChanged;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -15,6 +17,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 /// instead to be more consistent with production code.
 pub trait ISlaveIOCtx: BasicIOCtx<msg::NetworkMessage> {
   fn insert_bundle(&mut self, bundle: SlaveBundle);
+
+  fn defer(&mut self, defer_time: u128, timer_input: SlaveTimerInput);
 }
 
 pub struct SlaveIOCtx<'a> {
@@ -30,6 +34,9 @@ pub struct SlaveIOCtx<'a> {
   // Paxos
   pending_insert: &'a mut BTreeMap<EndpointId, msg::PLEntry<SlaveBundle>>,
   insert_queues: &'a mut BTreeMap<EndpointId, VecDeque<msg::PLEntry<SlaveBundle>>>,
+
+  /// Deferred timer tasks
+  tasks: &'a mut BTreeMap<Timestamp, Vec<SlaveTimerInput>>,
 }
 
 impl<'a> BasicIOCtx<msg::NetworkMessage> for SlaveIOCtx<'a> {
@@ -50,9 +57,18 @@ impl<'a> BasicIOCtx<msg::NetworkMessage> for SlaveIOCtx<'a> {
 
 impl<'a> ISlaveIOCtx for SlaveIOCtx<'a> {
   fn insert_bundle(&mut self, bundle: SlaveBundle) {
-    if self.insert_queues.contains_key(&self.this_eid) {
+    if !self.insert_queues.contains_key(&self.this_eid) {
       // This means the node has already received every PLEntry, so we may propose this `bundle`.
       self.pending_insert.insert(self.this_eid.clone(), msg::PLEntry::Bundle(bundle));
+    }
+  }
+
+  fn defer(&mut self, defer_time: u128, timer_input: SlaveTimerInput) {
+    let deferred_time = self.current_time + defer_time;
+    if let Some(timer_inputs) = self.tasks.get_mut(&deferred_time) {
+      timer_inputs.push(timer_input);
+    } else {
+      self.tasks.insert(deferred_time, vec![timer_input]);
     }
   }
 }
@@ -73,6 +89,12 @@ pub struct SimParams {
 }
 
 #[derive(Debug)]
+pub struct SlaveData {
+  slave_state: SlaveState,
+  tasks: BTreeMap<Timestamp, Vec<SlaveTimerInput>>,
+}
+
+#[derive(Debug)]
 pub struct Simulation {
   pub rand: XorShiftRng,
 
@@ -82,7 +104,7 @@ pub struct Simulation {
   nonempty_queues: Vec<(EndpointId, EndpointId)>,
 
   /// SlaveState
-  slave_states: BTreeMap<EndpointId, SlaveState>,
+  slave_data: BTreeMap<EndpointId, SlaveData>,
   /// Accumulated client responses for each client
   client_msgs_received: BTreeMap<EndpointId, Vec<msg::NetworkMessage>>,
 
@@ -99,7 +121,7 @@ pub struct Simulation {
   /// The current set of Leaders according to the Global PaxosLog
   pub leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   /// Non-`LeaderChanged``PLEntry` inserted into every PaxosGroups Global PL.
-  pub global_pls: BTreeMap<SlaveGroupId, Vec<SlaveBundle>>,
+  pub global_pls: BTreeMap<SlaveGroupId, Vec<msg::PLEntry<SlaveBundle>>>,
 
   /// Meta
   true_timestamp: u128,
@@ -120,7 +142,7 @@ impl Simulation {
       rand: XorShiftRng::from_seed(seed),
       queues: Default::default(),
       nonempty_queues: vec![],
-      slave_states: Default::default(),
+      slave_data: Default::default(),
       client_msgs_received: Default::default(),
       slave_address_config: slave_address_config.clone(),
       slave_address_config_inverse: Default::default(),
@@ -158,9 +180,16 @@ impl Simulation {
     // Construct and add SlaveStates
     for (sid, eids) in &slave_address_config {
       for eid in eids {
-        sim.slave_states.insert(
+        sim.slave_data.insert(
           eid.clone(),
-          SlaveState::new(SlaveContext::new(sid.clone(), eid.clone(), leader_map.clone())),
+          SlaveData {
+            slave_state: SlaveState::new(SlaveContext::new(
+              sid.clone(),
+              eid.clone(),
+              leader_map.clone(),
+            )),
+            tasks: Default::default(),
+          },
         );
       }
     }
@@ -179,17 +208,30 @@ impl Simulation {
 
     // LeaderMap and Paxos
     for (sid, eids) in slave_address_config {
-      let eid = eids[0].clone();
-      sim.leader_map.insert(sid.clone(), LeadershipId { gen: Gen(0), eid: eid.clone() });
-      // We insert an initial `SlaveBundle::default()` to every Global PL to warm
-      // up the Paxos insertion cycle.
-      sim.pending_insert.insert(eid, msg::PLEntry::Bundle(SlaveBundle::default()));
+      sim.leader_map.insert(sid.clone(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
       sim.global_pls.insert(sid, vec![]);
       for eid in eids {
         let mut queue = VecDeque::<msg::PLEntry<SlaveBundle>>::new();
         queue.push_back(msg::PLEntry::Bundle(SlaveBundle::default()));
         sim.insert_queues.insert(eid, queue);
       }
+    }
+
+    // Initialize the Slaves
+    for (this_eid, slave_data) in &mut sim.slave_data {
+      let mut io_ctx = SlaveIOCtx {
+        rand: &mut sim.rand,
+        current_time: sim.true_timestamp, // TODO: simulate clock skew
+        queues: &mut sim.queues,
+        nonempty_queues: &mut sim.nonempty_queues,
+        this_sid: &slave_data.slave_state.context.this_sid.clone(),
+        this_eid,
+        pending_insert: &mut sim.pending_insert,
+        insert_queues: &mut sim.insert_queues,
+        tasks: &mut slave_data.tasks,
+      };
+
+      slave_data.slave_state.initialize(&mut io_ctx);
     }
 
     // Metadata
@@ -229,7 +271,7 @@ impl Simulation {
   /// This function will run the Slave on the `to_eid` end, which might have any
   /// number of side effects, including adding new messages into `queues`.
   pub fn deliver_slave_input(&mut self, to_eid: &EndpointId, input: FullSlaveInput) {
-    let slave_state = self.slave_states.get_mut(&to_eid).unwrap();
+    let slave_data = self.slave_data.get_mut(&to_eid).unwrap();
 
     let current_time = self.true_timestamp;
     let mut io_ctx = SlaveIOCtx {
@@ -237,14 +279,34 @@ impl Simulation {
       current_time, // TODO: simulate clock skew
       queues: &mut self.queues,
       nonempty_queues: &mut self.nonempty_queues,
-      this_sid: &slave_state.context.this_sid.clone(),
+      this_sid: &slave_data.slave_state.context.this_sid.clone(),
       this_eid: to_eid,
       pending_insert: &mut self.pending_insert,
       insert_queues: &mut self.insert_queues,
+      tasks: &mut slave_data.tasks,
     };
 
     // Deliver the input message to the Slave.
-    slave_state.handle_full_input(&mut io_ctx, input);
+    slave_data.slave_state.handle_full_input(&mut io_ctx, input);
+
+    // Send all SlaveTimerInputs.
+    loop {
+      if let Some((next_timestamp, _)) = io_ctx.tasks.first_key_value() {
+        if next_timestamp <= &current_time {
+          // All data in this first entry should be dispatched.
+          let next_timestamp = next_timestamp.clone();
+          for timer_input in io_ctx.tasks.remove(&next_timestamp).unwrap() {
+            slave_data
+              .slave_state
+              .handle_full_input(&mut io_ctx, FullSlaveInput::SlaveTimerInput(timer_input));
+          }
+          continue;
+        }
+      }
+
+      // This means there are no more left.
+      break;
+    }
   }
 
   /// The endpoints provided must exist. This function polls a message from
@@ -253,7 +315,7 @@ impl Simulation {
   /// a slave, the slave processes the message.
   pub fn deliver_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) {
     if let Some(msg) = self.poll_msg(from_eid, to_eid) {
-      if self.slave_states.contains_key(to_eid) {
+      if self.slave_data.contains_key(to_eid) {
         let msg::NetworkMessage::Slave(slave_msg) = msg;
         self.deliver_slave_input(to_eid, FullSlaveInput::SlaveMessage(slave_msg));
       } else if let Some(msgs) = self.client_msgs_received.get_mut(to_eid) {
@@ -267,9 +329,9 @@ impl Simulation {
   /// Adds the `pl_entry` to the `insert_queues` of all nodes in the PaxosGroup `sid`, and also
   /// clears the `pending_insert` for nodes.
   fn global_pl_insert(&mut self, sid: &SlaveGroupId, pl_entry: msg::PLEntry<SlaveBundle>) {
-    if let msg::PLEntry::Bundle(slave_bundle) = &pl_entry {
-      // If this is a SlaveBundle, then we should record it in `global_pls`.
-      self.global_pls.get_mut(sid).unwrap().push(slave_bundle.clone());
+    self.global_pls.get_mut(sid).unwrap().push(pl_entry.clone());
+    if let msg::PLEntry::LeaderChanged(leader_changed) = &pl_entry {
+      self.leader_map.insert(sid.clone(), leader_changed.lid.clone());
     }
     for eid in self.slave_address_config.get(sid).unwrap() {
       self.pending_insert.remove(eid);
@@ -281,7 +343,7 @@ impl Simulation {
     }
   }
 
-  /// Here, we lookup Deliver a PLEntr
+  /// Here, we lookup Deliver a PLEntry
   pub fn deliver_pl_entry(&mut self) {
     // 2. Choose a message to queue up all insert queues.
     // 3. Randomly queue up a Leadership change.

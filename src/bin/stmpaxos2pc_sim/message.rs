@@ -18,6 +18,7 @@ pub enum NetworkMessage {
 // -------------------------------------------------------------------------------------------------
 
 pub type RemoteMessage<PayloadT> = msg::RemoteMessage<PayloadT>;
+pub type RemoteLeaderChanged = msg::RemoteLeaderChanged;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveMessage {

@@ -4,7 +4,8 @@ use crate::slave::SlavePLm;
 use rand::RngCore;
 use runiversal::common::mk_qid;
 use runiversal::model::common::{EndpointId, SlaveGroupId};
-use runiversal::stmpaxos2pc_tm::RMPLm;
+use runiversal::stmpaxos2pc_tm::{RMPLm, TMPLm};
+use runiversal::test_utils::mk_sid;
 use std::collections::BTreeMap;
 
 /// This checks for 2PC Consistency among the Global PLs in the simulation. Recall that
@@ -13,14 +14,16 @@ fn check_consistency(sim: &Simulation) -> bool {
   // Check whether a Committed PLm is among the RM PLs. Same with Aborted PLms.
   let mut exists_committed = false;
   let mut exists_aborted = false;
-  for (_, bundles) in &sim.global_pls {
-    for bundle in bundles {
-      for plm in &bundle.plms {
-        if let SlavePLm::SimpleRM(RMPLm::Committed(_)) = plm {
-          exists_committed = true;
-        }
-        if let SlavePLm::SimpleRM(RMPLm::Aborted(_)) = plm {
-          exists_aborted = true;
+  for (_, pl_entries) in &sim.global_pls {
+    for pl_entry in pl_entries {
+      if let msg::PLEntry::Bundle(bundle) = pl_entry {
+        for plm in &bundle.plms {
+          if let SlavePLm::SimpleRM(RMPLm::Committed(_)) = plm {
+            exists_committed = true;
+          }
+          if let SlavePLm::SimpleRM(RMPLm::Aborted(_)) = plm {
+            exists_aborted = true;
+          }
         }
       }
     }
@@ -31,30 +34,40 @@ fn check_consistency(sim: &Simulation) -> bool {
 
 /// This checks for 2PC Completion. Recall that 2PC Completion is where every
 /// RM either Commits or Aborts.
-fn check_completion(sim: &Simulation) -> bool {
-  'outer: for (_, bundles) in &sim.global_pls {
-    for bundle in bundles {
-      for plm in &bundle.plms {
-        if let SlavePLm::SimpleRM(RMPLm::Committed(_)) = plm {
-          continue 'outer;
-        }
-        if let SlavePLm::SimpleRM(RMPLm::Aborted(_)) = plm {
-          continue 'outer;
+fn check_completion(sim: &Simulation, rms: &Vec<SlaveGroupId>, tm: &SlaveGroupId) -> bool {
+  'outer: for rm in rms {
+    for pl_entry in sim.global_pls.get(rm).unwrap() {
+      if let msg::PLEntry::Bundle(bundle) = pl_entry {
+        for plm in &bundle.plms {
+          if let SlavePLm::SimpleRM(RMPLm::Committed(_)) = plm {
+            continue 'outer;
+          }
+          if let SlavePLm::SimpleRM(RMPLm::Aborted(_)) = plm {
+            continue 'outer;
+          }
         }
       }
     }
     return false;
   }
-  return true;
+  for pl_entry in sim.global_pls.get(tm).unwrap() {
+    if let msg::PLEntry::Bundle(bundle) = pl_entry {
+      for plm in &bundle.plms {
+        if let SlavePLm::SimpleTM(TMPLm::Closed(_)) = plm {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 pub fn test() {
-  // Fundamental seed used for all random number generation,
-  // providing determinism.
-  let mut seed = [0; 16];
-  for i in 0..16 {
-    seed[i] = i as u8;
-  }
+  // The fundamental seed used for all random number generation,
+  // providing determinism. We choose a seed such that we get non-trivial behavior
+  // For instance, if the External Message gets dropped or the receiver server goes down
+  // too early, then the behavior is trivial.
+  let seed: [u8; 16] = [0, 5, 2, 5, 4, 14, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
   // Setup Simulation
 
@@ -63,7 +76,7 @@ pub fn test() {
   for i in 0..5 {
     let mut eids = Vec::<EndpointId>::new();
     for j in 0..3 {
-      eids.push(mk_slave_eid(&(i * 5 + j)));
+      eids.push(mk_slave_eid(&(i * 3 + j)));
     }
     slave_address_config.insert(SlaveGroupId(format!("s{}", i)), eids);
   }
@@ -79,19 +92,19 @@ pub fn test() {
   // to perform Simple STMPaxos2PC.
 
   // Randomly chosen TM
-  let tm = SlaveGroupId(format!("s{}", sim.rand.next_u32() % 5));
-  let tm_eid = sim.leader_map.get(&tm).unwrap().eid.clone();
+  let tm = mk_sid("s2");
+  let tm_eid = mk_slave_eid(&6);
 
   // Randomly chosen RMs
   let num_rms = (sim.rand.next_u32() % 5) + 1;
   let mut all_slaves: Vec<SlaveGroupId> = slave_address_config.keys().cloned().collect();
-  let mut chosen_slaves = Vec::<SlaveGroupId>::new();
+  let mut rms = Vec::<SlaveGroupId>::new();
   for _ in 0..num_rms {
     let r = sim.rand.next_u32() % all_slaves.len() as u32;
-    chosen_slaves.push(all_slaves.remove(r as usize));
+    rms.push(all_slaves.remove(r as usize));
   }
 
-  let request = msg::SimpleRequest { query_id: mk_qid(&mut sim.rand), rms: chosen_slaves };
+  let request = msg::SimpleRequest { query_id: mk_qid(&mut sim.rand), rms: rms.clone() };
   sim.add_msg(
     msg::NetworkMessage::Slave(msg::SlaveMessage::ExternalMessage(
       msg::ExternalMessage::SimpleRequest(request),
@@ -124,7 +137,7 @@ pub fn test() {
   /// Here, "cooldown ms" are the number of milliseconds that we expect the STMPaxos2PC to finish,
   /// given that no leadership changes happen during this time. Although this can be calculated,
   /// we simply guess a sensible number for expedience.
-  const EXPECTED_COOLDOWN_MS: u32 = 100;
+  const EXPECTED_COOLDOWN_MS: u32 = 300;
 
   sim.simulate_n_ms(EXPECTED_COOLDOWN_MS);
 
@@ -133,8 +146,9 @@ pub fn test() {
     return;
   }
 
-  if !check_completion(&mut sim) {
+  if !check_completion(&mut sim, &rms, &tm) {
     println!("Test Failed: STMPaxos2PC did not complete after cooldown.");
+    println!("{:#?}", sim);
     return;
   }
 

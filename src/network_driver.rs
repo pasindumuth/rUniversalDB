@@ -12,6 +12,9 @@ pub struct NetworkDriverContext<'a> {
 
 #[derive(Debug)]
 pub struct NetworkDriver<PayloadT> {
+  /// This buffers the NetworkMessages until the LeaderMap is sufficiently high enough.
+  /// Some properties:
+  ///   1. All `RemoteMessage`s for a given `PaxosGroupId` have the same `from_lid`.
   network_buffer: BTreeMap<PaxosGroupId, Vec<msg::RemoteMessage<PayloadT>>>,
 }
 
@@ -40,7 +43,7 @@ impl<PayloadT: Clone> NetworkDriver<PayloadT> {
     // Messages should not be routed here ahead of this node knowing it is the Leader.
     debug_assert!(remote_message.to_lid.gen <= this_lid.gen);
 
-    // If the RemoteMessage was destined to an older generation, dropping if so.
+    // Drop the RemoteMessage if it was destined to an older generation.
     if remote_message.to_lid.gen < this_lid.gen {
       return None;
     }
@@ -94,20 +97,23 @@ impl<PayloadT: Clone> NetworkDriver<PayloadT> {
     from_lid: LeadershipId,
   ) -> Vec<PayloadT> {
     let buffer = self.network_buffer.get_mut(&from_gid).unwrap();
-    // Recall that the `from_lid.gen` of all bufferred messages should be the same.
-    let new_from_lid = &buffer.get(0).unwrap().from_lid;
-    if new_from_lid.gen < from_lid.gen {
-      // Here, the new RemoteLeaderChangedPLm is beyond all buffered messages, so we drop them.
-      buffer.clear();
-      Vec::new()
-    } else if from_lid.gen == new_from_lid.gen {
-      // Deliver all messages from the buffer.
-      let remote_messages = buffer.clone();
-      buffer.clear();
-      remote_messages.into_iter().map(|m| m.payload).collect()
+    if !buffer.is_empty() {
+      // Recall that the `from_lid.gen` of all bufferred messages should be the same.
+      let new_from_lid = &buffer.get(0).unwrap().from_lid;
+      if from_lid.gen > new_from_lid.gen {
+        // Here, the new RemoteLeaderChangedPLm is beyond all buffered messages, so we drop them.
+        buffer.clear();
+        Vec::new()
+      } else if from_lid.gen == new_from_lid.gen {
+        // Deliver all messages from the buffer.
+        let remote_messages = std::mem::replace(buffer, Vec::new());
+        remote_messages.into_iter().map(|m| m.payload).collect()
+      } else {
+        // Here, the newly inserted RemoteLeaderChangedPLm will have no affect. Note that from
+        // `recieve`, an appropriate one is still scheduled for insertion.
+        Vec::new()
+      }
     } else {
-      // Here, the newly inserted RemoteLeaderChangedPLm will have no affect. Note that from
-      // `recieve`, an appropriate one is still scheduled for insertion.
       Vec::new()
     }
   }
