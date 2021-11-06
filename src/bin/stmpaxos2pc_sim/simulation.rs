@@ -186,6 +186,7 @@ impl Simulation {
             slave_state: SlaveState::new(SlaveContext::new(
               sid.clone(),
               eid.clone(),
+              slave_address_config.clone(),
               leader_map.clone(),
             )),
             tasks: Default::default(),

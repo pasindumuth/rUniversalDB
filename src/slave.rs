@@ -277,6 +277,15 @@ impl SlaveContext {
           }
         }
       }
+      msg::SlaveMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip { gid, lid }) => {
+        if self.is_leader() {
+          if &lid.gen > &self.leader_map.get(&gid).unwrap().gen {
+            // If the incoming RemoteLeaderChanged would increase the generation
+            // in LeaderMap, then persist it.
+            self.slave_bundle.remote_leader_changes.push(RemoteLeaderChangedPLm { gid, lid })
+          }
+        }
+      }
       msg::SlaveMessage::PaxosDriverMessage(paxos_message) => {
         let bundles = self.paxos_driver.handle_paxos_message(
           &mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid },
@@ -396,19 +405,8 @@ impl SlaveContext {
         }
         SlaveTimerInput::RemoteLeaderChanged => {
           if self.is_leader() {
-            // If this node is the Leader, then send out RemoteLeaderChanged to all other
-            // PaxosGroups to help maintain their LeaderMaps.
-            for (pid, _) in &self.leader_map {
-              match pid {
-                PaxosGroupId::Master => self.ctx(io_ctx).send_to_master(
-                  msg::MasterRemotePayload::RemoteLeaderChanged(msg::RemoteLeaderChanged {}),
-                ),
-                PaxosGroupId::Slave(sid) => self.ctx(io_ctx).send_to_slave_common(
-                  sid.clone(),
-                  msg::SlaveRemotePayload::RemoteLeaderChanged(msg::RemoteLeaderChanged {}),
-                ),
-              }
-            }
+            // If this node is the Leader, then send out RemoteLeaderChanged.
+            self.broadcast_leadership(io_ctx);
           }
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
@@ -462,7 +460,6 @@ impl SlaveContext {
       }
       SlaveForwardMsg::SlaveRemotePayload(payload) => {
         match payload {
-          msg::SlaveRemotePayload::RemoteLeaderChanged(_) => {}
           msg::SlaveRemotePayload::CreateTable(message) => {
             let (query_id, action) =
               handle_rm_msg(self, io_ctx, &mut statuses.create_table_ess, message);
@@ -495,7 +492,10 @@ impl SlaveContext {
       SlaveForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
         let gid = remote_leader_changed.gid.clone();
         let lid = remote_leader_changed.lid.clone();
-        self.leader_map.insert(gid.clone(), lid.clone()); // Update the LeadershipId
+        if lid.gen > self.leader_map.get(&gid).unwrap().gen {
+          // Only update the LeadershipId if the new one increases the old one.
+          self.leader_map.insert(gid.clone(), lid.clone());
+        }
       }
       SlaveForwardMsg::LeaderChanged(leader_changed) => {
         let this_gid = self.this_sid.to_gid();
@@ -517,10 +517,41 @@ impl SlaveContext {
           // TODO: Clear the TabletBundles
           self.slave_bundle = SlaveBundle::default();
         } else {
+          // If this node is the Leader, then send out RemoteLeaderChanged.
+          self.broadcast_leadership(io_ctx);
+
           // If this node becomes the Leader, then start the insert cycle.
           self.maybe_start_insert(io_ctx);
         }
       }
+    }
+  }
+
+  /// Used to broadcast out `RemoteLeaderChanged` to all other
+  /// PaxosGroups to help maintain their LeaderMaps.
+  fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
+    let this_lid = self.leader_map.get(&self.this_gid).unwrap().clone();
+    for (sid, eids) in &self.gossip.slave_address_config {
+      if sid == &self.this_sid {
+        // Make sure to avoid sending this PaxosGroup the RemoteLeaderChanged.
+        continue;
+      }
+      for eid in eids {
+        io_ctx.send(
+          eid,
+          msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteLeaderChangedGossip(
+            msg::RemoteLeaderChangedGossip { gid: self.this_gid.clone(), lid: this_lid.clone() },
+          )),
+        )
+      }
+    }
+    for eid in &self.gossip.master_address_config {
+      io_ctx.send(
+        eid,
+        msg::NetworkMessage::Master(msg::MasterMessage::RemoteLeaderChangedGossip(
+          msg::RemoteLeaderChangedGossip { gid: self.this_gid.clone(), lid: this_lid.clone() },
+        )),
+      )
     }
   }
 

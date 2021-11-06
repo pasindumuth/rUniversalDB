@@ -88,14 +88,14 @@ fn check_completion(
 /// Run `test_single()` multiple times, each with a different seed.
 pub fn test() {
   let mut orig_rand = XorShiftRng::from_seed([0; 16]);
-  for _ in 0..100 {
+  for i in 0..1000 {
     let mut seed = [0; 16];
     orig_rand.fill_bytes(&mut seed);
-    test_single(seed)
+    test_single(i, seed)
   }
 }
 
-pub fn test_single(seed: [u8; 16]) {
+pub fn test_single(test_num: u32, seed: [u8; 16]) {
   // Setup Simulation
 
   // Create 5 SlaveGroups, each with 3 nodes.
@@ -157,23 +157,22 @@ pub fn test_single(seed: [u8; 16]) {
   /// Here, "cooldown ms" are the number of milliseconds that we expect the STMPaxos2PC to finish,
   /// given that no leadership changes happen during this time. Although this can be calculated,
   /// we simply guess a sensible number for expedience.
-  const EXPECTED_COOLDOWN_MS: u32 = 300;
+  const EXPECTED_COOLDOWN_MS: u32 = 500;
 
   sim.simulate_n_ms(EXPECTED_COOLDOWN_MS);
 
   match check_completion(&mut sim, &rms, &tm) {
     CompletionResult::Invalid => {
-      println!("Test Failed: Invalid PLs after cooldown. Seed: {:?}", seed);
-      println!("{:#?}", sim);
+      println!("{:?}. Test Failed: Invalid PLs after cooldown. Seed: {:?}", test_num, seed);
     }
     CompletionResult::SuccessfullyCommitted => {
-      println!("SuccessfullyCommitted!");
+      println!("{:?}. SuccessfullyCommitted!", test_num);
     }
     CompletionResult::SuccessfullyAborted => {
-      println!("SuccessfullyAborted!");
+      println!("{:?}. SuccessfullyAborted!", test_num);
     }
     CompletionResult::SuccessfullyTrivial => {
-      println!("SuccessfullyTrivial!");
+      println!("{:?}. SuccessfullyTrivial!", test_num);
     }
   }
 }

@@ -363,6 +363,15 @@ impl MasterContext {
           }
         }
       }
+      MasterMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip { gid, lid }) => {
+        if self.is_leader() {
+          if &lid.gen > &self.leader_map.get(&gid).unwrap().gen {
+            // If the incoming RemoteLeaderChanged would increase the generation
+            // in LeaderMap, then persist it.
+            self.master_bundle.remote_leader_changes.push(RemoteLeaderChangedPLm { gid, lid })
+          }
+        }
+      }
       MasterMessage::PaxosDriverMessage(paxos_message) => {
         let pl_entries = self.paxos_driver.handle_paxos_message(
           &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
@@ -429,19 +438,8 @@ impl MasterContext {
         }
         MasterTimerInput::RemoteLeaderChanged => {
           if self.is_leader() {
-            // If this node is the Leader, then send out RemoteLeaderChanged to all other
-            // PaxosGroups to help maintain their LeaderMaps.
-            for (pid, _) in &self.leader_map {
-              match pid {
-                PaxosGroupId::Master => self.ctx(io_ctx).send_to_master(
-                  msg::MasterRemotePayload::RemoteLeaderChanged(msg::RemoteLeaderChanged {}),
-                ),
-                PaxosGroupId::Slave(sid) => self.ctx(io_ctx).send_to_slave_common(
-                  sid.clone(),
-                  msg::SlaveRemotePayload::RemoteLeaderChanged(msg::RemoteLeaderChanged {}),
-                ),
-              }
-            }
+            // If this node is the Leader, then send out RemoteLeaderChanged.
+            self.broadcast_leadership(io_ctx);
           }
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
@@ -637,7 +635,6 @@ impl MasterContext {
       }
       MasterForwardMsg::MasterRemotePayload(payload) => {
         match payload {
-          MasterRemotePayload::RemoteLeaderChanged(_) => {}
           MasterRemotePayload::PerformMasterQueryPlanning(query_planning) => {
             let action = master_query_planning(self, query_planning.clone());
             match action {
@@ -765,6 +762,11 @@ impl MasterContext {
 
           // Clear MasterBundle
           self.master_bundle = MasterBundle::default();
+        } else {
+          // If this node is the Leader, then send out RemoteLeaderChanged.
+          self.broadcast_leadership(io_ctx);
+
+          // TODO: start inserting?
         }
       }
     }
@@ -790,6 +792,22 @@ impl MasterContext {
             ParserError(err_msg) => err_msg,
           }))
         }
+      }
+    }
+  }
+
+  /// Used to broadcast out `RemoteLeaderChanged` to all other
+  /// PaxosGroups to help maintain their LeaderMaps.
+  fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
+    let this_lid = self.leader_map.get(&PaxosGroupId::Master).unwrap().clone();
+    for (_, eids) in &self.slave_address_config {
+      for eid in eids {
+        io_ctx.send(
+          eid,
+          msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteLeaderChangedGossip(
+            msg::RemoteLeaderChangedGossip { gid: PaxosGroupId::Master, lid: this_lid.clone() },
+          )),
+        )
       }
     }
   }

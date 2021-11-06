@@ -39,6 +39,7 @@ pub enum MasterExternalReq {
 pub enum MasterMessage {
   MasterExternalReq(MasterExternalReq),
   RemoteMessage(RemoteMessage<MasterRemotePayload>),
+  RemoteLeaderChangedGossip(RemoteLeaderChangedGossip),
   PaxosDriverMessage(PaxosDriverMessage<MasterBundle>),
 }
 
@@ -56,6 +57,7 @@ pub enum SlaveExternalReq {
 pub enum SlaveMessage {
   ExternalMessage(SlaveExternalReq),
   RemoteMessage(RemoteMessage<SlaveRemotePayload>),
+  RemoteLeaderChangedGossip(RemoteLeaderChangedGossip),
   PaxosDriverMessage(PaxosDriverMessage<SharedPaxosBundle>),
 }
 
@@ -88,8 +90,6 @@ pub struct RemoteMessage<PayloadT> {
 // -------------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterRemotePayload {
-  RemoteLeaderChanged(RemoteLeaderChanged),
-
   // Master FrozenColUsageAlgorithm
   PerformMasterQueryPlanning(PerformMasterQueryPlanning),
   CancelMasterQueryPlanning(CancelMasterQueryPlanning),
@@ -107,8 +107,6 @@ pub enum MasterRemotePayload {
 // -------------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveRemotePayload {
-  RemoteLeaderChanged(RemoteLeaderChanged),
-
   // CreateTable RM Messages
   CreateTable(stmpaxos2pc_tm::RMMessage<CreateTablePayloadTypes>),
 
@@ -165,7 +163,10 @@ pub enum CoordMessage {
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct RemoteLeaderChanged {}
+pub struct RemoteLeaderChangedGossip {
+  pub gid: PaxosGroupId,
+  pub lid: LeadershipId,
+}
 
 // -------------------------------------------------------------------------------------------------
 // PaxosMessage

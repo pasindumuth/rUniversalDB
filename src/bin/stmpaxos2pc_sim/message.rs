@@ -18,18 +18,17 @@ pub enum NetworkMessage {
 // -------------------------------------------------------------------------------------------------
 
 pub type RemoteMessage<PayloadT> = msg::RemoteMessage<PayloadT>;
-pub type RemoteLeaderChanged = msg::RemoteLeaderChanged;
+pub type RemoteLeaderChangedGossip = msg::RemoteLeaderChangedGossip;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveMessage {
   ExternalMessage(ExternalMessage),
   RemoteMessage(msg::RemoteMessage<SlaveRemotePayload>),
+  RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveRemotePayload {
-  RemoteLeaderChanged(msg::RemoteLeaderChanged),
-
   // Simple STMPaxos2PC
   RMMessage(RMMessage<SimplePayloadTypes>),
   TMMessage(TMMessage<SimplePayloadTypes>),

@@ -144,6 +144,9 @@ pub struct SlaveContext {
   pub this_gid: PaxosGroupId, // self.this_sid.to_gid()
   pub this_eid: EndpointId,
 
+  /// Gossip
+  pub slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
+
   /// LeaderMap
   pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
 
@@ -177,6 +180,7 @@ impl SlaveContext {
   pub fn new(
     this_sid: SlaveGroupId,
     this_eid: EndpointId,
+    slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
   ) -> SlaveContext {
     let all_gids = leader_map.keys().cloned().collect();
@@ -184,6 +188,7 @@ impl SlaveContext {
       this_sid: this_sid.clone(),
       this_gid: this_sid.to_gid(),
       this_eid,
+      slave_address_config,
       leader_map,
       network_driver: NetworkDriver::new(all_gids),
       slave_bundle: Default::default(),
@@ -218,6 +223,15 @@ impl SlaveContext {
             if let Some(payload) = maybe_delivered {
               // Deliver if the message passed through
               self.handle_input(io_ctx, statuses, SlaveForwardMsg::SlaveRemotePayload(payload));
+            }
+          }
+        }
+        SlaveMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip { gid, lid }) => {
+          if self.is_leader() {
+            if &lid.gen > &self.leader_map.get(&gid).unwrap().gen {
+              // If the incoming RemoteLeaderChanged would increase the generation
+              // in LeaderMap, then persist it.
+              self.slave_bundle.remote_leader_changes.push(RemoteLeaderChangedPLm { gid, lid })
             }
           }
         }
@@ -308,7 +322,6 @@ impl SlaveContext {
         }
       },
       SlaveForwardMsg::SlaveRemotePayload(payload) => match payload {
-        SlaveRemotePayload::RemoteLeaderChanged(_) => {}
         SlaveRemotePayload::RMMessage(message) => {
           if let RMMessage::Prepare(prepare) = message.clone() {
             // Here, we randomly decide whether to accept the `Prepare` and proceed to
@@ -409,13 +422,20 @@ impl SlaveContext {
   /// Used to broadcast out `RemoteLeaderChanged` to all other
   /// PaxosGroups to help maintain their LeaderMaps.
   fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
-    for (pid, _) in &self.leader_map {
-      let sid = cast!(PaxosGroupId::Slave, pid).unwrap();
-      self.send(
-        io_ctx,
-        sid,
-        msg::SlaveRemotePayload::RemoteLeaderChanged(msg::RemoteLeaderChanged {}),
-      );
+    let this_lid = self.leader_map.get(&self.this_gid).unwrap().clone();
+    for (sid, eids) in &self.slave_address_config {
+      if sid == &self.this_sid {
+        // Make sure to avoid sending this PaxosGroup the RemoteLeaderChanged.
+        continue;
+      }
+      for eid in eids {
+        io_ctx.send(
+          eid,
+          msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteLeaderChangedGossip(
+            msg::RemoteLeaderChangedGossip { gid: self.this_gid.clone(), lid: this_lid.clone() },
+          )),
+        )
+      }
     }
   }
 
