@@ -88,7 +88,7 @@ fn check_completion(
 /// Run `test_single()` multiple times, each with a different seed.
 pub fn test() {
   let mut orig_rand = XorShiftRng::from_seed([0; 16]);
-  for i in 0..1000 {
+  for i in 0..100 {
     let mut seed = [0; 16];
     orig_rand.fill_bytes(&mut seed);
     test_single(i, seed)
@@ -99,11 +99,13 @@ pub fn test_single(test_num: u32, seed: [u8; 16]) {
   // Setup Simulation
 
   // Create 5 SlaveGroups, each with 3 nodes.
+  const NUM_PAXOS_GROUPS: u32 = 5;
+  const NUM_PAXOS_NODES: u32 = 3;
   let mut slave_address_config = BTreeMap::<SlaveGroupId, Vec<EndpointId>>::new();
-  for i in 0..5 {
+  for i in 0..NUM_PAXOS_GROUPS {
     let mut eids = Vec::<EndpointId>::new();
-    for j in 0..3 {
-      eids.push(mk_slave_eid(&(i * 3 + j)));
+    for j in 0..NUM_PAXOS_NODES {
+      eids.push(mk_slave_eid(&(i * NUM_PAXOS_NODES + j)));
     }
     slave_address_config.insert(SlaveGroupId(format!("s{}", i)), eids);
   }
@@ -118,13 +120,15 @@ pub fn test_single(test_num: u32, seed: [u8; 16]) {
   // Randomly construct a SimpleRequest and send it to a random Slave
   // to perform Simple STMPaxos2PC.
 
-  // Randomly chosen TM
-  let tm = mk_sid("s2");
-  let tm_eid = mk_slave_eid(&6);
+  // Take s0 to be the TM.
+  let tm = mk_sid("s0");
+  let tm_eid = sim.leader_map.get(&tm).unwrap().eid.clone();
 
-  // Randomly chosen RMs
-  let num_rms = (sim.rand.next_u32() % 5) + 1;
+  // Randomly chose RMs, where none of them are the TM.
+  // Recall that STMPaxos2PC requires at least one.
+  let num_rms = (sim.rand.next_u32() % (NUM_PAXOS_GROUPS - 1)) + 1;
   let mut all_slaves: Vec<SlaveGroupId> = slave_address_config.keys().cloned().collect();
+  all_slaves.remove(all_slaves.iter().position(|i| i == &tm).unwrap());
   let mut rms = Vec::<SlaveGroupId>::new();
   for _ in 0..num_rms {
     let r = sim.rand.next_u32() % all_slaves.len() as u32;

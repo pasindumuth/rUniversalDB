@@ -350,7 +350,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
         }
       }
       PaxosDriverMessage::IsLeader(is_leader) => {
-        if is_leader.leadership_id == self.leader {
+        if is_leader.lid == self.leader {
           // Reset heartbeat
           self.leader_heartbeat = 0;
         }
@@ -600,7 +600,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
         ctx.send(
           &eid,
           msg::PaxosDriverMessage::IsLeader(msg::IsLeader {
-            leadership_id: self.leader.clone(),
+            lid: self.leader.clone(),
             should_learned,
           }),
         );

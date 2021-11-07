@@ -168,7 +168,7 @@ pub struct CreateTableTMInner {
 
   /// This is set when `Committed` or `Aborted` gets inserted
   /// for use when constructing `Closed`.
-  pub timestamp_hint: Option<Timestamp>,
+  pub did_commit: bool,
 }
 
 impl CreateTableTMInner {
@@ -218,7 +218,7 @@ impl CreateTableTMInner {
     }
 
     // Update Gossip Gen
-    ctx.gen.0 += 1;
+    ctx.gen.inc();
 
     commit_timestamp
   }
@@ -236,7 +236,7 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
       key_cols: payload.key_cols,
       val_cols: payload.val_cols,
       shards: payload.shards,
-      timestamp_hint: None,
+      did_commit: false,
     }
   }
 
@@ -287,15 +287,13 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
     CreateTableTMCommitted {}
   }
 
-  /// Apply this `alter_op` to the system and construct Commit messages with the
-  /// commit timestamp (which is resolved form the resolved from `timestamp_hint`).
   fn committed_plm_inserted<IO: BasicIOCtx>(
     &mut self,
     _: &mut MasterContext,
     _: &mut IO,
     _: &TMCommittedPLm<CreateTablePayloadTypes>,
   ) -> BTreeMap<SlaveGroupId, CreateTableCommit> {
-    self.timestamp_hint = None;
+    self.did_commit = true;
 
     // The RMs are just the shards. Each shard should be in its own Slave.
     let mut commits = BTreeMap::<SlaveGroupId, CreateTableCommit>::new();
@@ -319,7 +317,7 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
   ) -> BTreeMap<SlaveGroupId, CreateTableAbort> {
-    self.timestamp_hint = Some(io_ctx.now());
+    self.did_commit = false;
 
     // Potentially respond to the External if we are the leader.
     if ctx.is_leader() {
@@ -348,9 +346,10 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
   fn mk_closed_plm<IO: BasicIOCtx>(
     &mut self,
     _: &mut MasterContext,
-    _: &mut IO,
+    io_ctx: &mut IO,
   ) -> CreateTableTMClosed {
-    CreateTableTMClosed { timestamp_hint: self.timestamp_hint }
+    let timestamp_hint = if self.did_commit { Some(io_ctx.now()) } else { None };
+    CreateTableTMClosed { timestamp_hint }
   }
 
   fn closed_plm_inserted<IO: BasicIOCtx>(

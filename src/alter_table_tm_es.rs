@@ -224,7 +224,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
       max(commit_timestamp, table_schema.val_cols.get_lat(&self.alter_op.col_name) + 1);
 
     // Apply the AlterOp
-    ctx.gen.0 += 1;
+    ctx.gen.inc();
     ctx.table_generation.update_lat(&self.table_path, commit_timestamp);
     table_schema.val_cols.write(
       &self.alter_op.col_name,

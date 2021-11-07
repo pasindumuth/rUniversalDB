@@ -6,8 +6,8 @@ use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::master::MasterBundle;
 use crate::model::common::{
   proc, CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
-  PaxosGroupId, QueryId, RequestId, TQueryPath, TablePath, TableView, TabletGroupId, TierMap,
-  Timestamp, TransTableLocationPrefix, TransTableName,
+  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
+  TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
 use crate::slave::SharedPaxosBundle;
 use crate::stmpaxos2pc_tm;
@@ -230,7 +230,7 @@ pub struct MultiPaxosMessage<BundleT> {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct IsLeader {
-  pub leadership_id: LeadershipId,
+  pub lid: LeadershipId,
   pub should_learned: Vec<(PLIndex, Rnd)>,
 }
 
@@ -538,7 +538,9 @@ pub struct MasterGossip {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterGossipRequest {
-  pub sender_path: CTQueryPath,
+  /// Recall that a GossipData is shared for all threads (Tablets, Coords, and Slave) for a given
+  /// node. Thus, we only use the `SlaveGroupId` as the path that the Master should respond to.
+  pub sender_path: SlaveGroupId,
 }
 
 // -------------------------------------------------------------------------------------------------

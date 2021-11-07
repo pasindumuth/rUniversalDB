@@ -26,22 +26,18 @@ where
     MVM { map }
   }
 
-  pub fn write(&mut self, key: &K, value: Option<V>, timestamp: Timestamp) -> Result<(), String> {
-    if timestamp == 0 {
-      Err(String::from("Timestamps must be >= current lat."))
+  /// Performs an MVMWrite to the MVM. The user *must* be sure that `timestamp` is beyond the
+  /// `lat` of the key, otherwise we `assert`. They can verify this by doing static and weak reads.
+  pub fn write(&mut self, key: &K, value: Option<V>, timestamp: Timestamp) {
+    if let Some((lat, versions)) = self.map.get_mut(key) {
+      assert!(*lat < timestamp);
+      *lat = timestamp;
+      versions.push((timestamp, value));
     } else {
-      if let Some((lat, versions)) = self.map.get_mut(key) {
-        if timestamp <= *lat {
-          Err(String::from("Timestamps must be >= current lat."))
-        } else {
-          *lat = timestamp;
-          versions.push((timestamp, value));
-          Ok(())
-        }
-      } else {
-        self.map.insert(key.clone(), (timestamp, vec![(timestamp, value)]));
-        Ok(())
-      }
+      // Recall that mathematically, every key imaginable is in the MVM with no versions
+      // and a LAT of 0. Thus, we cannot do an MVM write to a timestamp of 0.
+      assert!(0 < timestamp);
+      self.map.insert(key.clone(), (timestamp, vec![(timestamp, value)]));
     }
   }
 
@@ -73,7 +69,7 @@ where
     }
   }
 
-  /// Get the latest version at the `lat`
+  /// Get the value that would be read if we did a `read` at the `lat`.
   pub fn get_last_version(&self, key: &K) -> Option<&V> {
     if let Some((_, versions)) = self.map.get(key) {
       if let Some((_, val)) = versions.iter().last() {
@@ -86,7 +82,7 @@ where
     }
   }
 
-  /// Get the latest version at the `lat`
+  /// Get the latest version of the `key` that was non-`None`.
   pub fn get_last_present_version(&self, key: &K) -> Option<&V> {
     if let Some((_, versions)) = self.map.get(key) {
       for (_, val) in versions.iter().rev() {
@@ -98,8 +94,8 @@ where
     None
   }
 
-  /// Reads the version prior to the timestamp. This doesn't mutate
-  /// the lat if the read happens with a future timestamp.
+  /// Reads the version prior to the timestamp.
+  /// NOTE: This does not mutate the `lat` if the read happens with a future timestamp.
   pub fn static_read(&self, key: &K, timestamp: Timestamp) -> Option<&V> {
     if let Some((_, versions)) = self.map.get(key) {
       find_version(versions, timestamp)
@@ -160,14 +156,13 @@ mod tests {
     let v2 = String::from("v2");
     let v3 = String::from("v3");
     assert_eq!(mvm.read(&k, 1), None);
-    assert!(mvm.write(&k, Some(v1.clone()), 2).is_ok());
-    assert!(mvm.write(&k, Some(v2.clone()), 4).is_ok());
+    mvm.write(&k, Some(v1.clone()), 2).is_ok();
+    mvm.write(&k, Some(v2.clone()), 4).is_ok();
     assert_eq!(mvm.read(&k, 3), Some(v1));
     assert_eq!(mvm.read(&k, 5), Some(v2));
-    assert!(mvm.write(&k, Some(v3.clone()), 5).is_err());
-    assert!(mvm.write(&k, Some(v3.clone()), 6).is_ok());
+    mvm.write(&k, Some(v3.clone()), 6).is_ok();
     assert_eq!(mvm.read(&k, 6), Some(v3));
-    assert!(mvm.write(&k, None, 7).is_ok());
+    mvm.write(&k, None, 7).is_ok();
     assert_eq!(mvm.read(&k, 7), None);
   }
 }

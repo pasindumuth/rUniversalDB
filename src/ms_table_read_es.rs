@@ -148,9 +148,9 @@ impl MSTableReadES {
         self.state = MSReadExecutionS::GossipDataWaiting;
 
         // Request a GossipData from the Master to help stimulate progress.
-        let this_sender_path = ctx.ctx(io_ctx).mk_this_query_path(self.query_id.clone());
+        let sender_path = ctx.this_sid.clone();
         ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
-          msg::MasterGossipRequest { sender_path: this_sender_path },
+          msg::MasterGossipRequest { sender_path },
         ));
 
         return MSTableReadAction::Wait;

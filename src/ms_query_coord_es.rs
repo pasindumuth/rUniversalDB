@@ -795,7 +795,7 @@ impl QueryPlanningES {
         for table_path in collect_table_paths(&self.sql_query) {
           if ctx.gossip.table_generation.static_read(&table_path, self.timestamp).is_none() {
             // We send a MasterGossipRequest and go to GossipDataWaiting.
-            let sender_path = ctx.ctx(io_ctx).mk_this_query_path(self.query_id.clone());
+            let sender_path = ctx.this_sid.clone();
             ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
               msg::MasterGossipRequest { sender_path },
             ));

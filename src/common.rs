@@ -234,7 +234,7 @@ pub struct TMStatus {
 // -----------------------------------------------------------------------------------------------
 
 fn rand_string<R: Rng>(rng: &mut R) -> String {
-  rng.sample_iter(&Alphanumeric).take(8).map(char::from).collect()
+  rng.sample_iter(&Alphanumeric).take(12).map(char::from).collect()
 }
 
 pub fn mk_qid<R: Rng>(rng: &mut R) -> QueryId {

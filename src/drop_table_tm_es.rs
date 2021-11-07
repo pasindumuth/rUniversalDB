@@ -200,7 +200,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     commit_timestamp = max(commit_timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
 
     // Apply the Drop
-    ctx.gen.0 += 1;
+    ctx.gen.inc();
     ctx.table_generation.write(&self.table_path, None, commit_timestamp);
 
     // Potentially respond to the External if we are the leader.

@@ -157,7 +157,8 @@ impl Simulation {
     // Setup eids
     let slave_eids: Vec<EndpointId> =
       slave_address_config.values().cloned().into_iter().flatten().collect();
-    let client_eids: Vec<EndpointId> = rvec(0, num_clients).iter().map(mk_client_eid).collect();
+    let client_eids: Vec<EndpointId> =
+      rvec(0, num_clients).iter().map(|i| mk_client_eid(&(*i as u32))).collect();
     let all_eids: Vec<EndpointId> = vec![]
       .into_iter()
       .chain(slave_eids.iter().cloned())
@@ -450,12 +451,12 @@ impl Simulation {
 // -----------------------------------------------------------------------------------------------
 
 // Construct the Slave id of the slave at the given index.
-pub fn mk_slave_eid(i: &i32) -> EndpointId {
+pub fn mk_slave_eid(i: &u32) -> EndpointId {
   EndpointId(format!("se{}", i))
 }
 
 // Construct the Client id of the slave at the given index.
-pub fn mk_client_eid(i: &i32) -> EndpointId {
+pub fn mk_client_eid(i: &u32) -> EndpointId {
   EndpointId(format!("ce{}", i))
 }
 

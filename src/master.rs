@@ -24,7 +24,7 @@ use crate::server::{weak_contains_col_latest, MasterServerContext, ServerContext
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::{
-  handle_tm_msg, handle_tm_plm, RMPathTrait, STMPaxos2PCTMAction, TMServerContext,
+  handle_tm_msg, handle_tm_plm, RMPathTrait, STMPaxos2PCTMAction, State, TMServerContext,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -560,6 +560,7 @@ impl MasterContext {
                 match ddl_query {
                   DDLQuery::Create(create_table) => {
                     // Choose a random SlaveGroupId to place the Tablet
+                    // TODO: do multishard
                     let sids = Vec::from_iter(self.slave_address_config.keys().into_iter());
                     let idx = io_ctx.rand().next_u32() as usize % sids.len();
                     let sid = sids[idx].clone();
@@ -580,7 +581,7 @@ impl MasterContext {
                           key_cols: create_table.key_cols,
                           val_cols: create_table.val_cols,
                           shards,
-                          timestamp_hint: None,
+                          did_commit: false,
                         },
                       ),
                     );
@@ -617,7 +618,7 @@ impl MasterContext {
                 }
               }
               Err(payload) => {
-                // We return an error because the RequestId is not unique.
+                // We send the error back to the External.
                 io_ctx.send(
                   &external_query.sender_eid,
                   msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
@@ -627,7 +628,56 @@ impl MasterContext {
               }
             }
           }
-          MasterExternalReq::CancelExternalDDLQuery(_) => {}
+          MasterExternalReq::CancelExternalDDLQuery(cancel) => {
+            if let Some(query_id) = self.external_request_id_map.remove(&cancel.request_id) {
+              // Utility to send a `ConfirmCancelled` back to the External referred to by `cancel`.
+              fn respond_cancelled<IO: MasterIOCtx>(
+                io_ctx: &mut IO,
+                cancel: msg::CancelExternalDDLQuery,
+              ) {
+                io_ctx.send(
+                  &cancel.sender_eid,
+                  msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+                    msg::ExternalDDLQueryAborted {
+                      request_id: cancel.request_id,
+                      payload: msg::ExternalDDLQueryAbortData::ConfirmCancel,
+                    },
+                  )),
+                );
+              }
+
+              // If the query_id corresponds to an early CreateTable, then abort it.
+              if let Some(es) = statuses.create_table_tm_ess.get(&query_id) {
+                match &es.state {
+                  State::Start | State::WaitingInsertTMPrepared => {
+                    statuses.create_table_tm_ess.remove(&query_id);
+                    respond_cancelled(io_ctx, cancel);
+                  }
+                  _ => {}
+                }
+              }
+              // Otherwise, if the query_id corresponds to an early AlterTable, then abort it.
+              else if let Some(es) = statuses.alter_table_tm_ess.get(&query_id) {
+                match &es.state {
+                  State::Start | State::WaitingInsertTMPrepared => {
+                    statuses.alter_table_tm_ess.remove(&query_id);
+                    respond_cancelled(io_ctx, cancel);
+                  }
+                  _ => {}
+                }
+              }
+              // Otherwise, if the query_id corresponds to an early DropTable, then abort it.
+              else if let Some(es) = statuses.drop_table_tm_ess.get(&query_id) {
+                match &es.state {
+                  State::Start | State::WaitingInsertTMPrepared => {
+                    statuses.drop_table_tm_ess.remove(&query_id);
+                    respond_cancelled(io_ctx, cancel);
+                  }
+                  _ => {}
+                }
+              }
+            }
+          }
         }
 
         // Run Main Loop
@@ -683,7 +733,9 @@ impl MasterContext {
               handle_tm_msg(self, io_ctx, &mut statuses.drop_table_tm_ess, message);
             self.handle_drop_table_es_action(statuses, query_id, action);
           }
-          MasterRemotePayload::MasterGossipRequest(_) => {}
+          MasterRemotePayload::MasterGossipRequest(gossip_req) => {
+            self.send_gossip(io_ctx, gossip_req.sender_path);
+          }
         }
 
         // Run Main Loop
@@ -692,39 +744,42 @@ impl MasterContext {
       MasterForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
         let gid = remote_leader_changed.gid.clone();
         let lid = remote_leader_changed.lid.clone();
-        self.leader_map.insert(gid.clone(), lid.clone()); // Update the LeadershipId
+        if lid.gen > self.leader_map.get(&gid).unwrap().gen {
+          // Only update the LeadershipId if the new one increases the old one.
+          self.leader_map.insert(gid.clone(), lid.clone());
 
-        // CreateTable
-        let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-          self.handle_create_table_es_action(statuses, query_id, action);
-        }
+          // CreateTable
+          let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+            self.handle_create_table_es_action(statuses, query_id, action);
+          }
 
-        // AlterTable
-        let query_ids: Vec<QueryId> = statuses.alter_table_tm_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-          self.handle_alter_table_es_action(statuses, query_id, action);
-        }
+          // AlterTable
+          let query_ids: Vec<QueryId> = statuses.alter_table_tm_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+            self.handle_alter_table_es_action(statuses, query_id, action);
+          }
 
-        // DropTable
-        let query_ids: Vec<QueryId> = statuses.drop_table_tm_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-          self.handle_drop_table_es_action(statuses, query_id, action);
-        }
+          // DropTable
+          let query_ids: Vec<QueryId> = statuses.drop_table_tm_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+            self.handle_drop_table_es_action(statuses, query_id, action);
+          }
 
-        // For MasterQueryPlanningESs, if the sending PaxosGroup's Leadership changed,
-        // we ECU (no response).
-        let query_ids: Vec<QueryId> = statuses.planning_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let es = statuses.planning_ess.get_mut(&query_id).unwrap();
-          if es.sender_path.node_path.sid.to_gid() == gid {
-            statuses.planning_ess.remove(&query_id);
+          // For MasterQueryPlanningESs, if the sending PaxosGroup's Leadership changed,
+          // we ECU (no response).
+          let query_ids: Vec<QueryId> = statuses.planning_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let es = statuses.planning_ess.get_mut(&query_id).unwrap();
+            if es.sender_path.node_path.sid.to_gid() == gid {
+              statuses.planning_ess.remove(&query_id);
+            }
           }
         }
       }
@@ -755,6 +810,9 @@ impl MasterContext {
           self.handle_drop_table_es_action(statuses, query_id, action);
         }
 
+        // Inform the NetworkDriver
+        self.network_driver.leader_changed();
+
         // Check if this node just lost Leadership
         if !self.is_leader() {
           // Wink away all MasterQueryPlanningESs.
@@ -766,7 +824,12 @@ impl MasterContext {
           // If this node is the Leader, then send out RemoteLeaderChanged.
           self.broadcast_leadership(io_ctx);
 
-          // TODO: start inserting?
+          // Insert MasterBundle
+          let master_bundle = std::mem::replace(&mut self.master_bundle, MasterBundle::default());
+          self.paxos_driver.insert_bundle(
+            &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
+            master_bundle,
+          );
         }
       }
     }
@@ -823,6 +886,13 @@ impl MasterContext {
     io_ctx: &mut IO,
     statuses: &mut Statuses,
   ) -> bool {
+    self.advance_ddl_ess(io_ctx, statuses);
+    false
+  }
+
+  /// This function advances the DDL ESs as far as possible. Properties:
+  ///    1. Running this function again should not modify anything.
+  fn advance_ddl_ess<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
     // First, we accumulate all TablePaths that currently have a a DDL Query running for them.
     let mut tables_being_modified = BTreeSet::<TablePath>::new();
     for (_, es) in &statuses.create_table_tm_ess {
@@ -934,8 +1004,6 @@ impl MasterContext {
         }
       }
     }
-
-    return false;
   }
 
   /// Handles the actions specified by a CreateTableES.
@@ -991,6 +1059,14 @@ impl MasterContext {
 
   /// Broadcast GossipData
   pub fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO) {
+    let sids: Vec<SlaveGroupId> = self.slave_address_config.keys().cloned().collect();
+    for sid in sids {
+      self.send_gossip(io_ctx, sid);
+    }
+  }
+
+  /// Send GossipData
+  pub fn send_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, sid: SlaveGroupId) {
     let gossip_data = GossipData {
       gen: self.gen.clone(),
       db_schema: self.db_schema.clone(),
@@ -1000,15 +1076,10 @@ impl MasterContext {
       slave_address_config: self.slave_address_config.clone(),
       master_address_config: self.master_address_config.clone(),
     };
-    let sids: Vec<SlaveGroupId> = self.slave_address_config.keys().cloned().collect();
-    for sid in sids {
-      self.ctx(io_ctx).send_to_slave_common(
-        sid,
-        msg::SlaveRemotePayload::MasterGossip(msg::MasterGossip {
-          gossip_data: gossip_data.clone(),
-        }),
-      )
-    }
+    self.ctx(io_ctx).send_to_slave_common(
+      sid,
+      msg::SlaveRemotePayload::MasterGossip(msg::MasterGossip { gossip_data: gossip_data.clone() }),
+    );
   }
 }
 
