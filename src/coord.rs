@@ -1,5 +1,5 @@
 use crate::common::{
-  map_insert, merge_table_views, mk_qid, remove_item, GossipData, OrigP, TMStatus,
+  map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx, GossipData, OrigP, TMStatus,
 };
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::finish_query_tm_es::{
@@ -127,7 +127,7 @@ impl CoordContext {
     }
   }
 
-  pub fn ctx<'a, IO: CoreIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
+  pub fn ctx<'a, IO: BasicIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
     SlaveServerContext {
       io_ctx,
       this_sid: &self.this_sid,

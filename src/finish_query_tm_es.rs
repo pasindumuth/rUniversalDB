@@ -1,4 +1,4 @@
-use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
+use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::model::common::{
   proc, EndpointId, QueryId, RequestId, TQueryPath, TableView, Timestamp,
@@ -52,7 +52,7 @@ pub enum FinishQueryTMAction {
 //  Implementation
 // -----------------------------------------------------------------------------------------------
 impl FinishQueryTMES {
-  pub fn start_orig<IO: CoreIOCtx>(
+  pub fn start_orig<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
@@ -67,7 +67,7 @@ impl FinishQueryTMES {
     FinishQueryTMAction::Wait
   }
 
-  pub fn start_rec<IO: CoreIOCtx>(
+  pub fn start_rec<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
@@ -82,7 +82,7 @@ impl FinishQueryTMES {
     FinishQueryTMAction::Wait
   }
 
-  pub fn handle_prepared<IO: CoreIOCtx>(
+  pub fn handle_prepared<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
@@ -110,7 +110,7 @@ impl FinishQueryTMES {
     }
   }
 
-  pub fn handle_aborted<IO: CoreIOCtx>(
+  pub fn handle_aborted<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
@@ -134,7 +134,7 @@ impl FinishQueryTMES {
     }
   }
 
-  pub fn handle_wait<IO: CoreIOCtx>(
+  pub fn handle_wait<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
@@ -150,7 +150,7 @@ impl FinishQueryTMES {
     }
   }
 
-  pub fn remote_leader_changed<IO: CoreIOCtx>(
+  pub fn remote_leader_changed<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
@@ -180,7 +180,7 @@ impl FinishQueryTMES {
 }
 
 /// Send a `FinishQueryPrepare` to `rm`.
-fn send_prepare<IO: CoreIOCtx>(
+fn send_prepare<IO: BasicIOCtx>(
   ctx: &mut CoordContext,
   io_ctx: &mut IO,
   this_query_id: QueryId,
@@ -199,7 +199,7 @@ fn send_prepare<IO: CoreIOCtx>(
 }
 
 /// Send a `FinishQueryCheckPrepared` to `rm`.
-fn send_check_prepared<IO: CoreIOCtx>(
+fn send_check_prepared<IO: BasicIOCtx>(
   ctx: &mut CoordContext,
   io_ctx: &mut IO,
   this_query_id: QueryId,

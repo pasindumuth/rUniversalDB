@@ -13,7 +13,7 @@ pub mod drop_table_rm_es;
 pub mod drop_table_tm_es;
 pub mod experimental;
 pub mod expression;
-pub mod finish_query_es;
+pub mod finish_query_rm_es;
 pub mod finish_query_tm_es;
 pub mod gr_query_es;
 pub mod master;

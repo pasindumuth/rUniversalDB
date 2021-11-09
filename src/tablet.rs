@@ -9,7 +9,7 @@ use crate::common::{
 use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::expression::{compute_key_region, does_intersect, EvalError};
-use crate::finish_query_es::{
+use crate::finish_query_rm_es::{
   FinishQueryAction, FinishQueryES, FinishQueryExecuting, OrigTMLeadership, Paxos2PCRMState,
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
