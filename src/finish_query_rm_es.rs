@@ -78,6 +78,7 @@ impl FinishQueryES {
     match self {
       FinishQueryES::FinishQueryExecuting(es) => match &es.state {
         Paxos2PCRMState::WaitingInsertingPrepared(_) => {
+          // TODO: place this in early_abort
           ctx.inserting_prepared_writes.remove(&es.timestamp);
           FinishQueryAction::Exit
         }

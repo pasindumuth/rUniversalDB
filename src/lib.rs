@@ -26,6 +26,8 @@ pub mod multiversion_map;
 pub mod net;
 pub mod network_driver;
 pub mod paxos;
+pub mod paxos2pc_rm;
+pub mod paxos2pc_tm;
 pub mod query_converter;
 pub mod server;
 pub mod slave;
