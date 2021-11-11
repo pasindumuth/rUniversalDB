@@ -1,7 +1,7 @@
-use crate::simple_tm_es::SimplePayloadTypes;
+use crate::stm_simple_tm_es::STMSimplePayloadTypes;
 use runiversal::model::common::{QueryId, SlaveGroupId};
 use runiversal::model::message as msg;
-use runiversal::stmpaxos2pc_tm::{RMMessage, TMMessage};
+use runiversal::stmpaxos2pc_tm as stmpaxos2pc;
 use serde::{Deserialize, Serialize};
 
 // -------------------------------------------------------------------------------------------------
@@ -30,8 +30,8 @@ pub enum SlaveMessage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveRemotePayload {
   // Simple STMPaxos2PC
-  RMMessage(RMMessage<SimplePayloadTypes>),
-  TMMessage(TMMessage<SimplePayloadTypes>),
+  STMRMMessage(stmpaxos2pc::RMMessage<STMSimplePayloadTypes>),
+  STMTMMessage(stmpaxos2pc::TMMessage<STMSimplePayloadTypes>),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -40,11 +40,11 @@ pub enum SlaveRemotePayload {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ExternalMessage {
-  SimpleRequest(SimpleRequest),
+  STMSimpleRequest(STMSimpleRequest),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct SimpleRequest {
+pub struct STMSimpleRequest {
   pub query_id: QueryId,
   pub rms: Vec<SlaveGroupId>,
 }

@@ -1,7 +1,7 @@
 use crate::message as msg;
-use crate::simple_tm_es::SimplePayloadTypes;
 use crate::simulation::{mk_client_eid, mk_slave_eid, Simulation};
 use crate::slave::SlavePLm;
+use crate::stm_simple_tm_es::STMSimplePayloadTypes;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::mk_qid;
@@ -24,14 +24,14 @@ fn check_completion(
   rms: &Vec<SlaveGroupId>,
   tm: &SlaveGroupId,
 ) -> CompletionResult {
-  let mut tm_plms = Vec::<TMPLm<SimplePayloadTypes>>::new();
-  let mut rms_plms = BTreeMap::<SlaveGroupId, Vec<RMPLm<SimplePayloadTypes>>>::new();
+  let mut tm_plms = Vec::<TMPLm<STMSimplePayloadTypes>>::new();
+  let mut rms_plms = BTreeMap::<SlaveGroupId, Vec<RMPLm<STMSimplePayloadTypes>>>::new();
 
   // Add TMPLms
   for pl_entry in sim.global_pls.get(tm).unwrap() {
     if let msg::PLEntry::Bundle(bundle) = pl_entry {
       for plm in &bundle.plms {
-        if let SlavePLm::SimpleTM(tm_plm) = plm {
+        if let SlavePLm::SimpleSTMTM(tm_plm) = plm {
           tm_plms.push(tm_plm.clone());
         }
       }
@@ -44,7 +44,7 @@ fn check_completion(
     for pl_entry in sim.global_pls.get(rm).unwrap() {
       if let msg::PLEntry::Bundle(bundle) = pl_entry {
         for plm in &bundle.plms {
-          if let SlavePLm::SimpleRM(rm_plm) = plm {
+          if let SlavePLm::SimpleSTMRM(rm_plm) = plm {
             rms_plms.get_mut(rm).unwrap().push(rm_plm.clone());
           }
         }
@@ -117,7 +117,7 @@ pub fn test_single(test_num: u32, seed: [u8; 16]) {
   // Gossip, Paxos Insertions, etc.
   sim.simulate_n_ms(100);
 
-  // Randomly construct a SimpleRequest and send it to a random Slave
+  // Randomly construct a STMSimpleRequest and send it to a random Slave
   // to perform Simple STMPaxos2PC.
 
   // Take s0 to be the TM.
@@ -135,10 +135,10 @@ pub fn test_single(test_num: u32, seed: [u8; 16]) {
     rms.push(all_slaves.remove(r as usize));
   }
 
-  let request = msg::SimpleRequest { query_id: mk_qid(&mut sim.rand), rms: rms.clone() };
+  let request = msg::STMSimpleRequest { query_id: mk_qid(&mut sim.rand), rms: rms.clone() };
   sim.add_msg(
     msg::NetworkMessage::Slave(msg::SlaveMessage::ExternalMessage(
-      msg::ExternalMessage::SimpleRequest(request),
+      msg::ExternalMessage::STMSimpleRequest(request),
     )),
     &client_eid,
     &tm_eid,

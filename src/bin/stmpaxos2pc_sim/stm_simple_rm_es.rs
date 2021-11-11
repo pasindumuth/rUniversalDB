@@ -1,9 +1,9 @@
 use crate::message as msg;
-use crate::simple_tm_es::{
-  SimpleClosed, SimpleCommit, SimplePayloadTypes, SimplePrepare, SimplePrepared, SimpleRMAborted,
-  SimpleRMCommitted, SimpleRMPrepared,
-};
 use crate::slave::SlaveContext;
+use crate::stm_simple_tm_es::{
+  STMSimpleClosed, STMSimpleCommit, STMSimplePayloadTypes, STMSimplePrepare, STMSimplePrepared,
+  STMSimpleRMAborted, STMSimpleRMCommitted, STMSimpleRMPrepared,
+};
 use runiversal::common::BasicIOCtx;
 use runiversal::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use runiversal::stmpaxos2pc_tm::RMCommittedPLm;
@@ -13,61 +13,61 @@ use runiversal::stmpaxos2pc_tm::RMCommittedPLm;
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub struct SimpleRMInner {}
+pub struct STMSimpleRMInner {}
 
-pub type SimpleRMES = STMPaxos2PCRMOuter<SimplePayloadTypes, SimpleRMInner>;
+pub type STMSimpleRMES = STMPaxos2PCRMOuter<STMSimplePayloadTypes, STMSimpleRMInner>;
 
-impl STMPaxos2PCRMInner<SimplePayloadTypes> for SimpleRMInner {
+impl STMPaxos2PCRMInner<STMSimplePayloadTypes> for STMSimpleRMInner {
   fn new<IO: BasicIOCtx<msg::NetworkMessage>>(
     _: &mut SlaveContext,
     _: &mut IO,
-    _: SimplePrepare,
-  ) -> SimpleRMInner {
-    SimpleRMInner {}
+    _: STMSimplePrepare,
+  ) -> STMSimpleRMInner {
+    STMSimpleRMInner {}
   }
 
   fn new_follower<IO: BasicIOCtx<msg::NetworkMessage>>(
     _: &mut SlaveContext,
     _: &mut IO,
-    _: SimpleRMPrepared,
-  ) -> SimpleRMInner {
-    SimpleRMInner {}
+    _: STMSimpleRMPrepared,
+  ) -> STMSimpleRMInner {
+    STMSimpleRMInner {}
   }
 
-  fn mk_closed() -> SimpleClosed {
-    SimpleClosed {}
+  fn mk_closed() -> STMSimpleClosed {
+    STMSimpleClosed {}
   }
 
   fn mk_prepared_plm<IO: BasicIOCtx<msg::NetworkMessage>>(
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
-  ) -> SimpleRMPrepared {
-    SimpleRMPrepared {}
+  ) -> STMSimpleRMPrepared {
+    STMSimpleRMPrepared {}
   }
 
   fn prepared_plm_inserted<IO: BasicIOCtx<msg::NetworkMessage>>(
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
-  ) -> SimplePrepared {
-    SimplePrepared {}
+  ) -> STMSimplePrepared {
+    STMSimplePrepared {}
   }
 
   fn mk_committed_plm<IO: BasicIOCtx<msg::NetworkMessage>>(
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
-    _: &SimpleCommit,
-  ) -> SimpleRMCommitted {
-    SimpleRMCommitted {}
+    _: &STMSimpleCommit,
+  ) -> STMSimpleRMCommitted {
+    STMSimpleRMCommitted {}
   }
 
   fn committed_plm_inserted<IO: BasicIOCtx<msg::NetworkMessage>>(
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
-    _: &RMCommittedPLm<SimplePayloadTypes>,
+    _: &RMCommittedPLm<STMSimplePayloadTypes>,
   ) {
   }
 
@@ -75,8 +75,8 @@ impl STMPaxos2PCRMInner<SimplePayloadTypes> for SimpleRMInner {
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
-  ) -> SimpleRMAborted {
-    SimpleRMAborted {}
+  ) -> STMSimpleRMAborted {
+    STMSimpleRMAborted {}
   }
 
   fn aborted_plm_inserted<IO: BasicIOCtx<msg::NetworkMessage>>(
