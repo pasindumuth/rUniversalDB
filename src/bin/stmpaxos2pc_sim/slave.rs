@@ -186,7 +186,7 @@ impl paxos2pc_tm::RMServerContext<SimplePayloadTypes> for SlaveContext {
   }
 
   fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId> {
-    self.leader_map()
+    &self.leader_map
   }
 }
 
