@@ -147,7 +147,7 @@ const REMOTE_LEADER_CHANGED_PERIOD: u128 = 1;
 
 impl RMPathTrait for TNodePath {
   fn to_gid(&self) -> PaxosGroupId {
-    TNodePath::to_gid(self)
+    self.sid.to_gid()
   }
 }
 

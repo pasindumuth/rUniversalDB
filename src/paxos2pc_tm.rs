@@ -1,5 +1,6 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::model::common::{LeadershipId, PaxosGroupId, QueryId};
+use crate::stmpaxos2pc_tm::RMPathTrait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,10 +48,6 @@ pub trait TMServerContext<T: PayloadTypes> {
   fn is_leader(&self) -> bool;
 }
 
-pub trait RMPathTrait {
-  fn to_gid(&self) -> PaxosGroupId;
-}
-
 // -----------------------------------------------------------------------------------------------
 //  Paxos2PC
 // -----------------------------------------------------------------------------------------------
@@ -82,6 +79,8 @@ pub trait PayloadTypes: Clone {
   fn rm_plm(plm: RMPLm<Self>) -> Self::RMPLm;
 
   // TM-to-RM Messages
+  type Prepare: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+
   fn rm_msg(msg: RMMessage<Self>) -> Self::RMMessage;
 
   // RM-to-TM Messages
@@ -122,6 +121,9 @@ pub struct Prepare<T: PayloadTypes> {
   pub query_id: QueryId,
   pub tm: T::TMPath,
   pub rms: Vec<T::RMPath>,
+  /// This typically contains references to resources that this Paxos2PC
+  /// should take over in the RM.
+  pub payload: T::Prepare,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -218,12 +220,16 @@ pub trait Paxos2PCTMInner<T: PayloadTypes> {
 
 #[derive(Debug)]
 pub struct PreparingSt<T: PayloadTypes> {
-  rms_remaining: BTreeSet<T::RMPath>,
+  all_rms: Vec<T::RMPath>,
+  /// Maps the RMs that have not responded to the `Prepare` messages we sent out.
+  rms_remaining: BTreeMap<T::RMPath, Prepare<T>>,
 }
 
 #[derive(Debug)]
 pub struct CheckingPreparedSt<T: PayloadTypes> {
-  rms_remaining: BTreeSet<T::RMPath>,
+  all_rms: Vec<T::RMPath>,
+  /// Maps the RMs that have not responded to the `CheckPrepared` messages we sent out.
+  rms_remaining: BTreeMap<T::RMPath, CheckPrepared<T>>,
 }
 
 #[derive(Debug)]
@@ -240,29 +246,37 @@ pub enum Paxos2PCTMAction {
 
 #[derive(Debug)]
 pub struct Paxos2PCTMOuter<T: PayloadTypes, InnerT> {
+  /// The `QueryId` identifying the Paxos2PC instance.
   pub query_id: QueryId,
-  pub all_rms: Vec<T::RMPath>,
   pub state: State<T>,
   pub inner: InnerT,
 }
 
 impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
   pub fn new(query_id: QueryId, inner: InnerT) -> Paxos2PCTMOuter<T, InnerT> {
-    Paxos2PCTMOuter { query_id, all_rms: vec![], state: State::Start, inner }
+    Paxos2PCTMOuter { query_id, state: State::Start, inner }
   }
 
   pub fn start_orig<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
+    prepare_payloads: BTreeMap<T::RMPath, T::Prepare>,
   ) -> Paxos2PCTMAction {
     // Send out FinishQueryPrepare to all RMs
-    let mut rms_remaining = BTreeSet::<T::RMPath>::new();
-    for rm in &self.all_rms {
-      rms_remaining.insert(rm.clone());
-      self.send_prepare(ctx, io_ctx, rm);
+    let all_rms: Vec<T::RMPath> = prepare_payloads.keys().cloned().collect();
+    let mut rms_remaining = BTreeMap::<T::RMPath, Prepare<T>>::new();
+    for (rm, payload) in prepare_payloads {
+      let prepare = Prepare {
+        query_id: self.query_id.clone(),
+        tm: ctx.mk_node_path(),
+        rms: all_rms.clone(),
+        payload,
+      };
+      rms_remaining.insert(rm.clone(), prepare.clone());
+      ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Prepare(prepare)));
     }
-    self.state = State::Preparing(PreparingSt { rms_remaining });
+    self.state = State::Preparing(PreparingSt { all_rms, rms_remaining });
     Paxos2PCTMAction::Wait
   }
 
@@ -270,18 +284,41 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
+    all_rms: Vec<T::RMPath>,
   ) -> Paxos2PCTMAction {
     // Send out FinishQueryPrepare to all RMs
-    let mut rms_remaining = BTreeSet::<T::RMPath>::new();
-    for rm in &self.all_rms {
-      rms_remaining.insert(rm.clone());
-      self.send_check_prepared(ctx, io_ctx, rm);
+    let mut rms_remaining = BTreeMap::<T::RMPath, CheckPrepared<T>>::new();
+    for rm in &all_rms {
+      let check = CheckPrepared { query_id: self.query_id.clone(), tm: ctx.mk_node_path() };
+      rms_remaining.insert(rm.clone(), check.clone());
+      ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::CheckPrepared(check)));
     }
-    self.state = State::CheckingPrepared(CheckingPreparedSt { rms_remaining });
+    self.state = State::CheckingPrepared(CheckingPreparedSt { all_rms, rms_remaining });
     Paxos2PCTMAction::Wait
   }
 
   // Paxos2PC messages
+
+  /// Send out `Commit` and exit
+  fn commit<IO: BasicIOCtx<T::NetworkMessageT>>(
+    &mut self,
+    ctx: &mut T::TMContext,
+    io_ctx: &mut IO,
+    all_rms: &Vec<T::RMPath>,
+  ) -> Paxos2PCTMAction {
+    for rm in all_rms {
+      ctx.send_to_rm(
+        io_ctx,
+        rm,
+        T::rm_msg(RMMessage::Commit(Commit {
+          query_id: self.query_id.clone(),
+          tm: ctx.mk_node_path(),
+        })),
+      )
+    }
+    self.inner.committed(ctx, io_ctx);
+    Paxos2PCTMAction::Exit
+  }
 
   pub fn handle_prepared<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
@@ -290,23 +327,20 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     prepared: Prepared<T>,
   ) -> Paxos2PCTMAction {
     match &mut self.state {
-      State::Preparing(PreparingSt { rms_remaining })
-      | State::CheckingPrepared(CheckingPreparedSt { rms_remaining }) => {
+      State::Preparing(PreparingSt { all_rms, rms_remaining }) => {
         rms_remaining.remove(&prepared.rm);
         if rms_remaining.is_empty() {
-          // The Preparing is finished.
-          for rm in &self.all_rms {
-            ctx.send_to_rm(
-              io_ctx,
-              rm,
-              T::rm_msg(RMMessage::Commit(Commit {
-                query_id: self.query_id.clone(),
-                tm: ctx.mk_node_path(),
-              })),
-            )
-          }
-          self.inner.committed(ctx, io_ctx);
-          Paxos2PCTMAction::Exit
+          let all_rms = all_rms.clone();
+          self.commit(ctx, io_ctx, &all_rms)
+        } else {
+          Paxos2PCTMAction::Wait
+        }
+      }
+      State::CheckingPrepared(CheckingPreparedSt { all_rms, rms_remaining }) => {
+        rms_remaining.remove(&prepared.rm);
+        if rms_remaining.is_empty() {
+          let all_rms = all_rms.clone();
+          self.commit(ctx, io_ctx, &all_rms)
         } else {
           Paxos2PCTMAction::Wait
         }
@@ -321,9 +355,10 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     io_ctx: &mut IO,
   ) -> Paxos2PCTMAction {
     match &mut self.state {
-      State::Preparing(_) | State::CheckingPrepared(_) => {
+      State::Preparing(PreparingSt { all_rms, .. })
+      | State::CheckingPrepared(CheckingPreparedSt { all_rms, .. }) => {
         // The Preparing has been aborted.
-        for rm in &self.all_rms {
+        for rm in all_rms {
           ctx.send_to_rm(
             io_ctx,
             rm,
@@ -347,9 +382,10 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     wait: Wait<T>,
   ) -> Paxos2PCTMAction {
     match &mut self.state {
-      State::CheckingPrepared(_) => {
+      State::CheckingPrepared(CheckingPreparedSt { rms_remaining, .. }) => {
         // Send back a CheckPrepared
-        self.send_check_prepared(ctx, io_ctx, &wait.rm);
+        let check = rms_remaining.get(&wait.rm).unwrap().clone();
+        ctx.send_to_rm(io_ctx, &wait.rm, T::rm_msg(RMMessage::CheckPrepared(check.clone())));
         Paxos2PCTMAction::Wait
       }
       _ => Paxos2PCTMAction::Wait,
@@ -363,19 +399,19 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     remote_leader_changed: RemoteLeaderChangedPLm,
   ) -> Paxos2PCTMAction {
     match &self.state {
-      State::Preparing(PreparingSt { rms_remaining }) => {
-        for rm in rms_remaining {
+      State::Preparing(PreparingSt { rms_remaining, .. }) => {
+        for (rm, prepare) in rms_remaining {
           // If the RM has not responded and its Leadership changed, we resend Prepare.
           if rm.to_gid() == remote_leader_changed.gid {
-            self.send_prepare(ctx, io_ctx, rm);
+            ctx.send_to_rm(io_ctx, rm, T::rm_msg(RMMessage::Prepare(prepare.clone())));
           }
         }
       }
-      State::CheckingPrepared(CheckingPreparedSt { rms_remaining }) => {
-        for rm in rms_remaining {
+      State::CheckingPrepared(CheckingPreparedSt { rms_remaining, .. }) => {
+        for (rm, check) in rms_remaining {
           // If the RM has not responded and its Leadership changed, we resend CheckPrepared.
           if rm.to_gid() == remote_leader_changed.gid {
-            self.send_check_prepared(ctx, io_ctx, rm);
+            ctx.send_to_rm(io_ctx, rm, T::rm_msg(RMMessage::CheckPrepared(check.clone())));
           }
         }
       }
@@ -385,43 +421,6 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
   }
 
   // TODO: employ node died. Add LeaderChanged to outer.
-
-  // Sending Utils
-
-  /// Send a `Prepare` with `payload` to `rm`.
-  fn send_prepare<IO: BasicIOCtx<T::NetworkMessageT>>(
-    &self,
-    ctx: &mut T::TMContext,
-    io_ctx: &mut IO,
-    rm: &T::RMPath,
-  ) {
-    ctx.send_to_rm(
-      io_ctx,
-      rm,
-      T::rm_msg(RMMessage::Prepare(Prepare {
-        query_id: self.query_id.clone(),
-        tm: ctx.mk_node_path(),
-        rms: self.all_rms.clone(),
-      })),
-    );
-  }
-
-  /// Send a `Prepare` with `payload` to `rm`.
-  fn send_check_prepared<IO: BasicIOCtx<T::NetworkMessageT>>(
-    &self,
-    ctx: &mut T::TMContext,
-    io_ctx: &mut IO,
-    rm: &T::RMPath,
-  ) {
-    ctx.send_to_rm(
-      io_ctx,
-      rm,
-      T::rm_msg(RMMessage::CheckPrepared(CheckPrepared {
-        query_id: self.query_id.clone(),
-        tm: ctx.mk_node_path(),
-      })),
-    );
-  }
 }
 
 // -----------------------------------------------------------------------------------------------

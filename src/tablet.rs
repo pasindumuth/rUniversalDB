@@ -9,12 +9,11 @@ use crate::common::{
 use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::expression::{compute_key_region, does_intersect, EvalError};
-use crate::finish_query_rm_es::{
-  FinishQueryAction, FinishQueryES, FinishQueryExecuting, OrigTMLeadership, Paxos2PCRMState,
-};
+use crate::finish_query_rm_es::{FinishQueryRMES, FinishQueryRMInner};
+use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
 use crate::model::common::{
-  proc, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColValN, Context, ContextRow,
+  proc, CNodePath, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColValN, Context, ContextRow,
   ContextSchema, LeadershipId, PaxosGroupId, TNodePath, TQueryPath, TSubNodePath, TableView,
   TransTableName,
 };
@@ -22,8 +21,12 @@ use crate::model::common::{
   ColName, EndpointId, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
+use crate::model::message::TabletMessage;
 use crate::ms_table_read_es::{MSReadExecutionS, MSTableReadAction, MSTableReadES};
 use crate::ms_table_write_es::{MSTableWriteAction, MSTableWriteES, MSWriteExecutionS};
+use crate::paxos2pc_rm::Paxos2PCRMAction;
+use crate::paxos2pc_tm as paxos2pc;
+use crate::paxos2pc_tm::{RMMessage, RMPLm};
 use crate::server::{
   contains_col, CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
 };
@@ -31,7 +34,7 @@ use crate::slave::SlaveBackMessage;
 use crate::stmpaxos2pc_rm::{
   handle_rm_msg, handle_rm_plm, AggregateContainer, STMPaxos2PCRMAction,
 };
-use crate::stmpaxos2pc_tm as paxos2pc;
+use crate::stmpaxos2pc_tm as stmpaxos2pc;
 use crate::stmpaxos2pc_tm::RMServerContext;
 use crate::storage::{compress_updates_views, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
@@ -282,7 +285,7 @@ pub struct GRQueryESWrapper {
 #[derive(Debug, Default)]
 pub struct Statuses {
   // Paxos2PC
-  finish_query_ess: BTreeMap<QueryId, FinishQueryES>,
+  finish_query_ess: BTreeMap<QueryId, FinishQueryRMES>,
 
   // TP
   gr_query_ess: BTreeMap<QueryId, GRQueryESWrapper>,
@@ -479,40 +482,15 @@ pub mod plm {
     pub timestamp: Timestamp,
     pub region: TableRegion,
   }
-
-  // FinishQuery
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct FinishQueryPrepared {
-    pub query_id: QueryId,
-    pub tm: CQueryPath,
-    pub all_rms: Vec<TQueryPath>,
-
-    pub region_lock: ReadWriteRegion,
-    pub timestamp: Timestamp,
-    pub update_view: GenericTable,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct FinishQueryCommitted {
-    pub query_id: QueryId,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct FinishQueryAborted {
-    pub query_id: QueryId,
-  }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TabletPLm {
   LockedCols(plm::LockedCols),
   ReadProtected(plm::ReadProtected),
-  FinishQueryPrepared(plm::FinishQueryPrepared),
-  FinishQueryCommitted(plm::FinishQueryCommitted),
-  FinishQueryAborted(plm::FinishQueryAborted),
-  AlterTable(paxos2pc::RMPLm<AlterTablePayloadTypes>),
-  DropTable(paxos2pc::RMPLm<DropTablePayloadTypes>),
+  FinishQuery(paxos2pc::RMPLm<FinishQueryPayloadTypes>),
+  AlterTable(stmpaxos2pc::RMPLm<AlterTablePayloadTypes>),
+  DropTable(stmpaxos2pc::RMPLm<DropTablePayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -558,7 +536,7 @@ pub struct TabletCreateHelper {
 //  RMServerContext AlterTable
 // -----------------------------------------------------------------------------------------------
 
-impl RMServerContext<AlterTablePayloadTypes> for TabletContext {
+impl stmpaxos2pc::RMServerContext<AlterTablePayloadTypes> for TabletContext {
   fn push_plm(&mut self, plm: TabletPLm) {
     self.tablet_bundle.push(plm);
   }
@@ -580,7 +558,7 @@ impl RMServerContext<AlterTablePayloadTypes> for TabletContext {
 //  RMServerContext DropTable
 // -----------------------------------------------------------------------------------------------
 
-impl RMServerContext<DropTablePayloadTypes> for TabletContext {
+impl stmpaxos2pc::RMServerContext<DropTablePayloadTypes> for TabletContext {
   fn push_plm(&mut self, plm: TabletPLm) {
     self.tablet_bundle.push(plm);
   }
@@ -595,6 +573,37 @@ impl RMServerContext<DropTablePayloadTypes> for TabletContext {
 
   fn is_leader(&self) -> bool {
     TabletContext::is_leader(self)
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  RMServerContext FinishQuery
+// -----------------------------------------------------------------------------------------------
+
+impl paxos2pc::RMServerContext<FinishQueryPayloadTypes> for TabletContext {
+  fn push_plm(&mut self, plm: TabletPLm) {
+    self.tablet_bundle.push(plm);
+  }
+
+  fn send_to_tm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    tm: &CNodePath,
+    msg: msg::CoordMessage,
+  ) {
+    self.ctx(io_ctx).send_to_c(tm.clone(), msg);
+  }
+
+  fn mk_node_path(&self) -> TNodePath {
+    TabletContext::mk_node_path(self)
+  }
+
+  fn is_leader(&self) -> bool {
+    TabletContext::is_leader(self)
+  }
+
+  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId> {
+    &self.leader_map
   }
 }
 
@@ -743,24 +752,26 @@ impl TabletContext {
                 }
               }
               // FinishQuery
-              TabletPLm::FinishQueryPrepared(prepared) => {
-                let query_id = prepared.query_id;
-                let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                let action = finish_query_es.handle_prepared_plm(self, io_ctx);
-                self.handle_finish_query_es_action(statuses, query_id, action);
-              }
-              TabletPLm::FinishQueryCommitted(committed) => {
-                let query_id = committed.query_id;
-                let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                let action = finish_query_es.handle_committed_plm(self);
-                self.handle_finish_query_es_action(statuses, query_id, action);
-              }
-              TabletPLm::FinishQueryAborted(aborted) => {
-                let query_id = aborted.query_id;
-                let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                let action = finish_query_es.handle_aborted_plm(self);
-                self.handle_finish_query_es_action(statuses, query_id, action);
-              }
+              TabletPLm::FinishQuery(plm) => match plm {
+                RMPLm::Prepared(prepared) => {
+                  let query_id = prepared.query_id;
+                  let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+                  let action = finish_query_es.handle_prepared_plm(self, io_ctx);
+                  self.handle_finish_query_es_action(statuses, query_id, action);
+                }
+                RMPLm::Committed(committed) => {
+                  let query_id = committed.query_id;
+                  let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+                  let action = finish_query_es.handle_committed_plm(self, io_ctx);
+                  self.handle_finish_query_es_action(statuses, query_id, action);
+                }
+                RMPLm::Aborted(aborted) => {
+                  let query_id = aborted.query_id;
+                  let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+                  let action = finish_query_es.handle_aborted_plm(self, io_ctx);
+                  self.handle_finish_query_es_action(statuses, query_id, action);
+                }
+              },
               // AlterTable
               TabletPLm::AlterTable(plm) => {
                 let (query_id, action) = handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
@@ -779,7 +790,7 @@ impl TabletContext {
 
           // Inform all ESs in WaitingInserting and start inserting a PLm.
           for (_, es) in &mut statuses.finish_query_ess {
-            es.start_inserting(self);
+            es.start_inserting(self, io_ctx);
           }
           match &mut statuses.ddl_es {
             DDLES::None => {}
@@ -815,36 +826,40 @@ impl TabletContext {
                 );
               }
               // FinishQuery
-              TabletPLm::FinishQueryPrepared(prepared) => {
-                let query_id = prepared.query_id;
-                let timestamp = prepared.timestamp;
-                let region_lock = prepared.region_lock;
-                self.prepared_writes.insert(timestamp.clone(), region_lock.clone());
-                statuses.finish_query_ess.insert(
-                  query_id.clone(),
-                  FinishQueryES::FinishQueryExecuting(FinishQueryExecuting {
-                    query_id,
-                    tm: prepared.tm,
-                    all_rms: prepared.all_rms,
-                    region_lock,
-                    timestamp,
-                    update_view: prepared.update_view,
-                    state: Paxos2PCRMState::Follower,
-                  }),
-                );
-              }
-              TabletPLm::FinishQueryCommitted(committed) => {
-                let query_id = committed.query_id;
-                let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                let action = finish_query_es.handle_committed_plm(self);
-                self.handle_finish_query_es_action(statuses, query_id, action);
-              }
-              TabletPLm::FinishQueryAborted(aborted) => {
-                let query_id = aborted.query_id;
-                let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                let action = finish_query_es.handle_aborted_plm(self);
-                self.handle_finish_query_es_action(statuses, query_id, action);
-              }
+              TabletPLm::FinishQuery(plm) => match plm {
+                RMPLm::Prepared(prepared) => {
+                  let timestamp = prepared.payload.timestamp;
+                  let region_lock = prepared.payload.region_lock;
+                  self.prepared_writes.insert(timestamp.clone(), region_lock.clone());
+                  map_insert(
+                    &mut statuses.finish_query_ess,
+                    &prepared.query_id,
+                    FinishQueryRMES::new(
+                      self,
+                      prepared.query_id.clone(),
+                      prepared.tm,
+                      prepared.rms,
+                      FinishQueryRMInner {
+                        region_lock,
+                        timestamp,
+                        update_view: prepared.payload.update_view,
+                      },
+                    ),
+                  );
+                }
+                RMPLm::Committed(committed) => {
+                  let query_id = committed.query_id;
+                  let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+                  let action = finish_query_es.handle_committed_plm(self, io_ctx);
+                  self.handle_finish_query_es_action(statuses, query_id, action);
+                }
+                RMPLm::Aborted(aborted) => {
+                  let query_id = aborted.query_id;
+                  let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
+                  let action = finish_query_es.handle_aborted_plm(self, io_ctx);
+                  self.handle_finish_query_es_action(statuses, query_id, action);
+                }
+              },
               // AlterTable
               TabletPLm::AlterTable(plm) => {
                 let (query_id, action) = handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
@@ -1069,93 +1084,89 @@ impl TabletContext {
           msg::TabletMessage::QuerySuccess(query_success) => {
             self.handle_query_success(io_ctx, statuses, query_success);
           }
-          msg::TabletMessage::FinishQueryPrepare(prepare) => {
-            let query_id = prepare.query_id.clone();
-            if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
-              // If a FinishQueryES already exists, we route the prepare message there.
-              let action = finish_query_es.handle_prepare(self, io_ctx);
-              self.handle_finish_query_es_action(statuses, query_id, action);
-            } else {
-              if let Some(ms_query_es) = statuses.ms_query_ess.remove(&query_id) {
-                self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
-                debug_assert!(ms_query_es.pending_queries.is_empty());
+          msg::TabletMessage::FinishQuery(message) => {
+            match message {
+              RMMessage::Prepare(prepare) => {
+                if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&prepare.query_id)
+                {
+                  // If a FinishQueryRMES already exists, we route the prepare message there.
+                  let action = finish_query_es.handle_prepare(self, io_ctx);
+                  self.handle_finish_query_es_action(statuses, prepare.query_id, action);
+                } else {
+                  if let Some(ms_query_es) = statuses.ms_query_ess.remove(&prepare.payload.query_id)
+                  {
+                    self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
+                    debug_assert!(ms_query_es.pending_queries.is_empty());
 
-                let timestamp = ms_query_es.timestamp;
+                    let timestamp = ms_query_es.timestamp;
 
-                // Move the VerifyingReadWrite to inserting.
-                let verifying = self.verifying_writes.remove(&timestamp).unwrap();
-                debug_assert!(verifying.m_waiting_read_protected.is_empty());
-                let region_lock = ReadWriteRegion {
-                  orig_p: verifying.orig_p,
-                  m_read_protected: verifying.m_read_protected,
-                  m_write_protected: verifying.m_write_protected,
-                };
-                self.inserting_prepared_writes.insert(timestamp.clone(), region_lock.clone());
+                    // Move the VerifyingReadWrite to inserting.
+                    let verifying = self.verifying_writes.remove(&timestamp).unwrap();
+                    debug_assert!(verifying.m_waiting_read_protected.is_empty());
+                    let region_lock = ReadWriteRegion {
+                      orig_p: verifying.orig_p,
+                      m_read_protected: verifying.m_read_protected,
+                      m_write_protected: verifying.m_write_protected,
+                    };
+                    self.inserting_prepared_writes.insert(timestamp.clone(), region_lock.clone());
 
-                // Construct a FinishQueryES
-                let tm_lid = self.leader_map.get(&prepare.tm.node_path.sid.to_gid()).unwrap();
-                map_insert(
-                  &mut statuses.finish_query_ess,
-                  &query_id,
-                  FinishQueryES::FinishQueryExecuting(FinishQueryExecuting {
-                    query_id: query_id.clone(),
-                    tm: prepare.tm,
-                    all_rms: prepare.all_rms,
-                    region_lock,
-                    timestamp,
-                    update_view: compress_updates_views(&ms_query_es.update_views),
-                    state: Paxos2PCRMState::WaitingInsertingPrepared(OrigTMLeadership {
-                      orig_tm_lid: tm_lid.clone(),
-                    }),
-                  }),
-                );
-              } else {
-                // The MSQueryES might not be present because of a DeadlockSafetyWriteAbort.
-                let this_query_path = self.mk_query_path(prepare.query_id);
-                self.ctx(io_ctx).send_to_c(
-                  prepare.tm.node_path,
-                  msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
-                    return_qid: prepare.tm.query_id,
-                    rm_path: this_query_path,
-                  }),
-                );
+                    // Construct a FinishQueryRMES
+                    map_insert(
+                      &mut statuses.finish_query_ess,
+                      &prepare.query_id,
+                      FinishQueryRMES::new(
+                        self,
+                        prepare.query_id.clone(),
+                        prepare.tm,
+                        prepare.rms,
+                        FinishQueryRMInner {
+                          region_lock,
+                          timestamp,
+                          update_view: compress_updates_views(&ms_query_es.update_views),
+                        },
+                      ),
+                    );
+                  } else {
+                    // The MSQueryES might not be present because of a DeadlockSafetyWriteAbort.
+                    let this_node_path = self.mk_node_path();
+                    self.ctx(io_ctx).send_to_c(
+                      prepare.tm,
+                      msg::CoordMessage::FinishQuery(paxos2pc::TMMessage::Aborted(
+                        paxos2pc::Aborted { query_id: prepare.query_id, rm: this_node_path },
+                      )),
+                    );
+                  }
+                }
               }
-            }
-          }
-          msg::TabletMessage::FinishQueryAbort(abort) => {
-            let query_id = abort.query_id.clone();
-            if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
-              let action = finish_query_es.handle_abort(self);
-              self.handle_finish_query_es_action(statuses, query_id, action);
-            } else {
-              if let Some(ms_query_es) = statuses.ms_query_ess.remove(&query_id) {
-                self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
-                debug_assert!(ms_query_es.pending_queries.is_empty());
-                self.verifying_writes.remove(&ms_query_es.timestamp).unwrap();
+              RMMessage::Abort(abort) => {
+                let query_id = abort.query_id.clone();
+                if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
+                  let action = finish_query_es.handle_abort(self, io_ctx);
+                  self.handle_finish_query_es_action(statuses, query_id, action);
+                }
               }
-            }
-          }
-          msg::TabletMessage::FinishQueryCheckPrepared(check_prepared) => {
-            let query_id = check_prepared.query_id.clone();
-            if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
-              let action = finish_query_es.handle_check_prepared(self, io_ctx, check_prepared);
-              self.handle_finish_query_es_action(statuses, query_id, action);
-            } else {
-              let this_query_path = self.mk_query_path(check_prepared.query_id);
-              self.ctx(io_ctx).send_to_c(
-                check_prepared.tm.node_path,
-                msg::CoordMessage::FinishQueryAborted(msg::FinishQueryAborted {
-                  return_qid: check_prepared.tm.query_id,
-                  rm_path: this_query_path,
-                }),
-              );
-            }
-          }
-          msg::TabletMessage::FinishQueryCommit(commit) => {
-            let query_id = commit.query_id.clone();
-            if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
-              let action = finish_query_es.handle_commit(self);
-              self.handle_finish_query_es_action(statuses, query_id, action);
+              RMMessage::CheckPrepared(check_prepared) => {
+                let query_id = check_prepared.query_id.clone();
+                if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
+                  let action = finish_query_es.handle_check_prepared(self, io_ctx, check_prepared);
+                  self.handle_finish_query_es_action(statuses, query_id, action);
+                } else {
+                  let this_node_path = self.mk_node_path();
+                  self.ctx(io_ctx).send_to_c(
+                    check_prepared.tm,
+                    msg::CoordMessage::FinishQuery(paxos2pc::TMMessage::Aborted(
+                      paxos2pc::Aborted { query_id, rm: this_node_path },
+                    )),
+                  );
+                }
+              }
+              RMMessage::Commit(commit) => {
+                let query_id = commit.query_id.clone();
+                if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
+                  let action = finish_query_es.handle_commit(self, io_ctx);
+                  self.handle_finish_query_es_action(statuses, query_id, action);
+                }
+              }
             }
           }
           msg::TabletMessage::AlterTable(message) => {
@@ -1270,7 +1281,7 @@ impl TabletContext {
             }
           }
 
-          // Inform FinishQueryES
+          // Inform FinishQueryRMES
           let query_ids: Vec<QueryId> = statuses.finish_query_ess.keys().cloned().collect();
           for query_id in query_ids {
             let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
@@ -1287,7 +1298,7 @@ impl TabletContext {
         let this_gid = self.this_sid.to_gid();
         self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
 
-        // Inform FinishQueryES
+        // Inform FinishQueryRMES
         let query_ids: Vec<QueryId> = statuses.finish_query_ess.keys().cloned().collect();
         for query_id in query_ids {
           let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
@@ -2135,16 +2146,16 @@ impl TabletContext {
     }
   }
 
-  /// Handles the actions produced by a FinishQueryES.
+  /// Handles the actions produced by a FinishQueryRMES.
   fn handle_finish_query_es_action(
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: FinishQueryAction,
+    action: Paxos2PCRMAction,
   ) {
     match action {
-      FinishQueryAction::Wait => {}
-      FinishQueryAction::Exit => {
+      Paxos2PCRMAction::Wait => {}
+      Paxos2PCRMAction::Exit => {
         statuses.finish_query_ess.remove(&query_id);
       }
     }

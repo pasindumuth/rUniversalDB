@@ -3,12 +3,14 @@ use crate::col_usage::FrozenColUsageNode;
 use crate::common::{GossipData, QueryPlan};
 use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::drop_table_tm_es::DropTablePayloadTypes;
+use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::master::MasterBundle;
 use crate::model::common::{
   proc, CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
   PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
   TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
 };
+use crate::paxos2pc_tm;
 use crate::slave::SharedPaxosBundle;
 use crate::stmpaxos2pc_tm;
 use serde::{Deserialize, Serialize};
@@ -126,10 +128,7 @@ pub enum TabletMessage {
   QuerySuccess(QuerySuccess),
 
   // FinishQuery RM Messages
-  FinishQueryPrepare(FinishQueryPrepare),
-  FinishQueryAbort(FinishQueryAbort),
-  FinishQueryCommit(FinishQueryCommit),
-  FinishQueryCheckPrepared(FinishQueryCheckPrepared),
+  FinishQuery(paxos2pc_tm::RMMessage<FinishQueryPayloadTypes>),
 
   // DDL RM Messages
   AlterTable(stmpaxos2pc_tm::RMMessage<AlterTablePayloadTypes>),
@@ -149,10 +148,7 @@ pub enum CoordMessage {
   QuerySuccess(QuerySuccess),
 
   // FinishQuery TM Messages
-  FinishQueryPrepared(FinishQueryPrepared),
-  FinishQueryAborted(FinishQueryAborted),
-  FinishQueryInformPrepared(FinishQueryInformPrepared),
-  FinishQueryWait(FinishQueryWait),
+  FinishQuery(paxos2pc_tm::TMMessage<FinishQueryPayloadTypes>),
 
   // Register message
   RegisterQuery(RegisterQuery),
@@ -368,60 +364,6 @@ pub struct UpdateQuery {
 pub struct RegisterQuery {
   pub root_query_id: QueryId,
   pub query_path: TQueryPath,
-}
-
-// -------------------------------------------------------------------------------------------------
-//  2PC messages
-// -------------------------------------------------------------------------------------------------
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryPrepare {
-  pub tm: CQueryPath,
-  pub all_rms: Vec<TQueryPath>,
-  // This is the MSQueryES's QueryId. Recall that this will also be used
-  // as the QueryId for the FinishQueryES in the RM.
-  pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryPrepared {
-  pub return_qid: QueryId,
-  pub rm_path: TQueryPath,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryAborted {
-  pub return_qid: QueryId,
-  pub rm_path: TQueryPath,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryAbort {
-  pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryCommit {
-  pub query_id: QueryId,
-}
-
-// Other Paxos2PC messages
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryCheckPrepared {
-  pub tm: CQueryPath,
-  pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryInformPrepared {
-  pub tm: CQueryPath,
-  pub all_rms: Vec<TQueryPath>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FinishQueryWait {
-  pub return_qid: QueryId,
-  pub rm_path: TQueryPath,
 }
 
 // -------------------------------------------------------------------------------------------------

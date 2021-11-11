@@ -3,18 +3,21 @@ use crate::common::{
 };
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::finish_query_tm_es::{
-  FinishQueryTMAction, FinishQueryTMES, Paxos2PCTMState, ResponseData,
+  FinishQueryPayloadTypes, FinishQueryPrepare, FinishQueryTMES, FinishQueryTMInner, ResponseData,
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
   proc, CNodePath, CQueryPath, CSubNodePath, CTSubNodePath, ColName, CoordGroupId, LeadershipId,
-  PaxosGroupId, SlaveGroupId, TQueryPath, TableView,
+  PaxosGroupId, SlaveGroupId, TNodePath, TQueryPath, TableView,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
+use crate::model::message::CoordMessage;
 use crate::ms_query_coord_es::{
   FullMSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
+use crate::paxos2pc_tm as paxos2pc;
+use crate::paxos2pc_tm::{Paxos2PCTMAction, TMMessage, TMPathTrait};
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContextBase, SlaveServerContext};
 use crate::sql_parser::convert_ast;
@@ -67,6 +70,39 @@ pub struct Statuses {
   gr_query_ess: BTreeMap<QueryId, GRQueryESWrapper>,
   trans_table_read_ess: BTreeMap<QueryId, TransTableReadESWrapper>,
   tm_statuss: BTreeMap<QueryId, TMStatus>,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  TMServerContext Common
+// -----------------------------------------------------------------------------------------------
+
+impl TMPathTrait for CNodePath {
+  fn to_gid(&self) -> PaxosGroupId {
+    self.sid.to_gid()
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  TMServerContext
+// -----------------------------------------------------------------------------------------------
+
+impl paxos2pc::TMServerContext<FinishQueryPayloadTypes> for CoordContext {
+  fn send_to_rm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    rm: &TNodePath,
+    msg: msg::TabletMessage,
+  ) {
+    self.ctx(io_ctx).send_to_t(rm.clone(), msg);
+  }
+
+  fn mk_node_path(&self) -> CNodePath {
+    self.mk_this_node_path()
+  }
+
+  fn is_leader(&self) -> bool {
+    CoordContext::is_leader(self)
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -295,45 +331,46 @@ impl CoordContext {
           msg::CoordMessage::QueryAborted(query_aborted) => {
             self.handle_query_aborted(io_ctx, statuses, query_aborted);
           }
-          msg::CoordMessage::FinishQueryPrepared(prepared) => {
-            let query_id = prepared.return_qid.clone();
-            if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
-              let action = finish_query.handle_prepared(self, io_ctx, prepared);
-              self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+          CoordMessage::FinishQuery(message) => match message {
+            TMMessage::Prepared(prepared) => {
+              let query_id = prepared.query_id.clone();
+              if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
+                let action = finish_query.handle_prepared(self, io_ctx, prepared);
+                self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+              }
             }
-          }
-          msg::CoordMessage::FinishQueryAborted(aborted) => {
-            let query_id = aborted.return_qid.clone();
-            if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
-              let action = finish_query.handle_aborted(self, io_ctx, aborted);
-              self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+            TMMessage::Aborted(aborted) => {
+              let query_id = aborted.query_id.clone();
+              if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
+                let action = finish_query.handle_aborted(self, io_ctx);
+                self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+              }
             }
-          }
-          msg::CoordMessage::FinishQueryInformPrepared(inform_prepared) => {
-            let query_id = inform_prepared.tm.query_id.clone();
-            if !statuses.finish_query_tm_ess.contains_key(&query_id) {
-              // Add in and start a FinishQuerTMES
-              let finish_query_es = map_insert(
-                &mut statuses.finish_query_tm_ess,
-                &query_id,
-                FinishQueryTMES {
-                  response_data: None,
-                  query_id: query_id.clone(),
-                  all_rms: inform_prepared.all_rms,
-                  state: Paxos2PCTMState::Start,
-                },
-              );
-              let action = finish_query_es.start_rec(self, io_ctx);
-              self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+            TMMessage::InformPrepared(inform_prepared) => {
+              let query_id = inform_prepared.query_id.clone();
+              if !statuses.finish_query_tm_ess.contains_key(&query_id) {
+                // Add in and start a FinishQueryTMES
+                let finish_query_es = map_insert(
+                  &mut statuses.finish_query_tm_ess,
+                  &query_id,
+                  FinishQueryTMES {
+                    query_id: query_id.clone(),
+                    state: paxos2pc::State::Start,
+                    inner: FinishQueryTMInner { response_data: None, committed: false },
+                  },
+                );
+                let action = finish_query_es.start_rec(self, io_ctx, inform_prepared.rms);
+                self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+              }
             }
-          }
-          msg::CoordMessage::FinishQueryWait(wait) => {
-            let query_id = wait.return_qid.clone();
-            if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
-              let action = finish_query.handle_wait(self, io_ctx, wait);
-              self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+            TMMessage::Wait(wait) => {
+              let query_id = wait.query_id.clone();
+              if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
+                let action = finish_query.handle_wait(self, io_ctx, wait);
+                self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+              }
             }
-          }
+          },
           msg::CoordMessage::MasterQueryPlanningAborted(_) => {
             // In practice, this is never received.
             panic!();
@@ -440,7 +477,7 @@ impl CoordContext {
           for (_, finish_query_es) in
             std::mem::replace(&mut statuses.finish_query_tm_ess, BTreeMap::new())
           {
-            if let Some(response_data) = finish_query_es.response_data {
+            if let Some(response_data) = finish_query_es.inner.response_data {
               io_ctx.send(
                 &response_data.sender_eid,
                 msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
@@ -693,23 +730,33 @@ impl CoordContext {
       MSQueryCoordAction::Success(all_rms, sql_query, table_view, timestamp) => {
         let ms_coord = statuses.ms_coord_ess.remove(&query_id).unwrap();
         self.external_request_id_map.remove(&ms_coord.request_id);
+
+        // Construct the Prepare messages
+        let mut prepare_payloads = BTreeMap::<TNodePath, FinishQueryPrepare>::new();
+        for rm in all_rms {
+          prepare_payloads.insert(rm.node_path, FinishQueryPrepare { query_id: rm.query_id });
+        }
+
+        // Add in the FinishQueryES and start it
         let finish_query_es = map_insert(
           &mut statuses.finish_query_tm_ess,
           &query_id,
           FinishQueryTMES {
-            response_data: Some(ResponseData {
-              request_id: ms_coord.request_id,
-              sender_eid: ms_coord.sender_eid,
-              sql_query,
-              table_view,
-              timestamp,
-            }),
             query_id: query_id.clone(),
-            all_rms,
-            state: Paxos2PCTMState::Start,
+            state: paxos2pc::State::Start,
+            inner: FinishQueryTMInner {
+              response_data: Some(ResponseData {
+                request_id: ms_coord.request_id,
+                sender_eid: ms_coord.sender_eid,
+                sql_query,
+                table_view,
+                timestamp,
+              }),
+              committed: false,
+            },
           },
         );
-        let action = finish_query_es.start_orig(self, io_ctx);
+        let action = finish_query_es.start_orig(self, io_ctx, prepare_payloads);
         self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
       }
       MSQueryCoordAction::FatalFailure(payload) => {
@@ -750,59 +797,59 @@ impl CoordContext {
     }
   }
 
-  /// Handles the actions specified by a GRQueryES.
+  /// Handles the actions specified by a FinishQueryES.
   fn handle_finish_query_es_action<IO: CoreIOCtx>(
     &mut self,
     io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: FinishQueryTMAction,
+    action: Paxos2PCTMAction,
   ) {
     match action {
-      FinishQueryTMAction::Wait => {}
-      FinishQueryTMAction::Committed => {
-        // Send back a success to the External and remove the FinishQueryES
+      Paxos2PCTMAction::Wait => {}
+      Paxos2PCTMAction::Exit => {
         let es = statuses.finish_query_tm_ess.remove(&query_id).unwrap();
-        if let Some(response_data) = es.response_data {
-          io_ctx.send(
-            &response_data.sender_eid,
-            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
-              msg::ExternalQuerySuccess {
+        if es.inner.committed {
+          // If the ES was successful, send back a success to the External.
+          if let Some(response_data) = es.inner.response_data {
+            io_ctx.send(
+              &response_data.sender_eid,
+              msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
+                msg::ExternalQuerySuccess {
+                  request_id: response_data.request_id,
+                  timestamp: response_data.timestamp,
+                  result: response_data.table_view,
+                },
+              )),
+            );
+          }
+        } else {
+          if let Some(response_data) = es.inner.response_data {
+            // Otherwise, we should retry the request. We reconstruct a MSCoordESWrapper.
+            let query_id = mk_qid(io_ctx.rand());
+            let ms_coord = map_insert(
+              &mut statuses.ms_coord_ess,
+              &query_id,
+              MSCoordESWrapper {
                 request_id: response_data.request_id,
-                timestamp: response_data.timestamp,
-                result: response_data.table_view,
+                sender_eid: response_data.sender_eid,
+                child_queries: vec![],
+                es: FullMSCoordES::QueryPlanning(QueryPlanningES {
+                  timestamp: max(io_ctx.now(), response_data.timestamp + 1),
+                  sql_query: response_data.sql_query,
+                  query_id: query_id.clone(),
+                  state: QueryPlanningS::Start,
+                }),
               },
-            )),
-          );
-        }
-      }
-      FinishQueryTMAction::Aborted => {
-        let es = statuses.finish_query_tm_ess.remove(&query_id).unwrap();
-        if let Some(response_data) = es.response_data {
-          // We should retry the request. We reconstruct a MSCoordESWrapper.
-          let query_id = mk_qid(io_ctx.rand());
-          let ms_coord = map_insert(
-            &mut statuses.ms_coord_ess,
-            &query_id,
-            MSCoordESWrapper {
-              request_id: response_data.request_id,
-              sender_eid: response_data.sender_eid,
-              child_queries: vec![],
-              es: FullMSCoordES::QueryPlanning(QueryPlanningES {
-                timestamp: max(io_ctx.now(), response_data.timestamp + 1),
-                sql_query: response_data.sql_query,
-                query_id: query_id.clone(),
-                state: QueryPlanningS::Start,
-              }),
-            },
-          );
+            );
 
-          // Update the QueryId that's stored in the request map.
-          *self.external_request_id_map.get_mut(&ms_coord.request_id).unwrap() = query_id.clone();
+            // Update the QueryId that's stored in the request map.
+            *self.external_request_id_map.get_mut(&ms_coord.request_id).unwrap() = query_id.clone();
 
-          // Start executing the new MSCoordES.
-          let action = ms_coord.es.start(self, io_ctx);
-          self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
+            // Start executing the new MSCoordES.
+            let action = ms_coord.es.start(self, io_ctx);
+            self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
+          }
         }
       }
     }
@@ -972,13 +1019,11 @@ impl CoordContext {
 
   /// Construct QueryPath for a given `query_id` that belongs to this Coord.
   pub fn mk_query_path(&self, query_id: QueryId) -> CQueryPath {
-    CQueryPath {
-      node_path: CNodePath {
-        sid: self.this_sid.clone(),
-        sub: CSubNodePath::Coord(self.this_cid.clone()),
-      },
-      query_id,
-    }
+    CQueryPath { node_path: self.mk_this_node_path(), query_id }
+  }
+
+  pub fn mk_this_node_path(&self) -> CNodePath {
+    CNodePath { sid: self.this_sid.clone(), sub: CSubNodePath::Coord(self.this_cid.clone()) }
   }
 
   /// Returns true iff this is the Leader.

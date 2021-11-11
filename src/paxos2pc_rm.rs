@@ -24,11 +24,14 @@ pub trait Paxos2PCRMInner<T: PayloadTypes> {
   ) -> Self;
 
   /// Called if an `Abort` is received before any PL insertions.
+  /// NOTE: Compared to STMPaxos2PC, we need this because the applications of STMPaxos2PC
+  /// do not own other data (like Region locks). The only thing there that needs to be cleaned
+  /// up is the existance of the ES, which does not warrant an `early_aborted` callback.
   fn early_aborted<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-  ) -> T::RMAbortedPLm;
+  );
 
   /// Called in order to get the `RMPreparedPLm` to insert.
   fn mk_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
