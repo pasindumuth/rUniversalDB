@@ -10,8 +10,8 @@ use crate::master_query_planning_es::{
   MasterQueryPlanningES,
 };
 use crate::model::common::{
-  EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId, RequestId, SlaveGroupId, TNodePath,
-  TablePath, TabletGroupId, TabletKeyRange,
+  EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId, SlaveGroupId,
+  TNodePath, TablePath, TabletGroupId, TabletKeyRange,
 };
 use crate::model::message as msg;
 use crate::model::message::{
@@ -24,7 +24,7 @@ use crate::server::{weak_contains_col_latest, MasterServerContext, ServerContext
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::{
-  handle_tm_msg, handle_tm_plm, RMPathTrait, STMPaxos2PCTMAction, State, TMServerContext,
+  handle_tm_msg, handle_tm_plm, STMPaxos2PCTMAction, State, TMServerContext,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -140,22 +140,6 @@ pub enum FullMasterInput {
 // -----------------------------------------------------------------------------------------------
 
 const REMOTE_LEADER_CHANGED_PERIOD: u128 = 1;
-
-// -----------------------------------------------------------------------------------------------
-//  TMServerContext Common
-// -----------------------------------------------------------------------------------------------
-
-impl RMPathTrait for TNodePath {
-  fn to_gid(&self) -> PaxosGroupId {
-    self.sid.to_gid()
-  }
-}
-
-impl RMPathTrait for SlaveGroupId {
-  fn to_gid(&self) -> PaxosGroupId {
-    SlaveGroupId::to_gid(self)
-  }
-}
 
 // -----------------------------------------------------------------------------------------------
 //  TMServerContext AlterTable

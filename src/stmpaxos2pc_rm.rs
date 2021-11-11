@@ -1,5 +1,6 @@
 use crate::common::BasicIOCtx;
 use crate::model::common::QueryId;
+use crate::paxos2pc_tm::Paxos2PCContainer;
 use crate::stmpaxos2pc_tm::{
   Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm,
   RMPreparedPLm, RMServerContext, TMMessage,
@@ -338,30 +339,11 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
 // -----------------------------------------------------------------------------------------------
 //  Aggregate STM ES Management
 // -----------------------------------------------------------------------------------------------
-pub trait AggregateContainer<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> {
-  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut STMPaxos2PCRMOuter<T, InnerT>>;
-
-  fn insert(&mut self, query_id: QueryId, es: STMPaxos2PCRMOuter<T, InnerT>);
-}
-
-/// Implementation for BTreeMap, which is the common case.
-impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> AggregateContainer<T, InnerT>
-  for BTreeMap<QueryId, STMPaxos2PCRMOuter<T, InnerT>>
-{
-  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut STMPaxos2PCRMOuter<T, InnerT>> {
-    self.get_mut(query_id)
-  }
-
-  fn insert(&mut self, query_id: QueryId, es: STMPaxos2PCRMOuter<T, InnerT>) {
-    self.insert(query_id, es);
-  }
-}
-
 /// Function to handle the insertion of an `RMPLm` for a given `AggregateContainer`.
 pub fn handle_rm_plm<
   T: PayloadTypes,
   InnerT: STMPaxos2PCRMInner<T>,
-  ConT: AggregateContainer<T, InnerT>,
+  ConT: Paxos2PCContainer<STMPaxos2PCRMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
   ctx: &mut T::RMContext,
@@ -403,7 +385,7 @@ pub fn handle_rm_plm<
 pub fn handle_rm_msg<
   T: PayloadTypes,
   InnerT: STMPaxos2PCRMInner<T>,
-  ConT: AggregateContainer<T, InnerT>,
+  ConT: Paxos2PCContainer<STMPaxos2PCRMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
   ctx: &mut T::RMContext,

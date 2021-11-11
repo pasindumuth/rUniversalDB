@@ -1,6 +1,5 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
-use crate::model::common::{LeadershipId, PaxosGroupId, QueryId, SlaveGroupId};
-use crate::stmpaxos2pc_tm::RMPathTrait;
+use crate::model::common::{LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, SlaveGroupId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,21 +24,6 @@ pub trait RMServerContext<T: PayloadTypes> {
   fn is_leader(&self) -> bool;
 
   fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId>;
-}
-
-pub trait TMPathTrait {
-  fn to_gid(&self) -> PaxosGroupId;
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Common Implementations
-// -----------------------------------------------------------------------------------------------
-
-// TODO: create a PaxosGroupTrait that allows the conversion to a PaxosGroupId easily.
-impl TMPathTrait for SlaveGroupId {
-  fn to_gid(&self) -> PaxosGroupId {
-    SlaveGroupId::to_gid(self)
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -74,12 +58,14 @@ pub trait PayloadTypes: Clone {
     + Eq
     + PartialOrd
     + Ord
-    + RMPathTrait;
-  type TMPath: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq + TMPathTrait;
+    + PaxosGroupIdTrait;
+  type TMPath: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq + PaxosGroupIdTrait;
   type RMMessage: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
   type TMMessage: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
   type NetworkMessageT;
   type RMContext: RMServerContext<Self>;
+  /// This is extra data piped down to the Paxos2PCRMInner
+  type RMExtraData;
   type TMContext: TMServerContext<Self>;
 
   // RM PLm
@@ -203,6 +189,9 @@ pub enum TMMessage<T: PayloadTypes> {
 
 /// Contains callbacks for certain events in the TM.
 pub trait Paxos2PCTMInner<T: PayloadTypes> {
+  /// Called when constructing `Paxos2PCOuter` for recovery.
+  fn new_rec<IO: BasicIOCtx<T::NetworkMessageT>>(ctx: &mut T::TMContext, io_ctx: &mut IO) -> Self;
+
   /// Called after all RMs have responded with `Prepared`.
   fn committed<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
@@ -437,21 +426,19 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
 // -----------------------------------------------------------------------------------------------
 //  Aggregate STM ES Management
 // -----------------------------------------------------------------------------------------------
-pub trait AggregateContainer<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> {
-  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut Paxos2PCTMOuter<T, InnerT>>;
+pub trait Paxos2PCContainer<Outer> {
+  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut Outer>;
 
-  fn insert(&mut self, query_id: QueryId, es: Paxos2PCTMOuter<T, InnerT>);
+  fn insert(&mut self, query_id: QueryId, es: Outer);
 }
 
 /// Implementation for BTreeMap, which is the common case.
-impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> AggregateContainer<T, InnerT>
-  for BTreeMap<QueryId, Paxos2PCTMOuter<T, InnerT>>
-{
-  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut Paxos2PCTMOuter<T, InnerT>> {
+impl<Outer> Paxos2PCContainer<Outer> for BTreeMap<QueryId, Outer> {
+  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut Outer> {
     self.get_mut(query_id)
   }
 
-  fn insert(&mut self, query_id: QueryId, es: Paxos2PCTMOuter<T, InnerT>) {
+  fn insert(&mut self, query_id: QueryId, es: Outer) {
     self.insert(query_id, es);
   }
 }
@@ -460,7 +447,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> AggregateContainer<T, InnerT>
 pub fn handle_tm_msg<
   T: PayloadTypes,
   InnerT: Paxos2PCTMInner<T>,
-  ConT: AggregateContainer<T, InnerT>,
+  ConT: Paxos2PCContainer<Paxos2PCTMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
   ctx: &mut T::TMContext,
@@ -484,8 +471,17 @@ pub fn handle_tm_msg<
       }
     }
     TMMessage::InformPrepared(inform_prepared) => {
-      // TODO: do
-      (inform_prepared.query_id, Paxos2PCTMAction::Wait)
+      if let Some(_) = con.get_mut(&inform_prepared.query_id) {
+        // If there is already an ES, do nothing
+        (inform_prepared.query_id, Paxos2PCTMAction::Wait)
+      } else {
+        // Otherwise, create a new ES
+        let query_id = inform_prepared.query_id;
+        let mut outer = Paxos2PCTMOuter::new(query_id.clone(), InnerT::new_rec(ctx, io_ctx));
+        let action = outer.start_rec(ctx, io_ctx, inform_prepared.rms);
+        con.insert(query_id.clone(), outer);
+        (query_id, action)
+      }
     }
     TMMessage::Wait(wait) => {
       if let Some(es) = con.get_mut(&wait.query_id) {

@@ -4,7 +4,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{rvec, BasicIOCtx};
 use runiversal::model::common::{
-  EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId, Timestamp,
+  EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, Timestamp,
 };
 use runiversal::model::message::LeaderChanged;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

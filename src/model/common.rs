@@ -113,12 +113,6 @@ pub struct QueryId(pub String);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SlaveGroupId(pub String);
 
-impl SlaveGroupId {
-  pub fn to_gid(&self) -> PaxosGroupId {
-    PaxosGroupId::Slave(self.clone())
-  }
-}
-
 /// A global identfier of a Coord.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoordGroupId(pub String);
@@ -126,6 +120,32 @@ pub struct CoordGroupId(pub String);
 /// A request Id that globally identifies a request.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(pub String);
+
+// -------------------------------------------------------------------------------------------------
+//  PaxosGroupIdTrait
+// -------------------------------------------------------------------------------------------------
+
+pub trait PaxosGroupIdTrait {
+  fn to_gid(&self) -> PaxosGroupId;
+}
+
+impl PaxosGroupIdTrait for SlaveGroupId {
+  fn to_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.clone())
+  }
+}
+
+impl PaxosGroupIdTrait for TNodePath {
+  fn to_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.sid.clone())
+  }
+}
+
+impl PaxosGroupIdTrait for CNodePath {
+  fn to_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.sid.clone())
+  }
+}
 
 // -------------------------------------------------------------------------------------------------
 //  QueryPath

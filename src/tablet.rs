@@ -14,8 +14,8 @@ use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
 use crate::model::common::{
   proc, CNodePath, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColValN, Context, ContextRow,
-  ContextSchema, LeadershipId, PaxosGroupId, TNodePath, TQueryPath, TSubNodePath, TableView,
-  TransTableName,
+  ContextSchema, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, TNodePath, TQueryPath,
+  TSubNodePath, TableView, TransTableName,
 };
 use crate::model::common::{
   ColName, EndpointId, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
@@ -24,17 +24,17 @@ use crate::model::message as msg;
 use crate::model::message::TabletMessage;
 use crate::ms_table_read_es::{MSReadExecutionS, MSTableReadAction, MSTableReadES};
 use crate::ms_table_write_es::{MSTableWriteAction, MSTableWriteES, MSWriteExecutionS};
+use crate::paxos2pc_rm;
 use crate::paxos2pc_rm::Paxos2PCRMAction;
-use crate::paxos2pc_tm as paxos2pc;
-use crate::paxos2pc_tm::{RMMessage, RMPLm};
+use crate::paxos2pc_tm;
+use crate::paxos2pc_tm::{Paxos2PCContainer, RMMessage, RMPLm};
 use crate::server::{
   contains_col, CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
 };
 use crate::slave::SlaveBackMessage;
-use crate::stmpaxos2pc_rm::{
-  handle_rm_msg, handle_rm_plm, AggregateContainer, STMPaxos2PCRMAction,
-};
-use crate::stmpaxos2pc_tm as stmpaxos2pc;
+use crate::stmpaxos2pc_rm;
+use crate::stmpaxos2pc_rm::STMPaxos2PCRMAction;
+use crate::stmpaxos2pc_tm;
 use crate::stmpaxos2pc_tm::RMServerContext;
 use crate::storage::{compress_updates_views, GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
@@ -319,7 +319,7 @@ impl Default for DDLES {
 // -----------------------------------------------------------------------------------------------
 /// Implementation for DDLES
 
-impl AggregateContainer<AlterTablePayloadTypes, AlterTableRMInner> for DDLES {
+impl Paxos2PCContainer<AlterTableRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut AlterTableRMES> {
     if let DDLES::Alter(es) = self {
       // Recall that our DDL Coordination scheme requires the previous the previous DDL
@@ -339,7 +339,7 @@ impl AggregateContainer<AlterTablePayloadTypes, AlterTableRMInner> for DDLES {
   }
 }
 
-impl AggregateContainer<DropTablePayloadTypes, DropTableRMInner> for DDLES {
+impl Paxos2PCContainer<DropTableRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut DropTableRMES> {
     if let DDLES::Drop(es) = self {
       // Recall that our DDL Coordination scheme requires the previous the previous DDL
@@ -488,9 +488,9 @@ pub mod plm {
 pub enum TabletPLm {
   LockedCols(plm::LockedCols),
   ReadProtected(plm::ReadProtected),
-  FinishQuery(paxos2pc::RMPLm<FinishQueryPayloadTypes>),
-  AlterTable(stmpaxos2pc::RMPLm<AlterTablePayloadTypes>),
-  DropTable(stmpaxos2pc::RMPLm<DropTablePayloadTypes>),
+  FinishQuery(paxos2pc_tm::RMPLm<FinishQueryPayloadTypes>),
+  AlterTable(stmpaxos2pc_tm::RMPLm<AlterTablePayloadTypes>),
+  DropTable(stmpaxos2pc_tm::RMPLm<DropTablePayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -536,7 +536,7 @@ pub struct TabletCreateHelper {
 //  RMServerContext AlterTable
 // -----------------------------------------------------------------------------------------------
 
-impl stmpaxos2pc::RMServerContext<AlterTablePayloadTypes> for TabletContext {
+impl stmpaxos2pc_tm::RMServerContext<AlterTablePayloadTypes> for TabletContext {
   fn push_plm(&mut self, plm: TabletPLm) {
     self.tablet_bundle.push(plm);
   }
@@ -558,7 +558,7 @@ impl stmpaxos2pc::RMServerContext<AlterTablePayloadTypes> for TabletContext {
 //  RMServerContext DropTable
 // -----------------------------------------------------------------------------------------------
 
-impl stmpaxos2pc::RMServerContext<DropTablePayloadTypes> for TabletContext {
+impl stmpaxos2pc_tm::RMServerContext<DropTablePayloadTypes> for TabletContext {
   fn push_plm(&mut self, plm: TabletPLm) {
     self.tablet_bundle.push(plm);
   }
@@ -580,7 +580,7 @@ impl stmpaxos2pc::RMServerContext<DropTablePayloadTypes> for TabletContext {
 //  RMServerContext FinishQuery
 // -----------------------------------------------------------------------------------------------
 
-impl paxos2pc::RMServerContext<FinishQueryPayloadTypes> for TabletContext {
+impl paxos2pc_tm::RMServerContext<FinishQueryPayloadTypes> for TabletContext {
   fn push_plm(&mut self, plm: TabletPLm) {
     self.tablet_bundle.push(plm);
   }
@@ -752,34 +752,21 @@ impl TabletContext {
                 }
               }
               // FinishQuery
-              TabletPLm::FinishQuery(plm) => match plm {
-                RMPLm::Prepared(prepared) => {
-                  let query_id = prepared.query_id;
-                  let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                  let action = finish_query_es.handle_prepared_plm(self, io_ctx);
-                  self.handle_finish_query_es_action(statuses, query_id, action);
-                }
-                RMPLm::Committed(committed) => {
-                  let query_id = committed.query_id;
-                  let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                  let action = finish_query_es.handle_committed_plm(self, io_ctx);
-                  self.handle_finish_query_es_action(statuses, query_id, action);
-                }
-                RMPLm::Aborted(aborted) => {
-                  let query_id = aborted.query_id;
-                  let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                  let action = finish_query_es.handle_aborted_plm(self, io_ctx);
-                  self.handle_finish_query_es_action(statuses, query_id, action);
-                }
-              },
+              TabletPLm::FinishQuery(plm) => {
+                let (query_id, action) =
+                  paxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.finish_query_ess, plm);
+                self.handle_finish_query_es_action(statuses, query_id, action);
+              }
               // AlterTable
               TabletPLm::AlterTable(plm) => {
-                let (query_id, action) = handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
+                let (query_id, action) =
+                  stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               // DropTable
               TabletPLm::DropTable(plm) => {
-                let (query_id, action) = handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
+                let (query_id, action) =
+                  stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
             }
@@ -826,48 +813,21 @@ impl TabletContext {
                 );
               }
               // FinishQuery
-              TabletPLm::FinishQuery(plm) => match plm {
-                RMPLm::Prepared(prepared) => {
-                  let timestamp = prepared.payload.timestamp;
-                  let region_lock = prepared.payload.region_lock;
-                  self.prepared_writes.insert(timestamp.clone(), region_lock.clone());
-                  map_insert(
-                    &mut statuses.finish_query_ess,
-                    &prepared.query_id,
-                    FinishQueryRMES::new(
-                      self,
-                      prepared.query_id.clone(),
-                      prepared.tm,
-                      prepared.rms,
-                      FinishQueryRMInner {
-                        region_lock,
-                        timestamp,
-                        update_view: prepared.payload.update_view,
-                      },
-                    ),
-                  );
-                }
-                RMPLm::Committed(committed) => {
-                  let query_id = committed.query_id;
-                  let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                  let action = finish_query_es.handle_committed_plm(self, io_ctx);
-                  self.handle_finish_query_es_action(statuses, query_id, action);
-                }
-                RMPLm::Aborted(aborted) => {
-                  let query_id = aborted.query_id;
-                  let finish_query_es = statuses.finish_query_ess.get_mut(&query_id).unwrap();
-                  let action = finish_query_es.handle_aborted_plm(self, io_ctx);
-                  self.handle_finish_query_es_action(statuses, query_id, action);
-                }
-              },
+              TabletPLm::FinishQuery(plm) => {
+                let (query_id, action) =
+                  paxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.finish_query_ess, plm);
+                self.handle_finish_query_es_action(statuses, query_id, action);
+              }
               // AlterTable
               TabletPLm::AlterTable(plm) => {
-                let (query_id, action) = handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
+                let (query_id, action) =
+                  stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
                 self.handle_alter_table_es_action(statuses, query_id, action);
               }
               // DropTable
               TabletPLm::DropTable(plm) => {
-                let (query_id, action) = handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
+                let (query_id, action) =
+                  stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
                 self.handle_drop_table_es_action(statuses, query_id, action);
               }
             }
@@ -1085,96 +1045,23 @@ impl TabletContext {
             self.handle_query_success(io_ctx, statuses, query_success);
           }
           msg::TabletMessage::FinishQuery(message) => {
-            match message {
-              RMMessage::Prepare(prepare) => {
-                if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&prepare.query_id)
-                {
-                  // If a FinishQueryRMES already exists, we route the prepare message there.
-                  let action = finish_query_es.handle_prepare(self, io_ctx);
-                  self.handle_finish_query_es_action(statuses, prepare.query_id, action);
-                } else {
-                  if let Some(ms_query_es) = statuses.ms_query_ess.remove(&prepare.payload.query_id)
-                  {
-                    self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
-                    debug_assert!(ms_query_es.pending_queries.is_empty());
-
-                    let timestamp = ms_query_es.timestamp;
-
-                    // Move the VerifyingReadWrite to inserting.
-                    let verifying = self.verifying_writes.remove(&timestamp).unwrap();
-                    debug_assert!(verifying.m_waiting_read_protected.is_empty());
-                    let region_lock = ReadWriteRegion {
-                      orig_p: verifying.orig_p,
-                      m_read_protected: verifying.m_read_protected,
-                      m_write_protected: verifying.m_write_protected,
-                    };
-                    self.inserting_prepared_writes.insert(timestamp.clone(), region_lock.clone());
-
-                    // Construct a FinishQueryRMES
-                    map_insert(
-                      &mut statuses.finish_query_ess,
-                      &prepare.query_id,
-                      FinishQueryRMES::new(
-                        self,
-                        prepare.query_id.clone(),
-                        prepare.tm,
-                        prepare.rms,
-                        FinishQueryRMInner {
-                          region_lock,
-                          timestamp,
-                          update_view: compress_updates_views(&ms_query_es.update_views),
-                        },
-                      ),
-                    );
-                  } else {
-                    // The MSQueryES might not be present because of a DeadlockSafetyWriteAbort.
-                    let this_node_path = self.mk_node_path();
-                    self.ctx(io_ctx).send_to_c(
-                      prepare.tm,
-                      msg::CoordMessage::FinishQuery(paxos2pc::TMMessage::Aborted(
-                        paxos2pc::Aborted { query_id: prepare.query_id, rm: this_node_path },
-                      )),
-                    );
-                  }
-                }
-              }
-              RMMessage::Abort(abort) => {
-                let query_id = abort.query_id.clone();
-                if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
-                  let action = finish_query_es.handle_abort(self, io_ctx);
-                  self.handle_finish_query_es_action(statuses, query_id, action);
-                }
-              }
-              RMMessage::CheckPrepared(check_prepared) => {
-                let query_id = check_prepared.query_id.clone();
-                if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
-                  let action = finish_query_es.handle_check_prepared(self, io_ctx, check_prepared);
-                  self.handle_finish_query_es_action(statuses, query_id, action);
-                } else {
-                  let this_node_path = self.mk_node_path();
-                  self.ctx(io_ctx).send_to_c(
-                    check_prepared.tm,
-                    msg::CoordMessage::FinishQuery(paxos2pc::TMMessage::Aborted(
-                      paxos2pc::Aborted { query_id, rm: this_node_path },
-                    )),
-                  );
-                }
-              }
-              RMMessage::Commit(commit) => {
-                let query_id = commit.query_id.clone();
-                if let Some(finish_query_es) = statuses.finish_query_ess.get_mut(&query_id) {
-                  let action = finish_query_es.handle_commit(self, io_ctx);
-                  self.handle_finish_query_es_action(statuses, query_id, action);
-                }
-              }
-            }
+            let (query_id, action) = paxos2pc_rm::handle_rm_msg(
+              self,
+              io_ctx,
+              &mut statuses.finish_query_ess,
+              &mut statuses.ms_query_ess,
+              message,
+            );
+            self.handle_finish_query_es_action(statuses, query_id, action);
           }
           msg::TabletMessage::AlterTable(message) => {
-            let (query_id, action) = handle_rm_msg(self, io_ctx, &mut statuses.ddl_es, message);
+            let (query_id, action) =
+              stmpaxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.ddl_es, message);
             self.handle_alter_table_es_action(statuses, query_id, action);
           }
           msg::TabletMessage::DropTable(message) => {
-            let (query_id, action) = handle_rm_msg(self, io_ctx, &mut statuses.ddl_es, message);
+            let (query_id, action) =
+              stmpaxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.ddl_es, message);
             self.handle_drop_table_es_action(statuses, query_id, action);
           }
         }

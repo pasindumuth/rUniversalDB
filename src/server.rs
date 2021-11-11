@@ -2,8 +2,9 @@ use crate::common::{lookup_pos, BasicIOCtx, GossipData, TableSchema};
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
   proc, CNodePath, CSubNodePath, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColVal, ColValN,
-  ContextRow, ContextSchema, EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId, SlaveGroupId,
-  TNodePath, TSubNodePath, TablePath, TableView, TabletGroupId, Timestamp, TransTableName,
+  ContextRow, ContextSchema, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
+  QueryId, SlaveGroupId, TNodePath, TSubNodePath, TablePath, TableView, TabletGroupId, Timestamp,
+  TransTableName,
 };
 use crate::model::message as msg;
 use std::collections::{BTreeMap, BTreeSet};

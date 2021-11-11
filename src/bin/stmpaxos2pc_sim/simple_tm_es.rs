@@ -42,6 +42,7 @@ impl PayloadTypes for SimplePayloadTypes {
   type TMMessage = msg::SlaveRemotePayload;
   type NetworkMessageT = msg::NetworkMessage;
   type RMContext = SlaveContext;
+  type RMExtraData = ();
   type TMContext = SlaveContext;
 
   // RM PLm
@@ -74,6 +75,13 @@ pub type SimpleTMES = Paxos2PCTMOuter<SimplePayloadTypes, SimpleTMInner>;
 pub struct SimpleTMInner {}
 
 impl Paxos2PCTMInner<SimplePayloadTypes> for SimpleTMInner {
+  fn new_rec<IO: BasicIOCtx<msg::NetworkMessage>>(
+    _: &mut SlaveContext,
+    _: &mut IO,
+  ) -> SimpleTMInner {
+    SimpleTMInner {}
+  }
+
   fn committed<IO: BasicIOCtx<msg::NetworkMessage>>(&mut self, _: &mut SlaveContext, _: &mut IO) {}
 
   fn aborted<IO: BasicIOCtx<msg::NetworkMessage>>(&mut self, _: &mut SlaveContext, _: &mut IO) {}

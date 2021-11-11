@@ -2,7 +2,9 @@ use crate::common::{BasicIOCtx, GossipData, RemoteLeaderChangedPLm, SlaveIOCtx};
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::CreateTableRMES;
 use crate::create_table_tm_es::CreateTablePayloadTypes;
-use crate::model::common::{CoordGroupId, LeadershipId, PaxosGroupId, SlaveGroupId, TabletGroupId};
+use crate::model::common::{
+  CoordGroupId, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TabletGroupId,
+};
 use crate::model::common::{EndpointId, QueryId};
 use crate::model::message as msg;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};

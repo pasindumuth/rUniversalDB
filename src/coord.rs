@@ -8,7 +8,7 @@ use crate::finish_query_tm_es::{
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::{
   proc, CNodePath, CQueryPath, CSubNodePath, CTSubNodePath, ColName, CoordGroupId, LeadershipId,
-  PaxosGroupId, SlaveGroupId, TNodePath, TQueryPath, TableView,
+  PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TNodePath, TQueryPath, TableView,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
@@ -17,7 +17,7 @@ use crate::ms_query_coord_es::{
   FullMSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
 use crate::paxos2pc_tm as paxos2pc;
-use crate::paxos2pc_tm::{Paxos2PCTMAction, TMMessage, TMPathTrait};
+use crate::paxos2pc_tm::{Paxos2PCTMAction, TMMessage};
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CommonQuery, ServerContextBase, SlaveServerContext};
 use crate::sql_parser::convert_ast;
@@ -70,16 +70,6 @@ pub struct Statuses {
   gr_query_ess: BTreeMap<QueryId, GRQueryESWrapper>,
   trans_table_read_ess: BTreeMap<QueryId, TransTableReadESWrapper>,
   tm_statuss: BTreeMap<QueryId, TMStatus>,
-}
-
-// -----------------------------------------------------------------------------------------------
-//  TMServerContext Common
-// -----------------------------------------------------------------------------------------------
-
-impl TMPathTrait for CNodePath {
-  fn to_gid(&self) -> PaxosGroupId {
-    self.sid.to_gid()
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -331,46 +321,11 @@ impl CoordContext {
           msg::CoordMessage::QueryAborted(query_aborted) => {
             self.handle_query_aborted(io_ctx, statuses, query_aborted);
           }
-          CoordMessage::FinishQuery(message) => match message {
-            TMMessage::Prepared(prepared) => {
-              let query_id = prepared.query_id.clone();
-              if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
-                let action = finish_query.handle_prepared(self, io_ctx, prepared);
-                self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
-              }
-            }
-            TMMessage::Aborted(aborted) => {
-              let query_id = aborted.query_id.clone();
-              if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
-                let action = finish_query.handle_aborted(self, io_ctx);
-                self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
-              }
-            }
-            TMMessage::InformPrepared(inform_prepared) => {
-              let query_id = inform_prepared.query_id.clone();
-              if !statuses.finish_query_tm_ess.contains_key(&query_id) {
-                // Add in and start a FinishQueryTMES
-                let finish_query_es = map_insert(
-                  &mut statuses.finish_query_tm_ess,
-                  &query_id,
-                  FinishQueryTMES {
-                    query_id: query_id.clone(),
-                    state: paxos2pc::State::Start,
-                    inner: FinishQueryTMInner { response_data: None, committed: false },
-                  },
-                );
-                let action = finish_query_es.start_rec(self, io_ctx, inform_prepared.rms);
-                self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
-              }
-            }
-            TMMessage::Wait(wait) => {
-              let query_id = wait.query_id.clone();
-              if let Some(finish_query) = statuses.finish_query_tm_ess.get_mut(&query_id) {
-                let action = finish_query.handle_wait(self, io_ctx, wait);
-                self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
-              }
-            }
-          },
+          CoordMessage::FinishQuery(message) => {
+            let (query_id, action) =
+              paxos2pc::handle_tm_msg(self, io_ctx, &mut statuses.finish_query_tm_ess, message);
+            self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+          }
           msg::CoordMessage::MasterQueryPlanningAborted(_) => {
             // In practice, this is never received.
             panic!();

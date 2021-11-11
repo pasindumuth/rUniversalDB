@@ -17,8 +17,13 @@ pub struct SimpleRMInner {}
 pub type SimpleRMES = Paxos2PCRMOuter<SimplePayloadTypes, SimpleRMInner>;
 
 impl Paxos2PCRMInner<SimplePayloadTypes> for SimpleRMInner {
-  fn new<IO: BasicIOCtx<msg::NetworkMessage>>(_: &mut SlaveContext, _: &mut IO) -> SimpleRMInner {
-    SimpleRMInner {}
+  fn new<IO: BasicIOCtx<msg::NetworkMessage>>(
+    _: &mut SlaveContext,
+    _: &mut IO,
+    _: SimplePrepare,
+    _: &mut (),
+  ) -> Option<SimpleRMInner> {
+    Some(SimpleRMInner {})
   }
 
   fn new_follower<IO: BasicIOCtx<msg::NetworkMessage>>(

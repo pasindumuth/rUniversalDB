@@ -8,7 +8,7 @@ use crate::paxos2pc_tm::{
   Paxos2PCTMInner, Paxos2PCTMOuter, PayloadTypes, RMMessage, RMPLm, TMMessage,
 };
 use crate::storage::GenericTable;
-use crate::tablet::{ReadWriteRegion, TabletContext, TabletPLm};
+use crate::tablet::{MSQueryES, ReadWriteRegion, TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -51,6 +51,7 @@ impl PayloadTypes for FinishQueryPayloadTypes {
   type TMMessage = msg::CoordMessage;
   type NetworkMessageT = msg::NetworkMessage;
   type RMContext = TabletContext;
+  type RMExtraData = BTreeMap<QueryId, MSQueryES>;
   type TMContext = CoordContext;
 
   // RM PLm
@@ -98,7 +99,15 @@ pub struct FinishQueryTMInner {
   pub committed: bool,
 }
 
+// -----------------------------------------------------------------------------------------------
+//  Implementation
+// -----------------------------------------------------------------------------------------------
+
 impl Paxos2PCTMInner<FinishQueryPayloadTypes> for FinishQueryTMInner {
+  fn new_rec<IO: BasicIOCtx>(_: &mut CoordContext, _: &mut IO) -> FinishQueryTMInner {
+    FinishQueryTMInner { response_data: None, committed: false }
+  }
+
   fn committed<IO: BasicIOCtx>(&mut self, _: &mut CoordContext, _: &mut IO) {
     self.committed = true;
   }

@@ -1,8 +1,8 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
-use crate::model::common::{LeadershipId, QueryId};
+use crate::model::common::{LeadershipId, PaxosGroupIdTrait, QueryId};
 use crate::paxos2pc_tm::{
-  Aborted, CheckPrepared, Commit, InformPrepared, PayloadTypes, Prepared, RMAbortedPLm,
-  RMCommittedPLm, RMMessage, RMPLm, RMPreparedPLm, RMServerContext, TMMessage, TMPathTrait, Wait,
+  Aborted, CheckPrepared, Commit, InformPrepared, Paxos2PCContainer, PayloadTypes, Prepared,
+  RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm, RMPreparedPLm, RMServerContext, TMMessage, Wait,
 };
 use std::collections::BTreeMap;
 
@@ -10,10 +10,15 @@ use std::collections::BTreeMap;
 //  Paxos2PCRMInner
 // -----------------------------------------------------------------------------------------------
 
-pub trait Paxos2PCRMInner<T: PayloadTypes> {
-  /// Constructs an instance of `Paxos2PCRMInner` from a Prepared PLm. This is used primarily
-  /// by the Follower.
-  fn new<IO: BasicIOCtx<T::NetworkMessageT>>(ctx: &mut T::RMContext, io_ctx: &mut IO) -> Self;
+pub trait Paxos2PCRMInner<T: PayloadTypes>: Sized {
+  /// Constructs an instance of `Paxos2PCRMInner` for a `Prepare` message. We may return
+  /// `None` if the Working state of this Paxos2PC fails.
+  fn new<IO: BasicIOCtx<T::NetworkMessageT>>(
+    ctx: &mut T::RMContext,
+    io_ctx: &mut IO,
+    payload: T::Prepare,
+    extra_data: &mut T::RMExtraData,
+  ) -> Option<Self>;
 
   /// Constructs an instance of `Paxos2PCRMInner` from a Prepared PLm. This is used primarily
   /// by the Follower.
@@ -465,32 +470,13 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMExecOuter<T, InnerT>
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Aggregate STM ES Management
+//  Aggregate ES Management
 // -----------------------------------------------------------------------------------------------
-pub trait AggregateContainer<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> {
-  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut Paxos2PCRMOuter<T, InnerT>>;
-
-  fn insert(&mut self, query_id: QueryId, es: Paxos2PCRMOuter<T, InnerT>);
-}
-
-/// Implementation for BTreeMap, which is the common case.
-impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> AggregateContainer<T, InnerT>
-  for BTreeMap<QueryId, Paxos2PCRMOuter<T, InnerT>>
-{
-  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut Paxos2PCRMOuter<T, InnerT>> {
-    self.get_mut(query_id)
-  }
-
-  fn insert(&mut self, query_id: QueryId, es: Paxos2PCRMOuter<T, InnerT>) {
-    self.insert(query_id, es);
-  }
-}
-
 /// Function to handle the insertion of an `RMPLm` for a given `AggregateContainer`.
 pub fn handle_rm_plm<
   T: PayloadTypes,
   InnerT: Paxos2PCRMInner<T>,
-  ConT: AggregateContainer<T, InnerT>,
+  ConT: Paxos2PCContainer<Paxos2PCRMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
   ctx: &mut T::RMContext,
@@ -530,12 +516,13 @@ pub fn handle_rm_plm<
 pub fn handle_rm_msg<
   T: PayloadTypes,
   InnerT: Paxos2PCRMInner<T>,
-  ConT: AggregateContainer<T, InnerT>,
+  ConT: Paxos2PCContainer<Paxos2PCRMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
   ctx: &mut T::RMContext,
   io_ctx: &mut IO,
   con: &mut ConT,
+  extra_data: &mut T::RMExtraData,
   msg: RMMessage<T>,
 ) -> (QueryId, Paxos2PCRMAction) {
   match msg {
@@ -543,11 +530,24 @@ pub fn handle_rm_msg<
       if let Some(es) = con.get_mut(&prepare.query_id) {
         (prepare.query_id, es.handle_prepare(ctx, io_ctx))
       } else {
-        let inner = InnerT::new(ctx, io_ctx);
-        let outer =
-          Paxos2PCRMOuter::new(ctx, prepare.query_id.clone(), prepare.tm, prepare.rms, inner);
-        con.insert(prepare.query_id.clone(), outer);
-        (prepare.query_id, Paxos2PCRMAction::Wait)
+        if let Some(inner) = InnerT::new(ctx, io_ctx, prepare.payload, extra_data) {
+          let outer =
+            Paxos2PCRMOuter::new(ctx, prepare.query_id.clone(), prepare.tm, prepare.rms, inner);
+          con.insert(prepare.query_id.clone(), outer);
+          (prepare.query_id, Paxos2PCRMAction::Wait)
+        } else {
+          // The MSQueryES might not be present because of a DeadlockSafetyWriteAbort.
+          let this_node_path = ctx.mk_node_path();
+          ctx.send_to_tm(
+            io_ctx,
+            &prepare.tm,
+            T::tm_msg(TMMessage::Aborted(Aborted {
+              query_id: prepare.query_id.clone(),
+              rm: this_node_path,
+            })),
+          );
+          (prepare.query_id, Paxos2PCRMAction::Wait)
+        }
       }
     }
     RMMessage::CheckPrepared(check_prepared) => {
@@ -555,6 +555,15 @@ pub fn handle_rm_msg<
       if let Some(es) = con.get_mut(&query_id) {
         (query_id, es.handle_check_prepared(ctx, io_ctx, check_prepared))
       } else {
+        let this_node_path = ctx.mk_node_path();
+        ctx.send_to_tm(
+          io_ctx,
+          &check_prepared.tm,
+          T::tm_msg(TMMessage::Aborted(Aborted {
+            query_id: check_prepared.query_id.clone(),
+            rm: this_node_path,
+          })),
+        );
         (query_id, Paxos2PCRMAction::Wait)
       }
     }

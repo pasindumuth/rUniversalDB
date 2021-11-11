@@ -1,12 +1,18 @@
 use crate::common::BasicIOCtx;
 use crate::finish_query_tm_es::{
-  FinishQueryPayloadTypes, FinishQueryRMAborted, FinishQueryRMCommitted, FinishQueryRMPrepared,
+  FinishQueryPayloadTypes, FinishQueryPrepare, FinishQueryRMAborted, FinishQueryRMCommitted,
+  FinishQueryRMPrepared,
 };
-use crate::model::common::{proc, Timestamp};
+use crate::model::common::{proc, QueryId, Timestamp};
 use crate::paxos2pc_rm::{Paxos2PCRMInner, Paxos2PCRMOuter};
 use crate::paxos2pc_tm::PayloadTypes;
-use crate::storage::{commit_to_storage, GenericTable};
-use crate::tablet::{ReadWriteRegion, TabletContext};
+use crate::storage::{commit_to_storage, compress_updates_views, GenericTable};
+use crate::tablet::{MSQueryES, ReadWriteRegion, TabletContext};
+use std::collections::BTreeMap;
+
+// -----------------------------------------------------------------------------------------------
+//  FinishQueryRMES
+// -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct FinishQueryRMInner {
@@ -17,17 +23,53 @@ pub struct FinishQueryRMInner {
 
 pub type FinishQueryRMES = Paxos2PCRMOuter<FinishQueryPayloadTypes, FinishQueryRMInner>;
 
+// -----------------------------------------------------------------------------------------------
+//  Implementation
+// -----------------------------------------------------------------------------------------------
+
 impl Paxos2PCRMInner<FinishQueryPayloadTypes> for FinishQueryRMInner {
-  fn new<IO: BasicIOCtx>(ctx: &mut TabletContext, io_ctx: &mut IO) -> Self {
-    unimplemented!()
+  fn new<IO: BasicIOCtx>(
+    ctx: &mut TabletContext,
+    _: &mut IO,
+    payload: FinishQueryPrepare,
+    extra_data: &mut BTreeMap<QueryId, MSQueryES>,
+  ) -> Option<FinishQueryRMInner> {
+    if let Some(ms_query_es) = extra_data.remove(&payload.query_id) {
+      ctx.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
+      debug_assert!(ms_query_es.pending_queries.is_empty());
+
+      let timestamp = ms_query_es.timestamp;
+
+      // Move the VerifyingReadWrite to inserting.
+      let verifying = ctx.verifying_writes.remove(&timestamp).unwrap();
+      debug_assert!(verifying.m_waiting_read_protected.is_empty());
+      let region_lock = ReadWriteRegion {
+        orig_p: verifying.orig_p,
+        m_read_protected: verifying.m_read_protected,
+        m_write_protected: verifying.m_write_protected,
+      };
+      ctx.inserting_prepared_writes.insert(timestamp.clone(), region_lock.clone());
+
+      Some(FinishQueryRMInner {
+        region_lock,
+        timestamp,
+        update_view: compress_updates_views(&ms_query_es.update_views),
+      })
+    } else {
+      None
+    }
   }
 
   fn new_follower<IO: BasicIOCtx>(
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
+    _: &mut TabletContext,
+    _: &mut IO,
     payload: FinishQueryRMPrepared,
-  ) -> Self {
-    unimplemented!()
+  ) -> FinishQueryRMInner {
+    FinishQueryRMInner {
+      region_lock: payload.region_lock,
+      timestamp: payload.timestamp,
+      update_view: payload.update_view,
+    }
   }
 
   fn early_aborted<IO: BasicIOCtx>(&mut self, ctx: &mut TabletContext, _: &mut IO) {
@@ -47,8 +89,8 @@ impl Paxos2PCRMInner<FinishQueryPayloadTypes> for FinishQueryRMInner {
   }
 
   fn prepared_plm_inserted<IO: BasicIOCtx>(&mut self, ctx: &mut TabletContext, _: &mut IO) {
-    let region_lock = ctx.inserting_prepared_writes.remove(&self.timestamp).unwrap();
-    ctx.prepared_writes.insert(self.timestamp.clone(), region_lock);
+    ctx.inserting_prepared_writes.remove(&self.timestamp).unwrap();
+    ctx.prepared_writes.insert(self.timestamp.clone(), self.region_lock.clone());
   }
 
   fn mk_committed_plm<IO: BasicIOCtx>(

@@ -1,5 +1,6 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
-use crate::model::common::{PaxosGroupId, QueryId};
+use crate::model::common::{PaxosGroupId, PaxosGroupIdTrait, QueryId};
+use crate::paxos2pc_tm::Paxos2PCContainer;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,10 +44,6 @@ pub trait TMServerContext<T: PayloadTypes> {
   fn is_leader(&self) -> bool;
 }
 
-pub trait RMPathTrait {
-  fn to_gid(&self) -> PaxosGroupId;
-}
-
 // -----------------------------------------------------------------------------------------------
 //  STMPaxos2PC
 // -----------------------------------------------------------------------------------------------
@@ -63,7 +60,7 @@ pub trait PayloadTypes: Clone {
     + Eq
     + PartialOrd
     + Ord
-    + RMPathTrait;
+    + PaxosGroupIdTrait;
   type TMPath: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
   type RMMessage: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
   type TMMessage: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
@@ -689,30 +686,11 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
 // -----------------------------------------------------------------------------------------------
 //  Aggregate STM ES Management
 // -----------------------------------------------------------------------------------------------
-pub trait AggregateContainer<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> {
-  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut STMPaxos2PCTMOuter<T, InnerT>>;
-
-  fn insert(&mut self, query_id: QueryId, es: STMPaxos2PCTMOuter<T, InnerT>);
-}
-
-/// Implementation for BTreeMap, which is the common case.
-impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> AggregateContainer<T, InnerT>
-  for BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>
-{
-  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut STMPaxos2PCTMOuter<T, InnerT>> {
-    self.get_mut(query_id)
-  }
-
-  fn insert(&mut self, query_id: QueryId, es: STMPaxos2PCTMOuter<T, InnerT>) {
-    self.insert(query_id, es);
-  }
-}
-
 /// Function to handle the insertion of an `TMPLm` for a given `AggregateContainer`.
 pub fn handle_tm_plm<
   T: PayloadTypes,
   InnerT: STMPaxos2PCTMInner<T>,
-  ConT: AggregateContainer<T, InnerT>,
+  ConT: Paxos2PCContainer<STMPaxos2PCTMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
   ctx: &mut T::TMContext,
@@ -757,7 +735,7 @@ pub fn handle_tm_plm<
 pub fn handle_tm_msg<
   T: PayloadTypes,
   InnerT: STMPaxos2PCTMInner<T>,
-  ConT: AggregateContainer<T, InnerT>,
+  ConT: Paxos2PCContainer<STMPaxos2PCTMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
   ctx: &mut T::TMContext,
