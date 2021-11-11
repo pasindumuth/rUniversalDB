@@ -1,7 +1,7 @@
 use crate::message as msg;
 use crate::message::{ExternalMessage, SlaveMessage, SlaveRemotePayload};
 use crate::simple_rm_es::SimpleRMES;
-use crate::simple_tm_es::{SimplePayloadTypes, SimpleTMES};
+use crate::simple_tm_es::{SimplePayloadTypes, SimplePrepare, SimpleTMES, SimpleTMInner};
 use crate::simulation::ISlaveIOCtx;
 use crate::stm_simple_rm_es::STMSimpleRMES;
 use crate::stm_simple_tm_es::{
@@ -352,7 +352,7 @@ impl SlaveContext {
             SlavePLm::SimpleSTMRM(plm) => {
               let (query_id, action) =
                 stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.stm_simple_rm_ess, plm);
-              self.handle_simple_rm_es_action(statuses, query_id, action);
+              self.handle_stm_simple_rm_es_action(statuses, query_id, action);
             }
             SlavePLm::SimpleSTMTM(plm) => {
               let (query_id, action) =
@@ -360,7 +360,9 @@ impl SlaveContext {
               self.handle_stm_simple_tm_es_action(statuses, query_id, action);
             }
             SlavePLm::SimpleRM(plm) => {
-              // TODO do this
+              let (query_id, action) =
+                paxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.simple_rm_ess, plm);
+              self.handle_simple_rm_es_action(statuses, query_id, action);
             }
           }
         }
@@ -371,6 +373,9 @@ impl SlaveContext {
             es.start_inserting(self, io_ctx);
           }
           for (_, es) in &mut statuses.stm_simple_tm_ess {
+            es.start_inserting(self, io_ctx);
+          }
+          for (_, es) in &mut statuses.simple_rm_ess {
             es.start_inserting(self, io_ctx);
           }
 
@@ -388,7 +393,22 @@ impl SlaveContext {
           statuses.stm_simple_tm_ess.insert(query_id, es);
         }
         ExternalMessage::SimpleRequest(simple_req) => {
-          // TODO do this
+          let query_id = simple_req.query_id;
+          let mut es = SimpleTMES {
+            query_id: query_id.clone(),
+            state: paxos2pc_tm::State::Start,
+            inner: SimpleTMInner {},
+          };
+
+          // Construct SimplePrepares
+          let mut prepare_payloads = BTreeMap::<SlaveGroupId, SimplePrepare>::new();
+          for rm in simple_req.rms {
+            prepare_payloads.insert(rm, SimplePrepare {});
+          }
+
+          // Start the TM
+          es.start_orig(self, io_ctx, prepare_payloads);
+          statuses.simple_tm_ess.insert(query_id, es);
         }
       },
       SlaveForwardMsg::SlaveRemotePayload(payload) => match payload {
@@ -396,9 +416,8 @@ impl SlaveContext {
           if let stmpaxos2pc_tm::RMMessage::Prepare(prepare) = message.clone() {
             // Here, we randomly decide whether to accept the `Prepare` and proceed to
             // insert `Prepared`, or whether to respond immediately with an `Aborted`.
-            let r = io_ctx.rand().next_u32() % 100;
-            if r < 5 {
-              // We respond with an `Aborted` with a 5% chance.
+            // We respond with an `Aborted` with a 5% chance.
+            if io_ctx.rand().next_u32() % 100 < 5 {
               self.send(
                 io_ctx,
                 &prepare.tm,
@@ -416,7 +435,7 @@ impl SlaveContext {
           // If we do not abort, we just forward the `Prepare` to `simple_rm_ess`.
           let (query_id, action) =
             stmpaxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.stm_simple_rm_ess, message);
-          self.handle_simple_rm_es_action(statuses, query_id, action);
+          self.handle_stm_simple_rm_es_action(statuses, query_id, action);
         }
         SlaveRemotePayload::STMTMMessage(message) => {
           let (query_id, action) =
@@ -424,10 +443,14 @@ impl SlaveContext {
           self.handle_stm_simple_tm_es_action(statuses, query_id, action);
         }
         SlaveRemotePayload::RMMessage(message) => {
-          // TODO do this
+          let (query_id, action) =
+            paxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.simple_rm_ess, &mut (), message);
+          self.handle_simple_rm_es_action(statuses, query_id, action);
         }
         SlaveRemotePayload::TMMessage(message) => {
-          // TODO do this
+          let (query_id, action) =
+            paxos2pc_tm::handle_tm_msg(self, io_ctx, &mut statuses.simple_tm_ess, message);
+          self.handle_simple_tm_es_action(statuses, query_id, action);
         }
       },
       SlaveForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
@@ -443,6 +466,22 @@ impl SlaveContext {
             let es = statuses.stm_simple_tm_ess.get_mut(&query_id).unwrap();
             let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
             self.handle_stm_simple_tm_es_action(statuses, query_id, action);
+          }
+
+          // Inform SimpleTM
+          let query_ids: Vec<QueryId> = statuses.simple_tm_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let es = statuses.simple_tm_ess.get_mut(&query_id).unwrap();
+            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+            self.handle_simple_tm_es_action(statuses, query_id, action);
+          }
+
+          // Inform SimpleRM
+          let query_ids: Vec<QueryId> = statuses.simple_rm_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let es = statuses.simple_rm_ess.get_mut(&query_id).unwrap();
+            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+            self.handle_simple_rm_es_action(statuses, query_id, action);
           }
         }
       }
@@ -463,6 +502,14 @@ impl SlaveContext {
         for query_id in query_ids {
           let es = statuses.stm_simple_rm_ess.get_mut(&query_id).unwrap();
           let action = es.leader_changed(self);
+          self.handle_stm_simple_rm_es_action(statuses, query_id.clone(), action);
+        }
+
+        // Inform SimpleRM
+        let query_ids: Vec<QueryId> = statuses.simple_rm_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let es = statuses.simple_rm_ess.get_mut(&query_id).unwrap();
+          let action = es.leader_changed(self, io_ctx);
           self.handle_simple_rm_es_action(statuses, query_id.clone(), action);
         }
 
@@ -518,7 +565,7 @@ impl SlaveContext {
   }
 
   /// Handles the actions produced by a STMSimpleRM.
-  fn handle_simple_rm_es_action(
+  fn handle_stm_simple_rm_es_action(
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
@@ -543,6 +590,36 @@ impl SlaveContext {
       STMPaxos2PCTMAction::Wait => {}
       STMPaxos2PCTMAction::Exit => {
         statuses.stm_simple_tm_ess.remove(&query_id).unwrap();
+      }
+    }
+  }
+
+  /// Handles the actions produced by a SimpleRM.
+  fn handle_simple_rm_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: Paxos2PCRMAction,
+  ) {
+    match action {
+      Paxos2PCRMAction::Wait => {}
+      Paxos2PCRMAction::Exit => {
+        statuses.simple_rm_ess.remove(&query_id).unwrap();
+      }
+    }
+  }
+
+  /// Handles the actions produced by a SimpleTM.
+  fn handle_simple_tm_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: Paxos2PCTMAction,
+  ) {
+    match action {
+      Paxos2PCTMAction::Wait => {}
+      Paxos2PCTMAction::Exit => {
+        statuses.simple_tm_ess.remove(&query_id).unwrap();
       }
     }
   }

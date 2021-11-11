@@ -3,6 +3,7 @@ use crate::simple_tm_es::{
   SimplePayloadTypes, SimplePrepare, SimpleRMAborted, SimpleRMCommitted, SimpleRMPrepared,
 };
 use crate::slave::SlaveContext;
+use rand::RngCore;
 use runiversal::common::BasicIOCtx;
 use runiversal::paxos2pc_rm::{Paxos2PCRMInner, Paxos2PCRMOuter};
 use runiversal::paxos2pc_tm::{PayloadTypes, RMCommittedPLm};
@@ -19,11 +20,16 @@ pub type SimpleRMES = Paxos2PCRMOuter<SimplePayloadTypes, SimpleRMInner>;
 impl Paxos2PCRMInner<SimplePayloadTypes> for SimpleRMInner {
   fn new<IO: BasicIOCtx<msg::NetworkMessage>>(
     _: &mut SlaveContext,
-    _: &mut IO,
+    io_ctx: &mut IO,
     _: SimplePrepare,
     _: &mut (),
   ) -> Option<SimpleRMInner> {
-    Some(SimpleRMInner {})
+    // Here, we randomly decide whether to accept continue or Abort. // We abort with 5% chance.
+    if io_ctx.rand().next_u32() % 100 < 5 {
+      None
+    } else {
+      Some(SimpleRMInner {})
+    }
   }
 
   fn new_follower<IO: BasicIOCtx<msg::NetworkMessage>>(

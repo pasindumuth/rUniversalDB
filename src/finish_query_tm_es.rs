@@ -115,8 +115,4 @@ impl Paxos2PCTMInner<FinishQueryPayloadTypes> for FinishQueryTMInner {
   fn aborted<IO: BasicIOCtx>(&mut self, _: &mut CoordContext, _: &mut IO) {
     self.committed = false;
   }
-
-  fn node_died<IO: BasicIOCtx>(&mut self, _: &mut CoordContext, _: &mut IO) {
-    unimplemented!()
-  }
 }

@@ -85,6 +85,4 @@ impl Paxos2PCTMInner<SimplePayloadTypes> for SimpleTMInner {
   fn committed<IO: BasicIOCtx<msg::NetworkMessage>>(&mut self, _: &mut SlaveContext, _: &mut IO) {}
 
   fn aborted<IO: BasicIOCtx<msg::NetworkMessage>>(&mut self, _: &mut SlaveContext, _: &mut IO) {}
-
-  fn node_died<IO: BasicIOCtx<msg::NetworkMessage>>(&mut self, _: &mut SlaveContext, _: &mut IO) {}
 }

@@ -205,13 +205,6 @@ pub trait Paxos2PCTMInner<T: PayloadTypes> {
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   );
-
-  // This is called when the node died.
-  fn node_died<IO: BasicIOCtx<T::NetworkMessageT>>(
-    &mut self,
-    ctx: &mut T::TMContext,
-    io_ctx: &mut IO,
-  );
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -253,7 +246,7 @@ pub struct Paxos2PCTMOuter<T: PayloadTypes, InnerT> {
 }
 
 impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
-  pub fn new(query_id: QueryId, inner: InnerT) -> Paxos2PCTMOuter<T, InnerT> {
+  fn new(query_id: QueryId, inner: InnerT) -> Paxos2PCTMOuter<T, InnerT> {
     Paxos2PCTMOuter { query_id, state: State::Start, inner }
   }
 
@@ -280,7 +273,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     Paxos2PCTMAction::Wait
   }
 
-  pub fn start_rec<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn start_rec<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -320,7 +313,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     Paxos2PCTMAction::Exit
   }
 
-  pub fn handle_prepared<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_prepared<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -349,7 +342,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     }
   }
 
-  pub fn handle_aborted<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_aborted<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -375,7 +368,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     }
   }
 
-  pub fn handle_wait<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_wait<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -419,8 +412,6 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     }
     Paxos2PCTMAction::Wait
   }
-
-  // TODO: employ node died. Add LeaderChanged to outer.
 }
 
 // -----------------------------------------------------------------------------------------------

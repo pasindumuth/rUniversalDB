@@ -412,7 +412,7 @@ impl CoordContext {
         let this_gid = self.this_sid.to_gid();
         self.leader_map.insert(this_gid, leader_changed.lid);
 
-        if self.is_leader() {
+        if !self.is_leader() {
           // This means this node lost Leadership.
 
           // Wink away MSCoordESs

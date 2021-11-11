@@ -124,7 +124,7 @@ pub enum Paxos2PCRMAction {
 }
 
 impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
-  pub fn new(
+  fn new(
     ctx: &mut T::RMContext,
     query_id: QueryId,
     tm: T::TMPath,
@@ -154,7 +154,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
 
   // Paxos2PC messages
 
-  pub fn handle_prepare<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_prepare<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -171,7 +171,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
     Paxos2PCRMAction::Wait
   }
 
-  pub fn handle_commit<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_commit<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -193,7 +193,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
     Paxos2PCRMAction::Wait
   }
 
-  pub fn handle_abort<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_abort<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -223,7 +223,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
     }
   }
 
-  pub fn handle_check_prepared<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_check_prepared<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -267,7 +267,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
 
   // Paxos2PC PLm Insertions
 
-  pub fn handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -301,7 +301,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
     Paxos2PCRMAction::Wait
   }
 
-  pub fn handle_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -319,7 +319,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
     Paxos2PCRMAction::Wait
   }
 
-  pub fn handle_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
