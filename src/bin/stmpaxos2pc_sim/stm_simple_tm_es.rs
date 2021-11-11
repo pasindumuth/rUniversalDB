@@ -62,7 +62,7 @@ pub struct STMSimpleAborted {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct STMSimpleClosed {}
 
-// SimplePayloadTypes
+// STMSimplePayloadTypes
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct STMSimplePayloadTypes {}

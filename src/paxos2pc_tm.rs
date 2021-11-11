@@ -1,5 +1,5 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
-use crate::model::common::{LeadershipId, PaxosGroupId, QueryId};
+use crate::model::common::{LeadershipId, PaxosGroupId, QueryId, SlaveGroupId};
 use crate::stmpaxos2pc_tm::RMPathTrait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,17 @@ pub trait RMServerContext<T: PayloadTypes> {
 
 pub trait TMPathTrait {
   fn to_gid(&self) -> PaxosGroupId;
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Common Implementations
+// -----------------------------------------------------------------------------------------------
+
+// TODO: create a PaxosGroupTrait that allows the conversion to a PaxosGroupId easily.
+impl TMPathTrait for SlaveGroupId {
+  fn to_gid(&self) -> PaxosGroupId {
+    SlaveGroupId::to_gid(self)
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
