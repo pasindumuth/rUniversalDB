@@ -196,12 +196,12 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     committed_plm: &TMCommittedPLm<DropTablePayloadTypes>,
   ) -> BTreeMap<TNodePath, DropTableCommit> {
     // Compute the resolved timestamp
-    let mut commit_timestamp = committed_plm.payload.timestamp_hint;
-    commit_timestamp = max(commit_timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
+    let mut timestamp = committed_plm.payload.timestamp_hint;
+    timestamp = max(timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
 
     // Apply the Drop
     ctx.gen.inc();
-    ctx.table_generation.write(&self.table_path, None, commit_timestamp);
+    ctx.table_generation.write(&self.table_path, None, timestamp);
 
     // Potentially respond to the External if we are the leader.
     if ctx.is_leader() {
@@ -212,7 +212,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
           msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
             msg::ExternalDDLQuerySuccess {
               request_id: response_data.request_id.clone(),
-              timestamp: commit_timestamp,
+              timestamp,
             },
           )),
         );
@@ -226,7 +226,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     // Return Commit messages
     let mut commits = BTreeMap::<TNodePath, DropTableCommit>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
-      commits.insert(rm.clone(), DropTableCommit { timestamp: commit_timestamp });
+      commits.insert(rm.clone(), DropTableCommit { timestamp });
     }
     commits
   }

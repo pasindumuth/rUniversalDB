@@ -106,16 +106,6 @@ pub fn map_insert<'a, K: Clone + Eq + Ord, V>(
   map.get_mut(key).unwrap()
 }
 
-/// Same as above, except for BTrees
-pub fn btree_map_insert<'a, K: Clone + Eq + Ord, V>(
-  map: &'a mut BTreeMap<K, V>,
-  key: &K,
-  value: V,
-) -> &'a mut V {
-  map.insert(key.clone(), value);
-  map.get_mut(key).unwrap()
-}
-
 /// Used to add elements form a BTree MultiMap
 pub fn btree_multimap_insert<K: Ord + Clone, V: Ord>(
   map: &mut BTreeMap<K, BTreeSet<V>>,

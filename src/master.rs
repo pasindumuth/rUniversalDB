@@ -1,7 +1,7 @@
 use crate::alter_table_tm_es::{
   AlterTablePayloadTypes, AlterTableTMES, AlterTableTMInner, ResponseData,
 };
-use crate::common::{btree_map_insert, mk_qid, mk_tid, GossipData, MasterIOCtx, TableSchema};
+use crate::common::{lookup_pos, map_insert, mk_qid, mk_tid, GossipData, MasterIOCtx, TableSchema};
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
 use crate::drop_table_tm_es::{DropTablePayloadTypes, DropTableTMES, DropTableTMInner};
@@ -558,7 +558,7 @@ impl MasterContext {
                       vec![(TabletKeyRange { start: None, end: None }, mk_tid(io_ctx.rand()), sid)];
 
                     // Construct ES
-                    btree_map_insert(
+                    map_insert(
                       &mut statuses.create_table_tm_ess,
                       &query_id,
                       CreateTableTMES::new(
@@ -576,7 +576,7 @@ impl MasterContext {
                   }
                   DDLQuery::Alter(alter_table) => {
                     // Construct ES
-                    btree_map_insert(
+                    map_insert(
                       &mut statuses.alter_table_tm_ess,
                       &query_id,
                       AlterTableTMES::new(
@@ -591,7 +591,7 @@ impl MasterContext {
                   }
                   DDLQuery::Drop(drop_table) => {
                     // Construct ES
-                    btree_map_insert(
+                    map_insert(
                       &mut statuses.drop_table_tm_ess,
                       &query_id,
                       DropTableTMES::new(
@@ -677,7 +677,7 @@ impl MasterContext {
             let action = master_query_planning(self, query_planning.clone());
             match action {
               MasterQueryPlanningAction::Wait => {
-                btree_map_insert(
+                map_insert(
                   &mut statuses.planning_ess,
                   &query_planning.query_id.clone(),
                   MasterQueryPlanningES {
@@ -943,13 +943,16 @@ impl MasterContext {
               // The Table Exists.
               let schema =
                 &self.db_schema.get(&(es.inner.table_path.clone(), gen.clone())).unwrap();
-              let contains_col = weak_contains_col_latest(schema, &es.inner.alter_op.col_name);
-              let is_add_col = es.inner.alter_op.maybe_col_type.is_some();
-              if contains_col && !is_add_col || !contains_col && is_add_col {
-                // We have Column Validity, so we move it to WaitingInsertTMPrepared.
-                es.state = paxos2pc::State::WaitingInsertTMPrepared;
-                tables_being_modified.insert(es.inner.table_path.clone());
-                continue;
+              if lookup_pos(&schema.key_cols, &es.inner.alter_op.col_name).is_none() {
+                // The `col_name` is not a KeyCol.
+                let contains_col = weak_contains_col_latest(schema, &es.inner.alter_op.col_name);
+                let is_add_col = es.inner.alter_op.maybe_col_type.is_some();
+                if contains_col && !is_add_col || !contains_col && is_add_col {
+                  // We have Column Validity, so we move it to WaitingInsertTMPrepared.
+                  es.state = paxos2pc::State::WaitingInsertTMPrepared;
+                  tables_being_modified.insert(es.inner.table_path.clone());
+                  continue;
+                }
               }
             }
 

@@ -217,19 +217,18 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     let gen = ctx.table_generation.get_last_version(&self.table_path).unwrap();
     let table_schema = ctx.db_schema.get_mut(&(self.table_path.clone(), gen.clone())).unwrap();
 
-    // Compute the resolved timestamp
-    let mut commit_timestamp = committed_plm.payload.timestamp_hint;
-    commit_timestamp = max(commit_timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
-    commit_timestamp =
-      max(commit_timestamp, table_schema.val_cols.get_lat(&self.alter_op.col_name) + 1);
+    // Compute the timestamp to commit at
+    let mut timestamp = committed_plm.payload.timestamp_hint;
+    timestamp = max(timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
+    timestamp = max(timestamp, table_schema.val_cols.get_lat(&self.alter_op.col_name) + 1);
 
     // Apply the AlterOp
     ctx.gen.inc();
-    ctx.table_generation.update_lat(&self.table_path, commit_timestamp);
+    ctx.table_generation.update_lat(&self.table_path, timestamp);
     table_schema.val_cols.write(
       &self.alter_op.col_name,
       self.alter_op.maybe_col_type.clone(),
-      commit_timestamp,
+      timestamp,
     );
 
     // Potentially respond to the External if we are the leader.
@@ -241,7 +240,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
           msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
             msg::ExternalDDLQuerySuccess {
               request_id: response_data.request_id.clone(),
-              timestamp: commit_timestamp,
+              timestamp,
             },
           )),
         );
@@ -255,7 +254,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     // Return Commit messages
     let mut commits = BTreeMap::<TNodePath, AlterTableCommit>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
-      commits.insert(rm.clone(), AlterTableCommit { timestamp: commit_timestamp });
+      commits.insert(rm.clone(), AlterTableCommit { timestamp });
     }
     commits
   }

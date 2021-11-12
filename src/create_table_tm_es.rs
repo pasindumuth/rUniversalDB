@@ -210,7 +210,7 @@ impl CreateTableTMInner {
     for (key_range, tid, _) in &self.shards {
       stripped_shards.push((key_range.clone(), tid.clone()));
     }
-    ctx.sharding_config.insert(table_path_gen.clone(), stripped_shards);
+    ctx.sharding_config.insert(table_path_gen, stripped_shards);
 
     // Update `tablet_address_config`.
     for (_, tid, sid) in &self.shards {
@@ -359,7 +359,7 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
     closed_plm: &TMClosedPLm<CreateTablePayloadTypes>,
   ) {
     if let Some(timestamp_hint) = closed_plm.payload.timestamp_hint {
-      // This means we closed_plm as a result of a committing the CreateTable.
+      // This means that the closed_plm is a result of a committing the CreateTable.
       let commit_timestamp = self.apply_create(ctx, io_ctx, timestamp_hint);
 
       if ctx.is_leader() {
