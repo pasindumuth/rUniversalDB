@@ -342,11 +342,15 @@ impl SlaveContext {
               // Note: we must do this after RemoteLeaderChanges. Also note that there will
               // be no payloads in the NetworkBuffer if this nodes is a Follower.
               for remote_change in slave_bundle.remote_leader_changes {
-                let payloads = self
-                  .network_driver
-                  .deliver_blocked_messages(remote_change.gid, remote_change.lid);
-                for payload in payloads {
-                  slave_forward_msgs.push(SlaveForwardMsg::SlaveRemotePayload(payload))
+                if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
+                  // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
+                  // for the same `gid` with different `gen`s.
+                  let payloads = self
+                    .network_driver
+                    .deliver_blocked_messages(remote_change.gid, remote_change.lid);
+                  for payload in payloads {
+                    slave_forward_msgs.push(SlaveForwardMsg::SlaveRemotePayload(payload))
+                  }
                 }
               }
 

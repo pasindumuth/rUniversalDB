@@ -56,6 +56,7 @@ impl Paxos2PCRMInner<FinishQueryPayloadTypes> for FinishQueryRMInner {
         update_view: compress_updates_views(&ms_query_es.update_views),
       })
     } else {
+      // The MSQueryES might not be present because of a DeadlockSafetyWriteAbort.
       None
     }
   }

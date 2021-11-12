@@ -377,8 +377,9 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     match &mut self.state {
       State::CheckingPrepared(CheckingPreparedSt { rms_remaining, .. }) => {
         // Send back a CheckPrepared
-        let check = rms_remaining.get(&wait.rm).unwrap().clone();
-        ctx.send_to_rm(io_ctx, &wait.rm, T::rm_msg(RMMessage::CheckPrepared(check.clone())));
+        if let Some(check) = rms_remaining.get(&wait.rm) {
+          ctx.send_to_rm(io_ctx, &wait.rm, T::rm_msg(RMMessage::CheckPrepared(check.clone())));
+        }
         Paxos2PCTMAction::Wait
       }
       _ => Paxos2PCTMAction::Wait,

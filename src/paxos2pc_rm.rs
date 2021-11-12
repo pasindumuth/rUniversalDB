@@ -232,12 +232,12 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
     match self {
       Paxos2PCRMOuter::Paxos2PCRMExecOuter(es) => match &es.state {
         State::Follower => {}
-        State::WaitingInsertingPrepared(_) => es.send_wait(ctx, io_ctx),
-        State::InsertingPrepared(_) => es.send_wait(ctx, io_ctx),
-        State::Prepared => es.send_prepared(ctx, io_ctx),
-        State::InsertingCommitted => es.send_prepared(ctx, io_ctx),
-        State::InsertingPreparedAborted => es.send_wait(ctx, io_ctx),
-        State::InsertingAborted => es.send_prepared(ctx, io_ctx),
+        State::WaitingInsertingPrepared(_)
+        | State::InsertingPrepared(_)
+        | State::InsertingPreparedAborted => es.send_wait(ctx, io_ctx),
+        State::Prepared | State::InsertingCommitted | State::InsertingAborted => {
+          es.send_prepared(ctx, io_ctx)
+        }
       },
       Paxos2PCRMOuter::Committed => {
         let this_node_path = ctx.mk_node_path();
@@ -531,12 +531,13 @@ pub fn handle_rm_msg<
         (prepare.query_id, es.handle_prepare(ctx, io_ctx))
       } else {
         if let Some(inner) = InnerT::new(ctx, io_ctx, prepare.payload, extra_data) {
+          // The Working state succeeded
           let outer =
             Paxos2PCRMOuter::new(ctx, prepare.query_id.clone(), prepare.tm, prepare.rms, inner);
           con.insert(prepare.query_id.clone(), outer);
           (prepare.query_id, Paxos2PCRMAction::Wait)
         } else {
-          // The MSQueryES might not be present because of a DeadlockSafetyWriteAbort.
+          // The Working state failed
           let this_node_path = ctx.mk_node_path();
           ctx.send_to_tm(
             io_ctx,

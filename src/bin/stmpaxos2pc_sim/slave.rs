@@ -315,10 +315,15 @@ impl SlaveContext {
             // Note: we must do this after RemoteLeaderChanges. Also note that there will
             // be no payloads in the NetworkBuffer if this nodes is a Follower.
             for remote_change in bundle.remote_leader_changes {
-              let payloads =
-                self.network_driver.deliver_blocked_messages(remote_change.gid, remote_change.lid);
-              for payload in payloads {
-                self.handle_input(io_ctx, statuses, SlaveForwardMsg::SlaveRemotePayload(payload));
+              if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
+                // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
+                // for the same `gid` with different `gen`s.
+                let payloads = self
+                  .network_driver
+                  .deliver_blocked_messages(remote_change.gid, remote_change.lid);
+                for payload in payloads {
+                  self.handle_input(io_ctx, statuses, SlaveForwardMsg::SlaveRemotePayload(payload));
+                }
               }
             }
           }
@@ -504,6 +509,9 @@ impl SlaveContext {
           let action = es.leader_changed(self);
           self.handle_stm_simple_rm_es_action(statuses, query_id.clone(), action);
         }
+
+        // Wink away SimpleTM
+        statuses.simple_tm_ess.clear();
 
         // Inform SimpleRM
         let query_ids: Vec<QueryId> = statuses.simple_rm_ess.keys().cloned().collect();

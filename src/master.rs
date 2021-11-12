@@ -381,15 +381,19 @@ impl MasterContext {
               // Note: we must do this after RemoteLeaderChanges. Also note that there will
               // be no payloads in the NetworkBuffer if this nodes is a Follower.
               for remote_change in master_bundle.remote_leader_changes {
-                let payloads = self
-                  .network_driver
-                  .deliver_blocked_messages(remote_change.gid, remote_change.lid);
-                for payload in payloads {
-                  self.handle_input(
-                    io_ctx,
-                    statuses,
-                    MasterForwardMsg::MasterRemotePayload(payload),
-                  );
+                if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
+                  // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
+                  // for the same `gid` with different `gen`s.
+                  let payloads = self
+                    .network_driver
+                    .deliver_blocked_messages(remote_change.gid, remote_change.lid);
+                  for payload in payloads {
+                    self.handle_input(
+                      io_ctx,
+                      statuses,
+                      MasterForwardMsg::MasterRemotePayload(payload),
+                    );
+                  }
                 }
               }
             }
