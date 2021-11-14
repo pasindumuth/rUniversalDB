@@ -31,7 +31,7 @@ use crate::paxos2pc_tm::{Paxos2PCContainer, RMMessage, RMPLm};
 use crate::server::{
   contains_col, CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
 };
-use crate::slave::SlaveBackMessage;
+use crate::slave::{SlaveBackMessage, TabletBundleInsertion};
 use crate::stmpaxos2pc_rm;
 use crate::stmpaxos2pc_rm::STMPaxos2PCRMAction;
 use crate::stmpaxos2pc_tm;
@@ -516,8 +516,8 @@ pub struct TabletCreateHelper {
   pub rand_seed: [u8; 16],
 
   /// Metadata
-  pub this_slave_group_id: SlaveGroupId,
-  pub this_tablet_group_id: TabletGroupId,
+  pub this_sid: SlaveGroupId,
+  pub this_tid: TabletGroupId,
   pub this_eid: EndpointId,
 
   /// Gossip
@@ -673,9 +673,9 @@ impl TabletState {
 impl TabletContext {
   pub fn new(helper: TabletCreateHelper) -> TabletContext {
     TabletContext {
-      this_sid: helper.this_slave_group_id,
-      this_tid: helper.this_tablet_group_id.clone(),
-      sub_node_path: CTSubNodePath::Tablet(helper.this_tablet_group_id),
+      this_sid: helper.this_sid,
+      this_tid: helper.this_tid.clone(),
+      sub_node_path: CTSubNodePath::Tablet(helper.this_tid),
       this_eid: helper.this_eid,
       gossip: helper.gossip,
       leader_map: helper.leader_map,
@@ -791,9 +791,11 @@ impl TabletContext {
           }
 
           // Dispatch the TabletBundle for insertion and start a new one.
-          let tid = self.this_tid.clone();
-          let tablet_bundle = std::mem::replace(&mut self.tablet_bundle, Vec::default());
-          io_ctx.slave_forward(SlaveBackMessage::TabletBundle(tid, tablet_bundle));
+          io_ctx.slave_forward(SlaveBackMessage::TabletBundleInsertion(TabletBundleInsertion {
+            tid: self.this_tid.clone(),
+            lid: self.leader_map.get(&self.this_sid.to_gid()).unwrap().clone(),
+            bundle: std::mem::replace(&mut self.tablet_bundle, Vec::default()),
+          }));
         } else {
           for paxos_log_msg in bundle {
             match paxos_log_msg {
@@ -1185,6 +1187,11 @@ impl TabletContext {
         let this_gid = self.this_sid.to_gid();
         self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
 
+        if self.is_leader() {
+          // By the SharedPaxosInserter, this must be empty at the start of Leadership.
+          self.tablet_bundle = TabletBundle::default();
+        }
+
         // Inform FinishQueryRMES
         let query_ids: Vec<QueryId> = statuses.finish_query_ess.keys().cloned().collect();
         for query_id in query_ids {
@@ -1225,14 +1232,13 @@ impl TabletContext {
           // Wink away all unpersisted Column Locking Algorithm data
           self.waiting_locked_cols.clear();
           self.inserting_locked_cols.clear();
-
-          // Clear TabletBundle
-          self.tablet_bundle = Vec::new();
         } else {
-          // If this node becomes the Leader, then start the insert cycle.
-          let tid = self.this_tid.clone();
-          let tablet_bundle = std::mem::replace(&mut self.tablet_bundle, Vec::default());
-          io_ctx.slave_forward(SlaveBackMessage::TabletBundle(tid, tablet_bundle));
+          // If this node becomes the Leader, then we continue the insert cycle.
+          io_ctx.slave_forward(SlaveBackMessage::TabletBundleInsertion(TabletBundleInsertion {
+            tid: self.this_tid.clone(),
+            lid: self.leader_map.get(&self.this_sid.to_gid()).unwrap().clone(),
+            bundle: std::mem::replace(&mut self.tablet_bundle, TabletBundle::default()),
+          }));
         }
       }
     }

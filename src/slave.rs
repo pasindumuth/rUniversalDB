@@ -98,8 +98,16 @@ pub enum SlaveForwardMsg {
 // -----------------------------------------------------------------------------------------------
 
 /// Messages send from Tablets to the Slave
+pub struct TabletBundleInsertion {
+  /// The Tablet that is sending this message
+  pub tid: TabletGroupId,
+  /// The LeadershipId that it believe it is inserting for
+  pub lid: LeadershipId,
+  pub bundle: TabletBundle,
+}
+
 pub enum SlaveBackMessage {
-  TabletBundle(TabletGroupId, TabletBundle),
+  TabletBundleInsertion(TabletBundleInsertion),
 }
 
 /// Messages deferred by the Slave to be run on the Slave.
@@ -396,11 +404,11 @@ impl SlaveContext {
   ) {
     match slave_input {
       SlaveForwardMsg::SlaveBackMessage(slave_back_msg) => match slave_back_msg {
-        SlaveBackMessage::TabletBundle(tid, tablet_bundle) => {
-          // TODO: Attach the Leadership Id to these `SlaveBackMessage::TabletBundle` messages
-          //  and filter for them here.
-          self.tablet_bundles.insert(tid, tablet_bundle);
-          self.maybe_start_insert(io_ctx);
+        SlaveBackMessage::TabletBundleInsertion(insert) => {
+          if self.leader_map.get(&self.this_gid).unwrap() == &insert.lid {
+            self.tablet_bundles.insert(insert.tid, insert.bundle);
+            self.maybe_start_insert(io_ctx);
+          }
         }
       },
       SlaveForwardMsg::SlaveTimerInput(timer_input) => match timer_input {
@@ -421,32 +429,24 @@ impl SlaveContext {
         }
       },
       SlaveForwardMsg::SlaveBundle(bundle) => {
-        if self.is_leader() {
-          for paxos_log_msg in bundle {
-            match paxos_log_msg {
-              SlavePLm::CreateTable(plm) => {
-                let (query_id, action) =
-                  handle_rm_plm(self, io_ctx, &mut statuses.create_table_ess, plm);
-                self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
-              }
+        for paxos_log_msg in bundle {
+          match paxos_log_msg {
+            SlavePLm::CreateTable(plm) => {
+              let (query_id, action) =
+                handle_rm_plm(self, io_ctx, &mut statuses.create_table_ess, plm);
+              self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
             }
           }
+        }
 
+        if self.is_leader() {
           // Inform all ESs in WaitingInserting and start inserting a PLm.
           for (_, es) in &mut statuses.create_table_ess {
             es.start_inserting(self, io_ctx);
           }
+
+          // Continue the insert cycle if there are no Tablets.
           self.maybe_start_insert(io_ctx);
-        } else {
-          for paxos_log_msg in bundle {
-            match paxos_log_msg {
-              SlavePLm::CreateTable(plm) => {
-                let (query_id, action) =
-                  handle_rm_plm(self, io_ctx, &mut statuses.create_table_ess, plm);
-                self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
-              }
-            }
-          }
         }
       }
       SlaveForwardMsg::SlaveExternalReq(request) => {
@@ -507,6 +507,12 @@ impl SlaveContext {
         let this_gid = self.this_sid.to_gid();
         self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
 
+        if self.is_leader() {
+          // By the SharedPaxosInserter, these must be empty at the start of Leadership.
+          self.slave_bundle = SlaveBundle::default();
+          self.tablet_bundles = BTreeMap::default();
+        }
+
         // Inform CreateQueryES
         let query_ids: Vec<QueryId> = statuses.create_table_ess.keys().cloned().collect();
         for query_id in query_ids {
@@ -518,16 +524,10 @@ impl SlaveContext {
         // Inform the NetworkDriver
         self.network_driver.leader_changed();
 
-        if !self.is_leader() {
-          // If this node ceases to be or continues to not be the Leader, then clear SlaveBundle.
-          // TODO: Clear the TabletBundles
-          self.slave_bundle = SlaveBundle::default();
-        } else {
-          // If this node is the Leader, then send out RemoteLeaderChanged.
-          self.broadcast_leadership(io_ctx);
-
-          // If this node becomes the Leader, then start the insert cycle.
-          self.maybe_start_insert(io_ctx);
+        if self.is_leader() {
+          // This node is the new Leader
+          self.broadcast_leadership(io_ctx); // Broadcast RemoteLeaderChanged
+          self.maybe_start_insert(io_ctx); // Start the insert cycle if there are no Tablets.
         }
       }
     }
@@ -590,7 +590,10 @@ impl SlaveContext {
         if let Some(helper) = es.inner.committed_helper {
           // This means the ES had Committed, and we should use this `helper`
           // to construct the Tablet.
+          let this_tid = helper.this_tid.clone();
           io_ctx.create_tablet(helper);
+          // We amend tablet_bundles with an initial value, as per SharedPaxosInserter
+          self.tablet_bundles.insert(this_tid, TabletBundle::default());
         }
       }
     }

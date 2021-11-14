@@ -384,7 +384,7 @@ impl SlaveContext {
             es.start_inserting(self, io_ctx);
           }
 
-          // Start inserting the bundle.
+          // Continue the insert cycle.
           let bundle = std::mem::replace(&mut self.slave_bundle, SlaveBundle::default());
           io_ctx.insert_bundle(bundle);
         }
@@ -494,6 +494,11 @@ impl SlaveContext {
         let this_gid = self.this_sid.to_gid();
         self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
 
+        if self.is_leader() {
+          // By the SharedPaxosInserter, these must be empty at the start of Leadership.
+          self.slave_bundle = SlaveBundle::default();
+        }
+
         // Inform STMSimpleTM
         let query_ids: Vec<QueryId> = statuses.stm_simple_tm_ess.keys().cloned().collect();
         for query_id in query_ids {
@@ -524,16 +529,11 @@ impl SlaveContext {
         // Inform the NetworkDriver
         self.network_driver.leader_changed();
 
-        if !self.is_leader() {
-          // If this node ceases to be or continues to not be the Leader, then clear SlaveBundle.
-          self.slave_bundle = SlaveBundle::default();
-        } else {
-          // If this node is the Leader, then send out RemoteLeaderChanged.
-          self.broadcast_leadership(io_ctx);
-
-          // If this node becomes the Leader, then start the insert cycle.
+        if self.is_leader() {
+          // This node is the new Leader
+          self.broadcast_leadership(io_ctx); // Broadcast RemoteLeaderChanged
           let bundle = std::mem::replace(&mut self.slave_bundle, SlaveBundle::default());
-          io_ctx.insert_bundle(bundle);
+          io_ctx.insert_bundle(bundle); // Start the insert cycle.
         }
       }
       SlaveForwardMsg::SlaveTimerInput(timer_input) => {

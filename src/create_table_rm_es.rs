@@ -112,8 +112,8 @@ impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
     io_ctx.rand().fill_bytes(&mut rand_seed);
     self.committed_helper = Some(TabletCreateHelper {
       rand_seed,
-      this_slave_group_id: ctx.this_sid.clone(),
-      this_tablet_group_id: self.tablet_group_id.clone(),
+      this_sid: ctx.this_sid.clone(),
+      this_tid: self.tablet_group_id.clone(),
       this_eid: ctx.this_eid.clone(),
       gossip: ctx.gossip.clone(),
       leader_map: ctx.leader_map.clone(),

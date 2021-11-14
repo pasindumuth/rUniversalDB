@@ -158,16 +158,19 @@ pub fn test_single(test_num: u32, seed: [u8; 16]) {
 
   match check_completion(&mut sim, &rms) {
     CompletionResult::Invalid => {
-      println!("{:?}. Test Failed: Invalid PLs after cooldown. Seed: {:?}", test_num, seed);
+      println!(
+        "{:?}. Paxos2PC Test Failed: Invalid PLs after cooldown. Seed: {:?}",
+        test_num, seed
+      );
     }
     CompletionResult::SuccessfullyCommitted => {
-      println!("{:?}. SuccessfullyCommitted!", test_num);
+      println!("{:?}.    Paxos2PC SuccessfullyCommitted!", test_num);
     }
     CompletionResult::SuccessfullyAborted => {
-      println!("{:?}. SuccessfullyAborted!", test_num);
+      println!("{:?}.    Paxos2PC SuccessfullyAborted!", test_num);
     }
     CompletionResult::SuccessfullyTrivial => {
-      println!("{:?}. SuccessfullyTrivial!", test_num);
+      println!("{:?}.    Paxos2PC SuccessfullyTrivial!", test_num);
     }
   }
 }

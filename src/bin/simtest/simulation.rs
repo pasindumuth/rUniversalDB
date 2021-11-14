@@ -6,8 +6,8 @@ use runiversal::common::{
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::{FullMasterInput, MasterContext, MasterState, MasterTimerInput};
 use runiversal::model::common::{
-  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, RequestId, SlaveGroupId, TablePath,
-  TabletGroupId, TabletKeyRange, Timestamp,
+  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, RequestId,
+  SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use runiversal::model::message as msg;
 use runiversal::model::message::NetworkMessage;
@@ -69,7 +69,7 @@ impl<'a> BasicIOCtx for TestSlaveIOCtx<'a> {
 
 impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
   fn create_tablet(&mut self, helper: TabletCreateHelper) {
-    let tid = helper.this_tablet_group_id.clone();
+    let tid = helper.this_tid.clone();
     self.tablet_states.insert(tid, TabletState::new(TabletContext::new(helper)));
   }
 

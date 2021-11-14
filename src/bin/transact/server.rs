@@ -5,7 +5,8 @@ use runiversal::common::{
 };
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::model::common::{
-  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId, TabletGroupId, Timestamp,
+  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId,
+  TabletGroupId, Timestamp,
 };
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
@@ -95,7 +96,7 @@ impl SlaveIOCtx for ProdSlaveIOCtx {
 
     // Create mpsc queue for Slave-Tablet communication.
     let (to_tablet_sender, to_tablet_receiver) = mpsc::channel::<TabletForwardMsg>();
-    self.tablet_map.insert(helper.this_tablet_group_id.clone(), to_tablet_sender);
+    self.tablet_map.insert(helper.this_tid.clone(), to_tablet_sender);
 
     // Spawn a new thread and create the Tablet.
     let tablet_context = TabletContext::new(helper);

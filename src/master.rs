@@ -502,11 +502,10 @@ impl MasterContext {
             ));
           }
 
-          // Dispatch the Master for insertion and start a new one.
-          let master_bundle = std::mem::replace(&mut self.master_bundle, MasterBundle::default());
+          // Continue the insert cycle.
           self.paxos_driver.insert_bundle(
             &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
-            master_bundle,
+            std::mem::replace(&mut self.master_bundle, MasterBundle::default()),
           );
         } else {
           for paxos_log_msg in bundle {
@@ -774,6 +773,11 @@ impl MasterContext {
       MasterForwardMsg::LeaderChanged(leader_changed) => {
         self.leader_map.insert(PaxosGroupId::Master, leader_changed.lid); // Update the LeadershipId
 
+        if self.is_leader() {
+          // By the SharedPaxosInserter, these must be empty at the start of Leadership.
+          self.master_bundle = MasterBundle::default();
+        }
+
         // CreateTable
         let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
         for query_id in query_ids {
@@ -805,19 +809,13 @@ impl MasterContext {
         if !self.is_leader() {
           // Wink away all MasterQueryPlanningESs.
           statuses.planning_ess.clear();
-
-          // Clear MasterBundle
-          self.master_bundle = MasterBundle::default();
         } else {
-          // If this node is the Leader, then send out RemoteLeaderChanged.
-          self.broadcast_leadership(io_ctx);
-
-          // Insert MasterBundle
-          let master_bundle = std::mem::replace(&mut self.master_bundle, MasterBundle::default());
+          // This node is the new Leader
+          self.broadcast_leadership(io_ctx); // Broadcast RemoteLeaderChanged
           self.paxos_driver.insert_bundle(
             &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
-            master_bundle,
-          );
+            std::mem::replace(&mut self.master_bundle, MasterBundle::default()),
+          ); // Start the insert cycle.
         }
       }
     }
