@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, Bound};
 
 /// The multi-versioned container used to hold committed data. We refer to the tuple
 /// `(PrimaryKey, Option<ColName>)` as the "Storage Key". We refer to the `Option<ColName>`
-/// in the Storage Key as the "Column Indicator". We refer to a Storage Key - Value pair
+/// in the Storage Key as the "Column Indicator". We refer to a Storage Key-Value pair
 /// as a Storage Row. We refer to a Storage Row where the Column Indicator is `None` as
 /// a "Presence Row".
 pub type GenericMVTable = BTreeMap<(PrimaryKey, Option<ColName>), Vec<(Timestamp, ColValN)>>;
@@ -264,7 +264,7 @@ pub fn compress_updates_views(update_views: &BTreeMap<u32, GenericTable>) -> Gen
   snapshot_table
 }
 
-/// Apple the `compressed_view` to `storage` and `timestamp`.
+/// Apply the `compressed_view` to `storage` and `timestamp`.
 pub fn commit_to_storage(
   storage: &mut GenericMVTable,
   timestamp: &Timestamp,

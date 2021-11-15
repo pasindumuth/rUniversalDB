@@ -100,6 +100,7 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
       // Rename the Where Clause
       rename_trans_tables_val_expr_r(ctx, &mut update.selection);
     }
+    iast::QueryBody::Insert(_) => {}
   }
 
   // Remove the TransTables defined this Query from the ctx.
@@ -196,6 +197,17 @@ fn flatten_top_level_query_r(
         .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Update(ms_update)));
       Ok(())
     }
+    iast::QueryBody::Insert(insert) => {
+      trans_table_map.push((
+        TransTableName(assignment_name.clone()),
+        proc::MSQueryStage::Insert(proc::Insert {
+          table: TablePath(insert.table.clone()),
+          columns: insert.columns.iter().map(|x| ColName(x.clone())).collect(),
+          values: insert.values.clone(),
+        }),
+      ));
+      Ok(())
+    }
   }
 }
 
@@ -261,6 +273,7 @@ fn flatten_sub_query_r(
       Ok(())
     }
     iast::QueryBody::Update(_) => Err(msg::ExternalAbortedData::InvalidUpdate),
+    iast::QueryBody::Insert(_) => Err(msg::ExternalAbortedData::InvalidInsert),
   }
 }
 

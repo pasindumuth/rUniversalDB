@@ -1,5 +1,8 @@
-use crate::common::TableSchema;
-use crate::model::common::{proc, ColName, Gen, TablePath, TierMap, Timestamp, TransTableName};
+use crate::common::{lookup, TableSchema};
+use crate::model::common::proc::MSQueryStage;
+use crate::model::common::{
+  iast, proc, ColName, Gen, TablePath, TierMap, Timestamp, TransTableName,
+};
 use crate::multiversion_map::MVM;
 use crate::server::weak_contains_col;
 use serde::{Deserialize, Serialize};
@@ -16,9 +19,9 @@ use std::ops::Deref;
 ///    `ColumnRef`s that can reference an ancestral `TableRef` if its query's table's schema
 ///    does not have it. (Hence why we do not include projected columns in SELECT queries,
 ///    or assigned columns in UPDATE queries.)
-/// 2. When the MSCoordES creates this using it's GossipData, things like `safe_present_cols`
+/// 2. When the MSCoordES creates this using its GossipData, things like `safe_present_cols`
 ///    and `external_cols` should be considered expectations on what the schemas should be.
-///    The schemas should be checked and the Transaction aborted if the expections fail.
+///    The schemas should be checked and the Transaction aborted if the expectations fail.
 /// 3. Instead, if this is sent back with a MasterQueryPlanning, it will be hard facts that
 ///    `safe_resent_cols` and `external_cols` *will* align with the table schemas.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -52,13 +55,24 @@ impl FrozenColUsageNode {
   }
 }
 
+/// This algorithm computes a `Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>` that
+/// is parallel to the provided `MSQuery`. This is a tree. Every `FrozenColUsageNode` corresponds
+/// to an `(MS/GR)QueryStage`, and every `Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>`
+/// corresponds to an `(MS/GR)Query`.
+///
 /// This algorithm contains the following assumptions:
-///   1. All `TablePath`s referenced the `MSQuery` exist in `table_generation` and `db_schema`
-///      at the given `Timestamp`.
+///   1. All `TablePath`s referenced in the `MSQuery` exist in `table_generation` and `db_schema`
+///      at the given `Timestamp` (by `static_read`).
 ///   2. All projected columns in `SELECT` queries and all assigned columns in `UPDATE` queries
 ///      exist in the `db_schema`.
 ///   3. The assigned columns in an `UPDATE` are disjoint from the Key Columns. (This algorithm
 ///      does not support such queries).
+///   4. The `columns` in an `INSERT` are all present in the Table.
+///
+/// In the above, (1) is critical (otherwise we might crash). The others might will not lead to
+/// a crash, but since we use the projected columns, assigned columns, and `columns` in these
+/// queries to compute the schema of the resulting TransTable, we would like them to be present
+/// so that the resulting `FrozenColUsageNode`s makes sense.
 ///
 /// Users of this algorithm must verify these facts first.
 pub struct ColUsagePlanner<'a> {
@@ -132,7 +146,7 @@ impl<'a> ColUsagePlanner<'a> {
     return node;
   }
 
-  /// Construct a `FrozenColUsageNode` for the `select`.
+  /// Constructs a `FrozenColUsageNode` and the schema of the returned TransTable.
   pub fn plan_select(
     &mut self,
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<ColName>>,
@@ -148,7 +162,7 @@ impl<'a> ColUsagePlanner<'a> {
     )
   }
 
-  /// Construct a `FrozenColUsageNode` for the `update`.
+  /// Constructs a `FrozenColUsageNode` and the schema of the returned TransTable.
   pub fn plan_update(
     &mut self,
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<ColName>>,
@@ -179,7 +193,23 @@ impl<'a> ColUsagePlanner<'a> {
     )
   }
 
-  /// Construct a `FrozenColUsageNode` for the `stage_query`.
+  /// Constructs a `FrozenColUsageNode` and the schema of the returned TransTable.
+  pub fn plan_insert(
+    &mut self,
+    trans_table_ctx: &mut BTreeMap<TransTableName, Vec<ColName>>,
+    insert: &proc::Insert,
+  ) -> (Vec<ColName>, FrozenColUsageNode) {
+    (
+      insert.columns.clone(),
+      self.compute_frozen_col_usage_node(
+        trans_table_ctx,
+        &proc::TableRef::TablePath(insert.table.clone()),
+        &Vec::new(), // No expressions
+      ),
+    )
+  }
+
+  /// Construct a `FrozenColUsageNode` and the schema of the returned TransTable.
   pub fn plan_ms_query_stage(
     &mut self,
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<ColName>>,
@@ -188,10 +218,11 @@ impl<'a> ColUsagePlanner<'a> {
     match stage_query {
       proc::MSQueryStage::SuperSimpleSelect(select) => self.plan_select(trans_table_ctx, select),
       proc::MSQueryStage::Update(update) => self.plan_update(trans_table_ctx, update),
+      proc::MSQueryStage::Insert(insert) => self.plan_insert(trans_table_ctx, insert),
     }
   }
 
-  /// Construct a `FrozenColUsageNode` for the `gr_query`.
+  /// Construct `FrozenColUsageNode`s for the `gr_query`.
   pub fn plan_gr_query(
     &mut self,
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<ColName>>,
@@ -210,7 +241,7 @@ impl<'a> ColUsagePlanner<'a> {
     return children;
   }
 
-  /// Construct a `FrozenColUsageNode` for the `ms_query`.
+  /// Construct `FrozenColUsageNode`s for the `ms_query`.
   pub fn plan_ms_query(
     &mut self,
     ms_query: &proc::MSQuery,
@@ -358,6 +389,7 @@ pub fn nodes_external_cols(
 pub enum GeneralStage<'a> {
   SuperSimpleSelect(&'a proc::SuperSimpleSelect),
   Update(&'a proc::Update),
+  Insert(&'a proc::Insert),
 }
 
 fn iterate_stage_expr<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
@@ -408,109 +440,11 @@ pub fn iterate_stage_ms_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
           iterate_stage_expr(cb, expr)
         }
       }
-    }
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
-//  QueryPlanning helpers
-// -----------------------------------------------------------------------------------------------
-
-/// Gather every reference to a `TablePath` found in the `query`.
-pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
-  let mut table_paths = BTreeSet::<TablePath>::new();
-  iterate_stage_ms_query(
-    &mut |stage: GeneralStage| match stage {
-      GeneralStage::SuperSimpleSelect(query) => {
-        if let proc::TableRef::TablePath(table_path) = &query.from {
-          table_paths.insert(table_path.clone());
-        }
-      }
-      GeneralStage::Update(query) => {
-        table_paths.insert(query.table.clone());
-      }
-    },
-    query,
-  );
-  table_paths
-}
-
-/// Compute the all TierMaps for the `MSQueryES`.
-///
-/// The Tier should be where every Read query should be reading from, except
-/// if the current stage is an Update, which should be one Tier ahead (i.e.
-/// lower) for that TablePath.
-pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableName, TierMap> {
-  let mut all_tier_maps = BTreeMap::<TransTableName, TierMap>::new();
-  let mut cur_tier_map = BTreeMap::<TablePath, u32>::new();
-  for (_, stage) in &ms_query.trans_tables {
-    match stage {
-      proc::MSQueryStage::SuperSimpleSelect(_) => {}
-      proc::MSQueryStage::Update(update) => {
-        cur_tier_map.insert(update.table.clone(), 0);
+      proc::MSQueryStage::Insert(query) => {
+        cb(GeneralStage::Insert(query));
       }
     }
   }
-  for (trans_table_name, stage) in ms_query.trans_tables.iter().rev() {
-    all_tier_maps.insert(trans_table_name.clone(), TierMap { map: cur_tier_map.clone() });
-    match stage {
-      proc::MSQueryStage::SuperSimpleSelect(_) => {}
-      proc::MSQueryStage::Update(update) => {
-        *cur_tier_map.get_mut(&update.table).unwrap() += 1;
-      }
-    }
-  }
-  all_tier_maps
-}
-
-/// Compute miscellaneoud data related to QueryPlanning. This can be shared between
-/// the Master and MSCoordESs.
-pub fn compute_query_plan_data(
-  ms_query: &proc::MSQuery,
-  table_generation: &MVM<TablePath, Gen>,
-  timestamp: Timestamp,
-) -> (BTreeMap<TablePath, Gen>, BTreeMap<TablePath, Vec<ColName>>) {
-  let mut table_location_map = BTreeMap::<TablePath, Gen>::new();
-  let mut extra_req_cols = BTreeMap::<TablePath, Vec<ColName>>::new();
-  iterate_stage_ms_query(
-    &mut |stage: GeneralStage| match stage {
-      GeneralStage::SuperSimpleSelect(query) => {
-        if let proc::TableRef::TablePath(table_path) = &query.from {
-          let gen = table_generation.static_read(&table_path, timestamp).unwrap();
-          table_location_map.insert(table_path.clone(), gen.clone());
-
-          // Recall there might already be required columns for this TablePath.
-          if !extra_req_cols.contains_key(&table_path) {
-            extra_req_cols.insert(table_path.clone(), Vec::new());
-          }
-          let req_cols = extra_req_cols.get_mut(&table_path).unwrap();
-          for col_name in &query.projection {
-            if !req_cols.contains(col_name) {
-              req_cols.push(col_name.clone());
-            }
-          }
-        }
-      }
-      GeneralStage::Update(query) => {
-        let gen = table_generation.static_read(&query.table, timestamp).unwrap();
-        table_location_map.insert(query.table.clone(), gen.clone());
-
-        // Recall there might already be required columns for this TablePath.
-        if !extra_req_cols.contains_key(&query.table) {
-          extra_req_cols.insert(query.table.clone(), Vec::new());
-        }
-        let req_cols = extra_req_cols.get_mut(&query.table).unwrap();
-        for (col_name, _) in &query.assignment {
-          if !req_cols.contains(col_name) {
-            req_cols.push(col_name.clone());
-          }
-        }
-      }
-    },
-    ms_query,
-  );
-
-  (table_location_map, extra_req_cols)
 }
 
 // -----------------------------------------------------------------------------------------------

@@ -468,7 +468,7 @@ impl CoordContext {
       match Parser::parse_sql(&GenericDialect {}, &external_query.query) {
         Ok(parsed_ast) => {
           // Convert to MSQuery
-          let internal_ast = convert_ast(&parsed_ast);
+          let internal_ast = convert_ast(parsed_ast);
           convert_to_msquery(internal_ast)
         }
         Err(parse_error) => {

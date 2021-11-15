@@ -1,11 +1,13 @@
-use crate::col_usage::{
-  collect_table_paths, compute_all_tier_maps, compute_query_plan_data, iterate_stage_ms_query,
-  ColUsagePlanner, FrozenColUsageNode, GeneralStage,
-};
+use crate::col_usage::{iterate_stage_ms_query, ColUsagePlanner, FrozenColUsageNode, GeneralStage};
 use crate::common::{lookup, TableSchema};
 use crate::master::{plm, MasterContext};
+use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{proc, CQueryPath, ColName, QueryId, Timestamp, TransTableName};
 use crate::model::message as msg;
+use crate::query_planning::{
+  collect_table_paths, compute_all_tier_maps, compute_extra_req_cols, compute_query_plan_data,
+  perform_static_validations, KeyValidationError,
+};
 
 // -----------------------------------------------------------------------------------------------
 //  Master MasterQueryPlanningES
@@ -25,8 +27,6 @@ pub struct MasterQueryPlanningES {
 
 /// This is a helper that's used when checking the presence Required Columns in an `MSQuery`
 enum PreReqColHelper {
-  /// Returned if we can definitively say that at least one `ColName` is missing from `db_schema`.
-  OneColMissing(ColName),
   /// Returned if we can definitively say that all `ColName`s are present `db_schema`.
   AllColsPresent,
   /// Returned if we cannot return either of the above.
@@ -44,31 +44,51 @@ pub fn master_query_planning(
   ctx: &MasterContext,
   planning_msg: msg::PerformMasterQueryPlanning,
 ) -> MasterQueryPlanningAction {
-  let table_paths = collect_table_paths(&planning_msg.ms_query);
-  for table_path in &table_paths {
-    if ctx.table_generation.get_lat(table_path) < planning_msg.timestamp {
+  for table_path in collect_table_paths(&planning_msg.ms_query) {
+    if ctx.table_generation.get_lat(&table_path) < planning_msg.timestamp {
       return MasterQueryPlanningAction::Wait;
-    } else if ctx.table_generation.get_last_version(table_path).is_none() {
+    } else if ctx.table_generation.get_last_version(&table_path).is_none() {
       // Otherwise, if the TablePath does not exist, we respond accordingly.
       return MasterQueryPlanningAction::Respond(msg::MasteryQueryPlanningResult::TablePathDNE(
-        vec![table_path.clone()],
+        vec![table_path],
       ));
     }
   }
 
-  // Next, we check that we are not trying to modify a Key Column in an Update.
-  for (_, stage) in &planning_msg.ms_query.trans_tables {
-    match stage {
-      proc::MSQueryStage::SuperSimpleSelect(_) => {}
-      proc::MSQueryStage::Update(query) => {
-        // The TablePath exists, from the above.
-        let gen = ctx.table_generation.static_read(&query.table, planning_msg.timestamp).unwrap();
-        let schema = ctx.db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
-        for (col_name, _) in &query.assignment {
-          if lookup(&schema.key_cols, col_name).is_some() {
-            // If so, we return an InvalidUpdate to the External.
+  // Next, we do various validations on the MSQuery.
+  match perform_static_validations(
+    &planning_msg.ms_query,
+    &ctx.table_generation,
+    &ctx.db_schema,
+    planning_msg.timestamp,
+  ) {
+    Ok(_) => {}
+    Err(KeyValidationError::InvalidUpdate) => {
+      return MasterQueryPlanningAction::Respond(msg::MasteryQueryPlanningResult::InvalidUpdate)
+    }
+    Err(KeyValidationError::InvalidInsert) => {
+      return MasterQueryPlanningAction::Respond(msg::MasteryQueryPlanningResult::InvalidInsert)
+    }
+  }
+
+  // Next, we see if all required columns in all queries are present.
+  let mut helper = PreReqColHelper::AllColsPresent;
+  for (table_path, col_names) in compute_extra_req_cols(&planning_msg.ms_query) {
+    for col_name in col_names {
+      // The TablePath exists, from the above.
+      let gen = ctx.table_generation.static_read(&table_path, planning_msg.timestamp).unwrap();
+      let schema = ctx.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
+      if lookup(&schema.key_cols, &col_name).is_none() {
+        if schema.val_cols.get_lat(&col_name) < planning_msg.timestamp {
+          // Here, we realize we certain do not have AllColsPresent. We continue on, in case
+          // we (more strongly) realize that we can send back a `RequiredColumnDNE`.
+          helper = PreReqColHelper::InsufficientLat;
+        } else {
+          if schema.val_cols.static_read(&col_name, planning_msg.timestamp).is_none() {
+            // Here, we know for sure this `col_name` does not exist. We break out and
+            // respond immediately.
             return MasterQueryPlanningAction::Respond(
-              msg::MasteryQueryPlanningResult::InvalidUpdate,
+              msg::MasteryQueryPlanningResult::RequiredColumnDNE(vec![col_name]),
             );
           }
         }
@@ -76,66 +96,7 @@ pub fn master_query_planning(
     }
   }
 
-  // Next, we see if all required columns in Select and Update queries are present.
-  let mut helper = PreReqColHelper::AllColsPresent;
-  iterate_stage_ms_query(
-    &mut |stage: GeneralStage| {
-      fn req_col_helper(
-        schema: &TableSchema,
-        col_name: &ColName,
-        timestamp: Timestamp,
-        helper: &mut PreReqColHelper,
-      ) {
-        if lookup(&schema.key_cols, col_name).is_none() {
-          if schema.val_cols.get_lat(col_name) < timestamp {
-            // Here, we realize we certain do not have AllColsPresent
-            *helper = PreReqColHelper::InsufficientLat;
-          } else {
-            if schema.val_cols.static_read(col_name, timestamp).is_none() {
-              // Here, we know for sure this `col_name` does not exist.
-              *helper = PreReqColHelper::OneColMissing(col_name.clone());
-            }
-          }
-        }
-      }
-
-      match helper {
-        PreReqColHelper::OneColMissing(_) => {} // break out
-        PreReqColHelper::AllColsPresent | PreReqColHelper::InsufficientLat => {
-          let timestamp = planning_msg.timestamp;
-          match stage {
-            GeneralStage::SuperSimpleSelect(query) => {
-              if let proc::TableRef::TablePath(table_path) = &query.from {
-                // The TablePath exists, from the above.
-                let gen = ctx.table_generation.static_read(&table_path, timestamp).unwrap();
-                let schema = ctx.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
-                for col_name in &query.projection {
-                  req_col_helper(schema, col_name, timestamp, &mut helper);
-                }
-              }
-            }
-            GeneralStage::Update(query) => {
-              // The TablePath exists, from the above.
-              let gen = ctx.table_generation.static_read(&query.table, timestamp).unwrap();
-              let schema = ctx.db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
-              for (col_name, _) in &query.assignment {
-                req_col_helper(schema, col_name, timestamp, &mut helper);
-              }
-            }
-          }
-        }
-      }
-    },
-    &planning_msg.ms_query,
-  );
-
   match helper {
-    PreReqColHelper::OneColMissing(col_name) => {
-      // Here, we return an RequiredColumnDNE to the External.
-      return MasterQueryPlanningAction::Respond(
-        msg::MasteryQueryPlanningResult::RequiredColumnDNE(vec![col_name]),
-      );
-    }
     PreReqColHelper::AllColsPresent => {}
     PreReqColHelper::InsufficientLat => {
       // If the LAT is not high enough, we need to create an ES to persist a read.
@@ -214,15 +175,7 @@ fn check_nodes_lats(
 //  MasterQueryPlanningES Post-Insertion Implementation
 // -----------------------------------------------------------------------------------------------
 
-/// This is a helper that's used when checking the presence Required Columns in an `MSQuery`
-enum PostReqColHelper {
-  /// Returned if we can definitively say that at least one `ColName` is missing from `db_schema`.
-  OneColMissing(ColName),
-  /// Returned if we can definitively say that all `ColName`s are present `db_schema`.
-  AllColsPresent,
-}
-
-/// Handle an incoming `PerformMasterQueryPlanning` message.
+/// Handle the insertion of a `MasterQueryPlanning` message.
 pub fn master_query_planning_post(
   ctx: &mut MasterContext,
   planning_plm: plm::MasterQueryPlanning,
@@ -235,78 +188,37 @@ pub fn master_query_planning_post(
     }
   }
 
-  // Next, we check that we are not trying to modify a Key Column in an Update.
-  for (_, stage) in &planning_plm.ms_query.trans_tables {
-    match stage {
-      proc::MSQueryStage::SuperSimpleSelect(_) => {}
-      proc::MSQueryStage::Update(query) => {
-        // The TablePath exists, from the above.
-        let gen = ctx.table_generation.static_read(&query.table, planning_plm.timestamp).unwrap();
-        let schema = ctx.db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
-        for (col_name, _) in &query.assignment {
-          if lookup(&schema.key_cols, col_name).is_some() {
-            // If so, we return an InvalidUpdate to the External.
-            return msg::MasteryQueryPlanningResult::InvalidUpdate;
-          }
-        }
-      }
+  // Next, we do various validations on the MSQuery.
+  match perform_static_validations(
+    &planning_plm.ms_query,
+    &ctx.table_generation,
+    &ctx.db_schema,
+    planning_plm.timestamp,
+  ) {
+    Ok(_) => {}
+    Err(KeyValidationError::InvalidUpdate) => {
+      return msg::MasteryQueryPlanningResult::InvalidUpdate
+    }
+    Err(KeyValidationError::InvalidInsert) => {
+      return msg::MasteryQueryPlanningResult::InvalidInsert
     }
   }
 
-  // Next, we see if all required columns in Select and Update queries are present.
-  let mut helper = PostReqColHelper::AllColsPresent;
-  iterate_stage_ms_query(
-    &mut |stage: GeneralStage| {
-      fn req_col_helper(
-        schema: &mut TableSchema,
-        col_name: &ColName,
-        timestamp: Timestamp,
-        helper: &mut PostReqColHelper,
-      ) {
-        if lookup(&schema.key_cols, col_name).is_none() {
-          if schema.val_cols.read(col_name, timestamp).is_none() {
-            // Here, we know for sure this `col_name` does not exist.
-            *helper = PostReqColHelper::OneColMissing(col_name.clone());
-          }
+  // Next, we see if all extra required columns in all queries are present, making sure to
+  // increase the `lat` either way.
+  for (table_path, col_names) in compute_extra_req_cols(&planning_plm.ms_query) {
+    for col_name in col_names {
+      // The TablePath exists, from the above.
+      let gen = ctx.table_generation.static_read(&table_path, planning_plm.timestamp).unwrap();
+      let schema = ctx.db_schema.get_mut(&(table_path.clone(), gen.clone())).unwrap();
+      if lookup(&schema.key_cols, &col_name).is_none() {
+        if schema.val_cols.read(&col_name, planning_plm.timestamp).is_none() {
+          // Here, we know for sure this `col_name` does not exist, and will never since we
+          // just increased the LAT. Thus, we respond with it to the sender.
+          return msg::MasteryQueryPlanningResult::RequiredColumnDNE(vec![col_name]);
         }
       }
-
-      match helper {
-        PostReqColHelper::OneColMissing(_) => {} // break out
-        PostReqColHelper::AllColsPresent => {
-          let timestamp = planning_plm.timestamp;
-          match stage {
-            GeneralStage::SuperSimpleSelect(query) => {
-              if let proc::TableRef::TablePath(table_path) = &query.from {
-                // The TablePath exists, from the above.
-                let gen = ctx.table_generation.static_read(&table_path, timestamp).unwrap();
-                let schema = ctx.db_schema.get_mut(&(table_path.clone(), gen.clone())).unwrap();
-                for col_name in &query.projection {
-                  req_col_helper(schema, col_name, timestamp, &mut helper);
-                }
-              }
-            }
-            GeneralStage::Update(query) => {
-              // The TablePath exists, from the above.
-              let gen = ctx.table_generation.static_read(&query.table, timestamp).unwrap();
-              let schema = ctx.db_schema.get_mut(&(query.table.clone(), gen.clone())).unwrap();
-              for (col_name, _) in &query.assignment {
-                req_col_helper(schema, col_name, timestamp, &mut helper);
-              }
-            }
-          }
-        }
-      }
-    },
-    &planning_plm.ms_query,
-  );
-
-  match helper {
-    PostReqColHelper::OneColMissing(col_name) => {
-      // Here, we return an RequiredColumnDNE to the External.
-      return msg::MasteryQueryPlanningResult::RequiredColumnDNE(vec![col_name]);
     }
-    PostReqColHelper::AllColsPresent => {}
   }
 
   // Next, we run the FrozenColUsageAlgorithm.

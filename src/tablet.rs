@@ -903,6 +903,10 @@ impl TabletContext {
                       // Lookup the MSQueryES and add the new Query into `pending_queries`.
                       let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
                       ms_query_es.pending_queries.insert(perform_query.query_id.clone());
+                      let ms_query_path = TQueryPath {
+                        node_path: self.mk_node_path(),
+                        query_id: ms_query_id.clone(),
+                      };
 
                       // Create an MSReadTableES in the QueryReplanning state, and start it.
                       let ms_read = map_insert(
@@ -920,7 +924,7 @@ impl TabletContext {
                             sql_query: query.sql_query,
                             query_plan: query.query_plan,
                             ms_query_id,
-                            new_rms: Default::default(),
+                            new_rms: vec![ms_query_path].into_iter().collect(),
                             state: MSReadExecutionS::Start,
                           },
                         },
@@ -987,6 +991,8 @@ impl TabletContext {
                     // Lookup the MSQueryES and add the new Query into `pending_queries`.
                     let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
                     ms_query_es.pending_queries.insert(perform_query.query_id.clone());
+                    let ms_query_path =
+                      TQueryPath { node_path: self.mk_node_path(), query_id: ms_query_id.clone() };
 
                     // First, we look up the `tier` of this Table being
                     // written, update the `tier_map`.
@@ -1012,7 +1018,7 @@ impl TabletContext {
                           sql_query,
                           query_plan,
                           ms_query_id,
-                          new_rms: Default::default(),
+                          new_rms: vec![ms_query_path].into_iter().collect(),
                           state: MSWriteExecutionS::Start,
                         },
                       },

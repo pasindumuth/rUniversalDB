@@ -400,8 +400,12 @@ pub enum ExternalAbortedData {
   /// that is neither a TransTable or a Table in the gossiped_db_schema.
   TableDNE(String),
   /// This occurs if an Update appears as a Subquery (i.e. not at the top-level
-  /// of the SQL transaction). It also occurs if the Update is trying to write to a key column.
+  /// of the SQL transaction) an if the Update is trying to write to a key column.
   InvalidUpdate,
+  /// This occurs if an Insert appears as a Subquery (i.e. not at the top-level
+  /// of the SQL transaction), if it does not write to very key column, and if the VALUES clause
+  /// is does not correspond to the columns to insert to.
+  InvalidInsert,
   /// This is a fatal Query Execution error, including non-recoverable QueryErrors
   /// and ColumnsDNEs. We don't give any details for simplicity. The External should just
   /// understand that their query was invalid, but might become valid for the same timestamp
@@ -445,6 +449,7 @@ pub struct MasterQueryPlanningAborted {
   pub return_qid: QueryId,
 }
 
+/// See `QueryPlan`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterQueryPlan {
   pub all_tier_maps: BTreeMap<TransTableName, TierMap>,
@@ -459,6 +464,9 @@ pub enum MasteryQueryPlanningResult {
   TablePathDNE(Vec<TablePath>),
   /// This is returned if one of the Update queries tried modifiying a KeyCol.
   InvalidUpdate,
+  /// This is returned if one of the Insert queries does not contain a KeyCol, or the
+  /// `values` is not a grid whose width is `columns.len()`.
+  InvalidInsert,
   RequiredColumnDNE(Vec<ColName>),
 }
 

@@ -1,7 +1,7 @@
 use crate::model::common::{iast, ColName, ColType};
 use crate::model::common::{proc, TablePath};
 use sqlparser::ast;
-use sqlparser::ast::DataType;
+use sqlparser::ast::{DataType, Query};
 
 // TODO: We should return a Result if there is a conversion failure to MSQuery.
 
@@ -12,11 +12,14 @@ use sqlparser::ast::DataType;
 /// This function converts the sqlparser AST into our own internal
 /// AST, `Query`. Recall that we can transform all DML and DQL transactions
 /// together into a single Query, which is what we do here.
-pub fn convert_ast(raw_query: &Vec<ast::Statement>) -> iast::Query {
+pub fn convert_ast(raw_query: Vec<ast::Statement>) -> iast::Query {
   assert_eq!(raw_query.len(), 1, "Only one SQL statement support atm.");
-  let stmt = &raw_query[0];
+  let stmt = raw_query.into_iter().next().unwrap();
   match stmt {
-    ast::Statement::Query(query) => return convert_query(query),
+    ast::Statement::Query(query) => convert_query(&query),
+    ast::Statement::Insert { table_name, columns, source, .. } => {
+      convert_insert(table_name, columns, source)
+    }
     _ => panic!("Unsupported ast::Statement {:?}", stmt),
   }
 }
@@ -75,6 +78,48 @@ fn convert_query(query: &ast::Query) -> iast::Query {
     _ => panic!("Other stuff not supported"),
   };
   iast::Query { ctes: ictes, body }
+}
+
+fn convert_insert(
+  table_name: ast::ObjectName,
+  columns: Vec<ast::Ident>,
+  source: Box<Query>,
+) -> iast::Query {
+  if let ast::SetExpr::Values(values) = source.body {
+    // Construct values
+    let mut i_values = Vec::<Vec<iast::Value>>::new();
+    for row in values.0 {
+      let mut i_row = Vec::<iast::Value>::new();
+      for elem in row {
+        if let iast::ValExpr::Value { val } = convert_expr(&elem) {
+          i_row.push(val);
+        } else {
+          panic!("Only literal are supported in the VALUES clause.");
+        }
+      }
+      i_values.push(i_row);
+    }
+    // Construct Table name
+    let ast::ObjectName(idents) = table_name;
+    assert_eq!(idents.len(), 1, "Multi-part table references not supported");
+    let i_table = idents.into_iter().next().unwrap().value;
+    // Construct Columns
+    let mut i_columns = Vec::<String>::new();
+    for col in columns {
+      i_columns.push(col.value)
+    }
+
+    iast::Query {
+      ctes: vec![],
+      body: iast::QueryBody::Insert(iast::Insert {
+        table: i_table,
+        columns: i_columns,
+        values: i_values,
+      }),
+    }
+  } else {
+    panic!("Non VALUEs clause in Insert is unsupported.");
+  }
 }
 
 fn convert_select_clause(select_clause: &Vec<ast::SelectItem>) -> Vec<String> {

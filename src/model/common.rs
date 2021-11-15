@@ -397,6 +397,15 @@ pub mod proc {
     pub selection: ValExpr,
   }
 
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct Insert {
+    pub table: TablePath,
+    /// The columns to insert to
+    pub columns: Vec<ColName>,
+    /// The values to insert (where the inner `Vec` is a row)
+    pub values: Vec<Vec<Value>>,
+  }
+
   // GR
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -416,6 +425,7 @@ pub mod proc {
   pub enum MSQueryStage {
     SuperSimpleSelect(SuperSimpleSelect),
     Update(Update),
+    Insert(Insert),
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -520,6 +530,7 @@ pub mod iast {
     Query(Box<Query>),
     SuperSimpleSelect(SuperSimpleSelect),
     Update(Update),
+    Insert(Insert),
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -534,5 +545,14 @@ pub mod iast {
     pub table: String,
     pub assignments: Vec<(String, ValExpr)>,
     pub selection: ValExpr,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct Insert {
+    pub table: String,
+    /// The columns to insert to
+    pub columns: Vec<String>,
+    /// The values to insert (where the inner `Vec` is a row)
+    pub values: Vec<Vec<Value>>,
   }
 }

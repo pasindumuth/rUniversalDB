@@ -1,10 +1,11 @@
 use crate::col_usage::{
-  collect_table_paths, compute_all_tier_maps, compute_query_plan_data, iterate_stage_ms_query,
-  node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode, GeneralStage,
+  iterate_stage_ms_query, node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode,
+  GeneralStage,
 };
 use crate::common::{lookup, mk_qid, OrigP, QueryPlan, TMStatus};
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
+use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
   proc, ColName, Context, ContextRow, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId,
   SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId, TierMap, Timestamp,
@@ -12,6 +13,10 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::model::message::MasteryQueryPlanningResult;
+use crate::query_planning::{
+  collect_table_paths, compute_all_tier_maps, compute_extra_req_cols, compute_query_plan_data,
+  perform_static_validations, KeyValidationError,
+};
 use crate::server::{weak_contains_col, CommonQuery, ServerContextBase};
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{BTreeMap, BTreeSet};
@@ -482,6 +487,7 @@ impl FullMSCoordES {
         let tids = ctx.ctx(io_ctx).get_min_tablets(&update_query.table, &update_query.selection);
         SendHelper::TableQuery(perform_query, tids)
       }
+      MSQueryStage::Insert(_) => panic!(),
     };
 
     match helper {
@@ -633,57 +639,33 @@ impl QueryPlanningES {
       }
     }
 
-    // Next, we check that we are not trying to modify a Key Column in an Update.
-    for (_, stage) in &self.sql_query.trans_tables {
-      match stage {
-        proc::MSQueryStage::SuperSimpleSelect(_) => {}
-        proc::MSQueryStage::Update(query) => {
-          // The TablePath exists, from the above.
-          let gen = ctx.gossip.table_generation.static_read(&query.table, self.timestamp).unwrap();
-          let schema = ctx.gossip.db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
-          for (col_name, _) in &query.assignment {
-            if lookup(&schema.key_cols, col_name).is_some() {
-              // If so, we return an InvalidUpdate to the External.
-              return QueryPlanningAction::Failed(msg::ExternalAbortedData::InvalidUpdate);
-            }
-          }
-        }
+    // Next, we do various validations on the MSQuery.
+    match perform_static_validations(
+      &self.sql_query,
+      &ctx.gossip.table_generation,
+      &ctx.gossip.db_schema,
+      self.timestamp,
+    ) {
+      Ok(_) => {}
+      Err(KeyValidationError::InvalidUpdate) => {
+        return QueryPlanningAction::Failed(msg::ExternalAbortedData::InvalidUpdate);
+      }
+      Err(KeyValidationError::InvalidInsert) => {
+        return QueryPlanningAction::Failed(msg::ExternalAbortedData::InvalidInsert);
       }
     }
 
-    // Next, we see if all required columns in Select and Update queries are present.
-    let mut required_cols_exist = true;
-    iterate_stage_ms_query(
-      &mut |stage: GeneralStage| match stage {
-        GeneralStage::SuperSimpleSelect(query) => {
-          if let proc::TableRef::TablePath(table_path) = &query.from {
-            // The TablePath exists, from the above.
-            let gen = ctx.gossip.table_generation.static_read(&table_path, self.timestamp).unwrap();
-            let schema = ctx.gossip.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
-            for col_name in &query.projection {
-              if !weak_contains_col(schema, col_name, &self.timestamp) {
-                required_cols_exist = false;
-              }
-            }
-          }
+    // Next, we see if all extra required columns in all queries are present.
+    for (table_path, col_names) in compute_extra_req_cols(&self.sql_query) {
+      for col_name in col_names {
+        // The TablePath exists, from the above.
+        let gen = ctx.gossip.table_generation.static_read(&table_path, self.timestamp).unwrap();
+        let schema = ctx.gossip.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
+        if !weak_contains_col(schema, &col_name, &self.timestamp) {
+          // We must go to MasterQueryPlanning.
+          return self.perform_master_query_planning(ctx, io_ctx);
         }
-        GeneralStage::Update(query) => {
-          // The TablePath exists, from the above.
-          let gen = ctx.gossip.table_generation.static_read(&query.table, self.timestamp).unwrap();
-          let schema = ctx.gossip.db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
-          for (col_name, _) in &query.assignment {
-            if !weak_contains_col(schema, col_name, &self.timestamp) {
-              required_cols_exist = false;
-            }
-          }
-        }
-      },
-      &self.sql_query,
-    );
-
-    if !required_cols_exist {
-      // We must go to MasterQueryPlanning.
-      return self.perform_master_query_planning(ctx, io_ctx);
+      }
     }
 
     // Next, we run the FrozenColUsageAlgorithm
@@ -702,7 +684,17 @@ impl QueryPlanningES {
     }
 
     // If we get here, the QueryPlan is valid, so we return it and go to Done.
-    self.finish_planning(ctx, io_ctx, col_usage_nodes)
+    let all_tier_maps = compute_all_tier_maps(&self.sql_query);
+    let (table_location_map, extra_req_cols) =
+      compute_query_plan_data(&self.sql_query, &ctx.gossip.table_generation, self.timestamp);
+    self.state = QueryPlanningS::Done;
+    QueryPlanningAction::Success(CoordQueryPlan {
+      all_tier_maps,
+      query_leader_map: self.compute_query_leader_map(ctx, io_ctx, &table_location_map),
+      table_location_map,
+      extra_req_cols,
+      col_usage_nodes,
+    })
   }
 
   /// Send a `PerformMasterQueryPlanning` and go to the `MasterQueryReplanning` state.
@@ -725,27 +717,6 @@ impl QueryPlanningES {
     // Advance Replanning State.
     self.state = QueryPlanningS::MasterQueryPlanning(MasterQueryPlanning { master_query_id });
     QueryPlanningAction::Wait
-  }
-
-  /// All verifications of `gossip` have been complete and we construct a
-  /// `CoordQueryPlan` before going to the `Done` state.
-  fn finish_planning<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut CoordContext,
-    io_ctx: &mut IO,
-    col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
-  ) -> QueryPlanningAction {
-    let all_tier_maps = compute_all_tier_maps(&self.sql_query);
-    let (table_location_map, extra_req_cols) =
-      compute_query_plan_data(&self.sql_query, &ctx.gossip.table_generation, self.timestamp);
-    self.state = QueryPlanningS::Done;
-    QueryPlanningAction::Success(CoordQueryPlan {
-      all_tier_maps,
-      query_leader_map: self.compute_query_leader_map(ctx, io_ctx, &table_location_map),
-      table_location_map,
-      extra_req_cols,
-      col_usage_nodes,
-    })
   }
 
   /// Compute a query_leader_map using the `TablePath`s in `table_location_map`.
@@ -810,6 +781,7 @@ impl QueryPlanningES {
       }
       MasteryQueryPlanningResult::TablePathDNE(_)
       | MasteryQueryPlanningResult::InvalidUpdate
+      | MasteryQueryPlanningResult::InvalidInsert
       | MasteryQueryPlanningResult::RequiredColumnDNE(_) => {
         // We just return a generic error to the External
         self.state = QueryPlanningS::Done;
