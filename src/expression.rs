@@ -1,4 +1,6 @@
-use crate::common::{ColBound, KeyBound, PolyColBound, SingleBound, TableRegion};
+use crate::common::{
+  ColBound, KeyBound, PolyColBound, ReadRegion, SingleBound, WriteRegion, WriteRegionType,
+};
 use crate::model::common::proc::ValExpr;
 use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
 use std::collections::{BTreeMap, BTreeSet};
@@ -723,19 +725,23 @@ fn full_bound<T>() -> ColBound<T> {
   ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Unbounded)
 }
 
-/// Computes if `single_region` and intersects with any TableRegion in `regions`.
-/// The schemas of the KeyBounds should match, i.e. they should all be the same length
-/// and every element must have corresponding types.
-pub fn does_intersect(single_region: &TableRegion, regions: &BTreeSet<TableRegion>) -> bool {
-  fn does_col_regions_intersect(col_region1: &Vec<ColName>, col_region2: &Vec<ColName>) -> bool {
-    for col in col_region1 {
-      if col_region2.contains(col) {
-        return true;
-      }
-    }
-    false
-  }
+// -----------------------------------------------------------------------------------------------
+//  Region Isolation Property Utilities
+// -----------------------------------------------------------------------------------------------
 
+/// Computes whether the `Vec<ColName>`s have a common value.
+fn does_col_regions_intersect(col_region1: &Vec<ColName>, col_region2: &Vec<ColName>) -> bool {
+  for col in col_region1 {
+    if col_region2.contains(col) {
+      return true;
+    }
+  }
+  false
+}
+
+/// Computes whether the given row regions intersect. The schemas of the KeyBounds should match,
+/// i.e. they should all be the same length and every element must have corresponding types.
+fn does_row_region_intersect(row_region1: &Vec<KeyBound>, row_region2: &Vec<KeyBound>) -> bool {
   fn does_col_intersect<T: Ord>(bound1: &ColBound<T>, bound2: &ColBound<T>) -> bool {
     let interval = col_bound_intersect_interval(bound1, bound2);
     is_interval_empty(interval)
@@ -757,22 +763,52 @@ pub fn does_intersect(single_region: &TableRegion, regions: &BTreeSet<TableRegio
     true
   }
 
-  fn does_key_region_intersect(key_region1: &Vec<KeyBound>, key_region2: &Vec<KeyBound>) -> bool {
-    for key_bound1 in key_region1 {
-      for key_bound2 in key_region2 {
-        if does_key_bound_intersect(key_bound1, key_bound2) {
-          return true;
-        }
+  for key_bound1 in row_region1 {
+    for key_bound2 in row_region2 {
+      if does_key_bound_intersect(key_bound1, key_bound2) {
+        return true;
       }
-    }
-    false
-  }
-  for region in regions {
-    if does_col_regions_intersect(&region.col_region, &single_region.col_region)
-      && does_key_region_intersect(&region.row_region, &single_region.row_region)
-    {
-      return true;
     }
   }
   false
+}
+
+/// Returns true if this `WriteRegion` has the Region Isolation Property with the `ReadRegion`.
+pub fn is_isolated(write_region: &WriteRegion, read_region: &ReadRegion) -> bool {
+  if does_row_region_intersect(&read_region.row_region, &write_region.row_region) {
+    match &write_region.write_type {
+      WriteRegionType::FixedRowsVarCols { val_col_region } => {
+        !does_col_regions_intersect(&read_region.val_col_region, &val_col_region)
+      }
+      WriteRegionType::VarRows => false,
+    }
+  } else {
+    true
+  }
+}
+
+/// Returns true if this `WriteRegion` has the Region Isolation Property with these `ReadRegion`s.
+pub fn is_isolated_multiread(
+  write_region: &WriteRegion,
+  read_regions: &BTreeSet<ReadRegion>,
+) -> bool {
+  for read_region in read_regions {
+    if !is_isolated(&write_region, &read_region) {
+      return false;
+    }
+  }
+  true
+}
+
+/// Returns true if these `WriteRegion`s has the Region Isolation Property with the `ReadRegion`.
+pub fn is_isolated_multiwrite(
+  write_regions: &BTreeSet<WriteRegion>,
+  read_region: &ReadRegion,
+) -> bool {
+  for write_region in write_regions {
+    if !is_isolated(&write_region, &read_region) {
+      return false;
+    }
+  }
+  true
 }

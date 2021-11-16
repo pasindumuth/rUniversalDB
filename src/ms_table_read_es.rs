@@ -1,6 +1,6 @@
 use crate::col_usage::collect_top_level_cols;
 use crate::common::{
-  lookup, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, TableRegion,
+  lookup, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion,
 };
 use crate::expression::{compress_row_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
@@ -234,14 +234,17 @@ impl MSTableReadES {
     row_region = compress_row_region(row_region);
 
     // Compute the Read Column Region.
-    let mut col_region = BTreeSet::<ColName>::new();
-    col_region.extend(self.sql_query.projection.clone());
-    col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
+    let mut val_col_region = BTreeSet::<ColName>::new();
+    val_col_region.extend(self.sql_query.projection.clone());
+    val_col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
+    for (key_col, _) in &ctx.table_schema.key_cols {
+      val_col_region.remove(key_col);
+    }
 
     // Move the MSTableReadES to the Pending state with the given ReadRegion.
     let protect_qid = mk_qid(io_ctx.rand());
-    let col_region = Vec::from_iter(col_region.into_iter());
-    let read_region = TableRegion { col_region, row_region };
+    let val_col_region = Vec::from_iter(val_col_region.into_iter());
+    let read_region = ReadRegion { val_col_region, row_region };
     self.state = MSReadExecutionS::Pending(Pending {
       read_region: read_region.clone(),
       query_id: protect_qid.clone(),

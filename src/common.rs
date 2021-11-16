@@ -340,11 +340,24 @@ pub struct KeyBound {
   pub col_bounds: Vec<PolyColBound>,
 }
 
-/// TableRegion, used to represent both ReadRegions and WriteRegions.
+/// Represents a ReadRegions in the Region Isolation Algorithm.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TableRegion {
-  pub col_region: Vec<ColName>,
+pub struct ReadRegion {
   pub row_region: Vec<KeyBound>,
+  pub val_col_region: Vec<ColName>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WriteRegionType {
+  FixedRowsVarCols { val_col_region: Vec<ColName> },
+  VarRows,
+}
+
+/// Represents a ReadRegions in the Region Isolation Algorithm.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WriteRegion {
+  pub row_region: Vec<KeyBound>,
+  pub write_type: WriteRegionType,
 }
 
 // -----------------------------------------------------------------------------------------------

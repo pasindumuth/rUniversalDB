@@ -3,12 +3,14 @@ use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
 use crate::common::{
   btree_multimap_insert, lookup, map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx,
-  CoreIOCtx, GossipData, KeyBound, OrigP, RemoteLeaderChangedPLm, TMStatus, TableRegion,
-  TableSchema,
+  CoreIOCtx, GossipData, KeyBound, OrigP, ReadRegion, RemoteLeaderChangedPLm, TMStatus,
+  TableSchema, WriteRegion,
 };
 use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;
-use crate::expression::{compute_key_region, does_intersect, EvalError};
+use crate::expression::{
+  compute_key_region, is_isolated_multiread, is_isolated_multiwrite, EvalError,
+};
 use crate::finish_query_rm_es::{FinishQueryRMES, FinishQueryRMInner};
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
@@ -165,7 +167,7 @@ pub struct ColumnsLocking {
 
 #[derive(Debug)]
 pub struct Pending {
-  pub read_region: TableRegion,
+  pub read_region: ReadRegion,
   pub query_id: QueryId,
 }
 
@@ -366,7 +368,7 @@ impl Paxos2PCContainer<DropTableRMES> for DDLES {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestedReadProtected {
   pub query_id: QueryId,
-  pub read_region: TableRegion,
+  pub read_region: ReadRegion,
   pub orig_p: OrigP,
 }
 
@@ -374,15 +376,15 @@ pub struct RequestedReadProtected {
 pub struct VerifyingReadWriteRegion {
   pub orig_p: OrigP,
   pub m_waiting_read_protected: BTreeSet<RequestedReadProtected>,
-  pub m_read_protected: BTreeSet<TableRegion>,
-  pub m_write_protected: BTreeSet<TableRegion>,
+  pub m_read_protected: BTreeSet<ReadRegion>,
+  pub m_write_protected: BTreeSet<WriteRegion>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ReadWriteRegion {
   pub orig_p: OrigP,
-  pub m_read_protected: BTreeSet<TableRegion>,
-  pub m_write_protected: BTreeSet<TableRegion>,
+  pub m_read_protected: BTreeSet<ReadRegion>,
+  pub m_write_protected: BTreeSet<WriteRegion>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -458,7 +460,7 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
 // -----------------------------------------------------------------------------------------------
 
 pub mod plm {
-  use crate::common::TableRegion;
+  use crate::common::ReadRegion;
   use crate::model::common::{CQueryPath, TQueryPath};
   use crate::model::common::{ColName, QueryId, Timestamp};
   use crate::storage::GenericTable;
@@ -480,7 +482,7 @@ pub mod plm {
   pub struct ReadProtected {
     pub query_id: QueryId,
     pub timestamp: Timestamp,
-    pub region: TableRegion,
+    pub region: ReadRegion,
   }
 }
 
@@ -645,7 +647,7 @@ pub struct TabletContext {
 
   pub waiting_read_protected: BTreeMap<Timestamp, BTreeSet<RequestedReadProtected>>,
   pub inserting_read_protected: BTreeMap<Timestamp, BTreeSet<RequestedReadProtected>>,
-  pub read_protected: BTreeMap<Timestamp, BTreeSet<TableRegion>>,
+  pub read_protected: BTreeMap<Timestamp, BTreeSet<ReadRegion>>,
 
   // Schema Change and Locking
   pub waiting_locked_cols: BTreeMap<QueryId, RequestedLockedCols>,
@@ -1413,7 +1415,7 @@ impl TabletContext {
   /// Checks if the give `write_region` has a Region Isolation with subsequent reads.
   pub fn check_write_region_isolation(
     &self,
-    write_region: &TableRegion,
+    write_region: &WriteRegion,
     timestamp: &Timestamp,
   ) -> bool {
     // We iterate through every subsequent Reads that this `write_region` can conflict
@@ -1422,22 +1424,22 @@ impl TabletContext {
     // First, verify Region Isolation with ReadRegions of subsequent *_writes.
     let bound = (Bound::Excluded(timestamp), Bound::Unbounded);
     for (_, verifying_write) in self.verifying_writes.range(bound) {
-      if does_intersect(write_region, &verifying_write.m_read_protected) {
+      if is_isolated_multiread(write_region, &verifying_write.m_read_protected) {
         return false;
       }
     }
     for (_, prepared_write) in self.prepared_writes.range(bound) {
-      if does_intersect(write_region, &prepared_write.m_read_protected) {
+      if is_isolated_multiread(write_region, &prepared_write.m_read_protected) {
         return false;
       }
     }
     for (_, inserting_prepared_write) in self.inserting_prepared_writes.range(bound) {
-      if does_intersect(write_region, &inserting_prepared_write.m_read_protected) {
+      if is_isolated_multiread(write_region, &inserting_prepared_write.m_read_protected) {
         return false;
       }
     }
     for (_, committed_write) in self.committed_writes.range(bound) {
-      if does_intersect(write_region, &committed_write.m_read_protected) {
+      if is_isolated_multiread(write_region, &committed_write.m_read_protected) {
         return false;
       }
     }
@@ -1445,16 +1447,16 @@ impl TabletContext {
     // Then, verify Region Isolation with ReadRegions of subsequent Reads.
     let bound = (Bound::Included(timestamp), Bound::Unbounded);
     for (_, read_regions) in self.read_protected.range(bound) {
-      if does_intersect(write_region, read_regions) {
+      if is_isolated_multiread(write_region, read_regions) {
         return false;
       }
     }
     for (_, inserting_read_regions) in self.inserting_read_protected.range(bound) {
-      let mut read_regions = BTreeSet::<TableRegion>::new();
+      let mut read_regions = BTreeSet::<ReadRegion>::new();
       for req in inserting_read_regions {
         read_regions.insert(req.read_region.clone());
       }
-      if does_intersect(write_region, &read_regions) {
+      if is_isolated_multiread(write_region, &read_regions) {
         return false;
       }
     }
@@ -1604,7 +1606,7 @@ impl TabletContext {
 
         // Process `m_read_protected`
         for protect_request in &verifying_write.m_waiting_read_protected {
-          if !does_intersect(&protect_request.read_region, &cum_write_regions) {
+          if !is_isolated_multiwrite(&cum_write_regions, &protect_request.read_region) {
             self.grant_m_local_read_protected(
               io_ctx,
               statuses,
@@ -1619,7 +1621,7 @@ impl TabletContext {
         let bound = (Bound::Included(prev_write_timestamp), Bound::Excluded(cur_timestamp));
         for (timestamp, set) in self.waiting_read_protected.range(bound) {
           for protect_request in set {
-            if !does_intersect(&protect_request.read_region, &cum_write_regions) {
+            if !is_isolated_multiwrite(&cum_write_regions, &protect_request.read_region) {
               self.grant_local_read_protected(
                 io_ctx,
                 statuses,
@@ -1642,7 +1644,7 @@ impl TabletContext {
       let bound = (Bound::Included(prev_write_timestamp), Bound::Unbounded);
       for (timestamp, set) in self.waiting_read_protected.range(bound) {
         for protect_request in set {
-          if !does_intersect(&protect_request.read_region, &cum_write_regions) {
+          if !is_isolated_multiwrite(&cum_write_regions, &protect_request.read_region) {
             self.grant_local_read_protected(io_ctx, statuses, *timestamp, protect_request.clone());
             return true;
           }
@@ -1661,7 +1663,10 @@ impl TabletContext {
     for (timestamp, set) in &self.waiting_read_protected {
       if let Some(verifying_write) = self.verifying_writes.get(timestamp) {
         for protect_request in set {
-          if does_intersect(&protect_request.read_region, &verifying_write.m_write_protected) {
+          if is_isolated_multiwrite(
+            &verifying_write.m_write_protected,
+            &protect_request.read_region,
+          ) {
             self.deadlock_safety_write_abort(
               io_ctx,
               statuses,

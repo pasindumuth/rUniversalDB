@@ -1,6 +1,7 @@
 use crate::col_usage::collect_top_level_cols;
 use crate::common::{
-  lookup, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, TableRegion,
+  lookup, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, WriteRegion,
+  WriteRegionType,
 };
 use crate::expression::{compress_row_region, is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
@@ -233,12 +234,15 @@ impl MSTableWriteES {
     row_region = compress_row_region(row_region);
 
     // Compute the Write Column Region.
-    let mut col_region = BTreeSet::<ColName>::new();
-    col_region.extend(self.sql_query.assignment.iter().map(|(col, _)| col.clone()));
+    let mut val_col_region = BTreeSet::<ColName>::new();
+    val_col_region.extend(self.sql_query.assignment.iter().map(|(col, _)| col.clone()));
 
     // Compute the Write Region
-    let col_region = Vec::from_iter(col_region.into_iter());
-    let write_region = TableRegion { col_region, row_region: row_region.clone() };
+    let val_col_region = Vec::from_iter(val_col_region.into_iter());
+    let write_region = WriteRegion {
+      write_type: WriteRegionType::FixedRowsVarCols { val_col_region },
+      row_region: row_region.clone(),
+    };
 
     // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
     // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
@@ -247,11 +251,16 @@ impl MSTableWriteES {
       MSTableWriteAction::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
     } else {
       // Compute the Read Column Region.
-      let col_region = self.query_plan.col_usage_node.safe_present_cols.clone();
-      let read_region = TableRegion { col_region, row_region };
+      let mut val_col_region = BTreeSet::<ColName>::new();
+      val_col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
+      for (key_col, _) in &ctx.table_schema.key_cols {
+        val_col_region.remove(key_col);
+      }
 
       // Move the MSTableWriteES to the Pending state with the given ReadRegion.
       let protect_qid = mk_qid(io_ctx.rand());
+      let val_col_region = Vec::from_iter(val_col_region.into_iter());
+      let read_region = ReadRegion { val_col_region, row_region };
       self.state = MSWriteExecutionS::Pending(Pending {
         read_region: read_region.clone(),
         query_id: protect_qid.clone(),
