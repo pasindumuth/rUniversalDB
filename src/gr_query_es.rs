@@ -465,7 +465,8 @@ impl GRQueryES {
 
         // Validate the LeadershipId of PaxosGroups that the PerformQuery will be sent to.
         // We do this before sending any messages, in case it fails.
-        let tids = ctx.get_min_tablets(table_path, &child_sql_query.selection);
+        let gen = self.query_plan.table_location_map.get(table_path).unwrap();
+        let tids = ctx.get_min_tablets(table_path, gen, &child_sql_query.selection);
         for tid in &tids {
           let sid = ctx.gossip.tablet_address_config.get(&tid).unwrap();
           if let Some(lid) = query_leader_map.get(sid) {

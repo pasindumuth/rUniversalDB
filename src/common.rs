@@ -2,8 +2,8 @@ use crate::col_usage::FrozenColUsageNode;
 use crate::coord::CoordForwardMsg;
 use crate::master::MasterTimerInput;
 use crate::model::common::{
-  CTNodePath, ColName, ColType, CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, QueryId,
-  SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap,
+  proc, CTNodePath, ColName, ColType, CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId,
+  QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap,
   Timestamp,
 };
 use crate::model::message as msg;
@@ -280,6 +280,10 @@ pub fn merge_table_views(
     }
   }
   (schema, views)
+}
+
+pub fn to_table_path(table_ref: &proc::TableRef) -> &TablePath {
+  cast!(proc::TableRef::TablePath, table_ref).unwrap()
 }
 
 // -----------------------------------------------------------------------------------------------

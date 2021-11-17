@@ -20,6 +20,7 @@ pub mod master;
 pub mod master_query_planning_es;
 pub mod model;
 pub mod ms_query_coord_es;
+pub mod ms_table_insert_es;
 pub mod ms_table_read_es;
 pub mod ms_table_write_es;
 pub mod multiversion_map;

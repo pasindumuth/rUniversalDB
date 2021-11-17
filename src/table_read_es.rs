@@ -1,7 +1,7 @@
 use crate::col_usage::collect_top_level_cols;
 use crate::common::{
-  btree_multimap_insert, lookup, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan,
-  ReadRegion,
+  btree_multimap_insert, lookup, mk_qid, to_table_path, CoreIOCtx, KeyBound, OrigP, QueryESResult,
+  QueryPlan, ReadRegion,
 };
 use crate::expression::{compress_row_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
@@ -17,8 +17,8 @@ use crate::server::{
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
   compute_subqueries, ColumnsLocking, ContextKeyboundComputer, Executing, Pending,
-  QueryReplanningSqlView, RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable,
-  SubqueryFinished, SubqueryPending, TabletContext,
+  RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
+  SubqueryPending, TabletContext,
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -81,7 +81,9 @@ impl TableReadES {
     all_cols.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
 
     // If there are extra required cols, we add them in.
-    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(self.sql_query.table()) {
+    if let Some(extra_cols) =
+      self.query_plan.extra_req_cols.get(to_table_path(&self.sql_query.from))
+    {
       all_cols.extend(extra_cols.clone());
     }
 
@@ -119,7 +121,9 @@ impl TableReadES {
     }
 
     // Next, check that `extra_req_cols` are present.
-    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(self.sql_query.table()) {
+    if let Some(extra_cols) =
+      self.query_plan.extra_req_cols.get(to_table_path(&self.sql_query.from))
+    {
       for col in extra_cols {
         if !weak_contains_col(&ctx.table_schema, col, &self.timestamp) {
           return false;
@@ -185,7 +189,7 @@ impl TableReadES {
     self.common_locked_cols(ctx, io_ctx)
   }
 
-  fn remote_waiting_global_lock<IO: CoreIOCtx>(
+  fn remove_waiting_global_lock<IO: CoreIOCtx>(
     &mut self,
     _: &mut TabletContext,
     _: &mut IO,
@@ -215,7 +219,7 @@ impl TableReadES {
     } else {
       // Here, note that LocalLockedCols must have previously been provided because
       // GlobalLockedCols required a PL insertion.
-      self.remote_waiting_global_lock(ctx, io_ctx, &locked_cols_qid)
+      self.remove_waiting_global_lock(ctx, io_ctx, &locked_cols_qid)
     }
   }
 
@@ -368,7 +372,7 @@ impl TableReadES {
     io_ctx: &mut IO,
     query_id: QueryId,
   ) -> TableAction {
-    self.remote_waiting_global_lock(ctx, io_ctx, &query_id)
+    self.remove_waiting_global_lock(ctx, io_ctx, &query_id)
   }
 
   /// This is called if a subquery fails. This simply responds to the sender

@@ -5,7 +5,6 @@ use crate::col_usage::{
 use crate::common::{lookup, mk_qid, OrigP, QueryPlan, TMStatus};
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
-use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
   proc, ColName, Context, ContextRow, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId,
   SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId, TierMap, Timestamp,
@@ -443,7 +442,8 @@ impl FullMSCoordES {
                 },
               ),
             };
-            let tids = ctx.ctx(io_ctx).get_min_tablets(&table_path, &select_query.selection);
+            let gen = es.query_plan.table_location_map.get(table_path).unwrap();
+            let tids = ctx.ctx(io_ctx).get_min_tablets(&table_path, gen, &select_query.selection);
             SendHelper::TableQuery(perform_query, tids)
           }
           proc::TableRef::TransTableName(sub_trans_table_name) => {
@@ -484,10 +484,30 @@ impl FullMSCoordES {
             query_plan,
           }),
         };
-        let tids = ctx.ctx(io_ctx).get_min_tablets(&update_query.table, &update_query.selection);
+        let table_path = &update_query.table;
+        let gen = es.query_plan.table_location_map.get(table_path).unwrap();
+        let tids = ctx.ctx(io_ctx).get_min_tablets(table_path, gen, &update_query.selection);
         SendHelper::TableQuery(perform_query, tids)
       }
-      MSQueryStage::Insert(_) => panic!(),
+      proc::MSQueryStage::Insert(insert_query) => {
+        let perform_query = msg::PerformQuery {
+          root_query_path: root_query_path.clone(),
+          sender_path: sender_path.clone().into_ct(),
+          query_id: child_qid.clone(),
+          query: msg::GeneralQuery::InsertQuery(msg::InsertQuery {
+            timestamp: es.timestamp.clone(),
+            context: context.clone(),
+            sql_query: insert_query.clone(),
+            query_plan,
+          }),
+        };
+        // As an optimization, for inserts, we can evaluate the VALUES and select only the
+        // Tablets that are written to. For now, we just consider all.
+        let table_path = &insert_query.table;
+        let gen = es.query_plan.table_location_map.get(table_path).unwrap();
+        let tids = ctx.ctx(io_ctx).get_all_tablets(table_path, gen);
+        SendHelper::TableQuery(perform_query, tids)
+      }
     };
 
     match helper {

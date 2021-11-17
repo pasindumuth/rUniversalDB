@@ -3,6 +3,7 @@ use crate::col_usage::FrozenColUsageNode;
 use crate::common::{GossipData, QueryPlan};
 use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::drop_table_tm_es::DropTablePayloadTypes;
+use crate::expression::EvalError;
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::master::MasterBundle;
 use crate::model::common::{
@@ -301,6 +302,7 @@ pub enum QueryError {
   DeadlockSafetyAbortion,
   TimestampConflict,
 
+  // Lateral error, used for recursive aborting but never to be sent back to the External
   LateralError,
 
   // Query Validation Errors
@@ -326,6 +328,7 @@ pub enum GeneralQuery {
   SuperSimpleTransTableSelectQuery(SuperSimpleTransTableSelectQuery),
   SuperSimpleTableSelectQuery(SuperSimpleTableSelectQuery),
   UpdateQuery(UpdateQuery),
+  InsertQuery(InsertQuery),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -353,6 +356,14 @@ pub struct UpdateQuery {
   pub timestamp: Timestamp,
   pub context: Context,
   pub sql_query: proc::Update,
+  pub query_plan: QueryPlan,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InsertQuery {
+  pub timestamp: Timestamp,
+  pub context: Context,
+  pub sql_query: proc::Insert,
   pub query_plan: QueryPlan,
 }
 

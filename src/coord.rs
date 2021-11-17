@@ -310,6 +310,7 @@ impl CoordContext {
               }
               msg::GeneralQuery::SuperSimpleTableSelectQuery(_) => panic!(),
               msg::GeneralQuery::UpdateQuery(_) => panic!(),
+              msg::GeneralQuery::InsertQuery(_) => panic!(),
             }
           }
           msg::CoordMessage::CancelQuery(cancel_query) => {
@@ -686,6 +687,10 @@ impl CoordContext {
         let ms_coord = statuses.ms_coord_ess.remove(&query_id).unwrap();
         self.external_request_id_map.remove(&ms_coord.request_id);
 
+        if all_rms.is_empty() {
+          // TODO: respond to the External immediately. and skip the next stuff.
+        }
+
         // Construct the Prepare messages
         let mut prepare_payloads = BTreeMap::<TNodePath, FinishQueryPrepare>::new();
         for rm in all_rms {
@@ -906,6 +911,8 @@ impl CoordContext {
     if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&register.root_query_id) {
       ms_coord.es.handle_register_query(register);
     } else {
+      // TODO: this is incorrect; we need to also check for FinishQueryES to see if this
+      //  is an RM.
       // Otherwise, the MSCoordES no longer exists, and we should
       // cancel the MSQueryES immediately.
       let query_path = register.query_path;

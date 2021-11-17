@@ -16,8 +16,8 @@ use crate::server::{
 use crate::storage::{GenericTable, MSStorageView};
 use crate::tablet::{
   compute_subqueries, ColumnsLocking, ContextKeyboundComputer, Executing, MSQueryES, Pending,
-  QueryReplanningSqlView, RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable,
-  SubqueryFinished, SubqueryPending, TabletContext,
+  RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
+  SubqueryPending, TabletContext,
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -87,7 +87,7 @@ impl MSTableWriteES {
     all_cols.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
 
     // If there are extra required cols, we add them in.
-    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(self.sql_query.table()) {
+    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(&self.sql_query.table) {
       all_cols.extend(extra_cols.clone());
     }
 
@@ -125,7 +125,7 @@ impl MSTableWriteES {
     }
 
     // Next, check that `extra_req_cols` are present.
-    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(self.sql_query.table()) {
+    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(&self.sql_query.table) {
       for col in extra_cols {
         if !weak_contains_col(&ctx.table_schema, col, &self.timestamp) {
           return false;

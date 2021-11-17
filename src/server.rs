@@ -7,6 +7,7 @@ use crate::model::common::{
   TransTableName,
 };
 use crate::model::message as msg;
+use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
 use std::sync::Arc;
@@ -234,21 +235,29 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
   pub fn get_min_tablets(
     &self,
     table_path: &TablePath,
+    gen: &Gen,
     selection: &proc::ValExpr,
   ) -> Vec<TabletGroupId> {
-    // Next, we try to reduce the number of TabletGroups we must contact by computing
-    // the key_region of TablePath that we're going to be reading.
-    // TODO: fix this logic
-    let tablet_groups = self.gossip.sharding_config.get(&(table_path.clone(), Gen(0))).unwrap();
-    let key_cols = &self.gossip.db_schema.get(&(table_path.clone(), Gen(0))).unwrap().key_cols;
+    // Compute the Row Region that this selection is accessing.
+    let table_path_gen = (table_path.clone(), gen.clone());
+    let key_cols = &self.gossip.db_schema.get(&table_path_gen).unwrap().key_cols;
     match &compute_key_region(selection, BTreeMap::new(), key_cols) {
       Ok(_) => {
-        // We use a trivial implementation for now, where we just return all TabletGroupIds
-        tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone());
-        unimplemented!()
+        // TODO: We use a trivial implementation for now. Do a proper implementation later.
+        self.get_all_tablets(table_path, gen)
       }
-      Err(_) => panic!(),
+      Err(_) => {
+        // TODO: return an error to propagate back up if the selection cannot be evaluated.
+        panic!()
+      }
     }
+  }
+
+  /// Simply returns all `TabletGroupId`s for a `TablePath` and `Gen`
+  pub fn get_all_tablets(&self, table_path: &TablePath, gen: &Gen) -> Vec<TabletGroupId> {
+    let table_path_gen = (table_path.clone(), gen.clone());
+    let tablet_groups = self.gossip.sharding_config.get(&table_path_gen).unwrap();
+    tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone()).collect()
   }
 }
 

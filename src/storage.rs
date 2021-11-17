@@ -12,11 +12,15 @@ use std::collections::{BTreeMap, Bound};
 /// `(PrimaryKey, Option<ColName>)` as the "Storage Key". We refer to the `Option<ColName>`
 /// in the Storage Key as the "Column Indicator". We refer to a Storage Key-Value pair
 /// as a Storage Row. We refer to a Storage Row where the Column Indicator is `None` as
-/// a "Presence Row".
+/// a "Presence Row". The Storage Value in the Presence Row is `None` or `PRESENCE_VALN`,
+/// indicate that the row is absent or present respectively.
 pub type GenericMVTable = BTreeMap<(PrimaryKey, Option<ColName>), Vec<(Timestamp, ColValN)>>;
 /// A single-versioned version of the above to hold views constructed by a write. We use
 /// similar terminology to `GenericMVTable` to describe this.
 pub type GenericTable = BTreeMap<(PrimaryKey, Option<ColName>), ColValN>;
+
+/// A constant that indicates that a row is present.
+pub const PRESENCE_VALN: ColValN = Some(ColVal::Int(0));
 
 /// Finds the version at the given `timestamp`.
 pub fn find_version<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> &Option<V> {
@@ -272,7 +276,7 @@ pub fn commit_to_storage(
 ) {
   for (key, value) in compressed_view {
     // Recall that since MSWriteES does Type Checking, the Compressed View can be applied
-    // directory to `storage` without further checks.
+    // directly to `storage` without further checks.
     if let Some(versions) = storage.get_mut(&key) {
       // We do a sanity check that that the Region Isolation Algorithm did its job.
       let (last_timestamp, _) = versions.last().unwrap();
@@ -440,7 +444,7 @@ fn select_row(
   row
 }
 
-/// Convert a `GenericTable` to a `TableSchema` by selecting the columns in `selection`.
+/// Convert a `GenericTable` to a `TableView` by selecting the columns in `selection`.
 fn convert_to_table_view(
   snapshot_table: GenericTable,
   table_schema: &TableSchema,
