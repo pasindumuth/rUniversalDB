@@ -439,7 +439,6 @@ pub mod proc {
   // (We add DML parsed SQL data here for consistency. These don't appear in
   // `iast` because they can be constructed from SQL trivially.
 
-  // TODO: Parse this up right
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct CreateTable {
     pub table_path: TablePath,

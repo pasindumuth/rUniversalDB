@@ -58,7 +58,7 @@ pub enum SlaveExternalReq {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveMessage {
-  ExternalMessage(SlaveExternalReq),
+  SlaveExternalReq(SlaveExternalReq),
   RemoteMessage(RemoteMessage<SlaveRemotePayload>),
   RemoteLeaderChangedGossip(RemoteLeaderChangedGossip),
   PaxosDriverMessage(PaxosDriverMessage<SharedPaxosBundle>),

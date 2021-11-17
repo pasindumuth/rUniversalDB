@@ -13,13 +13,13 @@ use runiversal::test_utils::{cn, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
 
 fn main() {
-  // Fundamental seed used for all random number generation,
-  // providing determinism.
-  let mut seed = [0; 16];
-  for i in 0..16 {
-    seed[i] = i as u8;
-  }
+  tp_test()
+}
 
+/// This is a test that solely tests Transaction Processing. We take all PaxosGroups to just
+/// have one node. We only check for SQL semantics compatibility.
+fn tp_test() {
+  let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
     (mk_sid("s0"), vec![slave_eid(&0)]),
     (mk_sid("s1"), vec![slave_eid(&1)]),
@@ -30,153 +30,48 @@ fn main() {
   .into_iter()
   .collect();
 
-  let master_addres_config: Vec<EndpointId> =
-    vec![mk_eid("m0"), mk_eid("m1"), mk_eid("m2"), mk_eid("m3"), mk_eid("m4")];
+  let mut sim = Simulation::new([0; 16], 1, slave_address_config, master_address_config);
 
-  // We just have one Tablet per Slave for now.
-  let _tablet_address_config: BTreeMap<TabletGroupId, SlaveGroupId> = vec![
-    (mk_tid("t0"), mk_sid("s0")),
-    (mk_tid("t1"), mk_sid("s1")),
-    (mk_tid("t2"), mk_sid("s2")),
-    (mk_tid("t3"), mk_sid("s3")),
-    (mk_tid("t4"), mk_sid("s4")),
-  ]
-  .into_iter()
-  .collect();
-
-  let _schema: BTreeMap<(TablePath, Gen), TableSchema> = vec![
-    (
-      (mk_tab("tab0"), Gen(0)),
-      TableSchema::new(vec![(cn("id0"), ColType::String)], vec![(cn("c1"), ColType::Int)]),
-    ),
-    (
-      (mk_tab("tab1"), Gen(0)),
-      TableSchema::new(
-        vec![(cn("id1"), ColType::String), (cn("id2"), ColType::String)],
-        vec![(cn("c2"), ColType::Int)],
-      ),
-    ),
-    (
-      (mk_tab("tab2"), Gen(0)),
-      TableSchema::new(
-        vec![(cn("id3"), ColType::Int)],
-        vec![(cn("c3"), ColType::String), (cn("c4"), ColType::Bool)],
-      ),
-    ),
-  ]
-  .into_iter()
-  .collect();
-
-  #[rustfmt::skip]
-  let _sharding_config: BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>> = vec![
-    (
-      (mk_tab("tab0"), Gen(0)),
-      vec![
-        (
-          TabletKeyRange {
-            start: None,
-            end: Some(PrimaryKey { cols: vec![cvs("d")] })
-          },
-          mk_tid("t0"),
-        ),
-        (
-          TabletKeyRange {
-            start: Some(PrimaryKey { cols: vec![cvs("d")] }),
-            end: Some(PrimaryKey { cols: vec![cvs("q")] }),
-          },
-          mk_tid("t1"),
-        ),
-        (
-          TabletKeyRange {
-            start: Some(PrimaryKey { cols: vec![cvs("q")] }),
-            end: None
-          },
-          mk_tid("t2"),
-        ),
-      ],
-    ),
-    (
-      (mk_tab("tab1"), Gen(0)),
-      vec![
-        (
-          TabletKeyRange {
-            start: None,
-            end: Some(PrimaryKey { cols: vec![cvs("f"), cvs("h")] })
-          },
-          mk_tid("t2"),
-        ),
-        (
-          TabletKeyRange {
-            start: Some(PrimaryKey { cols: vec![cvs("f"), cvs("h")] }),
-            end: None
-          },
-          mk_tid("t3"),
-        ),
-      ],
-    ),
-    (
-      (mk_tab("tab2"), Gen(0)),
-      vec![
-        (
-          TabletKeyRange {
-            start: None,
-            end: Some(PrimaryKey { cols: vec![cvi(-100)] })
-          },
-          mk_tid("t2"),
-        ),
-        (
-          TabletKeyRange {
-            start: Some(PrimaryKey { cols: vec![cvi(-100)] }),
-            end: Some(PrimaryKey { cols: vec![cvi(100)] }),
-          },
-          mk_tid("t3"),
-        ),
-        (
-          TabletKeyRange {
-            start: Some(PrimaryKey { cols: vec![cvi(100)] }),
-            end: None
-          },
-          mk_tid("t4"),
-        ),
-      ],
-    ),
-  ]
-  .into_iter()
-  .collect();
-
-  let mut sim = Simulation::new(seed, 5, slave_address_config, master_addres_config);
-
-  // let query = "\
-  //     SELECT a, b, 123, myfunc(b) \
-  //     FROM table_1 \
-  //     WHERE a > b AND b < 100 \
-  //     ORDER BY a DESC, b;
-  //   \
-  //     SELECT a, b, 123, myfunc(b) \
-  //     FROM table_1 \
-  //     WHERE a > b AND b < 100 \
-  //     ORDER BY a DESC, b";
-
-  // let query = "\
-  //   ALTER TABLE bank ADD COLUMN address STRING UNIQUE;";
-
-  let query = "\
-    SELECT a, b, c, d \
-    FROM table_1 AS hi(foo, boo, bar) \
-    WHERE a > b AND b < -100 \
-    ORDER BY a DESC, b";
+  // Create a Table
+  let query = "
+    CREATE TABLE inventory (
+      product_id INT PRIMARY KEY,
+      email      VARCHAR
+    );
+  ";
 
   sim.add_msg(
-    msg::NetworkMessage::Slave(msg::SlaveMessage::ExternalMessage(
-      msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
+    msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+      msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
         sender_eid: client_eid(&0),
-        request_id: RequestId("rid".to_string()),
+        request_id: RequestId("rid0".to_string()),
         query: query.to_string(),
       }),
     )),
-    &client_eid(&2),
-    &slave_eid(&2),
+    &client_eid(&0),
+    &mk_eid("me0"),
   );
+
+  sim.simulate_all();
+  println!("{:#?}", sim);
+
+  // let query = "\
+  //   SELECT a, b, c, d \
+  //   FROM table_1 AS hi(foo, boo, bar) \
+  //   WHERE a > b AND b < -100 \
+  //   ORDER BY a DESC, b";
+  //
+  // sim.add_msg(
+  //   msg::NetworkMessage::Slave(msg::SlaveMessage::ExternalMessage(
+  //     msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
+  //       sender_eid: client_eid(&0),
+  //       request_id: RequestId("rid1".to_string()),
+  //       query: query.to_string(),
+  //     }),
+  //   )),
+  //   &client_eid(&2),
+  //   &slave_eid(&2),
+  // );
 
   // sim.simulate_all();
 }

@@ -866,14 +866,14 @@ impl MasterContext {
     while !self.run_main_loop_once(io_ctx, statuses) {}
   }
 
-  /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
+  /// Thus runs one iteration of the Main Loop, returning `true` exactly when nothing changes.
   fn run_main_loop_once<IO: MasterIOCtx>(
     &mut self,
     io_ctx: &mut IO,
     statuses: &mut Statuses,
   ) -> bool {
     self.advance_ddl_ess(io_ctx, statuses);
-    false
+    true
   }
 
   /// This function advances the DDL ESs as far as possible. Properties:

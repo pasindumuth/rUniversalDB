@@ -40,7 +40,7 @@ fn sql() {
   //          WHERE a > b AND b < 100 \
   //          ORDER BY a DESC, b";
 
-  let sql = "ALTER TABLE t ADD CONSTRAINT K FOREIGN KEY (c) REFERENCES t(a);";
+  let sql = "CREATE TABLE mytable (product_id INT PRIMARY KEY);";
 
   let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
 

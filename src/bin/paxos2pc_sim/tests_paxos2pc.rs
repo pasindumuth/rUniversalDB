@@ -162,6 +162,7 @@ pub fn test_single(test_num: u32, seed: [u8; 16]) {
         "{:?}. Paxos2PC Test Failed: Invalid PLs after cooldown. Seed: {:?}",
         test_num, seed
       );
+      panic!()
     }
     CompletionResult::SuccessfullyCommitted => {
       println!("{:?}.    Paxos2PC SuccessfullyCommitted!", test_num);

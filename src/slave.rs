@@ -264,7 +264,7 @@ impl SlaveContext {
     message: msg::SlaveMessage,
   ) {
     match message {
-      msg::SlaveMessage::ExternalMessage(request) => {
+      msg::SlaveMessage::SlaveExternalReq(request) => {
         if self.is_leader() {
           self.handle_input(io_ctx, statuses, SlaveForwardMsg::SlaveExternalReq(request))
         }

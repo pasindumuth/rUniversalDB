@@ -1,7 +1,7 @@
 use crate::model::common::{iast, ColName, ColType};
 use crate::model::common::{proc, TablePath};
 use sqlparser::ast;
-use sqlparser::ast::{DataType, Query};
+use sqlparser::ast::{ColumnOption, DataType, Query};
 
 // TODO: We should return a Result if there is a conversion failure to MSQuery.
 
@@ -220,6 +220,39 @@ pub fn convert_ddl_ast(raw_query: &Vec<ast::Statement>) -> DDLQuery {
   assert_eq!(raw_query.len(), 1, "Only one SQL statement support atm.");
   let stmt = &raw_query[0];
   match stmt {
+    ast::Statement::CreateTable { name, columns, .. } => {
+      let table_path = TablePath(name.0.get(0).unwrap().value.clone());
+      let mut key_cols = Vec::<(ColName, ColType)>::new();
+      let mut val_cols = Vec::<(ColName, ColType)>::new();
+      for col in columns {
+        let col_name = ColName(col.name.value.clone());
+        let col_type = match &col.data_type {
+          DataType::Varchar(_) => ColType::String,
+          DataType::Int => ColType::Int,
+          DataType::Boolean => ColType::Bool,
+          _ => panic!("Unsupported Create Table datatype {:?}", col.data_type),
+        };
+        let mut is_key_col = false;
+        for option_def in &col.options {
+          if let ColumnOption::Unique { is_primary, .. } = &option_def.option {
+            if *is_primary {
+              is_key_col = true;
+            }
+          }
+        }
+        if is_key_col {
+          key_cols.push((col_name, col_type));
+        } else {
+          val_cols.push((col_name, col_type));
+        }
+      }
+      DDLQuery::Create(proc::CreateTable { table_path, key_cols, val_cols })
+    }
+    ast::Statement::Drop { names, .. } => {
+      let name = names.get(0).unwrap().clone();
+      let table_path = TablePath(name.0.get(0).unwrap().value.clone());
+      DDLQuery::Drop(proc::DropTable { table_path })
+    }
     ast::Statement::AlterTable { name, operation } => match operation {
       ast::AlterTableOperation::AddColumn { column_def } => DDLQuery::Alter(proc::AlterTable {
         table_path: TablePath(name.0.get(0).unwrap().value.clone()),

@@ -156,13 +156,13 @@ mod tests {
     let v2 = String::from("v2");
     let v3 = String::from("v3");
     assert_eq!(mvm.read(&k, 1), None);
-    mvm.write(&k, Some(v1.clone()), 2).is_ok();
-    mvm.write(&k, Some(v2.clone()), 4).is_ok();
+    mvm.write(&k, Some(v1.clone()), 2);
+    mvm.write(&k, Some(v2.clone()), 4);
     assert_eq!(mvm.read(&k, 3), Some(v1));
     assert_eq!(mvm.read(&k, 5), Some(v2));
-    mvm.write(&k, Some(v3.clone()), 6).is_ok();
+    mvm.write(&k, Some(v3.clone()), 6);
     assert_eq!(mvm.read(&k, 6), Some(v3));
-    mvm.write(&k, None, 7).is_ok();
+    mvm.write(&k, None, 7);
     assert_eq!(mvm.read(&k, 7), None);
   }
 }
