@@ -88,6 +88,8 @@ pub trait PaxosContextBase<BundleT> {
 pub enum PaxosTimerEvent {
   RetryInsert(UUID),
   LeaderHeartbeat,
+  /// When this event occurs, PaxosDriver sends out `IndexRequests`, which, recall, is used to
+  /// clean up the `PaxosLog`.
   NextIndex,
 }
 

@@ -570,7 +570,7 @@ impl paxos2pc_tm::RMServerContext<FinishQueryPayloadTypes> for TabletContext {
 
 #[derive(Debug)]
 pub struct TabletState {
-  pub tablet_context: TabletContext,
+  pub ctx: TabletContext,
   pub statuses: Statuses,
 }
 
@@ -618,12 +618,12 @@ pub struct TabletContext {
 }
 
 impl TabletState {
-  pub fn new(tablet_context: TabletContext) -> TabletState {
-    TabletState { tablet_context, statuses: Default::default() }
+  pub fn new(ctx: TabletContext) -> TabletState {
+    TabletState { ctx, statuses: Default::default() }
   }
 
   pub fn handle_input<IO: CoreIOCtx>(&mut self, io_ctx: &mut IO, coord_input: TabletForwardMsg) {
-    self.tablet_context.handle_input(io_ctx, &mut self.statuses, coord_input);
+    self.ctx.handle_input(io_ctx, &mut self.statuses, coord_input);
   }
 }
 

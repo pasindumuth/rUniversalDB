@@ -370,6 +370,43 @@ impl Simulation {
     // Metadata
     sim.next_int = 0;
     sim.true_timestamp = 0;
+
+    // Bootstrap the nodes
+    for (_, slave_data) in &mut sim.slave_data {
+      let current_time = sim.true_timestamp;
+      let this_eid = slave_data.slave_state.ctx.this_eid.clone();
+      let mut slave_back_messages = VecDeque::<SlaveBackMessage>::new();
+      let mut io_ctx = TestSlaveIOCtx {
+        rand: &mut sim.rand,
+        current_time, // TODO: simulate clock skew
+        queues: &mut sim.queues,
+        nonempty_queues: &mut sim.nonempty_queues,
+        this_sid: &slave_data.slave_state.ctx.this_sid.clone(),
+        this_eid: &this_eid,
+        tablet_states: &mut slave_data.tablet_states,
+        slave_back_messages: &mut slave_back_messages,
+        coord_states: &mut slave_data.coord_states,
+        tasks: &mut slave_data.tasks,
+      };
+
+      slave_data.slave_state.bootstrap(&mut io_ctx);
+    }
+
+    for (_, master_data) in &mut sim.master_data {
+      let current_time = sim.true_timestamp;
+      let this_eid = master_data.master_state.ctx.this_eid.clone();
+      let mut io_ctx = TestMasterIOCtx {
+        rand: &mut sim.rand,
+        current_time, // TODO: simulate clock skew
+        queues: &mut sim.queues,
+        nonempty_queues: &mut sim.nonempty_queues,
+        this_eid: &this_eid,
+        tasks: &mut master_data.tasks,
+      };
+
+      master_data.master_state.bootstrap(&mut io_ctx);
+    }
+
     return sim;
   }
 
@@ -473,7 +510,7 @@ impl Simulation {
       current_time, // TODO: simulate clock skew
       queues: &mut self.queues,
       nonempty_queues: &mut self.nonempty_queues,
-      this_sid: &slave_data.slave_state.context.this_sid.clone(),
+      this_sid: &slave_data.slave_state.ctx.this_sid.clone(),
       this_eid: to_eid,
       tablet_states: &mut slave_data.tablet_states,
       slave_back_messages: &mut slave_back_messages,

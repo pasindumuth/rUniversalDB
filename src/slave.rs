@@ -169,7 +169,7 @@ impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct SlaveState {
-  pub context: SlaveContext,
+  pub ctx: SlaveContext,
   pub statuses: Statuses,
 }
 
@@ -201,23 +201,54 @@ pub struct SlaveContext {
 }
 
 impl SlaveState {
-  pub fn new(slave_context: SlaveContext) -> SlaveState {
-    SlaveState { context: slave_context, statuses: Default::default() }
+  pub fn new(ctx: SlaveContext) -> SlaveState {
+    SlaveState { ctx, statuses: Default::default() }
+  }
+
+  /// This should be called at the very start of the life of a Master node. This
+  /// will start the timer events, paxos insertion, etc.
+  pub fn bootstrap<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
+    if self.ctx.is_leader() {
+      // Start the Paxos insertion cycle with an empty bundle. Recall that since Slaves
+      // start with no Tablets, the SharedPaxosBundle is trivially constructible.
+      debug_assert_eq!(io_ctx.num_tablets(), 0);
+      self.ctx.paxos_driver.insert_bundle(
+        &mut SlavePaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
+        SharedPaxosBundle { slave: SlaveBundle::default(), tablet: BTreeMap::default() },
+      );
+    }
+
+    // Start Paxos Timer Events
+    self.ctx.paxos_driver.timer_event(
+      &mut SlavePaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
+      PaxosTimerEvent::LeaderHeartbeat,
+    );
+    self.ctx.paxos_driver.timer_event(
+      &mut SlavePaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
+      PaxosTimerEvent::NextIndex,
+    );
+
+    // Broadcast Gossip data
+    self.ctx.handle_input(
+      io_ctx,
+      &mut self.statuses,
+      SlaveForwardMsg::SlaveTimerInput(SlaveTimerInput::RemoteLeaderChanged),
+    )
   }
 
   pub fn handle_input<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO, input: FullSlaveInput) {
     match input {
       FullSlaveInput::SlaveMessage(message) => {
-        self.context.handle_incoming_message(io_ctx, &mut self.statuses, message);
+        self.ctx.handle_incoming_message(io_ctx, &mut self.statuses, message);
       }
       FullSlaveInput::SlaveBackMessage(message) => {
         // Handles messages that were send from the Tablets back to the Slave.
         let forward_msg = SlaveForwardMsg::SlaveBackMessage(message);
-        self.context.handle_input(io_ctx, &mut self.statuses, forward_msg);
+        self.ctx.handle_input(io_ctx, &mut self.statuses, forward_msg);
       }
       FullSlaveInput::SlaveTimerInput(timer_input) => {
         let forward_msg = SlaveForwardMsg::SlaveTimerInput(timer_input);
-        self.context.handle_input(io_ctx, &mut self.statuses, forward_msg);
+        self.ctx.handle_input(io_ctx, &mut self.statuses, forward_msg);
       }
     }
   }

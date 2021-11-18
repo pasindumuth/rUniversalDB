@@ -236,7 +236,7 @@ pub struct Statuses {
 
 #[derive(Debug)]
 pub struct MasterState {
-  context: MasterContext,
+  pub ctx: MasterContext,
   statuses: Statuses,
 }
 
@@ -271,18 +271,47 @@ pub struct MasterContext {
 }
 
 impl MasterState {
-  pub fn new(context: MasterContext) -> MasterState {
-    MasterState { context, statuses: Default::default() }
+  pub fn new(ctx: MasterContext) -> MasterState {
+    MasterState { ctx, statuses: Default::default() }
+  }
+
+  /// This should be called at the very start of the life of a Master node. This
+  /// will start the timer events, paxos insertion, etc.
+  pub fn bootstrap<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
+    if self.ctx.is_leader() {
+      // Start the Paxos insertion cycle with an empty bundle.
+      self.ctx.paxos_driver.insert_bundle(
+        &mut MasterPaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
+        MasterBundle::default(),
+      );
+    }
+
+    // Start Paxos Timer Events
+    self.ctx.paxos_driver.timer_event(
+      &mut MasterPaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
+      PaxosTimerEvent::LeaderHeartbeat,
+    );
+    self.ctx.paxos_driver.timer_event(
+      &mut MasterPaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
+      PaxosTimerEvent::NextIndex,
+    );
+
+    // Broadcast Gossip data
+    self.ctx.handle_input(
+      io_ctx,
+      &mut self.statuses,
+      MasterForwardMsg::MasterTimerInput(MasterTimerInput::RemoteLeaderChanged),
+    )
   }
 
   pub fn handle_input<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, input: FullMasterInput) {
     match input {
       FullMasterInput::MasterMessage(message) => {
-        self.context.handle_incoming_message(io_ctx, &mut self.statuses, message);
+        self.ctx.handle_incoming_message(io_ctx, &mut self.statuses, message);
       }
       FullMasterInput::MasterTimerInput(timer_input) => {
         let forward_msg = MasterForwardMsg::MasterTimerInput(timer_input);
-        self.context.handle_input(io_ctx, &mut self.statuses, forward_msg);
+        self.ctx.handle_input(io_ctx, &mut self.statuses, forward_msg);
       }
     }
   }

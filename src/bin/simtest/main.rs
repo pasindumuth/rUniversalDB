@@ -52,8 +52,7 @@ fn tp_test() {
     &mk_eid("me0"),
   );
 
-  sim.simulate_all();
-  println!("{:#?}", sim);
+  sim.simulate_n_ms(500);
 
   // let query = "\
   //   SELECT a, b, c, d \
