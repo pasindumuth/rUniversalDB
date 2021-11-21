@@ -32,6 +32,7 @@ pub mod paxos2pc_tm;
 pub mod query_converter;
 pub mod query_planning;
 pub mod server;
+pub mod simulation_utils;
 pub mod slave;
 pub mod sql_parser;
 pub mod stmpaxos2pc_rm;

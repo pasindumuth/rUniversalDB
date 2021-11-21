@@ -2,11 +2,12 @@ use crate::message as msg;
 use crate::slave::{FullSlaveInput, SlaveBundle, SlaveContext, SlaveState, SlaveTimerInput};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{rvec, BasicIOCtx};
+use runiversal::common::{BasicIOCtx, RangeEnds};
 use runiversal::model::common::{
   EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, Timestamp,
 };
 use runiversal::model::message::LeaderChanged;
+use runiversal::simulation_utils::{add_msg, mk_client_eid};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 // -------------------------------------------------------------------------------------------------
@@ -158,7 +159,7 @@ impl Simulation {
     let slave_eids: Vec<EndpointId> =
       slave_address_config.values().cloned().into_iter().flatten().collect();
     let client_eids: Vec<EndpointId> =
-      rvec(0, num_clients).iter().map(|i| mk_client_eid(&(*i as u32))).collect();
+      RangeEnds::rvec(0, num_clients).iter().map(|i| mk_client_eid(&(*i as u32))).collect();
     let all_eids: Vec<EndpointId> = vec![]
       .into_iter()
       .chain(slave_eids.iter().cloned())
@@ -429,49 +430,4 @@ impl Simulation {
       self.simulate1ms();
     }
   }
-
-  /// Returns true iff there is no more work left to be done in the Execution.
-  pub fn is_done(&self) -> bool {
-    if !self.nonempty_queues.is_empty() {
-      return false;
-    }
-
-    return true;
-  }
-
-  pub fn simulate_all(&mut self) {
-    while !self.is_done() {
-      self.simulate1ms();
-    }
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Utils
-// -----------------------------------------------------------------------------------------------
-
-// Construct the Slave id of the slave at the given index.
-pub fn mk_slave_eid(i: &u32) -> EndpointId {
-  EndpointId(format!("se{}", i))
-}
-
-// Construct the Client id of the slave at the given index.
-pub fn mk_client_eid(i: &u32) -> EndpointId {
-  EndpointId(format!("ce{}", i))
-}
-
-/// Add a message between two nodes in the network.
-fn add_msg(
-  queues: &mut BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
-  nonempty_queues: &mut Vec<(EndpointId, EndpointId)>,
-  msg: msg::NetworkMessage,
-  from_eid: &EndpointId,
-  to_eid: &EndpointId,
-) {
-  let queue = queues.get_mut(from_eid).unwrap().get_mut(to_eid).unwrap();
-  if queue.len() == 0 {
-    let queue_id = (from_eid.clone(), to_eid.clone());
-    nonempty_queues.push(queue_id);
-  }
-  queue.push_back(msg);
 }

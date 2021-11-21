@@ -1,9 +1,10 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::rvec;
+use runiversal::common::RangeEnds;
 use runiversal::model::common::{EndpointId, Timestamp};
 use runiversal::model::message as msg;
 use runiversal::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
+use runiversal::simulation_utils::{add_msg, mk_paxos_eid};
 use std::collections::{BTreeMap, VecDeque};
 
 // -----------------------------------------------------------------------------------------------
@@ -105,7 +106,8 @@ impl Simulation {
     };
 
     // PaxosNode EndpointIds
-    let eids: Vec<EndpointId> = rvec(0, num_paxos_data as i32).iter().map(paxos_eid).collect();
+    let eids: Vec<EndpointId> =
+      RangeEnds::rvec(0, num_paxos_data as i32).iter().map(mk_paxos_eid).collect();
     for from_eid in &eids {
       sim.queues.insert(from_eid.clone(), Default::default());
       for to_eid in &eids {
@@ -127,7 +129,7 @@ impl Simulation {
     }
 
     // Start inserting the first SimpleBundle at the leader.
-    let leader_eid = paxos_eid(&0);
+    let leader_eid = mk_paxos_eid(&0);
     let paxos_data = sim.paxos_data.get_mut(&leader_eid).unwrap();
     let current_time = sim.true_timestamp;
     let mut ctx = PaxosContext {
@@ -235,50 +237,4 @@ impl Simulation {
       self.simulate1ms();
     }
   }
-
-  /// Returns true iff there is no more work left to be done in the Execution.
-  pub fn is_done(&self) -> bool {
-    if !self.nonempty_queues.is_empty() {
-      return false;
-    }
-
-    for (_, paxos_data) in &self.paxos_data {
-      if !paxos_data.tasks.is_empty() {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  pub fn simulate_all(&mut self) {
-    while !self.is_done() {
-      self.simulate1ms();
-    }
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Utils
-// -----------------------------------------------------------------------------------------------
-
-// Construct the PaxosNode EndpointIds of the paxos at the given index.
-pub fn paxos_eid(i: &i32) -> EndpointId {
-  EndpointId(format!("e{}", i))
-}
-
-/// Add a message between two nodes in the network.
-fn add_msg(
-  queues: &mut BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<NetworkMessage>>>,
-  nonempty_queues: &mut Vec<(EndpointId, EndpointId)>,
-  msg: NetworkMessage,
-  from_eid: &EndpointId,
-  to_eid: &EndpointId,
-) {
-  let queue = queues.get_mut(from_eid).unwrap().get_mut(to_eid).unwrap();
-  if queue.len() == 0 {
-    let queue_id = (from_eid.clone(), to_eid.clone());
-    nonempty_queues.push(queue_id);
-  }
-  queue.push_back(msg);
 }

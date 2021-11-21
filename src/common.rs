@@ -72,9 +72,21 @@ pub trait MasterIOCtx: BasicIOCtx {
 // -----------------------------------------------------------------------------------------------
 /// These are very low-level utilities whose absence I consider a shortcoming of Rust.
 
-/// Constructs a Vec out of the given indices.
-pub fn rvec(i: i32, j: i32) -> Vec<i32> {
-  (i..j).collect()
+pub trait RangeEnds: Sized {
+  /// Constructs a Vec out of the given endpoints.
+  fn rvec(i: Self, j: Self) -> Vec<Self>;
+}
+
+impl RangeEnds for i32 {
+  fn rvec(i: i32, j: i32) -> Vec<i32> {
+    (i..j).collect()
+  }
+}
+
+impl RangeEnds for u32 {
+  fn rvec(i: u32, j: u32) -> Vec<u32> {
+    (i..j).collect()
+  }
 }
 
 /// Lookup the position of a `key` in an associative list.

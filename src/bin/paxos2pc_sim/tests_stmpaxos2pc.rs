@@ -1,11 +1,12 @@
 use crate::message as msg;
-use crate::simulation::{mk_client_eid, mk_slave_eid, Simulation};
+use crate::simulation::Simulation;
 use crate::slave::SlavePLm;
 use crate::stm_simple_tm_es::STMSimplePayloadTypes;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::mk_qid;
 use runiversal::model::common::{EndpointId, SlaveGroupId};
+use runiversal::simulation_utils::{mk_client_eid, mk_slave_eid};
 use runiversal::stmpaxos2pc_tm::{RMPLm, TMPLm};
 use runiversal::test_utils::mk_sid;
 use std::collections::BTreeMap;

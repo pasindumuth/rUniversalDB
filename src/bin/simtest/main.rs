@@ -2,13 +2,14 @@
 
 mod simulation;
 
-use crate::simulation::{client_eid, slave_eid, Simulation};
+use crate::simulation::Simulation;
 use runiversal::common::TableSchema;
 use runiversal::model::common::{
   ColType, EndpointId, Gen, PrimaryKey, RequestId, SlaveGroupId, TablePath, TabletGroupId,
   TabletKeyRange,
 };
 use runiversal::model::message as msg;
+use runiversal::simulation_utils::{mk_client_eid, mk_slave_eid};
 use runiversal::test_utils::{cn, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
 
@@ -21,11 +22,11 @@ fn main() {
 fn tp_test() {
   let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
-    (mk_sid("s0"), vec![slave_eid(&0)]),
-    (mk_sid("s1"), vec![slave_eid(&1)]),
-    (mk_sid("s2"), vec![slave_eid(&2)]),
-    (mk_sid("s3"), vec![slave_eid(&3)]),
-    (mk_sid("s4"), vec![slave_eid(&4)]),
+    (mk_sid("s0"), vec![mk_slave_eid(&0)]),
+    (mk_sid("s1"), vec![mk_slave_eid(&1)]),
+    (mk_sid("s2"), vec![mk_slave_eid(&2)]),
+    (mk_sid("s3"), vec![mk_slave_eid(&3)]),
+    (mk_sid("s4"), vec![mk_slave_eid(&4)]),
   ]
   .into_iter()
   .collect();
@@ -43,12 +44,12 @@ fn tp_test() {
   sim.add_msg(
     msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
       msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
-        sender_eid: client_eid(&0),
+        sender_eid: mk_client_eid(&0),
         request_id: RequestId("rid0".to_string()),
         query: query.to_string(),
       }),
     )),
-    &client_eid(&0),
+    &mk_client_eid(&0),
     &mk_eid("me0"),
   );
 
@@ -63,13 +64,13 @@ fn tp_test() {
   // sim.add_msg(
   //   msg::NetworkMessage::Slave(msg::SlaveMessage::ExternalMessage(
   //     msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
-  //       sender_eid: client_eid(&0),
+  //       sender_eid: mk_client_eid(&0),
   //       request_id: RequestId("rid1".to_string()),
   //       query: query.to_string(),
   //     }),
   //   )),
-  //   &client_eid(&2),
-  //   &slave_eid(&2),
+  //   &mk_client_eid(&2),
+  //   &mk_slave_eid(&2),
   // );
 
   // sim.simulate_all();

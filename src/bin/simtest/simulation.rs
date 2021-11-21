@@ -1,7 +1,7 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  mk_cid, rvec, BasicIOCtx, CoreIOCtx, GossipData, MasterIOCtx, SlaveIOCtx,
+  mk_cid, BasicIOCtx, CoreIOCtx, GossipData, MasterIOCtx, RangeEnds, SlaveIOCtx,
 };
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::{FullMasterInput, MasterContext, MasterState, MasterTimerInput};
@@ -12,6 +12,7 @@ use runiversal::model::common::{
 use runiversal::model::message as msg;
 use runiversal::model::message::NetworkMessage;
 use runiversal::multiversion_map::MVM;
+use runiversal::simulation_utils::{add_msg, mk_client_eid};
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
 };
@@ -276,7 +277,8 @@ impl Simulation {
     // Setup eids
     let slave_eids: Vec<EndpointId> =
       slave_address_config.values().cloned().into_iter().flatten().collect();
-    let client_eids: Vec<EndpointId> = rvec(0, num_clients).iter().map(client_eid).collect();
+    let client_eids: Vec<EndpointId> =
+      RangeEnds::rvec(0, num_clients as u32).iter().map(mk_client_eid).collect();
     let all_eids: Vec<EndpointId> = vec![]
       .into_iter()
       .chain(slave_eids.iter().cloned())
@@ -585,60 +587,9 @@ impl Simulation {
     }
   }
 
-  /// Returns true iff there is no more work left to be done in the Execution.
-  pub fn is_done(&self) -> bool {
-    if !self.nonempty_queues.is_empty() {
-      return false;
-    }
-
-    for (_, slave_data) in &self.slave_data {
-      if !slave_data.tasks.is_empty() {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  pub fn simulate_all(&mut self) {
-    while !self.is_done() {
-      self.simulate1ms();
-    }
-  }
-
   pub fn mk_request_id(&mut self) -> RequestId {
     let request_id = RequestId(self.next_int.to_string());
     self.next_int += 1;
     return request_id;
   }
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Utils
-// -----------------------------------------------------------------------------------------------
-
-// Construct the Slave id of the slave at the given index.
-pub fn slave_eid(i: &i32) -> EndpointId {
-  EndpointId(format!("se{}", i))
-}
-
-// Construct the Client id of the slave at the given index.
-pub fn client_eid(i: &i32) -> EndpointId {
-  EndpointId(format!("ce{}", i))
-}
-
-/// Add a message between two nodes in the network.
-fn add_msg(
-  queues: &mut BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
-  nonempty_queues: &mut Vec<(EndpointId, EndpointId)>,
-  msg: msg::NetworkMessage,
-  from_eid: &EndpointId,
-  to_eid: &EndpointId,
-) {
-  let queue = queues.get_mut(from_eid).unwrap().get_mut(to_eid).unwrap();
-  if queue.len() == 0 {
-    let queue_id = (from_eid.clone(), to_eid.clone());
-    nonempty_queues.push(queue_id);
-  }
-  queue.push_back(msg);
 }
