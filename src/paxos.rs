@@ -8,6 +8,7 @@ use rand::RngCore;
 use sqlparser::dialect::keywords::Keyword::NEXT;
 use std::cmp::{max, min};
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 
 // -----------------------------------------------------------------------------------------------
 //  Single Paxos State
@@ -61,7 +62,7 @@ pub struct PaxosInstance<BundleT> {
 const HEARTBEAT_THRESHOLD: u32 = 5;
 const HEARTBEAT_PRIOD: u128 = 1;
 const NEXT_INDEX_PERIOD: u128 = 1;
-const RETRY_DEFER_TIME: u128 = 1;
+const RETRY_DEFER_TIME: u128 = 10;
 const PROPOSAL_INCREMENT: u32 = 1000;
 
 // -----------------------------------------------------------------------------------------------
@@ -104,28 +105,28 @@ pub fn majority<T>(vec: &Vec<T>) -> usize {
 #[derive(Debug)]
 pub struct PaxosDriver<BundleT> {
   /// Metadata
-  pub paxos_nodes: Vec<EndpointId>,
+  paxos_nodes: Vec<EndpointId>,
 
   /// PaxosInstance state
 
   /// Maps all PaxosNodes in this PaxosGroup to the last known `PLIndex` that was
   /// returned by a `NextIndexResponse`. This contains `this_eid()`, but the value
   /// generally lags `next_index`.
-  pub remote_next_indices: BTreeMap<EndpointId, PLIndex>,
+  remote_next_indices: BTreeMap<EndpointId, PLIndex>,
   /// This holds the first index that this node has not learned the Vval of.
-  pub next_index: PLIndex,
+  next_index: PLIndex,
   /// In practice, the `PLIndex`s will be present contiguously from the first until one before
   /// `next_index`. After that, they do not have to be contiguous. The first `PLIndex` is one
   /// after the maximum of `remote_next_indices`.
-  pub paxos_instances: BTreeMap<PLIndex, PaxosInstance<BundleT>>,
+  paxos_instances: BTreeMap<PLIndex, PaxosInstance<BundleT>>,
 
   /// The latest Leadership by `next_index`.
   pub leader: LeadershipId,
-  pub leader_heartbeat: u32,
+  leader_heartbeat: u32,
 
   /// Insert state. Once this is set to `Some(_)`, the internal value is never modified. This is
   /// only unset when `next_index` is incremented due to insertion.
-  pub next_insert: Option<(UUID, BundleT)>,
+  next_insert: Option<(UUID, BundleT)>,
 }
 
 impl<BundleT: Clone> PaxosDriver<BundleT> {
@@ -157,9 +158,9 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     min_index
   }
 
-  fn is_leader<PaxosContextBaseT: PaxosContextBase<BundleT>>(
+  pub fn is_leader<PaxosContextBaseT: PaxosContextBase<BundleT>>(
     &self,
-    ctx: &mut PaxosContextBaseT,
+    ctx: &PaxosContextBaseT,
   ) -> bool {
     &self.leader.eid == ctx.this_eid()
   }
@@ -602,7 +603,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
           // Note that `index` will exist in the `paxos_instances` and there will surely be a
           // learned value (since it is less than `self.next_index`).
           let paxos_instance = self.paxos_instances.get(&index).unwrap();
-          let (vrnd, _) = paxos_instance.learned_rnd_val.unwrap().clone();
+          let (vrnd, _) = paxos_instance.learned_rnd_val.clone().unwrap();
           should_learned.push((index.clone(), vrnd));
         }
         ctx.send(
