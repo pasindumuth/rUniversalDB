@@ -13,7 +13,7 @@ fn test() {
   let mut sim = Simulation::new([0; 16], 5);
 
   // The number of milliseconds to run the simulation.
-  const SIMULATION_DURATION: u32 = 100;
+  const SIMULATION_DURATION: u32 = 1000;
   sim.simulate_n_ms(SIMULATION_DURATION);
 
   // Results

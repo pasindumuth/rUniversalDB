@@ -6,6 +6,7 @@ use runiversal::model::message as msg;
 use runiversal::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use runiversal::simulation_utils::{add_msg, mk_paxos_eid};
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::mpsc::channel;
 
 // -----------------------------------------------------------------------------------------------
 //  PaxosContext
@@ -71,6 +72,14 @@ pub struct PaxosNodeData {
 }
 
 #[derive(Debug)]
+pub enum QueuePauseMode {
+  /// Here, a queue is down permenantly until it is explicitly brought back up.
+  Permenant,
+  /// Here, a queue is down only for as many milliseconds as `u32`.
+  Temporary(u32),
+}
+
+#[derive(Debug)]
 pub struct Simulation {
   pub rand: XorShiftRng,
 
@@ -78,10 +87,19 @@ pub struct Simulation {
   queues: BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<NetworkMessage>>>,
   /// The set of queues that have messages to deliever
   nonempty_queues: Vec<(EndpointId, EndpointId)>,
+  /// All `EndpointIds`.
+  address_config: Vec<EndpointId>,
+
+  /// Network queue pausing
+
   /// Holds the set of queues that are temporarily unavailable for delivering messages.
   /// This holds a probability value that will be used to bring the queue back up.
-  paused_queues: BTreeMap<(EndpointId, EndpointId), u32>,
-  address_config: Vec<EndpointId>,
+  paused_queues: BTreeMap<(EndpointId, EndpointId), QueuePauseMode>,
+  /// For every value in `paused_queues`, this holds the sum of the time durations in
+  /// all of the `Delayed` values.
+  delay_sum: u32,
+  /// The number of elements in `paused_queues` where `QueuePauseMode` is `QueuePauseMode`.
+  num_permenant_down: u32,
 
   // The set of PaxosDrivers that make up the PaxosGroups
   pub paxos_data: BTreeMap<EndpointId, PaxosNodeData>,
@@ -98,8 +116,10 @@ impl Simulation {
       rand: XorShiftRng::from_seed(seed),
       queues: Default::default(),
       nonempty_queues: Default::default(),
+      address_config: Default::default(),
       paused_queues: Default::default(),
-      address_config: vec![],
+      delay_sum: 0,
+      num_permenant_down: 0,
       paxos_data: Default::default(),
       next_int: 0,
       true_timestamp: Default::default(),
@@ -227,8 +247,66 @@ impl Simulation {
     let num_msgs_to_deliver = self.nonempty_queues.len();
     for _ in 0..num_msgs_to_deliver {
       let r = self.rand.next_u32() as usize % self.nonempty_queues.len();
-      let (from_eid, to_eid) = self.nonempty_queues.get(r).unwrap().clone();
-      self.deliver_msg(&from_eid, &to_eid);
+      let channel_key = self.nonempty_queues.get(r).unwrap().clone();
+      // Only deliver a message if the queue is not paused.
+      if !self.paused_queues.contains_key(&channel_key) {
+        let (from_eid, to_eid) = channel_key;
+        self.deliver_msg(&from_eid, &to_eid);
+      }
+    }
+
+    self.update_paused_queues();
+  }
+
+  /// Here, we update `paused_queues`. For, we potentially add another element, and then,
+  /// we drecement the timer counts for which the queues are paused.
+  ///
+  /// Below is a mathematical analysis of how about how many queues will be down at one
+  /// time. In the steady state, the number of milliseconds added to `paused_queues`
+  /// must be equal to the number take away. DUR is `MAX_PAUSE_TIME`, and frac is the
+  /// fraction of channels that we want to be down on average.
+  ///
+  /// average_add = (1 - frac) * (DUR / 2) =
+  /// average_sub = num_channels * frac
+  /// average_add = average_sub
+  /// frac = 1 / (2 * num_channels / DUR + 1)
+  /// DUR = (num_channels * frac) * 2 / (1 - frac)
+  ///
+  /// Thus, if frac where 1/2 and num_channels were 25, then DUR is about 50.
+  pub fn update_paused_queues(&mut self) {
+    // Pause a queue for a little bit of time.
+    let from_idx = self.rand.next_u32() as usize % self.address_config.len();
+    let to_idx = self.rand.next_u32() as usize % self.address_config.len();
+    let channel_key = (
+      self.address_config.get(from_idx).unwrap().clone(),
+      self.address_config.get(to_idx).unwrap().clone(),
+    );
+
+    // Only amend `channel_key` to `paused_queues` if it is not already there.
+    if !self.paused_queues.contains_key(&channel_key) {
+      // Choose a duration that is > 0, and add it in.
+      const MAX_PAUSE_TIME: u32 = 50;
+      let duration = (self.rand.next_u32() % MAX_PAUSE_TIME) + 1;
+      self.paused_queues.insert(channel_key, QueuePauseMode::Temporary(duration));
+      self.delay_sum += duration;
+    }
+
+    // Decrement durations in `paused_queues`, removing keys if it goes to 0.
+    let mut keys_to_remove = Vec::<(EndpointId, EndpointId)>::new();
+    for (channel_key, pause_mode) in &mut self.paused_queues {
+      match pause_mode {
+        QueuePauseMode::Permenant => {}
+        QueuePauseMode::Temporary(duration) => {
+          *duration -= 1;
+          self.delay_sum -= 1;
+          if *duration == 0 {
+            keys_to_remove.push(channel_key.clone());
+          }
+        }
+      }
+    }
+    for key in keys_to_remove {
+      self.paused_queues.remove(&key);
     }
   }
 
