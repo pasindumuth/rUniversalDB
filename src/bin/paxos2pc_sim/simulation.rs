@@ -81,7 +81,7 @@ impl<'a> ISlaveIOCtx for SlaveIOCtx<'a> {
 /// These are values that control the execution of the simulation that can be varied
 /// from the outside during the middle of a simulation.
 #[derive(Debug)]
-pub struct SimParams {
+pub struct SimConfig {
   /// The probability (in %) of `PLEntry` delivery.
   pub pl_entry_delivery_prob: u32,
   /// The probability (in %) of Global PL insertion. The remaining % is the probability
@@ -128,7 +128,7 @@ pub struct Simulation {
   true_timestamp: u128,
 
   // Configurables
-  pub sim_params: SimParams,
+  pub sim_params: SimConfig,
 }
 
 impl Simulation {
@@ -152,7 +152,7 @@ impl Simulation {
       leader_map: Default::default(),
       global_pls: Default::default(),
       true_timestamp: Default::default(),
-      sim_params: SimParams { pl_entry_delivery_prob: 70, global_pl_insertion_prob: 25 },
+      sim_params: SimConfig { pl_entry_delivery_prob: 70, global_pl_insertion_prob: 25 },
     };
 
     // Setup eids

@@ -1,6 +1,6 @@
 #![feature(map_first_last)]
 
-use crate::simulation::{SimpleBundle, Simulation};
+use crate::simulation::{SimConfig, SimpleBundle, Simulation};
 use runiversal::model::common::{Gen, LeadershipId};
 use runiversal::model::message as msg;
 
@@ -18,6 +18,10 @@ fn test() {
   test_leader_partition();
 }
 
+fn default_config() -> SimConfig {
+  SimConfig { target_temp_blocked_frac: 0.5, max_pause_time_ms: 2000 }
+}
+
 fn print_stats(sim: &Simulation) {
   for (_, paxos_data) in &sim.paxos_data {
     println!("Size: {:#?}", sim.max_common_index + paxos_data.paxos_log.len());
@@ -26,7 +30,7 @@ fn print_stats(sim: &Simulation) {
 
 /// This is a basic test with random queues being paused temporarily randomly.
 fn test_basic() {
-  let mut sim = Simulation::new([0; 16], 5);
+  let mut sim = Simulation::new([0; 16], 5, default_config());
   sim.simulate_n_ms(1000);
   print_stats(&sim);
 }
@@ -34,7 +38,7 @@ fn test_basic() {
 /// Okay, let's get serious. Run this thing for a bit, then find the latest leader,
 /// partition it run it some more, and verify that more `PLEntry`s were added.
 fn test_leader_partition() {
-  let mut sim = Simulation::new([0; 16], 5);
+  let mut sim = Simulation::new([0; 16], 5, default_config());
   sim.simulate_n_ms(10000);
   print_stats(&sim);
 
@@ -56,5 +60,6 @@ fn test_leader_partition() {
     sim.block_queue_permanently(eid, leader_eid.clone());
   }
 
-  sim.simulate_n_ms(10000);
+  sim.simulate_n_ms(20000);
+  print_stats(&sim);
 }

@@ -79,6 +79,15 @@ pub enum QueuePauseMode {
 }
 
 #[derive(Debug)]
+pub struct SimConfig {
+  /// These are the faction of queues that are not Permanently blocked
+  /// that we want to make Temporarily blocked.
+  pub target_temp_blocked_frac: f32,
+  /// The maximum amount of time a queue can be Paused in `Temporary` at a time.
+  pub max_pause_time_ms: u32,
+}
+
+#[derive(Debug)]
 pub struct Simulation {
   pub rand: XorShiftRng,
 
@@ -96,10 +105,7 @@ pub struct Simulation {
   /// Holds the set of queues that are temporarily unavailable for delivering messages.
   /// This holds a probability value that will be used to bring the queue back up.
   paused_queues: BTreeMap<(EndpointId, EndpointId), QueuePauseMode>,
-  /// For every value in `paused_queues`, this holds the sum of the time durations in
-  /// all of the `Delayed` values.
-  delay_sum: u32,
-  /// The number of elements in `paused_queues` where `QueuePauseMode` is `QueuePauseMode`.
+  /// The number of elements in `paused_queues` where `QueuePauseMode` is `Permanent`.
   num_permanent_down: u32,
 
   /// PaxosNodes and Global Paxos Log
@@ -115,11 +121,12 @@ pub struct Simulation {
   /// Meta
   next_int: u32,
   true_timestamp: u128,
+  config: SimConfig,
 }
 
 impl Simulation {
   /// Here, we create as many `PaxosNodeData`s as `num_paxos_data`.
-  pub fn new(seed: [u8; 16], num_paxos_data: u32) -> Simulation {
+  pub fn new(seed: [u8; 16], num_paxos_data: u32, config: SimConfig) -> Simulation {
     assert!(num_paxos_data > 0); // We expect to at least have one node.
     let mut sim = Simulation {
       rand: XorShiftRng::from_seed(seed),
@@ -127,13 +134,13 @@ impl Simulation {
       nonempty_queues: Default::default(),
       address_config: Default::default(),
       paused_queues: Default::default(),
-      delay_sum: 0,
       num_permanent_down: 0,
       paxos_data: Default::default(),
       max_common_index: 0,
       global_paxos_log: vec![],
       next_int: 0,
       true_timestamp: Default::default(),
+      config,
     };
 
     // PaxosNode EndpointIds
@@ -333,39 +340,27 @@ impl Simulation {
     self.update_paused_queues();
   }
 
-  /// Here, we update `paused_queues`. For, we potentially add another element, and then,
-  /// we drecement the timer counts for which the queues are paused.
-  ///
-  /// Below is a mathematical analysis of how about how many queues will be down at one
-  /// time. In the steady state, the number of milliseconds added to `paused_queues`
-  /// must be equal to the number take away. DUR is `MAX_PAUSE_TIME`, and frac is the
-  /// fraction of channels that we want to be down on average.
-  ///
-  /// average_add = (1 - frac) * (DUR / 2) =
-  /// average_sub = num_channels * frac
-  /// average_add = average_sub
-  /// frac = 1 / (2 * num_channels / DUR + 1)
-  /// DUR = (num_channels * frac) * 2 / (1 - frac)
-  ///
-  /// Thus, if frac where 1/2 and num_channels were 25, then DUR is about 50.
   fn update_paused_queues(&mut self) {
-    // Pause a queue for a little bit of time.
-    let from_idx = self.rand.next_u32() as usize % self.address_config.len();
-    let to_idx = self.rand.next_u32() as usize % self.address_config.len();
-    let channel_key = (
-      self.address_config.get(from_idx).unwrap().clone(),
-      self.address_config.get(to_idx).unwrap().clone(),
-    );
+    // These are the faction of queues that are not Permanently blocked that we want to
+    // make Temporarily blocked.
+    let num_queues = self.address_config.len().pow(2) as u32;
+    let target_num_blocked =
+      ((num_queues - self.num_permanent_down) as f32 * self.config.target_temp_blocked_frac) as u32;
+    if self.paused_queues.len() as u32 - self.num_permanent_down < target_num_blocked {
+      let from_idx = self.rand.next_u32() as usize % self.address_config.len();
+      let to_idx = self.rand.next_u32() as usize % self.address_config.len();
+      let channel_key = (
+        self.address_config.get(from_idx).unwrap().clone(),
+        self.address_config.get(to_idx).unwrap().clone(),
+      );
 
-    // Only amend `channel_key` to `paused_queues` if it is not already there.
-    if !self.paused_queues.contains_key(&channel_key) {
-      // Choose a duration that is > 0, and add it in.
-      const MAX_PAUSE_TIME: u32 = 50;
-      // If MAX_PAUSE_TIME is 0, that means we should no pause anything.
-      if MAX_PAUSE_TIME > 0 {
-        let duration = (self.rand.next_u32() % MAX_PAUSE_TIME) + 1;
-        self.paused_queues.insert(channel_key, QueuePauseMode::Temporary(duration));
-        self.delay_sum += duration;
+      // Only amend `channel_key` to `paused_queues` if it is not already there.
+      if !self.paused_queues.contains_key(&channel_key) {
+        if self.config.max_pause_time_ms > 0 {
+          // Choose a duration that is > 0, and add it in.
+          let duration = (self.rand.next_u32() % self.config.max_pause_time_ms) + 1;
+          self.paused_queues.insert(channel_key, QueuePauseMode::Temporary(duration));
+        }
       }
     }
 
@@ -376,7 +371,6 @@ impl Simulation {
         QueuePauseMode::Permanent => {}
         QueuePauseMode::Temporary(duration) => {
           *duration -= 1;
-          self.delay_sum -= 1;
           if *duration == 0 {
             keys_to_remove.push(channel_key.clone());
           }
@@ -394,8 +388,7 @@ impl Simulation {
     if let Some(pause_mode) = self.paused_queues.get_mut(&channel_key) {
       match pause_mode {
         QueuePauseMode::Permanent => {}
-        QueuePauseMode::Temporary(duration) => {
-          self.delay_sum -= *duration;
+        QueuePauseMode::Temporary(_) => {
           *pause_mode = QueuePauseMode::Permanent;
           self.num_permanent_down += 1;
         }
