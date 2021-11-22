@@ -13,6 +13,15 @@ fn main() {
   test();
 }
 
+/**
+
+Next tests
+  1. We might not be exercising retries because of how long they take. We
+     should reduce the timer event times when doing simulation tests a little
+     so it is not as expensive.
+
+*/
+
 fn test() {
   println!("test_basic");
   test_basic();
@@ -22,6 +31,8 @@ fn test() {
 
   println!("test_general_partition");
   test_general_partition();
+
+  println!("Test Successful!");
 }
 
 fn default_config() -> SimConfig {
@@ -42,6 +53,7 @@ fn print_stats(sim: &Simulation) {
 fn test_basic() {
   let mut sim = Simulation::new([0; 16], 5, default_config());
   sim.simulate_n_ms(1000);
+  assert!(sim.global_paxos_log.len() > 0, "Failed! No elements in Global Paxos Log.",);
   print_stats(&sim);
 }
 
@@ -74,7 +86,14 @@ fn test_leader_partition() {
     sim.block_queue_permanently(eid, leader_eid.clone());
   }
 
+  let old_log_len = sim.global_paxos_log.len();
   sim.simulate_n_ms(20000);
+
+  assert!(
+    old_log_len < sim.global_paxos_log.len(),
+    "Failed! No new log messages where added since the old Leader died.",
+  );
+
   print_stats(&sim);
 }
 
@@ -153,6 +172,25 @@ fn unblock_partition(sim: &mut Simulation, partition: &Vec<Vec<usize>>) {
   }
 }
 
+fn verify_leadership_changes(sim: &Simulation, expected_changes: u32) {
+  let lid = LeadershipId { gen: Gen(0), eid: sim.address_config[0].clone() };
+  // Verify that there were Leadership changes.
+  let mut num_leader_changes = 0;
+  for entry in sim.global_paxos_log.iter() {
+    if let msg::PLEntry::LeaderChanged(leader_changed) = entry {
+      assert_ne!(lid, leader_changed.lid);
+      num_leader_changes += 1;
+    }
+  }
+
+  assert!(
+    num_leader_changes >= expected_changes,
+    "Test Failed! Not enough LeaderChanges occurred: {:?} instead of {:?}.",
+    num_leader_changes,
+    expected_changes
+  );
+}
+
 /// Loop around for some time, creating and changing network partition. Verify that
 /// the algorithm is safe and that new `PLEntry`s constantly get added.
 fn test_general_partition() {
@@ -160,6 +198,12 @@ fn test_general_partition() {
   let mut sim = Simulation::new([0; 16], 5, sim_config);
   let all_indices: Vec<usize> = (0..sim.address_config.len()).collect();
 
+  // Verification metadata
+  let mut num_unlive_periods = 0;
+  let mut num_periods = 0;
+  let mut last_log_len = 0;
+
+  // Simulation
   let mut cur_time = 0;
   let mut cur_partition = gen_partition(&mut sim.rand, all_indices.clone());
   while cur_time < 200000 {
@@ -167,18 +211,29 @@ fn test_general_partition() {
     sim.simulate_n_ms(time_for_partition as u32);
     cur_time += time_for_partition;
 
+    // Update verification metadata
+    if sim.global_paxos_log.len() == last_log_len {
+      num_unlive_periods += 1;
+    }
+    num_periods += 1;
+    last_log_len = sim.global_paxos_log.len();
+
     // Change the partition
     unblock_partition(&mut sim, &cur_partition);
     cur_partition = gen_partition(&mut sim.rand, all_indices.clone());
     block_partition(&mut sim, &cur_partition);
-
-    println!("Stats at time {:?}", cur_time);
-    print_stats(&sim);
   }
 
-  for entry in sim.global_paxos_log.iter() {
-    if let msg::PLEntry::LeaderChanged(leader_changed) = entry {
-      println!("{:?}", leader_changed);
-    }
-  }
+  // Make simple assertions about Verification Metadata.
+  // Check if the fraction of unlive periods to live periods is low enough.
+  assert!(
+    (num_unlive_periods as f32) < 0.3 * num_periods as f32,
+    "Failed! There were too many unlive periods: {:?} of {:?}.",
+    num_unlive_periods,
+    num_periods
+  );
+
+  // Verify that there were Leadership changes.
+  verify_leadership_changes(&sim, 5);
+  print_stats(&sim);
 }
