@@ -1,6 +1,7 @@
 #![feature(map_first_last)]
 
 use crate::simulation::{SimpleBundle, Simulation};
+use runiversal::model::common::{Gen, LeadershipId};
 use runiversal::model::message as msg;
 
 mod simulation;
@@ -10,32 +11,50 @@ fn main() {
 }
 
 fn test() {
+  println!("test_basic");
+  test_basic();
+
+  println!("test_leader_partition");
+  test_leader_partition();
+}
+
+fn print_stats(sim: &Simulation) {
+  for (_, paxos_data) in &sim.paxos_data {
+    println!("Size: {:#?}", sim.max_common_index + paxos_data.paxos_log.len());
+  }
+}
+
+/// This is a basic test with random queues being paused temporarily randomly.
+fn test_basic() {
   let mut sim = Simulation::new([0; 16], 5);
+  sim.simulate_n_ms(1000);
+  print_stats(&sim);
+}
 
-  // The number of milliseconds to run the simulation.
-  const SIMULATION_DURATION: u32 = 1000;
-  sim.simulate_n_ms(SIMULATION_DURATION);
+/// Okay, let's get serious. Run this thing for a bit, then find the latest leader,
+/// partition it run it some more, and verify that more `PLEntry`s were added.
+fn test_leader_partition() {
+  let mut sim = Simulation::new([0; 16], 5);
+  sim.simulate_n_ms(10000);
+  print_stats(&sim);
 
-  // Results
-  let mut max_index: usize = 0;
-  loop {
-    let mut maybe_val: Option<&msg::PLEntry<SimpleBundle>> = None;
-    for (_, paxos_data) in &sim.paxos_data {
-      if let Some(entry) = paxos_data.paxos_log.get(max_index) {
-        if let Some(cur_entry) = maybe_val {
-          assert_eq!(cur_entry, entry);
-        } else {
-          maybe_val = Some(entry);
-        }
-      }
-    }
-    if maybe_val.is_some() {
-      max_index += 1;
-    } else {
+  // Find the latest Leader
+  let lid = LeadershipId { gen: Gen(0), eid: sim.address_config[0].clone() };
+  let mut latest_leader_changed = msg::LeaderChanged { lid };
+  for entry in sim.global_paxos_log.iter().rev() {
+    if let msg::PLEntry::LeaderChanged(leader_changed) = entry {
+      latest_leader_changed = leader_changed.clone();
       break;
     }
   }
-  for (_, paxos_data) in &sim.paxos_data {
-    println!("Size: {:#?}", paxos_data.paxos_log.len());
+
+  // Partition out this Leader
+  let leader_eid = latest_leader_changed.lid.eid;
+  let eids = sim.address_config.clone();
+  for eid in eids {
+    sim.block_queue_permanently(leader_eid.clone(), eid.clone());
+    sim.block_queue_permanently(eid, leader_eid.clone());
   }
+
+  sim.simulate_n_ms(10000);
 }

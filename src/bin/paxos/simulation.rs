@@ -5,6 +5,7 @@ use runiversal::model::common::{EndpointId, Timestamp};
 use runiversal::model::message as msg;
 use runiversal::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use runiversal::simulation_utils::{add_msg, mk_paxos_eid};
+use std::cmp::min;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::channel;
 
@@ -59,8 +60,6 @@ pub struct SimpleBundle {
   val: u32,
 }
 
-const NUM_COORDS: u32 = 3;
-
 type NetworkMessage = msg::PaxosDriverMessage<SimpleBundle>;
 
 #[derive(Debug)]
@@ -68,13 +67,13 @@ pub struct PaxosNodeData {
   paxos_driver: PaxosDriver<SimpleBundle>,
   tasks: BTreeMap<Timestamp, Vec<PaxosTimerEvent>>,
   /// The Local PaxosLogs that accumulate the results for every node.
-  pub paxos_log: Vec<msg::PLEntry<SimpleBundle>>,
+  pub paxos_log: VecDeque<msg::PLEntry<SimpleBundle>>,
 }
 
 #[derive(Debug)]
 pub enum QueuePauseMode {
-  /// Here, a queue is down permenantly until it is explicitly brought back up.
-  Permenant,
+  /// Here, a queue is down permanently until it is explicitly brought back up.
+  Permanent,
   /// Here, a queue is down only for as many milliseconds as `u32`.
   Temporary(u32),
 }
@@ -83,12 +82,14 @@ pub enum QueuePauseMode {
 pub struct Simulation {
   pub rand: XorShiftRng,
 
+  /// Basic Network
+
   /// Message queues between all nodes in the network
   queues: BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<NetworkMessage>>>,
   /// The set of queues that have messages to deliever
   nonempty_queues: Vec<(EndpointId, EndpointId)>,
   /// All `EndpointIds`.
-  address_config: Vec<EndpointId>,
+  pub address_config: Vec<EndpointId>,
 
   /// Network queue pausing
 
@@ -99,10 +100,17 @@ pub struct Simulation {
   /// all of the `Delayed` values.
   delay_sum: u32,
   /// The number of elements in `paused_queues` where `QueuePauseMode` is `QueuePauseMode`.
-  num_permenant_down: u32,
+  num_permanent_down: u32,
 
-  // The set of PaxosDrivers that make up the PaxosGroups
+  /// PaxosNodes and Global Paxos Log
+
+  /// The set of PaxosDrivers that make up the PaxosGroups
   pub paxos_data: BTreeMap<EndpointId, PaxosNodeData>,
+  /// The highest index that has been learned by all `PaxosDrivers`.
+  pub max_common_index: usize,
+  /// Global Paxos Log that is constructed as PLEntry's are learned by at least one PaxosNode,
+  /// and where the learned values by other PaxosNode's are cross-checked against.
+  pub global_paxos_log: Vec<msg::PLEntry<SimpleBundle>>,
 
   /// Meta
   next_int: u32,
@@ -112,6 +120,7 @@ pub struct Simulation {
 impl Simulation {
   /// Here, we create as many `PaxosNodeData`s as `num_paxos_data`.
   pub fn new(seed: [u8; 16], num_paxos_data: u32) -> Simulation {
+    assert!(num_paxos_data > 0); // We expect to at least have one node.
     let mut sim = Simulation {
       rand: XorShiftRng::from_seed(seed),
       queues: Default::default(),
@@ -119,8 +128,10 @@ impl Simulation {
       address_config: Default::default(),
       paused_queues: Default::default(),
       delay_sum: 0,
-      num_permenant_down: 0,
+      num_permanent_down: 0,
       paxos_data: Default::default(),
+      max_common_index: 0,
+      global_paxos_log: vec![],
       next_int: 0,
       true_timestamp: Default::default(),
     };
@@ -148,19 +159,32 @@ impl Simulation {
       );
     }
 
-    // Start inserting the first SimpleBundle at the leader.
+    Self::initialize_paxos_nodes(sim)
+  }
+
+  /// Starts the Async insertion cycles of Paxos.
+  fn initialize_paxos_nodes(mut sim: Simulation) -> Simulation {
     let leader_eid = mk_paxos_eid(&0);
-    let paxos_data = sim.paxos_data.get_mut(&leader_eid).unwrap();
-    let current_time = sim.true_timestamp;
-    let mut ctx = PaxosContext {
-      rand: &mut sim.rand,
-      current_time, // TODO: simulate clock skew
-      queues: &mut sim.queues,
-      nonempty_queues: &mut sim.nonempty_queues,
-      this_eid: &leader_eid,
-      tasks: &mut paxos_data.tasks,
-    };
-    paxos_data.paxos_driver.insert_bundle(&mut ctx, SimpleBundle { val: sim.next_int });
+    for (eid, paxos_data) in &mut sim.paxos_data {
+      let current_time = sim.true_timestamp;
+      let mut ctx = PaxosContext {
+        rand: &mut sim.rand,
+        current_time, // TODO: simulate clock skew
+        queues: &mut sim.queues,
+        nonempty_queues: &mut sim.nonempty_queues,
+        this_eid: &leader_eid,
+        tasks: &mut paxos_data.tasks,
+      };
+
+      // If this node is the first Leader, then start inserting.
+      if eid == &leader_eid {
+        paxos_data.paxos_driver.insert_bundle(&mut ctx, SimpleBundle { val: sim.next_int });
+      }
+
+      // Start Paxos Timer Events
+      paxos_data.paxos_driver.timer_event(&mut ctx, PaxosTimerEvent::LeaderHeartbeat);
+      paxos_data.paxos_driver.timer_event(&mut ctx, PaxosTimerEvent::NextIndex);
+    }
 
     return sim;
   }
@@ -170,12 +194,12 @@ impl Simulation {
   // -----------------------------------------------------------------------------------------------
 
   /// Add a message between two nodes in the network.
-  pub fn add_msg(&mut self, msg: NetworkMessage, from_eid: &EndpointId, to_eid: &EndpointId) {
+  fn add_msg(&mut self, msg: NetworkMessage, from_eid: &EndpointId, to_eid: &EndpointId) {
     add_msg(&mut self.queues, &mut self.nonempty_queues, msg, from_eid, to_eid);
   }
 
   /// Poll a message between two nodes in the network.
-  pub fn poll_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) -> Option<NetworkMessage> {
+  fn poll_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) -> Option<NetworkMessage> {
     let queue = self.queues.get_mut(from_eid).unwrap().get_mut(to_eid).unwrap();
     if queue.len() == 1 {
       if let Some(index) = self
@@ -189,12 +213,46 @@ impl Simulation {
     queue.pop_front()
   }
 
+  /// Add the `entries` to the Local PaxosLog of at `eid`.
+  fn extend_paxos_log(&mut self, eid: &EndpointId, entries: Vec<msg::PLEntry<SimpleBundle>>) {
+    let paxos_data = self.paxos_data.get_mut(eid).unwrap();
+
+    // Add the PLEntrys to `global_paxos_log`, and verify that they match.
+    for entry in entries.into_iter() {
+      let next_index = self.max_common_index + paxos_data.paxos_log.len();
+      if let Some(global_entry) = self.global_paxos_log.get(next_index) {
+        assert_eq!(global_entry, &entry);
+      } else {
+        self.global_paxos_log.push(entry.clone());
+      }
+      paxos_data.paxos_log.push_back(entry);
+    }
+
+    // Remove PLEntrys in the Local PaxosLogs if all PaxosNodes have it.
+    let mut num_to_remove: Option<usize> = None;
+    for (_, paxos_data) in &self.paxos_data {
+      if let Some(num) = &mut num_to_remove {
+        *num = min(*num, paxos_data.paxos_log.len());
+      } else {
+        num_to_remove = Some(paxos_data.paxos_log.len());
+      }
+    }
+
+    let num_to_remove = num_to_remove.unwrap();
+    for (_, paxos_data) in &mut self.paxos_data {
+      for _ in 0..num_to_remove {
+        paxos_data.paxos_log.pop_front();
+      }
+    }
+
+    self.max_common_index += num_to_remove;
+  }
+
   /// When this is called, the `msg` will already have been popped from `queues`.
   /// This function will run the PaxosNode at the `to_eid` end, which might have
   /// any number of side effects, including adding new messages into `queues`.
-  pub fn run_paxos_message(&mut self, _: &EndpointId, to_eid: &EndpointId, msg: NetworkMessage) {
+  fn run_paxos_message(&mut self, _: &EndpointId, to_eid: &EndpointId, msg: NetworkMessage) {
     let paxos_data = self.paxos_data.get_mut(to_eid).unwrap();
-
     let current_time = self.true_timestamp;
     let mut ctx = PaxosContext {
       rand: &mut self.rand,
@@ -211,31 +269,47 @@ impl Simulation {
       self.next_int += 1;
       paxos_data.paxos_driver.insert_bundle(&mut ctx, SimpleBundle { val: self.next_int });
     }
-    paxos_data.paxos_log.extend(entries.into_iter());
 
-    // Execute all async timer tasks.
-    loop {
-      if let Some((next_timestamp, _)) = ctx.tasks.first_key_value() {
-        if next_timestamp <= &current_time {
-          // All data in this first entry should be dispatched.
-          let next_timestamp = next_timestamp.clone();
-          for timer_input in ctx.tasks.remove(&next_timestamp).unwrap() {
-            paxos_data.paxos_driver.timer_event(&mut ctx, timer_input);
-          }
-          continue;
-        }
-      }
-
-      // This means there are no more left.
-      break;
-    }
+    self.extend_paxos_log(to_eid, entries);
   }
 
   /// The endpoints provided must exist. This function polls a message from
   /// the message queue between them and delivers it to the PaxosDriver at `to_eid`.
-  pub fn deliver_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) {
+  fn deliver_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) {
     if let Some(msg) = self.poll_msg(from_eid, to_eid) {
       self.run_paxos_message(from_eid, to_eid, msg);
+    }
+  }
+
+  /// Execute the timer events up to the current `true_timestamp`.
+  pub fn run_timer_events(&mut self) {
+    for (eid, paxos_data) in &mut self.paxos_data {
+      let current_time = self.true_timestamp;
+      let mut ctx = PaxosContext {
+        rand: &mut self.rand,
+        current_time, // TODO: simulate clock skew
+        queues: &mut self.queues,
+        nonempty_queues: &mut self.nonempty_queues,
+        this_eid: eid,
+        tasks: &mut paxos_data.tasks,
+      };
+
+      // Execute all async timer tasks.
+      loop {
+        if let Some((next_timestamp, _)) = ctx.tasks.first_key_value() {
+          if next_timestamp <= &current_time {
+            // All data in this first entry should be dispatched.
+            let next_timestamp = next_timestamp.clone();
+            for timer_input in ctx.tasks.remove(&next_timestamp).unwrap() {
+              paxos_data.paxos_driver.timer_event(&mut ctx, timer_input);
+            }
+            continue;
+          }
+        }
+
+        // This means there are no more left.
+        break;
+      }
     }
   }
 
@@ -255,6 +329,7 @@ impl Simulation {
       }
     }
 
+    self.run_timer_events();
     self.update_paused_queues();
   }
 
@@ -273,7 +348,7 @@ impl Simulation {
   /// DUR = (num_channels * frac) * 2 / (1 - frac)
   ///
   /// Thus, if frac where 1/2 and num_channels were 25, then DUR is about 50.
-  pub fn update_paused_queues(&mut self) {
+  fn update_paused_queues(&mut self) {
     // Pause a queue for a little bit of time.
     let from_idx = self.rand.next_u32() as usize % self.address_config.len();
     let to_idx = self.rand.next_u32() as usize % self.address_config.len();
@@ -286,16 +361,19 @@ impl Simulation {
     if !self.paused_queues.contains_key(&channel_key) {
       // Choose a duration that is > 0, and add it in.
       const MAX_PAUSE_TIME: u32 = 50;
-      let duration = (self.rand.next_u32() % MAX_PAUSE_TIME) + 1;
-      self.paused_queues.insert(channel_key, QueuePauseMode::Temporary(duration));
-      self.delay_sum += duration;
+      // If MAX_PAUSE_TIME is 0, that means we should no pause anything.
+      if MAX_PAUSE_TIME > 0 {
+        let duration = (self.rand.next_u32() % MAX_PAUSE_TIME) + 1;
+        self.paused_queues.insert(channel_key, QueuePauseMode::Temporary(duration));
+        self.delay_sum += duration;
+      }
     }
 
     // Decrement durations in `paused_queues`, removing keys if it goes to 0.
     let mut keys_to_remove = Vec::<(EndpointId, EndpointId)>::new();
     for (channel_key, pause_mode) in &mut self.paused_queues {
       match pause_mode {
-        QueuePauseMode::Permenant => {}
+        QueuePauseMode::Permanent => {}
         QueuePauseMode::Temporary(duration) => {
           *duration -= 1;
           self.delay_sum -= 1;
@@ -307,6 +385,24 @@ impl Simulation {
     }
     for key in keys_to_remove {
       self.paused_queues.remove(&key);
+    }
+  }
+
+  /// Pause the message deliver of a queue permanently.
+  pub fn block_queue_permanently(&mut self, from_eid: EndpointId, to_eid: EndpointId) {
+    let channel_key = (from_eid, to_eid);
+    if let Some(pause_mode) = self.paused_queues.get_mut(&channel_key) {
+      match pause_mode {
+        QueuePauseMode::Permanent => {}
+        QueuePauseMode::Temporary(duration) => {
+          self.delay_sum -= *duration;
+          *pause_mode = QueuePauseMode::Permanent;
+          self.num_permanent_down += 1;
+        }
+      }
+    } else {
+      self.paused_queues.insert(channel_key, QueuePauseMode::Permanent);
+      self.num_permanent_down += 1;
     }
   }
 

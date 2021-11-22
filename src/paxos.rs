@@ -60,9 +60,12 @@ pub struct PaxosInstance<BundleT> {
 // -----------------------------------------------------------------------------------------------
 
 const HEARTBEAT_THRESHOLD: u32 = 5;
-const HEARTBEAT_PRIOD: u128 = 1;
-const NEXT_INDEX_PERIOD: u128 = 1;
-const RETRY_DEFER_TIME: u128 = 10;
+
+// These time values below are in milliseconds.
+const HEARTBEAT_PRIOD_MS: u128 = 1000;
+const NEXT_INDEX_PERIOD_MS: u128 = 1000;
+const RETRY_DEFER_TIME_MS: u128 = 1000;
+
 const PROPOSAL_INCREMENT: u32 = 1000;
 
 // -----------------------------------------------------------------------------------------------
@@ -121,7 +124,7 @@ pub struct PaxosDriver<BundleT> {
   paxos_instances: BTreeMap<PLIndex, PaxosInstance<BundleT>>,
 
   /// The latest Leadership by `next_index`.
-  pub leader: LeadershipId,
+  leader: LeadershipId,
   leader_heartbeat: u32,
 
   /// Insert state. Once this is set to `Some(_)`, the internal value is never modified. This is
@@ -499,7 +502,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
       self.next_insert = Some((uuid.clone(), bundle.clone()));
 
       // Schedule a retry in `RETRY_DEFER_TIME` ms.
-      ctx.defer(RETRY_DEFER_TIME, PaxosTimerEvent::RetryInsert(uuid));
+      ctx.defer(RETRY_DEFER_TIME_MS, PaxosTimerEvent::RetryInsert(uuid));
 
       // Propose the bundle at the next index.
       self.propose_next_index(ctx, PLEntry::Bundle(bundle));
@@ -583,7 +586,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
         // inserted in the meanwhile.
 
         // Schedule another retry in `RETRY_DEFER_TIME` ms.
-        ctx.defer(RETRY_DEFER_TIME, PaxosTimerEvent::RetryInsert(uuid));
+        ctx.defer(RETRY_DEFER_TIME_MS, PaxosTimerEvent::RetryInsert(uuid));
 
         // Propose the bundle at the next index.
         self.propose_next_index(ctx, PLEntry::Bundle(cur_bundle.clone()));
@@ -629,7 +632,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     }
 
     // Schedule another `LeaderHeartbeat`
-    ctx.defer(HEARTBEAT_PRIOD, PaxosTimerEvent::LeaderHeartbeat);
+    ctx.defer(HEARTBEAT_PRIOD_MS, PaxosTimerEvent::LeaderHeartbeat);
   }
 
   fn next_index_timer<PaxosContextBaseT: PaxosContextBase<BundleT>>(
@@ -648,6 +651,6 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     }
 
     // Schedule another `NextIndex`
-    ctx.defer(NEXT_INDEX_PERIOD, PaxosTimerEvent::NextIndex);
+    ctx.defer(NEXT_INDEX_PERIOD_MS, PaxosTimerEvent::NextIndex);
   }
 }
