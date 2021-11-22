@@ -33,45 +33,76 @@ fn tp_test() {
 
   let mut sim = Simulation::new([0; 16], 1, slave_address_config, master_address_config);
 
-  // Create a Table
-  let query = "
-    CREATE TABLE inventory (
-      product_id INT PRIMARY KEY,
-      email      VARCHAR
+  {
+    // Create a table
+    let query = "
+      CREATE TABLE inventory (
+        product_id INT PRIMARY KEY,
+        email      VARCHAR
+      );
+    ";
+
+    sim.add_msg(
+      msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+        msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
+          sender_eid: mk_client_eid(&0),
+          request_id: RequestId("rid0".to_string()),
+          query: query.to_string(),
+        }),
+      )),
+      &mk_client_eid(&0),
+      &mk_eid("me0"),
     );
-  ";
 
-  sim.add_msg(
-    msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
-      msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
-        sender_eid: mk_client_eid(&0),
-        request_id: RequestId("rid0".to_string()),
-        query: query.to_string(),
-      }),
-    )),
-    &mk_client_eid(&0),
-    &mk_eid("me0"),
-  );
+    sim.simulate_n_ms(500);
+  }
 
-  sim.simulate_n_ms(500);
+  {
+    // Insert data into the table
+    let query = "
+      INSERT INTO inventory (product_id, email)
+      VALUES (0, 'my_email_0'),
+             (1, 'my_email_1');
+    ";
 
-  // let query = "\
-  //   SELECT a, b, c, d \
-  //   FROM table_1 AS hi(foo, boo, bar) \
-  //   WHERE a > b AND b < -100 \
-  //   ORDER BY a DESC, b";
-  //
-  // sim.add_msg(
-  //   msg::NetworkMessage::Slave(msg::SlaveMessage::ExternalMessage(
-  //     msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
-  //       sender_eid: mk_client_eid(&0),
-  //       request_id: RequestId("rid1".to_string()),
-  //       query: query.to_string(),
-  //     }),
-  //   )),
-  //   &mk_client_eid(&2),
-  //   &mk_slave_eid(&2),
-  // );
+    sim.add_msg(
+      msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+        msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
+          sender_eid: mk_client_eid(&0),
+          request_id: RequestId("rid1".to_string()),
+          query: query.to_string(),
+        }),
+      )),
+      &mk_client_eid(&0),
+      &mk_eid("se0"),
+    );
 
-  // sim.simulate_all();
+    sim.simulate_n_ms(1000);
+  }
+
+  {
+    // Read data the table
+    let query = "
+      SELECT product_id, email
+      FROM inventory
+      WHERE true;
+    ";
+
+    sim.add_msg(
+      msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+        msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
+          sender_eid: mk_client_eid(&0),
+          request_id: RequestId("rid2".to_string()),
+          query: query.to_string(),
+        }),
+      )),
+      &mk_client_eid(&0),
+      &mk_eid("se0"),
+    );
+
+    sim.simulate_n_ms(1000);
+  }
+
+  println!("{:#?}", sim);
+  println!("Responses: {:#?}", sim.get_responses());
 }

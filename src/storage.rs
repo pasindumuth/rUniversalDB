@@ -101,17 +101,17 @@ impl<'a> StorageView for SimpleStorageView<'a> {
       // are within `key_bound` and aren't shadowed by an existing entry.
       let mut it = self.storage.range(compute_range_query(key_bound));
       let mut entry = it.next();
-      while let Some(((pkey, ci), _)) = entry {
+      while let Some(((pkey, ci), versions)) = entry {
         assert!(ci.is_none()); // Recall that this should be the Presence Storage Row of `pkey`.
         match check_inclusion(key_bound, pkey) {
           KeyBoundInclusionResult::Included => {
             // This row is present within the `key_bound`, so we add it to `snapshot_table`.
+            let storage_key = (pkey.clone(), ci.clone());
+            snapshot_table.insert(storage_key, find_version(versions, *timestamp).clone());
             entry = it.next();
             while let Some(((_, Some(col_name)), versions)) = entry {
               let storage_key = (pkey.clone(), Some(col_name.clone()));
-              if !snapshot_table.contains_key(&storage_key) {
-                snapshot_table.insert(storage_key, find_version(versions, *timestamp).clone());
-              }
+              snapshot_table.insert(storage_key, find_version(versions, *timestamp).clone());
               entry = it.next();
             }
           }
@@ -182,11 +182,15 @@ impl<'a> StorageView for MSStorageView<'a> {
         // are within `key_bound` and aren't shadowed by an existing entry.
         let mut it = generic_table.range(bound.clone());
         let mut entry = it.next();
-        while let Some(((pkey, ci), _)) = entry {
+        while let Some(((pkey, ci), val)) = entry {
           assert!(ci.is_none()); // Recall that this should be the Presence Storage Row of `pkey`.
           match check_inclusion(key_bound, pkey) {
             KeyBoundInclusionResult::Included => {
               // This row is present within the `key_bound`, so we add it to `snapshot_table`.
+              let storage_key = (pkey.clone(), ci.clone());
+              if !snapshot_table.contains_key(&storage_key) {
+                snapshot_table.insert(storage_key, val.clone());
+              }
               entry = it.next();
               while let Some(((_, Some(col_name)), val)) = entry {
                 let storage_key = (pkey.clone(), Some(col_name.clone()));
@@ -212,11 +216,15 @@ impl<'a> StorageView for MSStorageView<'a> {
       // are within `key_bound` and aren't shadowed by an existing entry.
       let mut it = self.storage.range(bound.clone());
       let mut entry = it.next();
-      while let Some(((pkey, ci), _)) = entry {
+      while let Some(((pkey, ci), versions)) = entry {
         assert!(ci.is_none()); // Recall that this should be the Presence Storage Row of `pkey`.
         match check_inclusion(key_bound, pkey) {
           KeyBoundInclusionResult::Included => {
             // This row is present within the `key_bound`, so we add it to `snapshot_table`.
+            let storage_key = (pkey.clone(), ci.clone());
+            if !snapshot_table.contains_key(&storage_key) {
+              snapshot_table.insert(storage_key, find_version(versions, *timestamp).clone());
+            }
             entry = it.next();
             while let Some(((_, Some(col_name)), versions)) = entry {
               let storage_key = (pkey.clone(), Some(col_name.clone()));
@@ -245,27 +253,18 @@ impl<'a> StorageView for MSStorageView<'a> {
   }
 }
 
-/// Compress the `update_views` by iterating from latest to earliest tier.
-pub fn compress_updates_views(update_views: &BTreeMap<u32, GenericTable>) -> GenericTable {
-  let mut snapshot_table = GenericTable::new();
-  for (_, generic_table) in update_views.iter() {
-    // Iterate over the the UpdateView Rows and insert them into `snapshot_table` if they
-    // are within `key_bound` and aren't shadowed by an existing entry.
-    let mut it = generic_table.iter();
-    let mut entry = it.next();
-    while let Some(((pkey, ci), _)) = entry {
-      assert!(ci.is_none()); // Recall that this should be the Presence Storage Row of `pkey`.
-      entry = it.next();
-      while let Some(((_, Some(col_name)), val)) = entry {
-        let storage_key = (pkey.clone(), Some(col_name.clone()));
-        if !snapshot_table.contains_key(&storage_key) {
-          snapshot_table.insert(storage_key, val.clone());
-        }
-        entry = it.next();
+/// Compress the `update_views` by iterating from latest to earliest tier. We add in elements
+/// that are not already present (since they are shadowed by the element already there).
+pub fn compress_updates_views(update_views: BTreeMap<u32, GenericTable>) -> GenericTable {
+  let mut compressed_table = GenericTable::new();
+  for (_, generic_table) in update_views.into_iter().rev() {
+    for (key, value) in generic_table {
+      if !compressed_table.contains_key(&key) {
+        compressed_table.insert(key, value);
       }
     }
   }
-  snapshot_table
+  compressed_table
 }
 
 /// Apply the `compressed_view` to `storage` and `timestamp`.

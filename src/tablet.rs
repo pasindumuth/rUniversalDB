@@ -32,14 +32,15 @@ use crate::paxos2pc_rm::Paxos2PCRMAction;
 use crate::paxos2pc_tm;
 use crate::paxos2pc_tm::{Paxos2PCContainer, RMMessage, RMPLm};
 use crate::server::{
-  contains_col, CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
+  contains_col, weak_contains_col, CommonQuery, ContextConstructor, LocalTable, ServerContextBase,
+  SlaveServerContext,
 };
 use crate::slave::{SlaveBackMessage, TabletBundleInsertion};
 use crate::stmpaxos2pc_rm;
 use crate::stmpaxos2pc_rm::STMPaxos2PCRMAction;
 use crate::stmpaxos2pc_tm;
 use crate::stmpaxos2pc_tm::RMServerContext;
-use crate::storage::{compress_updates_views, GenericMVTable, GenericTable, StorageView};
+use crate::storage::{GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
 use rand::RngCore;
@@ -381,7 +382,7 @@ impl<'a, StorageViewT: StorageView> StorageLocalTable<'a, StorageViewT> {
 
 impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, StorageViewT> {
   fn contains_col(&self, col: &ColName) -> bool {
-    contains_col(self.table_schema, col, self.timestamp)
+    weak_contains_col(self.table_schema, col, self.timestamp)
   }
 
   fn get_rows(
@@ -1107,6 +1108,7 @@ impl TabletContext {
         self.run_main_loop(io_ctx, statuses);
       }
       TabletForwardMsg::GossipData(gossip) => {
+        debug_assert!(self.gossip.gen < gossip.gen);
         self.gossip = gossip;
 
         // Inform Top-Level ESs.
@@ -1510,7 +1512,7 @@ impl TabletContext {
 
   // The Main Loop
   fn run_main_loop<IO: CoreIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
-    while !self.run_main_loop_iteration(io_ctx, statuses) {}
+    while self.run_main_loop_iteration(io_ctx, statuses) {}
   }
 
   /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
@@ -2188,7 +2190,7 @@ impl TabletContext {
       }
       TableAction::Success(success) => {
         // Remove the TableReadESWrapper and respond.
-        let read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
+        let read = statuses.table_read_ess.remove(&query_id).unwrap();
         let sender_path = read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").

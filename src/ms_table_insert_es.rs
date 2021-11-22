@@ -231,6 +231,7 @@ impl MSTableInsertES {
           }
         }
       }
+      eval_values.push(eval_row);
     }
 
     // Validate that the types of values align with the schema.
@@ -239,7 +240,7 @@ impl MSTableInsertES {
         col_type
       } else {
         // The `col_name` must be a ValCol that is already locked at this timestamp.
-        ctx.table_schema.val_cols.strong_static_read(col_name, self.timestamp).unwrap()
+        ctx.table_schema.val_cols.static_read(col_name, self.timestamp).unwrap()
       };
 
       for row in &eval_values {
@@ -368,6 +369,8 @@ impl MSTableInsertES {
     let update_view = &pending.update_view;
     for (key, _) in update_view {
       if key.1 == None {
+        // TODO: This check needs to be done with the existing update_view applied
+        //  onto storage.
         if static_read(&ctx.storage, key, self.timestamp).is_some() {
           // This key exists, so we must respond with an abort.
           self.state = MSTableInsertExecutionS::Done;

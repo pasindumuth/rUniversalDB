@@ -346,6 +346,7 @@ impl CoordContext {
         }
       }
       CoordForwardMsg::GossipData(gossip) => {
+        debug_assert!(self.gossip.gen < gossip.gen);
         self.gossip = gossip;
 
         // Inform Top-Level ESs.
@@ -688,36 +689,46 @@ impl CoordContext {
         self.external_request_id_map.remove(&ms_coord.request_id);
 
         if all_rms.is_empty() {
-          // TODO: respond to the External immediately. and skip the next stuff.
-        }
-
-        // Construct the Prepare messages
-        let mut prepare_payloads = BTreeMap::<TNodePath, FinishQueryPrepare>::new();
-        for rm in all_rms {
-          prepare_payloads.insert(rm.node_path, FinishQueryPrepare { query_id: rm.query_id });
-        }
-
-        // Add in the FinishQueryES and start it
-        let finish_query_es = map_insert(
-          &mut statuses.finish_query_tm_ess,
-          &query_id,
-          FinishQueryTMES {
-            query_id: query_id.clone(),
-            state: paxos2pc::State::Start,
-            inner: FinishQueryTMInner {
-              response_data: Some(ResponseData {
+          // If there are no RMs, respond immediately.
+          io_ctx.send(
+            &ms_coord.sender_eid,
+            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
+              msg::ExternalQuerySuccess {
                 request_id: ms_coord.request_id,
-                sender_eid: ms_coord.sender_eid,
-                sql_query,
-                table_view,
                 timestamp,
-              }),
-              committed: false,
+                result: table_view,
+              },
+            )),
+          );
+        } else {
+          // Construct the Prepare messages
+          let mut prepare_payloads = BTreeMap::<TNodePath, FinishQueryPrepare>::new();
+          for rm in all_rms {
+            prepare_payloads.insert(rm.node_path, FinishQueryPrepare { query_id: rm.query_id });
+          }
+
+          // Add in the FinishQueryES and start it
+          let finish_query_es = map_insert(
+            &mut statuses.finish_query_tm_ess,
+            &query_id,
+            FinishQueryTMES {
+              query_id: query_id.clone(),
+              state: paxos2pc::State::Start,
+              inner: FinishQueryTMInner {
+                response_data: Some(ResponseData {
+                  request_id: ms_coord.request_id,
+                  sender_eid: ms_coord.sender_eid,
+                  sql_query,
+                  table_view,
+                  timestamp,
+                }),
+                committed: false,
+              },
             },
-          },
-        );
-        let action = finish_query_es.start_orig(self, io_ctx, prepare_payloads);
-        self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+          );
+          let action = finish_query_es.start_orig(self, io_ctx, prepare_payloads);
+          self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+        }
       }
       MSQueryCoordAction::FatalFailure(payload) => {
         let ms_coord = statuses.ms_coord_ess.get(&query_id).unwrap();

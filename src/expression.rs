@@ -376,8 +376,8 @@ pub fn boolean_leaf_constraint<T: BoundType + Clone>(
 
 /// This function expects the  `kb_expr` to be a boolean expression (with potentially
 /// `UnknownValue`s). It then computes a `Vec<ColBound>` such that any `ColValN`
-/// outside of these bounds for the `col_name` can't possibly result in `kb_expr`
-/// evaluating to true.
+/// outside of these bounds for the `col_name` cannot possibly result in `kb_expr`
+/// evaluating to true, no matter what the `UnknownValue`s and other `ColumnRef`s take on.
 fn compute_col_bounds<T: Ord + BoundType + Clone>(
   kb_expr: &KBExpr,
   col_name: &ColName,
@@ -551,6 +551,10 @@ pub fn compute_key_region(
   let key_col_names = Vec::from_iter(key_cols.iter().map(|(name, _)| name.clone()));
   let kb_expr = construct_kb_expr(expr.clone(), &col_map, &key_col_names)?;
   let mut key_bounds = Vec::<KeyBound>::new();
+
+  // The strategy here is to start with an all-encompassing KeyRegion, then reduce the
+  // KeyRegion for each key column independently.
+  key_bounds.push(KeyBound { col_bounds: vec![] });
   for (col_name, col_type) in key_cols {
     // Then, compute the ColBound and extend key_bounds.
     let col_bounds = compute_poly_col_bounds(&kb_expr, col_name, col_type)?;
@@ -564,6 +568,7 @@ pub fn compute_key_region(
     }
     key_bounds = compress_row_region(new_key_bounds);
   }
+
   Ok(key_bounds)
 }
 

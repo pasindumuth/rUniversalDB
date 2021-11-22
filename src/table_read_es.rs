@@ -340,26 +340,26 @@ impl TableReadES {
       }
     };
 
+    // Here, we have computed all GRQueryESs, and we can now add them to Executing.
+    let mut subqueries = Vec::<SingleSubqueryStatus>::new();
+    for gr_query_es in &gr_query_statuses {
+      subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+        context: gr_query_es.context.clone(),
+        query_id: gr_query_es.query_id.clone(),
+      }));
+    }
+
+    // Move the ES to the Executing state.
+    self.state = ExecutionS::Executing(Executing {
+      completed: 0,
+      subqueries,
+      row_region: pending.read_region.row_region.clone(),
+    });
+
     if gr_query_statuses.is_empty() {
-      // Since there are no subqueries, we can go straight to finishing the ES.
+      // Go direction to finish.
       self.finish_table_read_es(ctx, io_ctx)
     } else {
-      // Here, we have computed all GRQueryESs, and we can now add them to Executing.
-      let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-      for gr_query_es in &gr_query_statuses {
-        subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-          context: gr_query_es.context.clone(),
-          query_id: gr_query_es.query_id.clone(),
-        }));
-      }
-
-      // Move the ES to the Executing state.
-      self.state = ExecutionS::Executing(Executing {
-        completed: 0,
-        subqueries,
-        row_region: pending.read_region.row_region.clone(),
-      });
-
       // Return the subqueries
       TableAction::SendSubqueries(gr_query_statuses)
     }
@@ -503,12 +503,19 @@ impl TableReadES {
       return TableAction::QueryError(mk_eval_error(eval_error));
     }
 
-    // Signal Success and return the data.
-    self.state = ExecutionS::Done;
-    TableAction::Success(QueryESResult {
+    let res = QueryESResult {
       result: (self.sql_query.projection.clone(), res_table_views),
       new_rms: self.new_rms.iter().cloned().collect(),
-    })
+    };
+
+    if self.waiting_global_locks.is_empty() {
+      // Signal Success and return the data.
+      self.state = ExecutionS::Done;
+      TableAction::Success(res)
+    } else {
+      self.state = ExecutionS::WaitingGlobalLockedCols(res);
+      TableAction::Wait
+    }
   }
 
   /// Cleans up all currently owned resources, and goes to Done.

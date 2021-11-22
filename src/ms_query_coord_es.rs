@@ -202,8 +202,8 @@ impl FullMSCoordES {
     // TMStatus that just finished had the right QueryId.
     assert_eq!(tm_qid, es.state.stage_query_id().unwrap());
     // Look up the schema for the stage in the QueryPlan, and assert it's the same as the result.
-    let stage_idx = es.state.stage_idx().unwrap();
-    let (trans_table_name, _) = es.sql_query.trans_tables.get(stage_idx).unwrap();
+    let stage = cast!(CoordState::Stage, &es.state).unwrap();
+    let (trans_table_name, _) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
     let (plan_schema, _) = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
     assert_eq!(plan_schema, &schema);
     // Recall that since we only send out one ContextRow, there should only be one TableView.
@@ -323,7 +323,11 @@ impl FullMSCoordES {
   ) -> MSQueryCoordAction {
     // Compute the next stage
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
-    let next_stage_idx = es.state.stage_idx().unwrap() + 1;
+    let next_stage_idx = match &es.state {
+      CoordState::Start => 0,
+      CoordState::Stage(stage) => stage.stage_idx + 1,
+      _ => panic!(),
+    };
 
     if next_stage_idx < es.sql_query.trans_tables.len() {
       self.process_ms_query_stage(ctx, io_ctx, next_stage_idx)

@@ -27,3 +27,46 @@ docker run -it --name=universal3 --ip 172.19.0.6 --network=runiversal-net runive
 docker run -it --name=universal4 --ip 172.19.0.7 --network=runiversal-net runiversal cargo run 4 172.19.0.7 172.19.0.3 172.19.0.4 172.19.0.5 172.19.0.6
 
 docker run -it --name=client --network=runiversal-net runiversal cargo run --bin client 172.19.0.3 1610
+
+
+Example of implementing Debug for a struct:
+
+```rust
+
+impl Debug for SlaveContext {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    let mut debug_trait_builder = f.debug_struct("SlaveContext");
+    let _ = debug_trait_builder.field("coord_positions", &self.coord_positions);
+    let _ = debug_trait_builder.field("this_sid", &self.this_sid);
+    let _ = debug_trait_builder.field("this_gid", &self.this_gid);
+    let _ = debug_trait_builder.field("this_eid", &self.this_eid);
+    let _ = debug_trait_builder.field("gossip", &self.gossip);
+    let _ = debug_trait_builder.field("leader_map", &self.leader_map);
+    let _ = debug_trait_builder.field("network_driver", &self.network_driver);
+    let _ = debug_trait_builder.field("slave_bundle", &self.slave_bundle);
+    let _ = debug_trait_builder.field("tablet_bundles", &self.tablet_bundles);
+    debug_trait_builder.finish()
+  }
+}
+
+```
+
+Example (unrefined) of impelmenting Debug for an enum:
+
+```rust
+  impl ::core::fmt::Debug for SlaveTimerInput {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+      match (&*self,) {
+        (&SlaveTimerInput::PaxosTimerEvent(ref __self_0),) => {
+          let mut debug_trait_builder = f.debug_tuple("PaxosTimerEvent");
+          let _ = debug_trait_builder.field(&&(*__self_0));
+          debug_trait_builder.finish()
+        }
+        (&SlaveTimerInput::RemoteLeaderChanged,) => {
+          let mut debug_trait_builder = f.debug_tuple("RemoteLeaderChanged");
+          debug_trait_builder.finish()
+        }
+      }
+    }
+  }
+```

@@ -486,7 +486,7 @@ impl MSTableWriteES {
             // Note that we only do this if `col_val` is non-NULL.
             if let Some(val) = &col_val {
               let col_type =
-                ctx.table_schema.val_cols.strong_static_read(&col_name, self.timestamp).unwrap();
+                ctx.table_schema.val_cols.static_read(&col_name, self.timestamp).unwrap();
               let does_match = match (val, col_type) {
                 (ColVal::Bool(_), ColType::Bool) => true,
                 (ColVal::Int(_), ColType::Int) => true,

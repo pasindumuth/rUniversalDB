@@ -32,6 +32,7 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{Debug, Formatter};
 use std::iter::FromIterator;
 
 // -----------------------------------------------------------------------------------------------
@@ -240,7 +241,6 @@ pub struct MasterState {
   statuses: Statuses,
 }
 
-#[derive(Debug)]
 pub struct MasterContext {
   /// Metadata
   pub this_eid: EndpointId,
@@ -270,6 +270,25 @@ pub struct MasterContext {
   pub paxos_driver: PaxosDriver<MasterBundle>,
 }
 
+impl Debug for MasterContext {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    let mut debug_trait_builder = f.debug_struct("MasterContext");
+    let _ = debug_trait_builder.field("this_eid", &self.this_eid);
+    let _ = debug_trait_builder.field("gen", &self.gen);
+    let _ = debug_trait_builder.field("db_schema", &self.db_schema);
+    let _ = debug_trait_builder.field("table_generation", &self.table_generation);
+    let _ = debug_trait_builder.field("sharding_config", &self.sharding_config);
+    let _ = debug_trait_builder.field("tablet_address_config", &self.tablet_address_config);
+    let _ = debug_trait_builder.field("slave_address_config", &self.slave_address_config);
+    let _ = debug_trait_builder.field("master_address_config", &self.master_address_config);
+    let _ = debug_trait_builder.field("leader_map", &self.leader_map);
+    let _ = debug_trait_builder.field("network_driver", &self.network_driver);
+    let _ = debug_trait_builder.field("external_request_id_map", &self.external_request_id_map);
+    let _ = debug_trait_builder.field("master_bundle", &self.master_bundle);
+    debug_trait_builder.finish()
+  }
+}
+
 impl MasterState {
   pub fn new(ctx: MasterContext) -> MasterState {
     MasterState { ctx, statuses: Default::default() }
@@ -278,23 +297,15 @@ impl MasterState {
   /// This should be called at the very start of the life of a Master node. This
   /// will start the timer events, paxos insertion, etc.
   pub fn bootstrap<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
+    let ctx = &mut MasterPaxosContext { io_ctx, this_eid: &self.ctx.this_eid };
     if self.ctx.is_leader() {
       // Start the Paxos insertion cycle with an empty bundle.
-      self.ctx.paxos_driver.insert_bundle(
-        &mut MasterPaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
-        MasterBundle::default(),
-      );
+      self.ctx.paxos_driver.insert_bundle(ctx, MasterBundle::default());
     }
 
     // Start Paxos Timer Events
-    self.ctx.paxos_driver.timer_event(
-      &mut MasterPaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
-      PaxosTimerEvent::LeaderHeartbeat,
-    );
-    self.ctx.paxos_driver.timer_event(
-      &mut MasterPaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
-      PaxosTimerEvent::NextIndex,
-    );
+    self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::LeaderHeartbeat);
+    self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::NextIndex);
 
     // Broadcast Gossip data
     self.ctx.handle_input(
@@ -892,17 +903,17 @@ impl MasterContext {
 
   /// Runs the `run_main_loop_once` until it finally results in changes to the node's state.
   fn run_main_loop<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
-    while !self.run_main_loop_once(io_ctx, statuses) {}
+    while self.run_main_loop_once(io_ctx, statuses) {}
   }
 
-  /// Thus runs one iteration of the Main Loop, returning `true` exactly when nothing changes.
+  /// Thus runs one iteration of the Main Loop, returning `false` exactly when nothing changes.
   fn run_main_loop_once<IO: MasterIOCtx>(
     &mut self,
     io_ctx: &mut IO,
     statuses: &mut Statuses,
   ) -> bool {
     self.advance_ddl_ess(io_ctx, statuses);
-    true
+    false
   }
 
   /// This function advances the DDL ESs as far as possible. Properties:

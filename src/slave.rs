@@ -17,6 +17,7 @@ use crate::tablet::{TabletBundle, TabletForwardMsg};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
+use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -98,6 +99,7 @@ pub enum SlaveForwardMsg {
 // -----------------------------------------------------------------------------------------------
 
 /// Messages send from Tablets to the Slave
+#[derive(Debug)]
 pub struct TabletBundleInsertion {
   /// The Tablet that is sending this message
   pub tid: TabletGroupId,
@@ -106,6 +108,7 @@ pub struct TabletBundleInsertion {
   pub bundle: TabletBundle,
 }
 
+#[derive(Debug)]
 pub enum SlaveBackMessage {
   TabletBundleInsertion(TabletBundleInsertion),
 }
@@ -174,7 +177,6 @@ pub struct SlaveState {
 }
 
 /// The SlaveState that holds all the state of the Slave
-#[derive(Debug)]
 pub struct SlaveContext {
   /// Maps integer values to Coords for the purpose of routing External requests.
   pub coord_positions: Vec<CoordGroupId>,
@@ -200,6 +202,22 @@ pub struct SlaveContext {
   pub paxos_driver: PaxosDriver<SharedPaxosBundle>,
 }
 
+impl Debug for SlaveContext {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    let mut debug_trait_builder = f.debug_struct("SlaveContext");
+    let _ = debug_trait_builder.field("coord_positions", &self.coord_positions);
+    let _ = debug_trait_builder.field("this_sid", &self.this_sid);
+    let _ = debug_trait_builder.field("this_gid", &self.this_gid);
+    let _ = debug_trait_builder.field("this_eid", &self.this_eid);
+    let _ = debug_trait_builder.field("gossip", &self.gossip);
+    let _ = debug_trait_builder.field("leader_map", &self.leader_map);
+    let _ = debug_trait_builder.field("network_driver", &self.network_driver);
+    let _ = debug_trait_builder.field("slave_bundle", &self.slave_bundle);
+    let _ = debug_trait_builder.field("tablet_bundles", &self.tablet_bundles);
+    debug_trait_builder.finish()
+  }
+}
+
 impl SlaveState {
   pub fn new(ctx: SlaveContext) -> SlaveState {
     SlaveState { ctx, statuses: Default::default() }
@@ -208,25 +226,17 @@ impl SlaveState {
   /// This should be called at the very start of the life of a Master node. This
   /// will start the timer events, paxos insertion, etc.
   pub fn bootstrap<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
+    debug_assert_eq!(io_ctx.num_tablets(), 0);
+    let ctx = &mut SlavePaxosContext { io_ctx, this_eid: &self.ctx.this_eid };
     if self.ctx.is_leader() {
       // Start the Paxos insertion cycle with an empty bundle. Recall that since Slaves
       // start with no Tablets, the SharedPaxosBundle is trivially constructible.
-      debug_assert_eq!(io_ctx.num_tablets(), 0);
-      self.ctx.paxos_driver.insert_bundle(
-        &mut SlavePaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
-        SharedPaxosBundle { slave: SlaveBundle::default(), tablet: BTreeMap::default() },
-      );
+      self.ctx.paxos_driver.insert_bundle(ctx, SharedPaxosBundle::default());
     }
 
     // Start Paxos Timer Events
-    self.ctx.paxos_driver.timer_event(
-      &mut SlavePaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
-      PaxosTimerEvent::LeaderHeartbeat,
-    );
-    self.ctx.paxos_driver.timer_event(
-      &mut SlavePaxosContext { io_ctx, this_eid: &self.ctx.this_eid },
-      PaxosTimerEvent::NextIndex,
-    );
+    self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::LeaderHeartbeat);
+    self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::NextIndex);
 
     // Broadcast Gossip data
     self.ctx.handle_input(
@@ -358,15 +368,17 @@ impl SlaveContext {
 
               // Dispatch GossipData
               if let Some(gossip_data) = slave_bundle.gossip_data {
-                let gossip = Arc::new(gossip_data);
-                slave_forward_msgs.push(SlaveForwardMsg::GossipData(gossip.clone()));
-                for tid in &all_tids {
-                  let forward_msg = TabletForwardMsg::GossipData(gossip.clone());
-                  io_ctx.tablet_forward(&tid, forward_msg);
-                }
-                for cid in &all_cids {
-                  let forward_msg = CoordForwardMsg::GossipData(gossip.clone());
-                  io_ctx.coord_forward(&cid, forward_msg);
+                if self.gossip.gen < gossip_data.gen {
+                  let gossip = Arc::new(gossip_data);
+                  slave_forward_msgs.push(SlaveForwardMsg::GossipData(gossip.clone()));
+                  for tid in &all_tids {
+                    let forward_msg = TabletForwardMsg::GossipData(gossip.clone());
+                    io_ctx.tablet_forward(&tid, forward_msg);
+                  }
+                  for cid in &all_cids {
+                    let forward_msg = CoordForwardMsg::GossipData(gossip.clone());
+                    io_ctx.coord_forward(&cid, forward_msg);
+                  }
                 }
               }
 

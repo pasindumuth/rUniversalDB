@@ -379,6 +379,9 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
           self.response_data = None;
         }
       }
+
+      // Send out GossipData to all Slaves.
+      ctx.broadcast_gossip(io_ctx);
     }
   }
 

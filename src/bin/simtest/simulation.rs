@@ -18,7 +18,7 @@ use runiversal::slave::{
 };
 use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 // -----------------------------------------------------------------------------------------------
@@ -77,12 +77,12 @@ impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
   fn tablet_forward(&mut self, tid: &TabletGroupId, forward_msg: TabletForwardMsg) {
     let tablet = self.tablet_states.get_mut(tid).unwrap();
     let mut io_ctx = TestCoreIOCtx {
-      rand: &mut self.rand,
+      rand: self.rand,
       current_time: self.current_time,
-      queues: &mut self.queues,
-      nonempty_queues: &mut self.nonempty_queues,
-      this_eid: &self.this_eid,
-      slave_back_messages: &mut Default::default(),
+      queues: self.queues,
+      nonempty_queues: self.nonempty_queues,
+      this_eid: self.this_eid,
+      slave_back_messages: self.slave_back_messages,
     };
     tablet.handle_input(&mut io_ctx, forward_msg);
   }
@@ -98,12 +98,12 @@ impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
   fn coord_forward(&mut self, cid: &CoordGroupId, forward_msg: CoordForwardMsg) {
     let coord = self.coord_states.get_mut(cid).unwrap();
     let mut io_ctx = TestCoreIOCtx {
-      rand: &mut self.rand,
+      rand: self.rand,
       current_time: self.current_time,
-      queues: &mut self.queues,
-      nonempty_queues: &mut self.nonempty_queues,
-      this_eid: &self.this_eid,
-      slave_back_messages: &mut Default::default(),
+      queues: self.queues,
+      nonempty_queues: self.nonempty_queues,
+      this_eid: self.this_eid,
+      slave_back_messages: self.slave_back_messages,
     };
     coord.handle_input(&mut io_ctx, forward_msg);
   }
@@ -219,12 +219,22 @@ pub struct MasterData {
   tasks: BTreeMap<Timestamp, Vec<MasterTimerInput>>,
 }
 
-#[derive(Debug)]
 pub struct SlaveData {
   slave_state: SlaveState,
   tablet_states: BTreeMap<TabletGroupId, TabletState>,
   coord_states: BTreeMap<CoordGroupId, CoordState>,
   tasks: BTreeMap<Timestamp, Vec<SlaveTimerInput>>,
+  slave_back_messages: VecDeque<SlaveBackMessage>,
+}
+
+impl Debug for SlaveData {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    let mut debug_trait_builder = f.debug_struct("SlaveData");
+    let _ = debug_trait_builder.field("slave_state", &self.slave_state);
+    let _ = debug_trait_builder.field("tablet_states", &self.tablet_states);
+    let _ = debug_trait_builder.field("coord_states", &self.coord_states);
+    debug_trait_builder.finish()
+  }
 }
 
 #[derive(Debug)]
@@ -359,6 +369,7 @@ impl Simulation {
             tablet_states: Default::default(),
             coord_states,
             tasks: Default::default(),
+            slave_back_messages: Default::default(),
           },
         );
       }
@@ -459,7 +470,6 @@ impl Simulation {
     msg: msg::MasterMessage,
   ) {
     let master_data = self.master_data.get_mut(&to_eid).unwrap();
-
     let current_time = self.true_timestamp;
     let mut io_ctx = TestMasterIOCtx {
       rand: &mut self.rand,
@@ -472,33 +482,12 @@ impl Simulation {
 
     // Deliver the network message to the Master.
     master_data.master_state.handle_input(&mut io_ctx, FullMasterInput::MasterMessage(msg));
-
-    // Send all MasterBackMessages and MasterTimerInputs.
-    loop {
-      if let Some((next_timestamp, _)) = io_ctx.tasks.first_key_value() {
-        if next_timestamp <= &current_time {
-          // All data in this first entry should be dispatched.
-          let next_timestamp = next_timestamp.clone();
-          for timer_input in io_ctx.tasks.remove(&next_timestamp).unwrap() {
-            master_data
-              .master_state
-              .handle_input(&mut io_ctx, FullMasterInput::MasterTimerInput(timer_input));
-          }
-          continue;
-        }
-      }
-
-      // This means there are no more left.
-      break;
-    }
   }
 
   /// Same as above, except for a Slave.
   pub fn run_slave_message(&mut self, _: &EndpointId, to_eid: &EndpointId, msg: msg::SlaveMessage) {
     let slave_data = self.slave_data.get_mut(&to_eid).unwrap();
-
     let current_time = self.true_timestamp;
-    let mut slave_back_messages = VecDeque::<SlaveBackMessage>::new();
     let mut io_ctx = TestSlaveIOCtx {
       rand: &mut self.rand,
       current_time, // TODO: simulate clock skew
@@ -507,39 +496,13 @@ impl Simulation {
       this_sid: &slave_data.slave_state.ctx.this_sid.clone(),
       this_eid: to_eid,
       tablet_states: &mut slave_data.tablet_states,
-      slave_back_messages: &mut slave_back_messages,
+      slave_back_messages: &mut slave_data.slave_back_messages,
       coord_states: &mut slave_data.coord_states,
       tasks: &mut slave_data.tasks,
     };
 
     // Deliver the network message to the Slave.
     slave_data.slave_state.handle_input(&mut io_ctx, FullSlaveInput::SlaveMessage(msg));
-
-    // Send all SlaveBackMessages and SlaveTimerInputs.
-    loop {
-      if let Some(back_msg) = io_ctx.slave_back_messages.pop_front() {
-        slave_data
-          .slave_state
-          .handle_input(&mut io_ctx, FullSlaveInput::SlaveBackMessage(back_msg));
-        continue;
-      }
-
-      if let Some((next_timestamp, _)) = io_ctx.tasks.first_key_value() {
-        if next_timestamp <= &current_time {
-          // All data in this first entry should be dispatched.
-          let next_timestamp = next_timestamp.clone();
-          for timer_input in io_ctx.tasks.remove(&next_timestamp).unwrap() {
-            slave_data
-              .slave_state
-              .handle_input(&mut io_ctx, FullSlaveInput::SlaveTimerInput(timer_input));
-          }
-          continue;
-        }
-      }
-
-      // This means there are no more left.
-      break;
-    }
   }
 
   /// The endpoints provided must exist. This function polls a message from
@@ -568,6 +531,91 @@ impl Simulation {
     }
   }
 
+  /// Execute the timer events up to the current `true_timestamp` for the Master.
+  pub fn run_master_timer_events(&mut self) {
+    for (eid, master_data) in &mut self.master_data {
+      let current_time = self.true_timestamp;
+      let mut io_ctx = TestMasterIOCtx {
+        rand: &mut self.rand,
+        current_time, // TODO: simulate clock skew
+        queues: &mut self.queues,
+        nonempty_queues: &mut self.nonempty_queues,
+        this_eid: eid,
+        tasks: &mut master_data.tasks,
+      };
+
+      // Send all MasterBackMessages and MasterTimerInputs.
+      loop {
+        if let Some((next_timestamp, _)) = io_ctx.tasks.first_key_value() {
+          if next_timestamp <= &current_time {
+            // All data in this first entry should be dispatched.
+            let next_timestamp = next_timestamp.clone();
+            for timer_input in io_ctx.tasks.remove(&next_timestamp).unwrap() {
+              master_data
+                .master_state
+                .handle_input(&mut io_ctx, FullMasterInput::MasterTimerInput(timer_input));
+            }
+            continue;
+          }
+        }
+
+        // This means there are no more left.
+        break;
+      }
+    }
+  }
+
+  /// Execute the timer events up to the current `true_timestamp` for the Slave.
+  pub fn run_slave_timer_events(&mut self) {
+    for (eid, slave_data) in &mut self.slave_data {
+      let current_time = self.true_timestamp;
+      let mut io_ctx = TestSlaveIOCtx {
+        rand: &mut self.rand,
+        current_time, // TODO: simulate clock skew
+        queues: &mut self.queues,
+        nonempty_queues: &mut self.nonempty_queues,
+        this_sid: &slave_data.slave_state.ctx.this_sid.clone(),
+        this_eid: eid,
+        tablet_states: &mut slave_data.tablet_states,
+        slave_back_messages: &mut slave_data.slave_back_messages,
+        coord_states: &mut slave_data.coord_states,
+        tasks: &mut slave_data.tasks,
+      };
+
+      // Send all SlaveBackMessages and SlaveTimerInputs.
+      loop {
+        if let Some(back_msg) = io_ctx.slave_back_messages.pop_front() {
+          slave_data
+            .slave_state
+            .handle_input(&mut io_ctx, FullSlaveInput::SlaveBackMessage(back_msg));
+          continue;
+        }
+
+        if let Some((next_timestamp, _)) = io_ctx.tasks.first_key_value() {
+          if next_timestamp <= &current_time {
+            // All data in this first entry should be dispatched.
+            let next_timestamp = next_timestamp.clone();
+            for timer_input in io_ctx.tasks.remove(&next_timestamp).unwrap() {
+              slave_data
+                .slave_state
+                .handle_input(&mut io_ctx, FullSlaveInput::SlaveTimerInput(timer_input));
+            }
+            continue;
+          }
+        }
+
+        // This means there are no more left.
+        break;
+      }
+    }
+  }
+
+  /// Execute the timer events up to the current `true_timestamp` in all nodes.
+  pub fn run_timer_events(&mut self) {
+    self.run_master_timer_events();
+    self.run_slave_timer_events();
+  }
+
   /// This function simply increments the `true_time` by 1ms and delivers 1ms worth of
   /// messages. For simplicity, we assume that this means that every non-empty queue
   /// of messages delivers about one message in this time.
@@ -579,6 +627,8 @@ impl Simulation {
       let (from_eid, to_eid) = self.nonempty_queues.get(r).unwrap().clone();
       self.deliver_msg(&from_eid, &to_eid);
     }
+
+    self.run_timer_events();
   }
 
   pub fn simulate_n_ms(&mut self, n: i32) {
