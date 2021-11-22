@@ -398,6 +398,18 @@ impl Simulation {
       self.num_permanent_down += 1;
     }
   }
+  /// Unpause the message deliver of a queue permanently.
+  pub fn unblock_queue_permanently(&mut self, from_eid: EndpointId, to_eid: EndpointId) {
+    let channel_key = (from_eid, to_eid);
+    if let Some(pause_mode) = self.paused_queues.remove(&channel_key) {
+      match pause_mode {
+        QueuePauseMode::Permanent => {
+          self.num_permanent_down -= 1;
+        }
+        QueuePauseMode::Temporary(_) => {}
+      }
+    }
+  }
 
   pub fn simulate_n_ms(&mut self, n: u32) {
     for _ in 0..n {
