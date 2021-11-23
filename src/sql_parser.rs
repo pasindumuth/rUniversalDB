@@ -1,7 +1,6 @@
 use crate::model::common::{iast, ColName, ColType};
 use crate::model::common::{proc, TablePath};
 use sqlparser::ast;
-use sqlparser::ast::{ColumnOption, DataType, Query, Statement};
 use sqlparser::test_utils::table;
 
 // TODO: We should return a Result if there is a conversion failure to MSQuery.
@@ -14,8 +13,25 @@ use sqlparser::test_utils::table;
 /// AST, `Query`. Recall that we can transform all DML and DQL transactions
 /// together into a single Query, which is what we do here.
 pub fn convert_ast(raw_query: Vec<ast::Statement>) -> iast::Query {
-  assert_eq!(raw_query.len(), 1, "Only one SQL statement support atm.");
-  let stmt = raw_query.into_iter().next().unwrap();
+  assert!(!raw_query.is_empty(), "A SQL Transaction with no stages is not supported.");
+  let mut it = raw_query.into_iter().rev().enumerate();
+  let (_, final_stmt) = it.next().unwrap();
+
+  // Add all prior stages as CTEs by setting their results to Transient Tables.
+  let mut ctes = Vec::<(String, iast::Query)>::new();
+  while let Some((idx, stmt)) = it.next() {
+    ctes.push((format!("\\rtt{:?}", idx), convert_stage(stmt)));
+    it.next();
+  }
+
+  // Add the final stage to the query
+  let mut ret_query = convert_stage(final_stmt);
+  ctes.extend(ret_query.ctes);
+  ret_query.ctes = ctes;
+  ret_query
+}
+
+pub fn convert_stage(stmt: ast::Statement) -> iast::Query {
   match stmt {
     ast::Statement::Query(query) => convert_query(*query),
     ast::Statement::Insert { table_name, columns, source, .. } => {
@@ -60,10 +76,10 @@ fn convert_query(query: ast::Query) -> iast::Query {
       }
     }
     ast::SetExpr::Insert(stmt) => match stmt {
-      Statement::Insert { table_name, columns, source, .. } => {
+      ast::Statement::Insert { table_name, columns, source, .. } => {
         convert_insert(table_name, columns, source)
       }
-      Statement::Update { table_name, assignments, selection } => {
+      ast::Statement::Update { table_name, assignments, selection } => {
         convert_update(table_name, assignments, selection)
       }
       _ => panic!("Unsupported ast::Statement {:?}", stmt),
@@ -76,7 +92,7 @@ fn convert_query(query: ast::Query) -> iast::Query {
 fn convert_insert(
   table_name: ast::ObjectName,
   columns: Vec<ast::Ident>,
-  source: Box<Query>,
+  source: Box<ast::Query>,
 ) -> iast::QueryBody {
   if let ast::SetExpr::Values(values) = source.body {
     // Construct values
@@ -235,14 +251,14 @@ pub fn convert_ddl_ast(raw_query: &Vec<ast::Statement>) -> DDLQuery {
       for col in columns {
         let col_name = ColName(col.name.value.clone());
         let col_type = match &col.data_type {
-          DataType::Varchar(_) => ColType::String,
-          DataType::Int => ColType::Int,
-          DataType::Boolean => ColType::Bool,
+          ast::DataType::Varchar(_) => ColType::String,
+          ast::DataType::Int => ColType::Int,
+          ast::DataType::Boolean => ColType::Bool,
           _ => panic!("Unsupported Create Table datatype {:?}", col.data_type),
         };
         let mut is_key_col = false;
         for option_def in &col.options {
-          if let ColumnOption::Unique { is_primary, .. } = &option_def.option {
+          if let ast::ColumnOption::Unique { is_primary, .. } = &option_def.option {
             if *is_primary {
               is_key_col = true;
             }
@@ -286,9 +302,9 @@ pub fn convert_ddl_ast(raw_query: &Vec<ast::Statement>) -> DDLQuery {
 
 pub fn convert_data_type(raw_data_type: &ast::DataType) -> ColType {
   match raw_data_type {
-    DataType::Int => ColType::Int,
-    DataType::Boolean => ColType::Bool,
-    DataType::String => ColType::String,
+    ast::DataType::Int => ColType::Int,
+    ast::DataType::Boolean => ColType::Bool,
+    ast::DataType::String => ColType::String,
     _ => panic!("Unsupported ast::DataType {:?}", raw_data_type),
   }
 }

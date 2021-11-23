@@ -128,7 +128,7 @@ pub fn tp_test() {
   let mut context = TestContext::new();
 
   {
-    // Create a table
+    // Create Table
     context.send_ddl_query(
       &mut sim,
       " CREATE TABLE inventory (
@@ -141,7 +141,7 @@ pub fn tp_test() {
   }
 
   {
-    // Insert data into the table
+    // Insert Table
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
@@ -157,7 +157,7 @@ pub fn tp_test() {
   }
 
   {
-    // Read data the table
+    // Read Table
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
@@ -173,7 +173,7 @@ pub fn tp_test() {
   }
 
   {
-    // Update the table
+    // Update Table
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
     context.send_query(
@@ -188,7 +188,7 @@ pub fn tp_test() {
   }
 
   {
-    // Read data the table
+    // Read Table
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
@@ -203,5 +203,41 @@ pub fn tp_test() {
     );
   }
 
+  {
+    // Update Table
+    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5"))]);
+    context.send_query(
+      &mut sim,
+      " UPDATE inventory
+        SET email = 'my_email_4'
+        WHERE product_id = 0;
+
+        UPDATE inventory
+        SET email = 'my_email_5'
+        WHERE product_id = 1;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    // Read Table
+    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_4"))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5"))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email
+        FROM inventory
+        WHERE true;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
   println!("Responses: {:#?}", sim.get_all_responses());
+  println!("True Time: {:#?}", sim.true_timestamp());
 }

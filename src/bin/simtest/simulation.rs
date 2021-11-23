@@ -436,6 +436,10 @@ impl Simulation {
     self.client_msgs_received.get(eid).unwrap()
   }
 
+  pub fn true_timestamp(&self) -> &Timestamp {
+    &self.true_timestamp
+  }
+
   // -----------------------------------------------------------------------------------------------
   //  Simulation Methods
   // -----------------------------------------------------------------------------------------------
