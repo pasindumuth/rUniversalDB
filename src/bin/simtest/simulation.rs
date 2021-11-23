@@ -427,8 +427,13 @@ impl Simulation {
   //  Const getters
   // -----------------------------------------------------------------------------------------------
 
-  pub fn get_responses(&self) -> &BTreeMap<EndpointId, Vec<msg::NetworkMessage>> {
+  pub fn get_all_responses(&self) -> &BTreeMap<EndpointId, Vec<msg::NetworkMessage>> {
     return &self.client_msgs_received;
+  }
+
+  /// Returns all responses at `eid`.
+  pub fn get_responses(&self, eid: &EndpointId) -> &Vec<msg::NetworkMessage> {
+    self.client_msgs_received.get(eid).unwrap()
   }
 
   // -----------------------------------------------------------------------------------------------
