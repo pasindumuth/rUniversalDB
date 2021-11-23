@@ -14,6 +14,10 @@ use std::collections::BTreeMap;
  * Only one query executes at a time.
  */
 
+// -----------------------------------------------------------------------------------------------
+//  Utils
+// -----------------------------------------------------------------------------------------------
+
 struct TestContext {
   next_request_idx: u32,
   /// The client that we always use.
@@ -110,9 +114,7 @@ fn simulate_until_response(sim: &mut Simulation, eid: &EndpointId, time_limit: u
   false
 }
 
-/// This is a test that solely tests Transaction Processing. We take all PaxosGroups to just
-/// have one node. We only check for SQL semantics compatibility.
-pub fn tp_test() {
+fn setup() -> (Simulation, TestContext) {
   let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
     (mk_sid("s0"), vec![mk_slave_eid(&0)]),
@@ -124,11 +126,23 @@ pub fn tp_test() {
   .into_iter()
   .collect();
 
-  let mut sim = Simulation::new([0; 16], 1, slave_address_config, master_address_config);
-  let mut context = TestContext::new();
+  let sim = Simulation::new([0; 16], 1, slave_address_config, master_address_config);
+  let context = TestContext::new();
+  (sim, context)
+}
+
+// -----------------------------------------------------------------------------------------------
+//  simple_test
+// -----------------------------------------------------------------------------------------------
+
+/// This is a test that solely tests Transaction Processing. We take all PaxosGroups to just
+/// have one node. We only check for SQL semantics compatibility.
+pub fn simple_test() {
+  let (mut sim, mut context) = setup();
+
+  // Test Basic Queries
 
   {
-    // Create Table
     context.send_ddl_query(
       &mut sim,
       " CREATE TABLE inventory (
@@ -141,7 +155,6 @@ pub fn tp_test() {
   }
 
   {
-    // Insert Table
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
@@ -157,7 +170,6 @@ pub fn tp_test() {
   }
 
   {
-    // Read Table
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
@@ -173,7 +185,6 @@ pub fn tp_test() {
   }
 
   {
-    // Update Table
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
     context.send_query(
@@ -188,7 +199,6 @@ pub fn tp_test() {
   }
 
   {
-    // Read Table
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
@@ -203,8 +213,9 @@ pub fn tp_test() {
     );
   }
 
+  // Test Multi-Stage Transactions
+
   {
-    // Update Table
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5"))]);
     context.send_query(
@@ -223,7 +234,6 @@ pub fn tp_test() {
   }
 
   {
-    // Read Table
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_4"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5"))]);
@@ -232,6 +242,94 @@ pub fn tp_test() {
       " SELECT product_id, email
         FROM inventory
         WHERE true;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Responses: {:#?}", sim.get_all_responses());
+  println!("True Time: {:#?}", sim.true_timestamp());
+}
+
+// -----------------------------------------------------------------------------------------------
+//  subquery_test
+// -----------------------------------------------------------------------------------------------
+
+pub fn subquery_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+
+  {
+    context.send_ddl_query(
+      &mut sim,
+      " CREATE TABLE inventory (
+          product_id INT PRIMARY KEY,
+          email      VARCHAR
+        );
+      ",
+      100,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email)
+        VALUES (0, 'my_email_0'),
+               (1, 'my_email_1');
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    context.send_ddl_query(
+      &mut sim,
+      " CREATE TABLE users (
+          email      VARCHAR PRIMARY KEY,
+          balance    INT,
+        );
+      ",
+      100,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cn("email"), cn("balance")]);
+    exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
+    exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
+    exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO users (email, balance)
+        VALUES ('my_email_0', 50),
+               ('my_email_1', 60),
+               ('my_email_2', 70);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  // Test Subqueries
+
+  {
+    let mut exp_result = TableView::new(vec![cn("balance")]);
+    exp_result.add_row(vec![Some(cvi(60))]);
+    context.send_query(
+      &mut sim,
+      " SELECT balance
+        FROM users
+        WHERE email = (
+          SELECT email
+          FROM inventory
+          WHERE product_id = 1);
       ",
       100,
       exp_result,

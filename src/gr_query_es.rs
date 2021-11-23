@@ -166,12 +166,13 @@ impl<'a, SqlQueryT: SubqueryComputableSql> GRQueryConstructorView<'a, SqlQueryT>
   ) -> GRQueryES {
     // Filter the TransTables in the QueryPlan based on the TransTables available for this subquery.
     let col_usage_nodes = self.query_plan.col_usage_node.children.get(subquery_idx).unwrap();
+    let new_trans_table_context = (0..context.context_rows.len()).map(|_| Vec::new()).collect();
     // Finally, construct the GRQueryES.
     GRQueryES {
       root_query_path: self.root_query_path.clone(),
       timestamp: self.timestamp.clone(),
       context,
-      new_trans_table_context: vec![],
+      new_trans_table_context,
       query_id: gr_query_id,
       sql_query: self.sql_query.collect_subqueries().remove(subquery_idx),
       query_plan: GRQueryPlan {
