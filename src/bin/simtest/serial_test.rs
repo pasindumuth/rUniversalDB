@@ -284,7 +284,36 @@ pub fn simple_test() {
     );
   }
 
-  println!("Test 'simple_test' Passed! Time taken: {:?}", sim.true_timestamp())
+  // Test NULL data
+
+  {
+    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+    exp_result.add_row(vec![Some(cvi(6)), Some(cvs("my_email_6"))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email)
+        VALUES (6, 'my_email_6');
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email"), cn("count")]);
+    exp_result.add_row(vec![Some(cvi(6)), Some(cvs("my_email_6")), None]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory
+        WHERE product_id = 6
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Test 'simple_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -413,7 +442,7 @@ pub fn subquery_test() {
     );
   }
 
-  println!("Test 'subquery_test' Passed! Time taken: {:?}", sim.true_timestamp())
+  println!("Test 'subquery_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -447,7 +476,7 @@ pub fn trans_table_test() {
     );
   }
 
-  println!("Test 'trans_table_test' Passed! Time taken: {:?}", sim.true_timestamp())
+  println!("Test 'trans_table_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -504,5 +533,5 @@ pub fn multi_stage_test() {
     );
   }
 
-  println!("Test 'multi_stage_test' Passed! Time taken: {:?}", sim.true_timestamp())
+  println!("Test 'multi_stage_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
 }
