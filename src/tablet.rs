@@ -1778,6 +1778,18 @@ impl TabletContext {
       // TableReadES
       let action = read.es.global_locked_cols(self, io_ctx, locked_cols_qid);
       self.handle_read_es_action(io_ctx, statuses, query_id, action);
+    } else if let Some(ms_write) = statuses.ms_table_write_ess.get_mut(&query_id) {
+      // MSTableWriteES
+      let action = ms_write.es.global_locked_cols(self, io_ctx, locked_cols_qid);
+      self.handle_ms_write_es_action(io_ctx, statuses, query_id, action);
+    } else if let Some(ms_insert) = statuses.ms_table_insert_ess.get_mut(&query_id) {
+      // MSTableInsertES
+      let action = ms_insert.es.global_locked_cols(self, io_ctx, locked_cols_qid);
+      self.handle_ms_insert_es_action(io_ctx, statuses, query_id, action);
+    } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
+      // MSTableReadES
+      let action = ms_read.es.global_locked_cols(self, io_ctx, locked_cols_qid);
+      self.handle_ms_read_es_action(io_ctx, statuses, query_id, action);
     }
   }
 

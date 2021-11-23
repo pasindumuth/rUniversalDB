@@ -168,23 +168,48 @@ impl MSTableWriteES {
     io_ctx: &mut IO,
     locked_cols_qid: QueryId,
   ) -> MSTableWriteAction {
-    let locking = cast!(MSWriteExecutionS::ColumnsLocking, &self.state).unwrap();
-    assert_eq!(locking.locked_cols_qid, locked_cols_qid);
-    // Now, we check whether the TableSchema aligns with the QueryPlan.
-    if !self.does_query_plan_align(ctx) {
-      self.state = MSWriteExecutionS::Done;
-      MSTableWriteAction::QueryError(msg::QueryError::InvalidQueryPlan)
-    } else {
-      // If it aligns, we verify is GossipData is recent enough.
-      self.check_gossip_data(ctx, io_ctx)
+    match &self.state {
+      MSWriteExecutionS::ColumnsLocking(locking) => {
+        if locking.locked_cols_qid == locked_cols_qid {
+          // Now, we check whether the TableSchema aligns with the QueryPlan.
+          if !self.does_query_plan_align(ctx) {
+            self.state = MSWriteExecutionS::Done;
+            MSTableWriteAction::QueryError(msg::QueryError::InvalidQueryPlan)
+          } else {
+            // If it aligns, we verify is GossipData is recent enough.
+            self.check_gossip_data(ctx, io_ctx)
+          }
+        } else {
+          debug_assert!(false);
+          MSTableWriteAction::Wait
+        }
+      }
+      _ => MSTableWriteAction::Wait,
     }
+  }
+
+  /// Handle this just as `local_locked_cols`
+  pub fn global_locked_cols<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+    locked_cols_qid: QueryId,
+  ) -> MSTableWriteAction {
+    self.local_locked_cols(ctx, io_ctx, locked_cols_qid)
   }
 
   /// Here, the column locking request results in us realizing the table has been dropped.
   pub fn table_dropped(&mut self, _: &mut TabletContext) -> MSTableWriteAction {
-    assert!(cast!(MSWriteExecutionS::ColumnsLocking, &self.state).is_ok());
-    self.state = MSWriteExecutionS::Done;
-    MSTableWriteAction::QueryError(msg::QueryError::InvalidQueryPlan)
+    match &self.state {
+      MSWriteExecutionS::ColumnsLocking(_) => {
+        self.state = MSWriteExecutionS::Done;
+        MSTableWriteAction::QueryError(msg::QueryError::InvalidQueryPlan)
+      }
+      _ => {
+        debug_assert!(false);
+        MSTableWriteAction::Wait
+      }
+    }
   }
 
   /// Here, we GossipData gets delivered.
@@ -287,60 +312,67 @@ impl MSTableWriteES {
     ms_query_es: &mut MSQueryES,
     _: QueryId,
   ) -> MSTableWriteAction {
-    let pending = cast!(MSWriteExecutionS::Pending, &self.state).unwrap();
-    let gr_query_statuses = match compute_subqueries(
-      GRQueryConstructorView {
-        root_query_path: &self.root_query_path,
-        timestamp: &self.timestamp,
-        sql_query: &self.sql_query,
-        query_plan: &self.query_plan,
-        query_id: &self.query_id,
-        context: &self.context,
-      },
-      io_ctx.rand(),
-      StorageLocalTable::new(
-        &ctx.table_schema,
-        &self.timestamp,
-        &self.sql_query.selection,
-        MSStorageView::new(
-          &ctx.storage,
-          &ctx.table_schema,
-          &ms_query_es.update_views,
-          self.tier.clone() + 1, // Remember that `tier` is the Tier to write to, which is
-                                 // one lower than which to read from.
-        ),
-      ),
-    ) {
-      Ok(gr_query_statuses) => gr_query_statuses,
-      Err(eval_error) => {
-        self.state = MSWriteExecutionS::Done;
-        return MSTableWriteAction::QueryError(mk_eval_error(eval_error));
+    match &self.state {
+      MSWriteExecutionS::Pending(pending) => {
+        let gr_query_statuses = match compute_subqueries(
+          GRQueryConstructorView {
+            root_query_path: &self.root_query_path,
+            timestamp: &self.timestamp,
+            sql_query: &self.sql_query,
+            query_plan: &self.query_plan,
+            query_id: &self.query_id,
+            context: &self.context,
+          },
+          io_ctx.rand(),
+          StorageLocalTable::new(
+            &ctx.table_schema,
+            &self.timestamp,
+            &self.sql_query.selection,
+            MSStorageView::new(
+              &ctx.storage,
+              &ctx.table_schema,
+              &ms_query_es.update_views,
+              self.tier.clone() + 1, // Remember that `tier` is the Tier to write to, which is
+                                     // one lower than which to read from.
+            ),
+          ),
+        ) {
+          Ok(gr_query_statuses) => gr_query_statuses,
+          Err(eval_error) => {
+            self.state = MSWriteExecutionS::Done;
+            return MSTableWriteAction::QueryError(mk_eval_error(eval_error));
+          }
+        };
+
+        // Here, we have to evaluate subqueries. Thus, we go to Executing and return
+        // SendSubqueries to the parent server.
+        let mut subqueries = Vec::<SingleSubqueryStatus>::new();
+        for gr_query_es in &gr_query_statuses {
+          subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+            context: gr_query_es.context.clone(),
+            query_id: gr_query_es.query_id.clone(),
+          }));
+        }
+
+        // Move the ES to the Executing state.
+        self.state = MSWriteExecutionS::Executing(Executing {
+          completed: 0,
+          subqueries,
+          row_region: pending.read_region.row_region.clone(),
+        });
+
+        if gr_query_statuses.is_empty() {
+          // Since there are no subqueries, we can go straight to finishing the ES.
+          self.finish_ms_table_write_es(ctx, io_ctx, ms_query_es)
+        } else {
+          // Return the subqueries
+          MSTableWriteAction::SendSubqueries(gr_query_statuses)
+        }
       }
-    };
-
-    // Here, we have to evaluate subqueries. Thus, we go to Executing and return
-    // SendSubqueries to the parent server.
-    let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-    for gr_query_es in &gr_query_statuses {
-      subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-        context: gr_query_es.context.clone(),
-        query_id: gr_query_es.query_id.clone(),
-      }));
-    }
-
-    // Move the ES to the Executing state.
-    self.state = MSWriteExecutionS::Executing(Executing {
-      completed: 0,
-      subqueries,
-      row_region: pending.read_region.row_region.clone(),
-    });
-
-    if gr_query_statuses.is_empty() {
-      // Since there are no subqueries, we can go straight to finishing the ES.
-      self.finish_ms_table_write_es(ctx, io_ctx, ms_query_es)
-    } else {
-      // Return the subqueries
-      MSTableWriteAction::SendSubqueries(gr_query_statuses)
+      _ => {
+        debug_assert!(false);
+        MSTableWriteAction::Wait
+      }
     }
   }
 

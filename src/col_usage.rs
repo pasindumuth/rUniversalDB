@@ -439,6 +439,7 @@ pub fn iterate_stage_ms_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
         for (_, expr) in &query.assignment {
           iterate_stage_expr(cb, expr)
         }
+        iterate_stage_expr(cb, &query.selection)
       }
       proc::MSQueryStage::Insert(query) => {
         cb(GeneralStage::Insert(query));

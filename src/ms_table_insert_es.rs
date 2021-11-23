@@ -173,23 +173,48 @@ impl MSTableInsertES {
     io_ctx: &mut IO,
     locked_cols_qid: QueryId,
   ) -> MSTableInsertAction {
-    let locking = cast!(MSTableInsertExecutionS::ColumnsLocking, &self.state).unwrap();
-    assert_eq!(locking.locked_cols_qid, locked_cols_qid);
-    // Now, we check whether the TableSchema aligns with the QueryPlan.
-    if !self.does_query_plan_align(ctx) {
-      self.state = MSTableInsertExecutionS::Done;
-      MSTableInsertAction::QueryError(msg::QueryError::InvalidQueryPlan)
-    } else {
-      // If it aligns, we verify is GossipData is recent enough.
-      self.check_gossip_data(ctx, io_ctx)
+    match &self.state {
+      MSTableInsertExecutionS::ColumnsLocking(locking) => {
+        if locking.locked_cols_qid == locked_cols_qid {
+          // Now, we check whether the TableSchema aligns with the QueryPlan.
+          if !self.does_query_plan_align(ctx) {
+            self.state = MSTableInsertExecutionS::Done;
+            MSTableInsertAction::QueryError(msg::QueryError::InvalidQueryPlan)
+          } else {
+            // If it aligns, we verify is GossipData is recent enough.
+            self.check_gossip_data(ctx, io_ctx)
+          }
+        } else {
+          debug_assert!(false);
+          MSTableInsertAction::Wait
+        }
+      }
+      _ => MSTableInsertAction::Wait,
     }
+  }
+
+  /// Handle this just as `local_locked_cols`
+  pub fn global_locked_cols<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+    locked_cols_qid: QueryId,
+  ) -> MSTableInsertAction {
+    self.local_locked_cols(ctx, io_ctx, locked_cols_qid)
   }
 
   /// Here, the column locking request results in us realizing the table has been dropped.
   pub fn table_dropped(&mut self, _: &mut TabletContext) -> MSTableInsertAction {
-    assert!(cast!(MSTableInsertExecutionS::ColumnsLocking, &self.state).is_ok());
-    self.state = MSTableInsertExecutionS::Done;
-    MSTableInsertAction::QueryError(msg::QueryError::InvalidQueryPlan)
+    match &self.state {
+      MSTableInsertExecutionS::ColumnsLocking(_) => {
+        self.state = MSTableInsertExecutionS::Done;
+        MSTableInsertAction::QueryError(msg::QueryError::InvalidQueryPlan)
+      }
+      _ => {
+        debug_assert!(false);
+        MSTableInsertAction::Wait
+      }
+    }
   }
 
   /// Here, we GossipData gets delivered.
@@ -277,7 +302,7 @@ impl MSTableInsertES {
         if let Some(val) = valn {
           pkey.cols.push(val.clone());
         } else {
-          // Since the value of a row call cannot be NULL, we return an error if this is the case.
+          // Since the value of a Key Col cannot be NULL, we return an error if this is the case.
           self.state = MSTableInsertExecutionS::Done;
           return MSTableInsertAction::QueryError(mk_eval_error(EvalError::TypeError));
         }
@@ -363,35 +388,41 @@ impl MSTableInsertES {
     ms_query_es: &mut MSQueryES,
     _: QueryId,
   ) -> MSTableInsertAction {
-    let pending = cast!(MSTableInsertExecutionS::Pending, &self.state).unwrap();
-
-    // Iterate over the keys and make sure they do not already exist in the storage.
-    let update_view = &pending.update_view;
-    for (key, _) in update_view {
-      if key.1 == None {
-        // TODO: This check needs to be done with the existing update_view applied
-        //  onto storage.
-        if static_read(&ctx.storage, key, self.timestamp).is_some() {
-          // This key exists, so we must respond with an abort.
-          self.state = MSTableInsertExecutionS::Done;
-          return MSTableInsertAction::QueryError(msg::QueryError::RuntimeError {
-            msg: "Inserting a row that already exists.".to_string(),
-          });
+    match &self.state {
+      MSTableInsertExecutionS::Pending(pending) => {
+        // Iterate over the keys and make sure they do not already exist in the storage.
+        let update_view = &pending.update_view;
+        for (key, _) in update_view {
+          if key.1 == None {
+            // TODO: This check needs to be done with the existing update_view applied
+            //  onto storage.
+            if static_read(&ctx.storage, key, self.timestamp).is_some() {
+              // This key exists, so we must respond with an abort.
+              self.state = MSTableInsertExecutionS::Done;
+              return MSTableInsertAction::QueryError(msg::QueryError::RuntimeError {
+                msg: "Inserting a row that already exists.".to_string(),
+              });
+            }
+          }
         }
+
+        // Finally, apply the update to the MSQueryES's update_views
+        ms_query_es.update_views.insert(self.tier.clone(), update_view.clone());
+
+        // Signal Success and return the data.
+        let res_table_view = pending.res_table_view.clone();
+        let res_table_cols = res_table_view.col_names.clone();
+        self.state = MSTableInsertExecutionS::Done;
+        MSTableInsertAction::Success(QueryESResult {
+          result: (res_table_cols, vec![res_table_view]),
+          new_rms: self.new_rms.iter().cloned().collect(),
+        })
+      }
+      _ => {
+        debug_assert!(false);
+        MSTableInsertAction::Wait
       }
     }
-
-    // Finally, apply the update to the MSQueryES's update_views
-    ms_query_es.update_views.insert(self.tier.clone(), update_view.clone());
-
-    // Signal Success and return the data.
-    let res_table_view = pending.res_table_view.clone();
-    let res_table_cols = res_table_view.col_names.clone();
-    self.state = MSTableInsertExecutionS::Done;
-    MSTableInsertAction::Success(QueryESResult {
-      result: (res_table_cols, vec![res_table_view]),
-      new_rms: self.new_rms.iter().cloned().collect(),
-    })
   }
 
   /// Cleans up all currently owned resources, and goes to Done.

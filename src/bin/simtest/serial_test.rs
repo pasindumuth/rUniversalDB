@@ -139,7 +139,8 @@ fn setup_inventory_table(sim: &mut Simulation, context: &mut TestContext) {
       sim,
       " CREATE TABLE inventory (
           product_id INT PRIMARY KEY,
-          email      VARCHAR
+          email      VARCHAR,
+          count      INT
         );
       ",
       100,
@@ -147,14 +148,14 @@ fn setup_inventory_table(sim: &mut Simulation, context: &mut TestContext) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
-    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
-    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
+    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email"), cn("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     context.send_query(
       sim,
-      " INSERT INTO inventory (product_id, email)
-        VALUES (0, 'my_email_0'),
-               (1, 'my_email_1');
+      " INSERT INTO inventory (product_id, email, count)
+        VALUES (0, 'my_email_0', 15),
+               (1, 'my_email_1', 25);
       ",
       100,
       exp_result,
@@ -205,6 +206,8 @@ pub fn simple_test() {
   // Test Basic Queries
   setup_inventory_table(&mut sim, &mut context);
 
+  // Test Simple Update-Select
+
   {
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
@@ -249,7 +252,7 @@ pub fn simple_test() {
     );
   }
 
-  // Test Multi-Stage Transactions
+  // Test Simple Multi-Stage Transactions
 
   {
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
@@ -284,8 +287,7 @@ pub fn simple_test() {
     );
   }
 
-  println!("Responses: {:#?}", sim.get_all_responses());
-  println!("True Time: {:#?}", sim.true_timestamp());
+  println!("Test 'simple_test' Passed!")
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -318,8 +320,10 @@ pub fn subquery_test() {
     );
   }
 
-  println!("Responses: {:#?}", sim.get_all_responses());
-  println!("True Time: {:#?}", sim.true_timestamp());
+  // TODO: test a subquery with a column context..
+  //  1. Test with column shadowing.
+
+  println!("Test 'subquery_test' Passed!")
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -354,6 +358,62 @@ pub fn trans_table_test() {
     );
   }
 
-  println!("Responses: {:#?}", sim.get_all_responses());
-  println!("True Time: {:#?}", sim.true_timestamp());
+  println!("Test 'trans_table_test' Passed!")
+}
+
+// -----------------------------------------------------------------------------------------------
+//  multi_stage_test
+// -----------------------------------------------------------------------------------------------
+
+pub fn multi_stage_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+  setup_user_table(&mut sim, &mut context);
+
+  // Multi-Stage Transactions with TransTables
+
+  {
+    let mut exp_result = TableView::new(vec![cn("email"), cn("balance")]);
+    exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(80))]);
+    context.send_query(
+      &mut sim,
+      " UPDATE user
+        SET balance = balance + 20
+        WHERE email = (
+          SELECT email
+          FROM inventory
+          WHERE product_id = 1);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cn("product_id"), cn("count")]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(30))]);
+    context.send_query(
+      &mut sim,
+      " UPDATE user
+        SET balance = balance + 20
+        WHERE email = (
+          SELECT email
+          FROM inventory
+          WHERE product_id = 1);
+  
+        UPDATE inventory
+        SET count = count + 5
+        WHERE email = (
+          SELECT email
+          FROM user
+          WHERE balance >= 80);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Test 'multi_stage_test' Passed!")
 }
