@@ -2613,7 +2613,7 @@ impl ContextKeyboundComputer {
     // the TableSchema (i.e. part of the external Context).
     let mut external_cols = BTreeSet::<ColName>::new();
     for col in collect_top_level_cols(selection) {
-      if !contains_col(table_schema, &col, timestamp) {
+      if !weak_contains_col(table_schema, &col, timestamp) {
         external_cols.insert(col);
       }
     }

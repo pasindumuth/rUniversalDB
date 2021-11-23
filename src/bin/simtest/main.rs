@@ -1,6 +1,6 @@
 #![feature(map_first_last)]
 
-use crate::serial_test::{simple_test, subquery_test};
+use crate::serial_test::{simple_test, subquery_test, trans_table_test};
 
 mod serial_test;
 mod simulation;
@@ -8,4 +8,5 @@ mod simulation;
 fn main() {
   simple_test();
   subquery_test();
+  trans_table_test();
 }

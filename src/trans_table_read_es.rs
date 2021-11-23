@@ -181,27 +181,27 @@ impl TransTableReadES {
       ));
     }
 
+    // Here, we have computed all GRQueryESs, and we can now add them to
+    // `subquery_status`.
+    let mut subqueries = Vec::<SingleSubqueryStatus>::new();
+    for gr_query_es in &gr_query_ess {
+      subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+        context: gr_query_es.context.clone(),
+        query_id: gr_query_es.query_id.clone(),
+      }));
+    }
+
+    // Move the ES to the Executing state.
+    self.state = TransExecutionS::Executing(Executing {
+      completed: 0,
+      subqueries,
+      row_region: vec![], // This doesn't make sense for TransTables...
+    });
+
     if gr_query_ess.is_empty() {
       // Since there are no subqueries, we can go straight to finishing the ES.
       self.finish_trans_table_read_es(ctx, trans_table_source)
     } else {
-      // Here, we have computed all GRQueryESs, and we can now add them to
-      // `subquery_status`.
-      let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-      for gr_query_es in &gr_query_ess {
-        subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-          context: gr_query_es.context.clone(),
-          query_id: gr_query_es.query_id.clone(),
-        }));
-      }
-
-      // Move the ES to the Executing state.
-      self.state = TransExecutionS::Executing(Executing {
-        completed: 0,
-        subqueries,
-        row_region: vec![], // This doesn't make sense for TransTables...
-      });
-
       // Return the subqueries so that they can be driven from the parent Server.
       TransTableAction::SendSubqueries(gr_query_ess)
     }

@@ -56,11 +56,12 @@ impl TestContext {
     );
 
     assert!(simulate_until_response(sim, &self.sender_eid, time_limit));
-    match sim.get_responses(&self.sender_eid).iter().last().unwrap() {
+    let response = sim.get_responses(&self.sender_eid).iter().last().unwrap();
+    match response {
       msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(payload)) => {
         assert_eq!(payload.request_id, request_id)
       }
-      _ => panic!(),
+      _ => panic!("Incorrect Response: {:#?}", response),
     }
   }
 
@@ -89,12 +90,13 @@ impl TestContext {
     );
 
     assert!(simulate_until_response(sim, &self.sender_eid, time_limit));
-    match sim.get_responses(&self.sender_eid).iter().last().unwrap() {
+    let response = sim.get_responses(&self.sender_eid).iter().last().unwrap();
+    match response {
       msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
         assert_eq!(payload.request_id, request_id);
         assert_eq!(payload.result, exp_result);
       }
-      _ => panic!(),
+      _ => panic!("Incorrect Response: {:#?}", response),
     }
   }
 }
@@ -131,20 +133,10 @@ fn setup() -> (Simulation, TestContext) {
   (sim, context)
 }
 
-// -----------------------------------------------------------------------------------------------
-//  simple_test
-// -----------------------------------------------------------------------------------------------
-
-/// This is a test that solely tests Transaction Processing. We take all PaxosGroups to just
-/// have one node. We only check for SQL semantics compatibility.
-pub fn simple_test() {
-  let (mut sim, mut context) = setup();
-
-  // Test Basic Queries
-
+fn setup_inventory_table(sim: &mut Simulation, context: &mut TestContext) {
   {
     context.send_ddl_query(
-      &mut sim,
+      sim,
       " CREATE TABLE inventory (
           product_id INT PRIMARY KEY,
           email      VARCHAR
@@ -159,7 +151,7 @@ pub fn simple_test() {
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
     context.send_query(
-      &mut sim,
+      sim,
       " INSERT INTO inventory (product_id, email)
         VALUES (0, 'my_email_0'),
                (1, 'my_email_1');
@@ -168,6 +160,50 @@ pub fn simple_test() {
       exp_result,
     );
   }
+}
+
+fn setup_user_table(sim: &mut Simulation, context: &mut TestContext) {
+  {
+    context.send_ddl_query(
+      sim,
+      " CREATE TABLE user (
+          email      VARCHAR PRIMARY KEY,
+          balance    INT,
+        );
+      ",
+      100,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cn("email"), cn("balance")]);
+    exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
+    exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
+    exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);
+    context.send_query(
+      sim,
+      " INSERT INTO user (email, balance)
+        VALUES ('my_email_0', 50),
+               ('my_email_1', 60),
+               ('my_email_2', 70);
+      ",
+      100,
+      exp_result,
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  simple_test
+// -----------------------------------------------------------------------------------------------
+
+/// This is a test that solely tests Transaction Processing. We take all PaxosGroups to just
+/// have one node. We only check for SQL semantics compatibility.
+pub fn simple_test() {
+  let (mut sim, mut context) = setup();
+
+  // Test Basic Queries
+  setup_inventory_table(&mut sim, &mut context);
 
   {
     let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
@@ -260,62 +296,8 @@ pub fn subquery_test() {
   let (mut sim, mut context) = setup();
 
   // Setup Tables
-
-  {
-    context.send_ddl_query(
-      &mut sim,
-      " CREATE TABLE inventory (
-          product_id INT PRIMARY KEY,
-          email      VARCHAR
-        );
-      ",
-      100,
-    );
-  }
-
-  {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
-    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
-    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
-    context.send_query(
-      &mut sim,
-      " INSERT INTO inventory (product_id, email)
-        VALUES (0, 'my_email_0'),
-               (1, 'my_email_1');
-      ",
-      100,
-      exp_result,
-    );
-  }
-
-  {
-    context.send_ddl_query(
-      &mut sim,
-      " CREATE TABLE users (
-          email      VARCHAR PRIMARY KEY,
-          balance    INT,
-        );
-      ",
-      100,
-    );
-  }
-
-  {
-    let mut exp_result = TableView::new(vec![cn("email"), cn("balance")]);
-    exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
-    exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
-    exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);
-    context.send_query(
-      &mut sim,
-      " INSERT INTO users (email, balance)
-        VALUES ('my_email_0', 50),
-               ('my_email_1', 60),
-               ('my_email_2', 70);
-      ",
-      100,
-      exp_result,
-    );
-  }
+  setup_inventory_table(&mut sim, &mut context);
+  setup_user_table(&mut sim, &mut context);
 
   // Test Subqueries
 
@@ -325,11 +307,47 @@ pub fn subquery_test() {
     context.send_query(
       &mut sim,
       " SELECT balance
-        FROM users
+        FROM user
         WHERE email = (
           SELECT email
           FROM inventory
           WHERE product_id = 1);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Responses: {:#?}", sim.get_all_responses());
+  println!("True Time: {:#?}", sim.true_timestamp());
+}
+
+// -----------------------------------------------------------------------------------------------
+//  trans_table_test
+// -----------------------------------------------------------------------------------------------
+
+pub fn trans_table_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+  setup_user_table(&mut sim, &mut context);
+
+  // Test TransTable Reads
+
+  {
+    let mut exp_result = TableView::new(vec![cn("email")]);
+    exp_result.add_row(vec![Some(cvs("my_email_1"))]);
+    exp_result.add_row(vec![Some(cvs("my_email_2"))]);
+    context.send_query(
+      &mut sim,
+      " WITH
+          v1 AS (SELECT email, balance
+                 FROM  user
+                 WHERE balance >= 60)
+        SELECT email
+        FROM v1
+        WHERE true;
       ",
       100,
       exp_result,
