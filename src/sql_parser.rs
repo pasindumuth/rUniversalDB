@@ -1,7 +1,8 @@
 use crate::model::common::{iast, ColName, ColType};
 use crate::model::common::{proc, TablePath};
 use sqlparser::ast;
-use sqlparser::ast::{ColumnOption, DataType, Query};
+use sqlparser::ast::{ColumnOption, DataType, Query, Statement};
+use sqlparser::test_utils::table;
 
 // TODO: We should return a Result if there is a conversion failure to MSQuery.
 
@@ -16,24 +17,27 @@ pub fn convert_ast(raw_query: Vec<ast::Statement>) -> iast::Query {
   assert_eq!(raw_query.len(), 1, "Only one SQL statement support atm.");
   let stmt = raw_query.into_iter().next().unwrap();
   match stmt {
-    ast::Statement::Query(query) => convert_query(&query),
+    ast::Statement::Query(query) => convert_query(*query),
     ast::Statement::Insert { table_name, columns, source, .. } => {
-      convert_insert(table_name, columns, source)
+      iast::Query { ctes: vec![], body: convert_insert(table_name, columns, source) }
+    }
+    ast::Statement::Update { table_name, assignments, selection } => {
+      iast::Query { ctes: vec![], body: convert_update(table_name, assignments, selection) }
     }
     _ => panic!("Unsupported ast::Statement {:?}", stmt),
   }
 }
 
-fn convert_query(query: &ast::Query) -> iast::Query {
+fn convert_query(query: ast::Query) -> iast::Query {
   let mut ictes = Vec::<(String, iast::Query)>::new();
-  if let Some(with) = &query.with {
-    for cte in &with.cte_tables {
-      ictes.push((cte.alias.name.value.clone(), convert_query(&cte.query)));
+  if let Some(with) = query.with {
+    for cte in with.cte_tables {
+      ictes.push((cte.alias.name.value.clone(), convert_query(cte.query)));
     }
   }
-  let body = match &query.body {
+  let body = match query.body {
     ast::SetExpr::Query(child_query) => {
-      iast::QueryBody::Query(Box::new(convert_query(child_query)))
+      iast::QueryBody::Query(Box::new(convert_query(*child_query)))
     }
     ast::SetExpr::Select(select) => {
       let from_clause = &select.from;
@@ -45,7 +49,7 @@ fn convert_query(query: &ast::Query) -> iast::Query {
         iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
           projection: convert_select_clause(&select.projection),
           from: idents[0].value.clone(),
-          selection: if let Some(selection) = &select.selection {
+          selection: if let Some(selection) = select.selection {
             convert_expr(selection)
           } else {
             iast::ValExpr::Value { val: iast::Value::Boolean(true) }
@@ -55,26 +59,15 @@ fn convert_query(query: &ast::Query) -> iast::Query {
         panic!("TableFactor {:?} not supported", &from_clause[0].relation);
       }
     }
-    ast::SetExpr::Insert(stmt) => {
-      if let ast::Statement::Update { table_name, assignments, selection } = stmt {
-        let ast::ObjectName(idents) = table_name;
-        assert_eq!(idents.len(), 1, "Multi-part table references not supported");
-        iast::QueryBody::Update(iast::Update {
-          table: idents[0].value.clone(),
-          assignments: assignments
-            .iter()
-            .map(|a| (a.id.value.clone(), convert_expr(&a.value)))
-            .collect(),
-          selection: if let Some(selection) = selection {
-            convert_expr(selection)
-          } else {
-            iast::ValExpr::Value { val: iast::Value::Boolean(true) }
-          },
-        })
-      } else {
-        panic!("Statement type {:?} not supported", stmt)
+    ast::SetExpr::Insert(stmt) => match stmt {
+      Statement::Insert { table_name, columns, source, .. } => {
+        convert_insert(table_name, columns, source)
       }
-    }
+      Statement::Update { table_name, assignments, selection } => {
+        convert_update(table_name, assignments, selection)
+      }
+      _ => panic!("Unsupported ast::Statement {:?}", stmt),
+    },
     _ => panic!("Other stuff not supported"),
   };
   iast::Query { ctes: ictes, body }
@@ -84,14 +77,14 @@ fn convert_insert(
   table_name: ast::ObjectName,
   columns: Vec<ast::Ident>,
   source: Box<Query>,
-) -> iast::Query {
+) -> iast::QueryBody {
   if let ast::SetExpr::Values(values) = source.body {
     // Construct values
     let mut i_values = Vec::<Vec<iast::Value>>::new();
     for row in values.0 {
       let mut i_row = Vec::<iast::Value>::new();
       for elem in row {
-        if let iast::ValExpr::Value { val } = convert_expr(&elem) {
+        if let iast::ValExpr::Value { val } = convert_expr(elem) {
           i_row.push(val);
         } else {
           panic!("Only literal are supported in the VALUES clause.");
@@ -108,18 +101,31 @@ fn convert_insert(
     for col in columns {
       i_columns.push(col.value)
     }
-
-    iast::Query {
-      ctes: vec![],
-      body: iast::QueryBody::Insert(iast::Insert {
-        table: i_table,
-        columns: i_columns,
-        values: i_values,
-      }),
-    }
+    iast::QueryBody::Insert(iast::Insert { table: i_table, columns: i_columns, values: i_values })
   } else {
     panic!("Non VALUEs clause in Insert is unsupported.");
   }
+}
+
+fn convert_update(
+  table_name: ast::ObjectName,
+  assignments: Vec<ast::Assignment>,
+  selection: Option<ast::Expr>,
+) -> iast::QueryBody {
+  let ast::ObjectName(idents) = table_name;
+  assert_eq!(idents.len(), 1, "Multi-part table references not supported");
+  iast::QueryBody::Update(iast::Update {
+    table: idents[0].value.clone(),
+    assignments: assignments
+      .into_iter()
+      .map(|a| (a.id.value.clone(), convert_expr(a.value)))
+      .collect(),
+    selection: if let Some(selection) = selection {
+      convert_expr(selection)
+    } else {
+      iast::ValExpr::Value { val: iast::Value::Boolean(true) }
+    },
+  })
 }
 
 fn convert_select_clause(select_clause: &Vec<ast::SelectItem>) -> Vec<String> {
@@ -141,7 +147,7 @@ fn convert_select_clause(select_clause: &Vec<ast::SelectItem>) -> Vec<String> {
   select_list
 }
 
-fn convert_value(value: &ast::Value) -> iast::Value {
+fn convert_value(value: ast::Value) -> iast::Value {
   match &value {
     ast::Value::Number(num, _) => iast::Value::Number(num.clone()),
     ast::Value::SingleQuotedString(string) => iast::Value::QuotedString(string.clone()),
@@ -152,7 +158,7 @@ fn convert_value(value: &ast::Value) -> iast::Value {
   }
 }
 
-fn convert_expr(expr: &ast::Expr) -> iast::ValExpr {
+fn convert_expr(expr: ast::Expr) -> iast::ValExpr {
   match expr {
     ast::Expr::Identifier(ident) => iast::ValExpr::ColumnRef { col_ref: ident.value.clone() },
     ast::Expr::CompoundIdentifier(idents) => {
@@ -166,13 +172,13 @@ fn convert_expr(expr: &ast::Expr) -> iast::ValExpr {
         ast::UnaryOperator::Not => iast::UnaryOp::Not,
         _ => panic!("UnaryOperator {:?} not supported", op),
       };
-      iast::ValExpr::UnaryExpr { op: iop, expr: Box::new(convert_expr(expr)) }
+      iast::ValExpr::UnaryExpr { op: iop, expr: Box::new(convert_expr(*expr)) }
     }
     ast::Expr::IsNull(expr) => {
-      iast::ValExpr::UnaryExpr { op: iast::UnaryOp::IsNull, expr: Box::new(convert_expr(expr)) }
+      iast::ValExpr::UnaryExpr { op: iast::UnaryOp::IsNull, expr: Box::new(convert_expr(*expr)) }
     }
     ast::Expr::IsNotNull(expr) => {
-      iast::ValExpr::UnaryExpr { op: iast::UnaryOp::IsNotNull, expr: Box::new(convert_expr(expr)) }
+      iast::ValExpr::UnaryExpr { op: iast::UnaryOp::IsNotNull, expr: Box::new(convert_expr(*expr)) }
     }
     ast::Expr::BinaryOp { op, left, right } => {
       let iop = match op {
@@ -195,12 +201,14 @@ fn convert_expr(expr: &ast::Expr) -> iast::ValExpr {
       };
       iast::ValExpr::BinaryExpr {
         op: iop,
-        left: Box::new(convert_expr(left)),
-        right: Box::new(convert_expr(right)),
+        left: Box::new(convert_expr(*left)),
+        right: Box::new(convert_expr(*right)),
       }
     }
     ast::Expr::Value(value) => iast::ValExpr::Value { val: convert_value(value) },
-    ast::Expr::Subquery(query) => iast::ValExpr::Subquery { query: Box::new(convert_query(query)) },
+    ast::Expr::Subquery(query) => {
+      iast::ValExpr::Subquery { query: Box::new(convert_query(*query)) }
+    }
     _ => panic!("Expr {:?} not supported", expr),
   }
 }

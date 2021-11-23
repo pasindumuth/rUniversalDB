@@ -29,9 +29,9 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
 
 /// Compute the all TierMaps for the `MSQueryES`.
 ///
-/// The Tier should be where every Read query should be reading from, except
-/// if the current stage is an Update, which should be one Tier ahead (i.e.
-/// lower) for that TablePath.
+/// The Tier for a stage is where every Read query should be reading from, except for the
+/// written `TablePath` if the stage is a write (i.e. Update or Insert), in which case the
+/// Tier is one lower that which a Read query should be reading from.
 pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableName, TierMap> {
   let mut all_tier_maps = BTreeMap::<TransTableName, TierMap>::new();
   let mut cur_tier_map = BTreeMap::<TablePath, u32>::new();

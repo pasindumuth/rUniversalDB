@@ -306,8 +306,8 @@ impl MSTableWriteES {
           &ctx.storage,
           &ctx.table_schema,
           &ms_query_es.update_views,
-          self.tier.clone() - 1, // Remember that `tier` is the Tier to write to, which is
-                                 // One ahead of that which to read from.
+          self.tier.clone() + 1, // Remember that `tier` is the Tier to write to, which is
+                                 // one lower than which to read from.
         ),
       ),
     ) {
@@ -318,27 +318,27 @@ impl MSTableWriteES {
       }
     };
 
+    // Here, we have to evaluate subqueries. Thus, we go to Executing and return
+    // SendSubqueries to the parent server.
+    let mut subqueries = Vec::<SingleSubqueryStatus>::new();
+    for gr_query_es in &gr_query_statuses {
+      subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+        context: gr_query_es.context.clone(),
+        query_id: gr_query_es.query_id.clone(),
+      }));
+    }
+
+    // Move the ES to the Executing state.
+    self.state = MSWriteExecutionS::Executing(Executing {
+      completed: 0,
+      subqueries,
+      row_region: pending.read_region.row_region.clone(),
+    });
+
     if gr_query_statuses.is_empty() {
       // Since there are no subqueries, we can go straight to finishing the ES.
       self.finish_ms_table_write_es(ctx, io_ctx, ms_query_es)
     } else {
-      // Here, we have to evaluate subqueries. Thus, we go to Executing and return
-      // SendSubqueries to the parent server.
-      let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-      for gr_query_es in &gr_query_statuses {
-        subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-          context: gr_query_es.context.clone(),
-          query_id: gr_query_es.query_id.clone(),
-        }));
-      }
-
-      // Move the ES to the Executing state.
-      self.state = MSWriteExecutionS::Executing(Executing {
-        completed: 0,
-        subqueries,
-        row_region: pending.read_region.row_region.clone(),
-      });
-
       // Return the subqueries
       MSTableWriteAction::SendSubqueries(gr_query_statuses)
     }
@@ -417,7 +417,7 @@ impl MSTableWriteES {
           &ctx.storage,
           &ctx.table_schema,
           &ms_query_es.update_views,
-          self.tier.clone() - 1,
+          self.tier.clone() + 1,
         ),
       ),
       children,

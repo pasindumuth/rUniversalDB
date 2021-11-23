@@ -302,26 +302,26 @@ impl MSTableReadES {
       }
     };
 
+    // Here, we have computed all GRQueryESs, and we can now add them to Executing.
+    let mut subqueries = Vec::<SingleSubqueryStatus>::new();
+    for gr_query_es in &gr_query_statuses {
+      subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+        context: gr_query_es.context.clone(),
+        query_id: gr_query_es.query_id.clone(),
+      }));
+    }
+
+    // Move the ES to the Executing state.
+    self.state = MSReadExecutionS::Executing(Executing {
+      completed: 0,
+      subqueries,
+      row_region: pending.read_region.row_region.clone(),
+    });
+
     if gr_query_statuses.is_empty() {
       // Since there are no subqueries, we can go straight to finishing the ES.
       self.finish_ms_table_read_es(ctx, io_ctx, ms_query_es)
     } else {
-      // Here, we have computed all GRQueryESs, and we can now add them to Executing.
-      let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-      for gr_query_es in &gr_query_statuses {
-        subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-          context: gr_query_es.context.clone(),
-          query_id: gr_query_es.query_id.clone(),
-        }));
-      }
-
-      // Move the ES to the Executing state.
-      self.state = MSReadExecutionS::Executing(Executing {
-        completed: 0,
-        subqueries,
-        row_region: pending.read_region.row_region.clone(),
-      });
-
       // Return the subqueries
       MSTableReadAction::SendSubqueries(gr_query_statuses)
     }

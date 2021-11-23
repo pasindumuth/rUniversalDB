@@ -148,5 +148,72 @@ fn tp_test() {
     }
   }
 
+  {
+    // Update the table
+    let query = "
+      UPDATE inventory
+      SET email = 'my_email_3'
+      WHERE product_id = 1;
+    ";
+
+    let request_id = RequestId("rid3".to_string());
+    sim.add_msg(
+      msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+        msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
+          sender_eid: sender_eid.clone(),
+          request_id: request_id.clone(),
+          query: query.to_string(),
+        }),
+      )),
+      &sender_eid,
+      &mk_eid("se0"),
+    );
+
+    assert!(simulate_until_response(&mut sim, &sender_eid, 100));
+    match sim.get_responses(&sender_eid).iter().last().unwrap() {
+      msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
+        let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+        exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
+        assert_eq!(payload.request_id, request_id);
+        assert_eq!(payload.result, exp_result);
+      }
+      _ => panic!(),
+    }
+  }
+
+  {
+    // Read data the table
+    let query = "
+      SELECT product_id, email
+      FROM inventory
+      WHERE true;
+    ";
+
+    let request_id = RequestId("rid3".to_string());
+    sim.add_msg(
+      msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+        msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
+          sender_eid: sender_eid.clone(),
+          request_id: request_id.clone(),
+          query: query.to_string(),
+        }),
+      )),
+      &sender_eid,
+      &mk_eid("se0"),
+    );
+
+    assert!(simulate_until_response(&mut sim, &sender_eid, 100));
+    match sim.get_responses(&sender_eid).iter().last().unwrap() {
+      msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
+        let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+        exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
+        exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
+        assert_eq!(payload.request_id, request_id);
+        assert_eq!(payload.result, exp_result);
+      }
+      _ => panic!(),
+    }
+  }
+
   println!("Responses: {:#?}", sim.get_all_responses());
 }

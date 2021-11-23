@@ -357,7 +357,7 @@ impl TableReadES {
     });
 
     if gr_query_statuses.is_empty() {
-      // Go direction to finish.
+      // Since there are no subqueries, we can go straight to finishing the ES.
       self.finish_table_read_es(ctx, io_ctx)
     } else {
       // Return the subqueries
