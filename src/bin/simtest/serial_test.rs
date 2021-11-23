@@ -215,8 +215,7 @@ pub fn simple_test() {
     context.send_query(
       &mut sim,
       " SELECT product_id, email
-        FROM inventory
-        WHERE true;
+        FROM inventory;
       ",
       100,
       exp_result,
@@ -244,8 +243,7 @@ pub fn simple_test() {
     context.send_query(
       &mut sim,
       " SELECT product_id, email
-        FROM inventory
-        WHERE true;
+        FROM inventory;
       ",
       100,
       exp_result,
@@ -279,15 +277,14 @@ pub fn simple_test() {
     context.send_query(
       &mut sim,
       " SELECT product_id, email
-        FROM inventory
-        WHERE true;
+        FROM inventory;
       ",
       100,
       exp_result,
     );
   }
 
-  println!("Test 'simple_test' Passed!")
+  println!("Test 'simple_test' Passed! Time taken: {:?}", sim.true_timestamp())
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -298,14 +295,69 @@ pub fn subquery_test() {
   let (mut sim, mut context) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  setup_user_table(&mut sim, &mut context);
 
-  // Test Subqueries
+  {
+    context.send_ddl_query(
+      &mut sim,
+      " CREATE TABLE inventory (
+          product_id INT PRIMARY KEY,
+          email      VARCHAR,
+          count      INT
+        );
+      ",
+      100,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email"), cn("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(25))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email, count)
+        VALUES (0, 'my_email_0', 15),
+               (2, 'my_email_2', 25);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    context.send_ddl_query(
+      &mut sim,
+      " CREATE TABLE user (
+          email      VARCHAR PRIMARY KEY,
+          balance    INT,
+        );
+      ",
+      100,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cn("email"), cn("balance")]);
+    exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(30))]);
+    exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(50))]);
+    exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(30))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO user (email, balance)
+        VALUES ('my_email_0', 30),
+               ('my_email_1', 50),
+               ('my_email_2', 30);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  // Test Simple Subquery
 
   {
     let mut exp_result = TableView::new(vec![cn("balance")]);
-    exp_result.add_row(vec![Some(cvi(60))]);
+    exp_result.add_row(vec![Some(cvi(30))]);
     context.send_query(
       &mut sim,
       " SELECT balance
@@ -313,17 +365,55 @@ pub fn subquery_test() {
         WHERE email = (
           SELECT email
           FROM inventory
-          WHERE product_id = 1);
+          WHERE product_id = 0);
       ",
       100,
       exp_result,
     );
   }
 
-  // TODO: test a subquery with a column context..
-  //  1. Test with column shadowing.
+  // Test Correlated Subquery
 
-  println!("Test 'subquery_test' Passed!")
+  {
+    let mut exp_result = TableView::new(vec![cn("balance")]);
+    exp_result.add_row(vec![Some(cvi(30))]);
+    context.send_query(
+      &mut sim,
+      " SELECT balance
+        FROM user
+        WHERE email = (
+          SELECT email
+          FROM inventory
+          WHERE count = balance / 2);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  // Test Subquery with TransTable
+
+  {
+    let mut exp_result = TableView::new(vec![cn("balance")]);
+    exp_result.add_row(vec![Some(cvi(30))]);
+    context.send_query(
+      &mut sim,
+      " SELECT balance
+        FROM user
+        WHERE email = (
+          WITH
+            v1 AS (SELECT email, count
+                   FROM inventory)
+          SELECT email
+          FROM v1
+          WHERE count = balance / 2);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Test 'subquery_test' Passed! Time taken: {:?}", sim.true_timestamp())
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -350,15 +440,14 @@ pub fn trans_table_test() {
                  FROM  user
                  WHERE balance >= 60)
         SELECT email
-        FROM v1
-        WHERE true;
+        FROM v1;
       ",
       100,
       exp_result,
     );
   }
 
-  println!("Test 'trans_table_test' Passed!")
+  println!("Test 'trans_table_test' Passed! Time taken: {:?}", sim.true_timestamp())
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -415,5 +504,5 @@ pub fn multi_stage_test() {
     );
   }
 
-  println!("Test 'multi_stage_test' Passed!")
+  println!("Test 'multi_stage_test' Passed! Time taken: {:?}", sim.true_timestamp())
 }

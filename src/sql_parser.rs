@@ -221,6 +221,7 @@ fn convert_expr(expr: ast::Expr) -> iast::ValExpr {
         right: Box::new(convert_expr(*right)),
       }
     }
+    ast::Expr::Nested(expr) => convert_expr(*expr),
     ast::Expr::Value(value) => iast::ValExpr::Value { val: convert_value(value) },
     ast::Expr::Subquery(query) => {
       iast::ValExpr::Subquery { query: Box::new(convert_query(*query)) }
