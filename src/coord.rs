@@ -6,6 +6,7 @@ use crate::finish_query_tm_es::{
   FinishQueryPayloadTypes, FinishQueryPrepare, FinishQueryTMES, FinishQueryTMInner, ResponseData,
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
+use crate::model::common::iast::Query;
 use crate::model::common::{
   proc, CNodePath, CQueryPath, CSubNodePath, CTSubNodePath, ColName, CoordGroupId, LeadershipId,
   PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TNodePath, TQueryPath, TableView,
@@ -470,8 +471,10 @@ impl CoordContext {
       match Parser::parse_sql(&GenericDialect {}, &external_query.query) {
         Ok(parsed_ast) => {
           // Convert to MSQuery
-          let internal_ast = convert_ast(parsed_ast);
-          convert_to_msquery(internal_ast)
+          match convert_ast(parsed_ast) {
+            Ok(internal_ast) => convert_to_msquery(internal_ast),
+            Err(parse_error) => Err(msg::ExternalAbortedData::ParseError(parse_error)),
+          }
         }
         Err(parse_error) => {
           // Extract error string

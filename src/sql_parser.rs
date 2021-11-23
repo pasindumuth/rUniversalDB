@@ -3,123 +3,143 @@ use crate::model::common::{proc, TablePath};
 use sqlparser::ast;
 use sqlparser::test_utils::table;
 
-// TODO: We should return a Result if there is a conversion failure to MSQuery.
+// -----------------------------------------------------------------------------------------------
+//  Utils
+// -----------------------------------------------------------------------------------------------
+
+/// Gets a table reference from a list of identifiers. Since we do not support multi-part
+/// table references, we return an error in that case.
+fn get_table_ref(idents: Vec<ast::Ident>) -> Result<String, String> {
+  if idents.len() != 1 {
+    Err(format!("Multi-part table references not supported"))
+  } else {
+    Ok(idents.into_iter().next().unwrap().value)
+  }
+}
 
 // -----------------------------------------------------------------------------------------------
 //  DQL Query Parsing
 // -----------------------------------------------------------------------------------------------
 
-/// This function converts the sqlparser AST into our own internal
-/// AST, `Query`. Recall that we can transform all DML and DQL transactions
-/// together into a single Query, which is what we do here.
-pub fn convert_ast(raw_query: Vec<ast::Statement>) -> iast::Query {
-  assert!(!raw_query.is_empty(), "A SQL Transaction with no stages is not supported.");
+/// Converts the Rust `sqlparser` AST into our own internal AST, `iast::Query`. Recall that
+/// we can transform all DML and DQL transactions together into a single Query, which is
+/// what we do here.
+pub fn convert_ast(raw_query: Vec<ast::Statement>) -> Result<iast::Query, String> {
+  if raw_query.is_empty() {
+    return Err(format!("A SQL Transaction with no stages is not supported."));
+  }
+
   let mut it = raw_query.into_iter().rev().enumerate();
   let (_, final_stmt) = it.next().unwrap();
 
   // Add all prior stages as CTEs by setting their results to Transient Tables.
   let mut ctes = Vec::<(String, iast::Query)>::new();
   while let Some((idx, stmt)) = it.next() {
-    ctes.push((format!("\\rtt{:?}", idx), convert_stage(stmt)));
+    ctes.push((format!("\\rtt{:?}", idx), convert_stage(stmt)?));
     it.next();
   }
 
   // Add the final stage to the query
-  let mut ret_query = convert_stage(final_stmt);
+  let mut ret_query = convert_stage(final_stmt)?;
   ctes.extend(ret_query.ctes);
   ret_query.ctes = ctes;
-  ret_query
+  Ok(ret_query)
 }
 
-pub fn convert_stage(stmt: ast::Statement) -> iast::Query {
+pub fn convert_stage(stmt: ast::Statement) -> Result<iast::Query, String> {
   match stmt {
     ast::Statement::Query(query) => convert_query(*query),
     ast::Statement::Insert { table_name, columns, source, .. } => {
-      iast::Query { ctes: vec![], body: convert_insert(table_name, columns, source) }
+      Ok(iast::Query { ctes: vec![], body: convert_insert(table_name, columns, source)? })
     }
     ast::Statement::Update { table_name, assignments, selection } => {
-      iast::Query { ctes: vec![], body: convert_update(table_name, assignments, selection) }
+      Ok(iast::Query { ctes: vec![], body: convert_update(table_name, assignments, selection)? })
     }
-    _ => panic!("Unsupported ast::Statement {:?}", stmt),
+    _ => Err(format!("Unsupported ast::Statement {:?}", stmt)),
   }
 }
 
-fn convert_query(query: ast::Query) -> iast::Query {
+fn convert_query(query: ast::Query) -> Result<iast::Query, String> {
   let mut ictes = Vec::<(String, iast::Query)>::new();
   if let Some(with) = query.with {
     for cte in with.cte_tables {
-      ictes.push((cte.alias.name.value.clone(), convert_query(cte.query)));
+      ictes.push((cte.alias.name.value, convert_query(cte.query)?));
     }
   }
   let body = match query.body {
     ast::SetExpr::Query(child_query) => {
-      iast::QueryBody::Query(Box::new(convert_query(*child_query)))
+      iast::QueryBody::Query(Box::new(convert_query(*child_query)?))
     }
     ast::SetExpr::Select(select) => {
-      let from_clause = &select.from;
-      assert_eq!(from_clause.len(), 1, "Joins with ',' not supported");
-      assert!(from_clause[0].joins.is_empty(), "Joins not supported");
-      if let ast::TableFactor::Table { name, .. } = &from_clause[0].relation {
-        let ast::ObjectName(idents) = name;
-        assert_eq!(idents.len(), 1, "Multi-part table references not supported");
+      let from_clause = select.from;
+      if from_clause.len() != 1 {
+        return Err(format!("Joins with ',' not supported"));
+      }
+      if !from_clause[0].joins.is_empty() {
+        return Err(format!("Joins not supported"));
+      }
+      let relation = from_clause.into_iter().next().unwrap().relation;
+      if let ast::TableFactor::Table { name, .. } = relation {
         iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
-          projection: convert_select_clause(&select.projection),
-          from: idents[0].value.clone(),
+          projection: convert_select_clause(select.projection)?,
+          from: get_table_ref(name.0)?,
           selection: if let Some(selection) = select.selection {
-            convert_expr(selection)
+            convert_expr(selection)?
           } else {
             iast::ValExpr::Value { val: iast::Value::Boolean(true) }
           },
         })
       } else {
-        panic!("TableFactor {:?} not supported", &from_clause[0].relation);
+        return Err(format!("TableFactor {:?} not supported", relation));
       }
     }
     ast::SetExpr::Insert(stmt) => match stmt {
       ast::Statement::Insert { table_name, columns, source, .. } => {
-        convert_insert(table_name, columns, source)
+        convert_insert(table_name, columns, source)?
       }
       ast::Statement::Update { table_name, assignments, selection } => {
-        convert_update(table_name, assignments, selection)
+        convert_update(table_name, assignments, selection)?
       }
-      _ => panic!("Unsupported ast::Statement {:?}", stmt),
+      _ => return Err(format!("Unsupported ast::Statement {:?}", stmt)),
     },
-    _ => panic!("Other stuff not supported"),
+    _ => return Err(format!("Other stuff not supported")),
   };
-  iast::Query { ctes: ictes, body }
+  Ok(iast::Query { ctes: ictes, body })
 }
 
 fn convert_insert(
   table_name: ast::ObjectName,
   columns: Vec<ast::Ident>,
   source: Box<ast::Query>,
-) -> iast::QueryBody {
+) -> Result<iast::QueryBody, String> {
   if let ast::SetExpr::Values(values) = source.body {
     // Construct values
     let mut i_values = Vec::<Vec<iast::Value>>::new();
     for row in values.0 {
       let mut i_row = Vec::<iast::Value>::new();
       for elem in row {
-        if let iast::ValExpr::Value { val } = convert_expr(elem) {
+        if let iast::ValExpr::Value { val } = convert_expr(elem)? {
           i_row.push(val);
         } else {
-          panic!("Only literal are supported in the VALUES clause.");
+          return Err(format!("Only literal are supported in the VALUES clause."));
         }
       }
       i_values.push(i_row);
     }
     // Construct Table name
-    let ast::ObjectName(idents) = table_name;
-    assert_eq!(idents.len(), 1, "Multi-part table references not supported");
-    let i_table = idents.into_iter().next().unwrap().value;
+    let i_table = get_table_ref(table_name.0)?;
     // Construct Columns
     let mut i_columns = Vec::<String>::new();
     for col in columns {
       i_columns.push(col.value)
     }
-    iast::QueryBody::Insert(iast::Insert { table: i_table, columns: i_columns, values: i_values })
+    Ok(iast::QueryBody::Insert(iast::Insert {
+      table: i_table,
+      columns: i_columns,
+      values: i_values,
+    }))
   } else {
-    panic!("Non VALUEs clause in Insert is unsupported.");
+    Err(format!("Non VALUEs clause in Insert is unsupported."))
   }
 }
 
@@ -127,24 +147,25 @@ fn convert_update(
   table_name: ast::ObjectName,
   assignments: Vec<ast::Assignment>,
   selection: Option<ast::Expr>,
-) -> iast::QueryBody {
-  let ast::ObjectName(idents) = table_name;
-  assert_eq!(idents.len(), 1, "Multi-part table references not supported");
-  iast::QueryBody::Update(iast::Update {
-    table: idents[0].value.clone(),
-    assignments: assignments
-      .into_iter()
-      .map(|a| (a.id.value.clone(), convert_expr(a.value)))
-      .collect(),
+) -> Result<iast::QueryBody, String> {
+  Ok(iast::QueryBody::Update(iast::Update {
+    table: get_table_ref(table_name.0)?,
+    assignments: {
+      let mut internal_assignments = Vec::<(String, iast::ValExpr)>::new();
+      for a in assignments {
+        internal_assignments.push((a.id.value, convert_expr(a.value)?))
+      }
+      internal_assignments
+    },
     selection: if let Some(selection) = selection {
-      convert_expr(selection)
+      convert_expr(selection)?
     } else {
       iast::ValExpr::Value { val: iast::Value::Boolean(true) }
     },
-  })
+  }))
 }
 
-fn convert_select_clause(select_clause: &Vec<ast::SelectItem>) -> Vec<String> {
+fn convert_select_clause(select_clause: Vec<ast::SelectItem>) -> Result<Vec<String>, String> {
   let mut select_list = Vec::<String>::new();
   for item in select_clause {
     match &item {
@@ -152,50 +173,48 @@ fn convert_select_clause(select_clause: &Vec<ast::SelectItem>) -> Vec<String> {
         if let ast::Expr::Identifier(ident) = expr {
           select_list.push(ident.value.clone());
         } else {
-          panic!("{:?} is not supported in SelectItem", item);
+          return Err(format!("{:?} is not supported in SelectItem", item));
         }
       }
-      _ => {
-        panic!("{:?} is not supported in SelectItem", item);
-      }
+      _ => return Err(format!("{:?} is not supported in SelectItem", item)),
     }
   }
-  select_list
+  Ok(select_list)
 }
 
-fn convert_value(value: ast::Value) -> iast::Value {
-  match &value {
-    ast::Value::Number(num, _) => iast::Value::Number(num.clone()),
-    ast::Value::SingleQuotedString(string) => iast::Value::QuotedString(string.clone()),
-    ast::Value::DoubleQuotedString(string) => iast::Value::QuotedString(string.clone()),
-    ast::Value::Boolean(bool) => iast::Value::Boolean(bool.clone()),
-    ast::Value::Null => iast::Value::Null,
-    _ => panic!("Value type {:?} not supported.", value),
+fn convert_value(value: ast::Value) -> Result<iast::Value, String> {
+  match value {
+    ast::Value::Number(num, _) => Ok(iast::Value::Number(num)),
+    ast::Value::SingleQuotedString(string) => Ok(iast::Value::QuotedString(string)),
+    ast::Value::DoubleQuotedString(string) => Ok(iast::Value::QuotedString(string)),
+    ast::Value::Boolean(bool) => Ok(iast::Value::Boolean(bool)),
+    ast::Value::Null => Ok(iast::Value::Null),
+    _ => Err(format!("Value type {:?} not supported.", value)),
   }
 }
 
-fn convert_expr(expr: ast::Expr) -> iast::ValExpr {
-  match expr {
-    ast::Expr::Identifier(ident) => iast::ValExpr::ColumnRef { col_ref: ident.value.clone() },
+fn convert_expr(expr: ast::Expr) -> Result<iast::ValExpr, String> {
+  Ok(match expr {
+    ast::Expr::Identifier(ident) => iast::ValExpr::ColumnRef { col_ref: ident.value },
     ast::Expr::CompoundIdentifier(idents) => {
-      assert_eq!(idents.len(), 2, "The only prefix fix for a column should be the table.");
-      iast::ValExpr::ColumnRef { col_ref: idents[1].value.clone() }
+      iast::ValExpr::ColumnRef { col_ref: get_table_ref(idents)? }
     }
     ast::Expr::UnaryOp { op, expr } => {
       let iop = match op {
         ast::UnaryOperator::Minus => iast::UnaryOp::Minus,
         ast::UnaryOperator::Plus => iast::UnaryOp::Plus,
         ast::UnaryOperator::Not => iast::UnaryOp::Not,
-        _ => panic!("UnaryOperator {:?} not supported", op),
+        _ => return Err(format!("UnaryOperator {:?} not supported", op)),
       };
-      iast::ValExpr::UnaryExpr { op: iop, expr: Box::new(convert_expr(*expr)) }
+      iast::ValExpr::UnaryExpr { op: iop, expr: Box::new(convert_expr(*expr)?) }
     }
     ast::Expr::IsNull(expr) => {
-      iast::ValExpr::UnaryExpr { op: iast::UnaryOp::IsNull, expr: Box::new(convert_expr(*expr)) }
+      iast::ValExpr::UnaryExpr { op: iast::UnaryOp::IsNull, expr: Box::new(convert_expr(*expr)?) }
     }
-    ast::Expr::IsNotNull(expr) => {
-      iast::ValExpr::UnaryExpr { op: iast::UnaryOp::IsNotNull, expr: Box::new(convert_expr(*expr)) }
-    }
+    ast::Expr::IsNotNull(expr) => iast::ValExpr::UnaryExpr {
+      op: iast::UnaryOp::IsNotNull,
+      expr: Box::new(convert_expr(*expr)?),
+    },
     ast::Expr::BinaryOp { op, left, right } => {
       let iop = match op {
         ast::BinaryOperator::Plus => iast::BinaryOp::Plus,
@@ -213,21 +232,21 @@ fn convert_expr(expr: ast::Expr) -> iast::ValExpr {
         ast::BinaryOperator::NotEq => iast::BinaryOp::NotEq,
         ast::BinaryOperator::And => iast::BinaryOp::And,
         ast::BinaryOperator::Or => iast::BinaryOp::Or,
-        _ => panic!("BinaryOperator {:?} not supported", op),
+        _ => return Err(format!("BinaryOperator {:?} not supported", op)),
       };
       iast::ValExpr::BinaryExpr {
         op: iop,
-        left: Box::new(convert_expr(*left)),
-        right: Box::new(convert_expr(*right)),
+        left: Box::new(convert_expr(*left)?),
+        right: Box::new(convert_expr(*right)?),
       }
     }
-    ast::Expr::Nested(expr) => convert_expr(*expr),
-    ast::Expr::Value(value) => iast::ValExpr::Value { val: convert_value(value) },
+    ast::Expr::Nested(expr) => convert_expr(*expr)?,
+    ast::Expr::Value(value) => iast::ValExpr::Value { val: convert_value(value)? },
     ast::Expr::Subquery(query) => {
-      iast::ValExpr::Subquery { query: Box::new(convert_query(*query)) }
+      iast::ValExpr::Subquery { query: Box::new(convert_query(*query)?) }
     }
-    _ => panic!("Expr {:?} not supported", expr),
-  }
+    _ => return Err(format!("Expr {:?} not supported", expr)),
+  })
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -241,12 +260,14 @@ pub enum DDLQuery {
 }
 
 /// This function converts the sqlparser AST into an internal DDL struct.
-pub fn convert_ddl_ast(raw_query: &Vec<ast::Statement>) -> DDLQuery {
-  assert_eq!(raw_query.len(), 1, "Only one SQL statement support atm.");
-  let stmt = &raw_query[0];
-  match stmt {
+pub fn convert_ddl_ast(raw_query: Vec<ast::Statement>) -> Result<DDLQuery, String> {
+  if raw_query.len() != 1 {
+    return Err(format!("Only one SQL statement support atm."));
+  }
+  let stmt = raw_query.into_iter().next().unwrap();
+  match &stmt {
     ast::Statement::CreateTable { name, columns, .. } => {
-      let table_path = TablePath(name.0.get(0).unwrap().value.clone());
+      let table_path = TablePath(get_table_ref(name.0.clone())?);
       let mut key_cols = Vec::<(ColName, ColType)>::new();
       let mut val_cols = Vec::<(ColName, ColType)>::new();
       for col in columns {
@@ -255,7 +276,7 @@ pub fn convert_ddl_ast(raw_query: &Vec<ast::Statement>) -> DDLQuery {
           ast::DataType::Varchar(_) => ColType::String,
           ast::DataType::Int => ColType::Int,
           ast::DataType::Boolean => ColType::Bool,
-          _ => panic!("Unsupported Create Table datatype {:?}", col.data_type),
+          _ => return Err(format!("Unsupported Create Table datatype {:?}", col.data_type)),
         };
         let mut is_key_col = false;
         for option_def in &col.options {
@@ -271,41 +292,41 @@ pub fn convert_ddl_ast(raw_query: &Vec<ast::Statement>) -> DDLQuery {
           val_cols.push((col_name, col_type));
         }
       }
-      DDLQuery::Create(proc::CreateTable { table_path, key_cols, val_cols })
+      Ok(DDLQuery::Create(proc::CreateTable { table_path, key_cols, val_cols }))
     }
     ast::Statement::Drop { names, .. } => {
-      let name = names.get(0).unwrap().clone();
-      let table_path = TablePath(name.0.get(0).unwrap().value.clone());
-      DDLQuery::Drop(proc::DropTable { table_path })
+      let name = names.into_iter().next().unwrap();
+      let table_path = TablePath(get_table_ref(name.0.clone())?);
+      Ok(DDLQuery::Drop(proc::DropTable { table_path }))
     }
     ast::Statement::AlterTable { name, operation } => match operation {
-      ast::AlterTableOperation::AddColumn { column_def } => DDLQuery::Alter(proc::AlterTable {
-        table_path: TablePath(name.0.get(0).unwrap().value.clone()),
+      ast::AlterTableOperation::AddColumn { column_def } => Ok(DDLQuery::Alter(proc::AlterTable {
+        table_path: TablePath(get_table_ref(name.0.clone())?),
         alter_op: proc::AlterOp {
           col_name: ColName(column_def.name.value.clone()),
-          maybe_col_type: Some(convert_data_type(&column_def.data_type)),
+          maybe_col_type: Some(convert_data_type(&column_def.data_type)?),
         },
-      }),
+      })),
       ast::AlterTableOperation::DropColumn { column_name, .. } => {
-        DDLQuery::Alter(proc::AlterTable {
-          table_path: TablePath(name.0.get(0).unwrap().value.clone()),
+        Ok(DDLQuery::Alter(proc::AlterTable {
+          table_path: TablePath(get_table_ref(name.0.clone())?),
           alter_op: proc::AlterOp {
             col_name: ColName(column_name.value.clone()),
             maybe_col_type: None,
           },
-        })
+        }))
       }
-      _ => panic!("Unsupported ast::Statement {:?}", stmt),
+      _ => Err(format!("Unsupported ast::Statement {:?}", stmt)),
     },
-    _ => panic!("Unsupported ast::Statement {:?}", stmt),
+    _ => Err(format!("Unsupported ast::Statement {:?}", stmt)),
   }
 }
 
-pub fn convert_data_type(raw_data_type: &ast::DataType) -> ColType {
+pub fn convert_data_type(raw_data_type: &ast::DataType) -> Result<ColType, String> {
   match raw_data_type {
-    ast::DataType::Int => ColType::Int,
-    ast::DataType::Boolean => ColType::Bool,
-    ast::DataType::String => ColType::String,
-    _ => panic!("Unsupported ast::DataType {:?}", raw_data_type),
+    ast::DataType::Int => Ok(ColType::Int),
+    ast::DataType::Boolean => Ok(ColType::Bool),
+    ast::DataType::String => Ok(ColType::String),
+    _ => Err(format!("Unsupported ast::DataType {:?}", raw_data_type)),
   }
 }

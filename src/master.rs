@@ -873,7 +873,10 @@ impl MasterContext {
     } else {
       // Parse the SQL
       match Parser::parse_sql(&GenericDialect {}, &external_query.query) {
-        Ok(parsed_ast) => Ok(convert_ddl_ast(&parsed_ast)),
+        Ok(parsed_ast) => match convert_ddl_ast(parsed_ast) {
+          Ok(ddl_ast) => Ok(ddl_ast),
+          Err(parse_error) => Err(msg::ExternalDDLQueryAbortData::ParseError(parse_error)),
+        },
         Err(parse_error) => {
           // Extract error string
           Err(msg::ExternalDDLQueryAbortData::ParseError(match parse_error {
