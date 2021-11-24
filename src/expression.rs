@@ -109,8 +109,9 @@ fn evaluate_unary_op(op: &iast::UnaryOp, expr: ColValN) -> Result<ColValN, EvalE
     (iast::UnaryOp::Minus, Some(ColVal::Int(val))) => Ok(Some(ColVal::Int(-val))),
     (iast::UnaryOp::Not, Some(ColVal::Bool(val))) => Ok(Some(ColVal::Bool(!val))),
     (iast::UnaryOp::IsNull, None) => Ok(Some(ColVal::Bool(true))),
+    (iast::UnaryOp::IsNull, Some(_)) => Ok(Some(ColVal::Bool(false))),
     (iast::UnaryOp::IsNotNull, None) => Ok(Some(ColVal::Bool(false))),
-    (iast::UnaryOp::IsNotNull, _) => Ok(Some(ColVal::Bool(true))),
+    (iast::UnaryOp::IsNotNull, Some(_)) => Ok(Some(ColVal::Bool(true))),
     _ => Err(EvalError::InvalidUnaryOp),
   }
 }

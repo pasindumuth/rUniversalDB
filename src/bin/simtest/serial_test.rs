@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 //  Utils
 // -----------------------------------------------------------------------------------------------
 
-struct TestContext {
+pub struct TestContext {
   next_request_idx: u32,
   /// The client that we always use.
   sender_eid: EndpointId,
@@ -29,7 +29,7 @@ struct TestContext {
 }
 
 impl TestContext {
-  fn new() -> TestContext {
+  pub fn new() -> TestContext {
     TestContext {
       next_request_idx: 0,
       sender_eid: mk_eid("ce0"),
@@ -40,7 +40,7 @@ impl TestContext {
 
   /// Executes the DDL `query` using `sim` with a time limit of `time_limit`. If the query
   /// finishes, we check that it succeeded.
-  fn send_ddl_query(&mut self, sim: &mut Simulation, query: &str, time_limit: u32) {
+  pub fn send_ddl_query(&mut self, sim: &mut Simulation, query: &str, time_limit: u32) {
     let request_id = RequestId(format!("rid{:?}", self.next_request_idx));
     self.next_request_idx += 1;
     sim.add_msg(
@@ -68,7 +68,7 @@ impl TestContext {
   /// Executes the `query` using `sim` with a time limit of `time_limit`. If the query
   /// finishes, we check that it succeeded and that the resulting `TableView` is the same
   /// as `expr_result`.
-  fn send_query(
+  pub fn send_query(
     &mut self,
     sim: &mut Simulation,
     query: &str,
@@ -116,7 +116,7 @@ fn simulate_until_response(sim: &mut Simulation, eid: &EndpointId, time_limit: u
   false
 }
 
-fn setup() -> (Simulation, TestContext) {
+pub fn setup() -> (Simulation, TestContext) {
   let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
     (mk_sid("s0"), vec![mk_slave_eid(&0)]),
@@ -192,6 +192,17 @@ fn setup_user_table(sim: &mut Simulation, context: &mut TestContext) {
       exp_result,
     );
   }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  test_all_serial
+// -----------------------------------------------------------------------------------------------
+
+pub fn test_all_serial() {
+  simple_test();
+  subquery_test();
+  trans_table_test();
+  multi_stage_test();
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -307,6 +318,21 @@ pub fn simple_test() {
       " SELECT product_id, email, count
         FROM inventory
         WHERE product_id = 6
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email"), cn("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_4")), Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5")), Some(cvi(25))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory
+        WHERE count IS NOT NULL
       ",
       100,
       exp_result,

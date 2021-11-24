@@ -3,8 +3,8 @@ use crate::coord::CoordForwardMsg;
 use crate::master::MasterTimerInput;
 use crate::model::common::{
   proc, CTNodePath, ColName, ColType, CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId,
-  QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap,
-  Timestamp,
+  QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
+  TabletKeyRange, TierMap, Timestamp,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
@@ -241,6 +241,10 @@ fn rand_string<R: Rng>(rng: &mut R) -> String {
 
 pub fn mk_qid<R: Rng>(rng: &mut R) -> QueryId {
   QueryId(rand_string(rng))
+}
+
+pub fn mk_rid<R: Rng>(rng: &mut R) -> RequestId {
+  RequestId(rand_string(rng))
 }
 
 pub fn mk_tid<R: Rng>(rng: &mut R) -> TabletGroupId {

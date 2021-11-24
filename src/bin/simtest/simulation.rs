@@ -431,6 +431,15 @@ impl Simulation {
     return &self.client_msgs_received;
   }
 
+  /// Move out and return all responses from `client_msgs_received`, starting it again from empty.
+  pub fn remove_all_responses(&mut self) -> BTreeMap<EndpointId, Vec<msg::NetworkMessage>> {
+    let mut empty_client_msgs_received = BTreeMap::new();
+    for (eid, _) in &self.client_msgs_received {
+      empty_client_msgs_received.insert(eid.clone(), Vec::new());
+    }
+    std::mem::replace(&mut self.client_msgs_received, empty_client_msgs_received)
+  }
+
   /// Returns all responses at `eid`.
   pub fn get_responses(&self, eid: &EndpointId) -> &Vec<msg::NetworkMessage> {
     self.client_msgs_received.get(eid).unwrap()
@@ -640,7 +649,7 @@ impl Simulation {
     self.run_timer_events();
   }
 
-  pub fn simulate_n_ms(&mut self, n: i32) {
+  pub fn simulate_n_ms(&mut self, n: u32) {
     for _ in 0..n {
       self.simulate1ms();
     }
