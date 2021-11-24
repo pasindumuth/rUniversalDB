@@ -18,7 +18,7 @@ fn mk_inventory_insert(r: &mut XorShiftRng) -> String {
   let num_vals = r.next_u32() % 5;
   for _ in 0..num_vals {
     values.push(format!(
-      "({:?}, 'my_email_{:?}', {:?})",
+      "({}, 'my_email_{}', {})",
       r.next_u32() % 100,
       r.next_u32() % 100,
       r.next_u32() % 100
@@ -27,7 +27,7 @@ fn mk_inventory_insert(r: &mut XorShiftRng) -> String {
 
   format!(
     " INSERT INTO inventory (product_id, email, count)
-      VALUES {:?};
+      VALUES {};
     ",
     values.join(", ")
   )
@@ -38,8 +38,8 @@ fn mk_inventory_update(r: &mut XorShiftRng) -> String {
   if query_type == 0 {
     format!(
       " UPDATE inventory
-        SET count = count + {:?}
-        WHERE product_id >= {:?};
+        SET count = count + {}
+        WHERE product_id >= {};
       ",
       r.next_u32() % 5,
       r.next_u32() % 100
@@ -47,8 +47,8 @@ fn mk_inventory_update(r: &mut XorShiftRng) -> String {
   } else if query_type == 1 {
     format!(
       " UPDATE inventory
-        SET count = count - {:?}
-        WHERE product_id >= {:?};
+        SET count = count - {}
+        WHERE product_id >= {};
       ",
       r.next_u32() % 5,
       r.next_u32() % 100
@@ -56,8 +56,8 @@ fn mk_inventory_update(r: &mut XorShiftRng) -> String {
   } else if query_type == 2 {
     format!(
       " UPDATE inventory
-        SET email = 'my_email_{:?}'
-        WHERE count >= {:?};
+        SET email = 'my_email_{}'
+        WHERE count >= {};
       ",
       r.next_u32() % 100,
       r.next_u32() % 100
@@ -73,7 +73,7 @@ fn mk_inventory_select(r: &mut XorShiftRng) -> String {
     format!(
       " SELECT email
         FROM inventory
-        WHERE count >= {:?};
+        WHERE count >= {};
       ",
       r.next_u32() % 100
     )
@@ -81,7 +81,7 @@ fn mk_inventory_select(r: &mut XorShiftRng) -> String {
     format!(
       " SELECT product_id
         FROM inventory
-        WHERE count >= {:?} AND count < {:?};
+        WHERE count >= {} AND count < {};
       ",
       r.next_u32() % 50,
       r.next_u32() % 50 + 50
@@ -90,7 +90,7 @@ fn mk_inventory_select(r: &mut XorShiftRng) -> String {
     format!(
       " SELECT count
         FROM inventory
-        WHERE product_id >= {:?} AND product_id < {:?};
+        WHERE product_id >= {} AND product_id < {};
       ",
       r.next_u32() % 50,
       r.next_u32() % 50 + 50

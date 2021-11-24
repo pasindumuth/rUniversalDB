@@ -250,6 +250,21 @@ pub fn compress_updates_views(update_views: BTreeMap<u32, GenericTable>) -> Gene
   compressed_table
 }
 
+/// Add `(timestamp, value)` to `versions`, possibly replacing an existing version if the
+/// timestamp already exists. Recall that `versions` must remain sorted in ascending order.
+fn add_version(versions: &mut Vec<(Timestamp, ColValN)>, timestamp: Timestamp, value: ColValN) {
+  for (i, (cur_timestamp, cur_value)) in versions.iter_mut().enumerate().rev() {
+    if *cur_timestamp == timestamp {
+      *cur_value = value;
+      return;
+    } else if *cur_timestamp < timestamp {
+      versions.insert(i + 1, (timestamp, value));
+      return;
+    }
+  }
+  versions.insert(0, (timestamp, value));
+}
+
 /// Apply the `compressed_view` to `storage` and `timestamp`.
 pub fn commit_to_storage(
   storage: &mut GenericMVTable,
@@ -260,10 +275,7 @@ pub fn commit_to_storage(
     // Recall that since MSWriteES does Type Checking, the Compressed View can be applied
     // directly to `storage` without further checks.
     if let Some(versions) = storage.get_mut(&key) {
-      // We do a sanity check that that the Region Isolation Algorithm did its job.
-      let (last_timestamp, _) = versions.last().unwrap();
-      assert!(timestamp > last_timestamp);
-      versions.push((*timestamp, value));
+      add_version(versions, timestamp.clone(), value);
     } else {
       storage.insert(key, vec![(*timestamp, value)]);
     }
