@@ -15,9 +15,17 @@ mod expression_test;
 //  Expression Evaluation
 // -----------------------------------------------------------------------------------------------
 
+/**
+ * Ad hoc `NULL` Handling:
+ *
+ * A shortcoming of this expression evaluation system is that `NULL` might be handled in
+ * a Non-Standard way. Nevertheless, study and take inspiration from Postgres and choose a
+ * sensible scheme that is simple to implement and useful for simulation testing.
+ */
+
 /// These primarily exist for testing the expression evaluation code. It's not used
 /// by the system for decision making.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum EvalError {
   /// An invalid unary operation was attempted.
   InvalidUnaryOp,
@@ -35,7 +43,8 @@ pub enum EvalError {
   TypeError,
 }
 
-/// This is the expression type we use to Compute a value (hence why it's called CExpr).
+/// This is the expression type we use to Compute a value (hence why it is called CExpr).
+/// Note that there are no more `ColumnRef`s
 #[derive(Debug)]
 pub enum CExpr {
   UnaryExpr { op: iast::UnaryOp, expr: Box<CExpr> },
@@ -44,7 +53,7 @@ pub enum CExpr {
 }
 
 /// This is the expression type we use to evaluate KeyBounds. Recall that we generally only have
-/// a subset of ColumnRefs with a known value; the remaining columns and subquery results are
+/// a subset of `ColumnRefs` with a known value; the remaining columns and subquery results are
 /// all unknown. We replace the known ColumnRefs with `Value`, the Key Columns with a `ColumnRef`,
 /// and the unknown things with `Unknown`.
 #[derive(Debug)]
@@ -106,46 +115,87 @@ pub fn construct_cexpr(
   Ok(c_expr)
 }
 
-/// Common function for evaluating a unary expression with fully-evaluate insides.
+/// Common function for evaluating a unary expression with fully-evaluated insides.
+///
+/// The `NULL` handling was observed with Postgres, where we applied the unary operations
+/// to a column name (not the NULL keyword directly).
 fn evaluate_unary_op(op: &iast::UnaryOp, expr: ColValN) -> Result<ColValN, EvalError> {
   match (op, expr) {
+    // Plus
     (iast::UnaryOp::Plus, Some(ColVal::Int(val))) => Ok(Some(ColVal::Int(val))),
+    (iast::UnaryOp::Plus, None) => Ok(None),
+    // Minus
     (iast::UnaryOp::Minus, Some(ColVal::Int(val))) => Ok(Some(ColVal::Int(-val))),
+    (iast::UnaryOp::Minus, None) => Ok(None),
+    // Not
     (iast::UnaryOp::Not, Some(ColVal::Bool(val))) => Ok(Some(ColVal::Bool(!val))),
-    (iast::UnaryOp::IsNull, None) => Ok(Some(ColVal::Bool(true))),
+    (iast::UnaryOp::Not, None) => Ok(None), // Note that Postgres does not evaluate this to `false`
+    // IsNull
     (iast::UnaryOp::IsNull, Some(_)) => Ok(Some(ColVal::Bool(false))),
-    (iast::UnaryOp::IsNotNull, None) => Ok(Some(ColVal::Bool(false))),
+    (iast::UnaryOp::IsNull, None) => Ok(Some(ColVal::Bool(true))),
+    // IsNotNull
     (iast::UnaryOp::IsNotNull, Some(_)) => Ok(Some(ColVal::Bool(true))),
+    (iast::UnaryOp::IsNotNull, None) => Ok(Some(ColVal::Bool(false))),
+    // Invalid
     _ => Err(EvalError::InvalidUnaryOp),
   }
 }
 
 /// Common function for evaluating a binary expression with fully-evaluate left and right sides.
+///
+/// The `NULL` handling was observed with Postgres, where we applied the unary operations
+/// to a column name (not the NULL keyword directly). Observe that for most operators, if either
+/// side is `NULL`, we bubble that up.
 fn evaluate_binary_op(
   op: &iast::BinaryOp,
   left: ColValN,
   right: ColValN,
 ) -> Result<ColValN, EvalError> {
   match (op, left, right) {
+    // Plus
     (iast::BinaryOp::Plus, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
       Ok(Some(ColVal::Int(left_val + right_val)))
     }
+    (iast::BinaryOp::Plus, Some(ColVal::Int(_)), None) => Ok(None),
+    (iast::BinaryOp::Plus, None, Some(ColVal::Int(_))) => Ok(None),
+    (iast::BinaryOp::Plus, None, None) => Ok(None),
+    // Minus
     (iast::BinaryOp::Minus, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
       Ok(Some(ColVal::Int(left_val - right_val)))
     }
+    (iast::BinaryOp::Minus, Some(ColVal::Int(_)), None) => Ok(None),
+    (iast::BinaryOp::Minus, None, Some(ColVal::Int(_))) => Ok(None),
+    (iast::BinaryOp::Minus, None, None) => Ok(None),
+    // Multiply
     (iast::BinaryOp::Multiply, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
       Ok(Some(ColVal::Int(left_val * right_val)))
     }
+    (iast::BinaryOp::Multiply, Some(ColVal::Int(_)), None) => Ok(None),
+    (iast::BinaryOp::Multiply, None, Some(ColVal::Int(_))) => Ok(None),
+    (iast::BinaryOp::Multiply, None, None) => Ok(None),
+    // Divide
     (iast::BinaryOp::Divide, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
-      if right_val != 0 && left_val % right_val == 0 {
+      if right_val != 0 {
         Ok(Some(ColVal::Int(left_val / right_val)))
       } else {
         Err(EvalError::InvalidBinaryOp)
       }
     }
+    (iast::BinaryOp::Divide, Some(ColVal::Int(_)), None) => Ok(None),
+    (iast::BinaryOp::Divide, None, Some(ColVal::Int(_))) => Ok(None),
+    (iast::BinaryOp::Divide, None, None) => Ok(None),
+    // Modulus
     (iast::BinaryOp::Modulus, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
-      Ok(Some(ColVal::Int(left_val % right_val)))
+      if right_val != 0 {
+        Ok(Some(ColVal::Int(left_val % right_val)))
+      } else {
+        Err(EvalError::InvalidBinaryOp)
+      }
     }
+    (iast::BinaryOp::Modulus, Some(ColVal::Int(_)), None) => Ok(None),
+    (iast::BinaryOp::Modulus, None, Some(ColVal::Int(_))) => Ok(None),
+    (iast::BinaryOp::Modulus, None, None) => Ok(None),
+    // StringConcat
     (
       iast::BinaryOp::StringConcat,
       Some(ColVal::String(left_val)),
@@ -155,42 +205,96 @@ fn evaluate_binary_op(
       result.extend(right_val.chars());
       Ok(Some(ColVal::String(result)))
     }
+    (iast::BinaryOp::StringConcat, Some(ColVal::String(_)), None) => Ok(None),
+    (iast::BinaryOp::StringConcat, None, Some(ColVal::String(_))) => Ok(None),
+    (iast::BinaryOp::StringConcat, None, None) => Ok(None),
+    // Gt
     (iast::BinaryOp::Gt, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
       Ok(Some(ColVal::Bool(left_val > right_val)))
     }
+    (iast::BinaryOp::Gt, Some(ColVal::Int(_)), None) => Ok(None),
+    (iast::BinaryOp::Gt, None, Some(ColVal::Int(_))) => Ok(None),
+    (iast::BinaryOp::Gt, None, None) => Ok(None),
+    // Lt
     (iast::BinaryOp::Lt, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
       Ok(Some(ColVal::Bool(left_val < right_val)))
     }
+    (iast::BinaryOp::Lt, Some(ColVal::Int(_)), None) => Ok(None),
+    (iast::BinaryOp::Lt, None, Some(ColVal::Int(_))) => Ok(None),
+    (iast::BinaryOp::Lt, None, None) => Ok(None),
+    // GtEq
     (iast::BinaryOp::GtEq, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
       Ok(Some(ColVal::Bool(left_val >= right_val)))
     }
+    (iast::BinaryOp::GtEq, Some(ColVal::Int(_)), None) => Ok(None),
+    (iast::BinaryOp::GtEq, None, Some(ColVal::Int(_))) => Ok(None),
+    (iast::BinaryOp::GtEq, None, None) => Ok(None),
+    // LtEq
     (iast::BinaryOp::LtEq, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
       Ok(Some(ColVal::Bool(left_val <= right_val)))
     }
+    (iast::BinaryOp::LtEq, Some(ColVal::Int(_)), None) => Ok(None),
+    (iast::BinaryOp::LtEq, None, Some(ColVal::Int(_))) => Ok(None),
+    (iast::BinaryOp::LtEq, None, None) => Ok(None),
+    // Spaceship
     (iast::BinaryOp::Spaceship, left_val, right_val) => {
       // Recall that unlike '=', this operator is NULL-safe.
       Ok(Some(ColVal::Bool(left_val == right_val)))
     }
-    (iast::BinaryOp::Eq, left_val, right_val) => {
-      if left_val.is_none() || right_val.is_none() {
-        // Recall that the '=' operator returns NULL if one of the sides is NULL.
-        Ok(None)
-      } else {
-        Ok(Some(ColVal::Bool(left_val == right_val)))
-      }
+    // Eq
+    (iast::BinaryOp::Eq, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
+      Ok(Some(ColVal::Bool(left_val == right_val)))
     }
-    (iast::BinaryOp::NotEq, left_val, right_val) => Ok(Some(ColVal::Bool(left_val != right_val))),
+    (iast::BinaryOp::Eq, Some(ColVal::Bool(left_val)), Some(ColVal::Bool(right_val))) => {
+      Ok(Some(ColVal::Bool(left_val == right_val)))
+    }
+    (iast::BinaryOp::Eq, Some(ColVal::String(left_val)), Some(ColVal::String(right_val))) => {
+      Ok(Some(ColVal::Bool(left_val == right_val)))
+    }
+    (iast::BinaryOp::Eq, Some(_), None) => Ok(None),
+    (iast::BinaryOp::Eq, None, Some(_)) => Ok(None),
+    (iast::BinaryOp::Eq, None, None) => Ok(None),
+    // NotEq
+    (iast::BinaryOp::NotEq, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
+      Ok(Some(ColVal::Bool(left_val != right_val)))
+    }
+    (iast::BinaryOp::NotEq, Some(ColVal::Bool(left_val)), Some(ColVal::Bool(right_val))) => {
+      Ok(Some(ColVal::Bool(left_val != right_val)))
+    }
+    (iast::BinaryOp::NotEq, Some(ColVal::String(left_val)), Some(ColVal::String(right_val))) => {
+      Ok(Some(ColVal::Bool(left_val != right_val)))
+    }
+    (iast::BinaryOp::NotEq, Some(_), None) => Ok(None),
+    (iast::BinaryOp::NotEq, None, Some(_)) => Ok(None),
+    (iast::BinaryOp::NotEq, None, None) => Ok(None),
+    // And
     (iast::BinaryOp::And, Some(ColVal::Bool(left_val)), Some(ColVal::Bool(right_val))) => {
       Ok(Some(ColVal::Bool(left_val && right_val)))
     }
+    (iast::BinaryOp::And, Some(ColVal::Bool(_)), None) => Ok(None),
+    (iast::BinaryOp::And, None, Some(ColVal::Bool(_))) => Ok(None),
+    (iast::BinaryOp::And, None, None) => Ok(None),
+    // Or
+    // Here, if one side is `true`, the whole thing is `true`. Otherwise, if one side is
+    // `NULL`, the whole thing is `NULL`. Otherwise, the whole thing is `false`.
     (iast::BinaryOp::Or, Some(ColVal::Bool(left_val)), Some(ColVal::Bool(right_val))) => {
       Ok(Some(ColVal::Bool(left_val || right_val)))
     }
+    (iast::BinaryOp::Or, Some(ColVal::Bool(val)), None)
+    | (iast::BinaryOp::Or, None, Some(ColVal::Bool(val))) => {
+      if !val {
+        Ok(None)
+      } else {
+        Ok(Some(ColVal::Bool(true)))
+      }
+    }
+    (iast::BinaryOp::Or, None, None) => Ok(None),
+    // Invalid
     _ => Err(EvalError::InvalidBinaryOp),
   }
 }
 
-// This is a general expression evaluator.
+/// This is a general expression evaluator.
 pub fn evaluate_c_expr(c_expr: &CExpr) -> Result<ColValN, EvalError> {
   match c_expr {
     CExpr::UnaryExpr { op, expr } => evaluate_unary_op(op, evaluate_c_expr(expr.deref())?),
@@ -201,10 +305,12 @@ pub fn evaluate_c_expr(c_expr: &CExpr) -> Result<ColValN, EvalError> {
   }
 }
 
-/// Construct a KBExpr for evaluating KeyBounds. The `col_map` contains values for
+/// Construct a `KBExpr` for evaluating KeyBounds. The `col_map` contains values for
 /// columns which are known (i.e. the ColNames from the parent context that we should
-/// use), and `key_cols` are the Key Columns of the Table.  
-pub fn construct_kb_expr(
+/// use), and `key_cols` are the Key Columns of the Table.
+///
+/// Note that `col_map` must have distinct `ColName`s from `key_cols`.
+fn construct_kb_expr(
   expr: proc::ValExpr,
   col_map: &BTreeMap<ColName, ColValN>,
   key_cols: &Vec<ColName>,
@@ -233,9 +339,9 @@ pub fn construct_kb_expr(
   Ok(kb_expr)
 }
 
-// This evaluates KBExprs, which is the same as CExpr, except if any sub-expr is an
-// unknown value, then this returns an empty optional.
-pub fn evaluate_kb_expr(kb_expr: &KBExpr) -> Result<Option<ColValN>, EvalError> {
+/// This evaluates `KBExprs`, which is the same as `CExpr`, except if any sub-expr is an
+/// unknown value, then this returns an empty optional.
+fn evaluate_kb_expr(kb_expr: &KBExpr) -> Result<Option<ColValN>, EvalError> {
   let val = match kb_expr {
     KBExpr::ColumnRef { .. } => None,
     KBExpr::UnaryExpr { op, expr } => {
@@ -264,13 +370,15 @@ pub fn evaluate_kb_expr(kb_expr: &KBExpr) -> Result<Option<ColValN>, EvalError> 
 //  Expression Evaluation Utilities
 // -----------------------------------------------------------------------------------------------
 
-/// This function simply deduces if the given `ColValN` sould be interpreted as true
-/// during query evaluation (e.g. when used in the WHERE clause). An error is returned
-/// if `val` isn't a Bool type.
+/// This function simply deduces if the given `ColValN` should be interpreted as true
+/// during query evaluation (e.g. when used in the WHERE clause). Recall that `NULL` should
+/// be interpreted as false. Otherwise, `val` should be a bool type, and if it is not, we
+/// return an error.
 pub fn is_true(val: &ColValN) -> Result<bool, EvalError> {
   match val {
     Some(ColVal::Bool(bool_val)) => Ok(bool_val.clone()),
-    _ => Ok(false),
+    None => Ok(false),
+    _ => Err(EvalError::TypeError),
   }
 }
 
@@ -548,11 +656,23 @@ pub fn compress_row_region(row_region: Vec<KeyBound>) -> Vec<KeyBound> {
 /// Computes `KeyBound`s that have a corresponding shape to `key_cols` such that any key
 /// outside of this is guaranteed to evaluate `expr` to false. We have `col_map` as concrete
 /// values that we substitute into `expr` first. This returns the compressed regions.
+///
+/// Note that `col_map` must have distinct `ColName`s from `key_cols`.
 pub fn compute_key_region(
   expr: &proc::ValExpr,
   col_map: BTreeMap<ColName, ColValN>,
   key_cols: &Vec<(ColName, ColType)>,
 ) -> Result<Vec<KeyBound>, EvalError> {
+  // Enforce the precondition.
+  debug_assert!((|| {
+    for (col_name, _) in key_cols {
+      if col_map.contains_key(col_name) {
+        return false;
+      }
+    }
+    true
+  })());
+
   let key_col_names = Vec::from_iter(key_cols.iter().map(|(name, _)| name.clone()));
   let kb_expr = construct_kb_expr(expr.clone(), &col_map, &key_col_names)?;
   let mut key_bounds = Vec::<KeyBound>::new();

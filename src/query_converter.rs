@@ -211,7 +211,7 @@ fn flatten_top_level_query_r(
   }
 }
 
-fn flatten_val_expr_r(
+pub fn flatten_val_expr_r(
   val_expr: &iast::ValExpr,
   counter: &mut u32,
 ) -> Result<proc::ValExpr, msg::ExternalAbortedData> {

@@ -193,7 +193,7 @@ fn convert_value(value: ast::Value) -> Result<iast::Value, String> {
   }
 }
 
-fn convert_expr(expr: ast::Expr) -> Result<iast::ValExpr, String> {
+pub fn convert_expr(expr: ast::Expr) -> Result<iast::ValExpr, String> {
   Ok(match expr {
     ast::Expr::Identifier(ident) => iast::ValExpr::ColumnRef { col_ref: ident.value },
     ast::Expr::CompoundIdentifier(idents) => {
