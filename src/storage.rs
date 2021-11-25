@@ -4,6 +4,10 @@ use crate::common::{
 use crate::model::common::{ColName, ColType, ColVal, ColValN, PrimaryKey, TableView, Timestamp};
 use std::collections::{BTreeMap, Bound};
 
+#[cfg(test)]
+#[path = "./storage_test.rs"]
+mod storage_test;
+
 // -----------------------------------------------------------------------------------------------
 //  Storage Containers
 // -----------------------------------------------------------------------------------------------

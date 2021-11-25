@@ -196,11 +196,15 @@ impl TableReadES {
     query_id: &QueryId,
   ) -> TableAction {
     self.waiting_global_locks.remove(query_id);
-    if let ExecutionS::WaitingGlobalLockedCols(res) = &self.state {
-      // Signal Success and return the data.
-      let res = res.clone();
-      self.state = ExecutionS::Done;
-      TableAction::Success(res)
+    if self.waiting_global_locks.is_empty() {
+      if let ExecutionS::WaitingGlobalLockedCols(res) = &self.state {
+        // Signal Success and return the data.
+        let res = res.clone();
+        self.state = ExecutionS::Done;
+        TableAction::Success(res)
+      } else {
+        TableAction::Wait
+      }
     } else {
       TableAction::Wait
     }

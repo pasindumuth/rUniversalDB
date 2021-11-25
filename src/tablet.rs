@@ -9,7 +9,7 @@ use crate::common::{
 use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::expression::{
-  compute_key_region, is_isolated_multiread, is_isolated_multiwrite, EvalError,
+  compute_key_region, is_surely_isolated_multiread, is_surely_isolated_multiwrite, EvalError,
 };
 use crate::finish_query_rm_es::{FinishQueryRMES, FinishQueryRMInner};
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
@@ -1469,22 +1469,22 @@ impl TabletContext {
     // First, verify Region Isolation with ReadRegions of subsequent *_writes.
     let bound = (Bound::Excluded(timestamp), Bound::Unbounded);
     for (_, verifying_write) in self.verifying_writes.range(bound) {
-      if is_isolated_multiread(write_region, &verifying_write.m_read_protected) {
+      if !is_surely_isolated_multiread(write_region, &verifying_write.m_read_protected) {
         return false;
       }
     }
     for (_, prepared_write) in self.prepared_writes.range(bound) {
-      if is_isolated_multiread(write_region, &prepared_write.m_read_protected) {
+      if !is_surely_isolated_multiread(write_region, &prepared_write.m_read_protected) {
         return false;
       }
     }
     for (_, inserting_prepared_write) in self.inserting_prepared_writes.range(bound) {
-      if is_isolated_multiread(write_region, &inserting_prepared_write.m_read_protected) {
+      if !is_surely_isolated_multiread(write_region, &inserting_prepared_write.m_read_protected) {
         return false;
       }
     }
     for (_, committed_write) in self.committed_writes.range(bound) {
-      if is_isolated_multiread(write_region, &committed_write.m_read_protected) {
+      if !is_surely_isolated_multiread(write_region, &committed_write.m_read_protected) {
         return false;
       }
     }
@@ -1492,7 +1492,7 @@ impl TabletContext {
     // Then, verify Region Isolation with ReadRegions of subsequent Reads.
     let bound = (Bound::Included(timestamp), Bound::Unbounded);
     for (_, read_regions) in self.read_protected.range(bound) {
-      if is_isolated_multiread(write_region, read_regions) {
+      if !is_surely_isolated_multiread(write_region, read_regions) {
         return false;
       }
     }
@@ -1501,7 +1501,7 @@ impl TabletContext {
       for req in inserting_read_regions {
         read_regions.insert(req.read_region.clone());
       }
-      if is_isolated_multiread(write_region, &read_regions) {
+      if !is_surely_isolated_multiread(write_region, &read_regions) {
         return false;
       }
     }
@@ -1604,22 +1604,24 @@ impl TabletContext {
     }
     let write_it = self.inserting_prepared_writes.iter().chain(self.prepared_writes.iter());
     for (cur_timestamp, prepared_write) in write_it {
-      all_cur_writes.insert(
-        *cur_timestamp,
-        VerifyingReadWriteRegion {
-          orig_p: prepared_write.orig_p.clone(),
-          m_waiting_read_protected: Default::default(),
-          m_read_protected: prepared_write.m_read_protected.clone(),
-          m_write_protected: prepared_write.m_write_protected.clone(),
-        },
-      );
+      assert!(all_cur_writes
+        .insert(
+          *cur_timestamp,
+          VerifyingReadWriteRegion {
+            orig_p: prepared_write.orig_p.clone(),
+            m_waiting_read_protected: Default::default(),
+            m_read_protected: prepared_write.m_read_protected.clone(),
+            m_write_protected: prepared_write.m_write_protected.clone(),
+          },
+        )
+        .is_none());
     }
 
     // First, we see if any `(m_)waiting_read_protected`s can be moved to `(m_)read_protected`.
     if !all_cur_writes.is_empty() {
       let (first_write_timestamp, verifying_write) = all_cur_writes.first_key_value().unwrap();
 
-      // First, process all `read_protected`s before the `first_write_timestamp`
+      // First, process all `waiting_read_protected`s before the `first_write_timestamp`
       let bound = (Bound::Unbounded, Bound::Excluded(first_write_timestamp));
       for (timestamp, set) in self.waiting_read_protected.range(bound) {
         let protect_request = set.first().unwrap().clone();
@@ -1649,9 +1651,9 @@ impl TabletContext {
         // have been processed, and all `waiting_read_protected`s < `prev_write_timestamp`
         // have been processed.
 
-        // Process `m_read_protected`
+        // Process `m_waiting_read_protected`
         for protect_request in &verifying_write.m_waiting_read_protected {
-          if !is_isolated_multiwrite(&cum_write_regions, &protect_request.read_region) {
+          if is_surely_isolated_multiwrite(&cum_write_regions, &protect_request.read_region) {
             self.grant_m_local_read_protected(
               io_ctx,
               statuses,
@@ -1662,11 +1664,11 @@ impl TabletContext {
           }
         }
 
-        // Process `read_protected`
+        // Process `waiting_read_protected`
         let bound = (Bound::Included(prev_write_timestamp), Bound::Excluded(cur_timestamp));
         for (timestamp, set) in self.waiting_read_protected.range(bound) {
           for protect_request in set {
-            if !is_isolated_multiwrite(&cum_write_regions, &protect_request.read_region) {
+            if is_surely_isolated_multiwrite(&cum_write_regions, &protect_request.read_region) {
               self.grant_local_read_protected(
                 io_ctx,
                 statuses,
@@ -1689,7 +1691,7 @@ impl TabletContext {
       let bound = (Bound::Included(prev_write_timestamp), Bound::Unbounded);
       for (timestamp, set) in self.waiting_read_protected.range(bound) {
         for protect_request in set {
-          if !is_isolated_multiwrite(&cum_write_regions, &protect_request.read_region) {
+          if is_surely_isolated_multiwrite(&cum_write_regions, &protect_request.read_region) {
             self.grant_local_read_protected(io_ctx, statuses, *timestamp, protect_request.clone());
             return true;
           }
@@ -1708,7 +1710,7 @@ impl TabletContext {
     for (timestamp, set) in &self.waiting_read_protected {
       if let Some(verifying_write) = self.verifying_writes.get(timestamp) {
         for protect_request in set {
-          if is_isolated_multiwrite(
+          if !is_surely_isolated_multiwrite(
             &verifying_write.m_write_protected,
             &protect_request.read_region,
           ) {

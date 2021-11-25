@@ -7,6 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
 use std::ops::Deref;
 
+#[cfg(test)]
+#[path = "./expression_test.rs"]
+mod expression_test;
+
 // -----------------------------------------------------------------------------------------------
 //  Expression Evaluation
 // -----------------------------------------------------------------------------------------------
@@ -626,9 +630,14 @@ pub fn col_bound_intersect_interval<'a, T: Ord>(
   (lower, upper)
 }
 
-/// Checks if the given interval (where the first element can generally be greater
-/// than the second) is non-empty.
-pub fn is_interval_empty<T: Ord>(interval: (&SingleBound<T>, &SingleBound<T>)) -> bool {
+/// Returns true if the `interval` is surely empty. If it returns false, then its very likely
+/// that the set is non-empty, but it might be.
+///
+/// To see how we can have a false negative, Consider the case that T is `bool`, and consider the
+/// bound `(SingleBound::Excluded(false), SingleBound::Excluded(true))`. Although this set
+/// is empty, the below function will return false (since the last branch is taken, and since
+/// `false >= true` is a false statement). Thus, we see that this function does not actually
+pub fn is_surely_interval_empty<T: Ord>(interval: (&SingleBound<T>, &SingleBound<T>)) -> bool {
   match interval {
     (SingleBound::Unbounded, _) => false,
     (_, SingleBound::Unbounded) => false,
@@ -648,7 +657,7 @@ pub fn col_bounds_intersect<T: Ord + Clone>(
   for left_bound in &left_bounds {
     for right_bound in &right_bounds {
       let (lower, upper) = col_bound_intersect_interval(left_bound, right_bound);
-      if !is_interval_empty((lower, upper)) {
+      if !is_surely_interval_empty((lower, upper)) {
         intersection.push(ColBound { start: lower.clone(), end: upper.clone() })
       }
     }
@@ -745,33 +754,36 @@ fn does_col_regions_intersect(col_region1: &Vec<ColName>, col_region2: &Vec<ColN
   false
 }
 
-/// Computes whether the given row regions intersect. The schemas of the KeyBounds should match,
-/// i.e. they should all be the same length and every element must have corresponding types.
-fn does_row_region_intersect(row_region1: &Vec<KeyBound>, row_region2: &Vec<KeyBound>) -> bool {
-  fn does_col_intersect<T: Ord>(bound1: &ColBound<T>, bound2: &ColBound<T>) -> bool {
-    let interval = col_bound_intersect_interval(bound1, bound2);
-    is_interval_empty(interval)
-  }
+/// Returns true if the `ColBound`s surely intersect.
+fn might_col_intersect<T: Ord>(bound1: &ColBound<T>, bound2: &ColBound<T>) -> bool {
+  let interval = col_bound_intersect_interval(bound1, bound2);
+  !is_surely_interval_empty(interval)
+}
 
-  fn does_key_bound_intersect(key_bound1: &KeyBound, key_bound2: &KeyBound) -> bool {
-    assert_eq!(key_bound1.col_bounds.len(), key_bound2.col_bounds.len());
-    for (pc1, pc2) in key_bound1.col_bounds.iter().zip(key_bound2.col_bounds.iter()) {
-      let does_col_bound_intersect = match (pc1, pc2) {
-        (PolyColBound::Int(c1), PolyColBound::Int(c2)) => does_col_intersect(c1, c2),
-        (PolyColBound::Bool(c1), PolyColBound::Bool(c2)) => does_col_intersect(c1, c2),
-        (PolyColBound::String(c1), PolyColBound::String(c2)) => does_col_intersect(c1, c2),
-        _ => panic!(),
-      };
-      if !does_col_bound_intersect {
-        return false;
-      }
+/// Returns true if the `KeyBound`s surely intersect.
+fn might_key_bound_intersect(key_bound1: &KeyBound, key_bound2: &KeyBound) -> bool {
+  assert_eq!(key_bound1.col_bounds.len(), key_bound2.col_bounds.len());
+  for (pc1, pc2) in key_bound1.col_bounds.iter().zip(key_bound2.col_bounds.iter()) {
+    let might_col_bound_intersect = match (pc1, pc2) {
+      (PolyColBound::Int(c1), PolyColBound::Int(c2)) => might_col_intersect(c1, c2),
+      (PolyColBound::Bool(c1), PolyColBound::Bool(c2)) => might_col_intersect(c1, c2),
+      (PolyColBound::String(c1), PolyColBound::String(c2)) => might_col_intersect(c1, c2),
+      _ => panic!(),
+    };
+    if !might_col_bound_intersect {
+      return false;
     }
-    true
   }
+  true
+}
 
+/// Computes whether the given row regions surely intersect. The schemas of the `KeyBounds` should
+/// match, i.e. they should all be the same length and every corresponding element must have
+/// the same type. Returning false might be a false negative under rare circumstances.
+fn might_row_region_intersect(row_region1: &Vec<KeyBound>, row_region2: &Vec<KeyBound>) -> bool {
   for key_bound1 in row_region1 {
     for key_bound2 in row_region2 {
-      if does_key_bound_intersect(key_bound1, key_bound2) {
+      if might_key_bound_intersect(key_bound1, key_bound2) {
         return true;
       }
     }
@@ -779,9 +791,10 @@ fn does_row_region_intersect(row_region1: &Vec<KeyBound>, row_region2: &Vec<KeyB
   false
 }
 
-/// Returns true if this `WriteRegion` has the Region Isolation Property with the `ReadRegion`.
-pub fn is_isolated(write_region: &WriteRegion, read_region: &ReadRegion) -> bool {
-  if does_row_region_intersect(&read_region.row_region, &write_region.row_region) {
+/// Returns true if this `WriteRegion` surely has the Region Isolation Property with the
+/// `ReadRegion`. Returning false might be a false negative under rare circumstances.
+fn is_surely_isolated(write_region: &WriteRegion, read_region: &ReadRegion) -> bool {
+  if might_row_region_intersect(&read_region.row_region, &write_region.row_region) {
     match &write_region.write_type {
       WriteRegionType::FixedRowsVarCols { val_col_region } => {
         !does_col_regions_intersect(&read_region.val_col_region, &val_col_region)
@@ -793,26 +806,28 @@ pub fn is_isolated(write_region: &WriteRegion, read_region: &ReadRegion) -> bool
   }
 }
 
-/// Returns true if this `WriteRegion` has the Region Isolation Property with these `ReadRegion`s.
-pub fn is_isolated_multiread(
+/// Returns true if this `WriteRegion` surely has the Region Isolation Property with these
+/// `ReadRegion`s. Returning false might be a false negative under rare circumstances.
+pub fn is_surely_isolated_multiread(
   write_region: &WriteRegion,
   read_regions: &BTreeSet<ReadRegion>,
 ) -> bool {
   for read_region in read_regions {
-    if !is_isolated(&write_region, &read_region) {
+    if !is_surely_isolated(&write_region, &read_region) {
       return false;
     }
   }
   true
 }
 
-/// Returns true if these `WriteRegion`s has the Region Isolation Property with the `ReadRegion`.
-pub fn is_isolated_multiwrite(
+/// Returns true if these `WriteRegion`s surely has the Region Isolation Property with the
+/// `ReadRegion`. Returning false might be a false negative under rare circumstances.
+pub fn is_surely_isolated_multiwrite(
   write_regions: &BTreeSet<WriteRegion>,
   read_region: &ReadRegion,
 ) -> bool {
   for write_region in write_regions {
-    if !is_isolated(&write_region, &read_region) {
+    if !is_surely_isolated(&write_region, &read_region) {
       return false;
     }
   }
