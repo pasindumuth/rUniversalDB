@@ -134,7 +134,7 @@ fn verify_req_res(
 
   let successful_queries = sorted_success_res.len() as u32;
   for (_, (req, res)) in sorted_success_res {
-    context.send_query(&mut sim, req.query.as_str(), 100, res.result);
+    context.send_query(&mut sim, req.query.as_str(), 10000, res.result);
   }
 
   (*sim.true_timestamp() as u32, total_queries, successful_queries)

@@ -751,7 +751,7 @@ impl CoordContext {
         self.exit_all(io_ctx, statuses, child_queries);
 
         // Construct a new MSCoordES using a Timestamp that's strictly greater than before.
-        let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+        let mut ms_coord = statuses.ms_coord_ess.remove(&query_id).unwrap();
         let exec = ms_coord.es.to_exec();
         let query_id = mk_qid(io_ctx.rand());
         ms_coord.es = FullMSCoordES::QueryPlanning(QueryPlanningES {
@@ -760,6 +760,7 @@ impl CoordContext {
           query_id: query_id.clone(),
           state: QueryPlanningS::Start,
         });
+        let ms_coord = map_insert(&mut statuses.ms_coord_ess, &query_id, ms_coord);
 
         // Update the QueryId that's stored in the request map.
         *self.external_request_id_map.get_mut(&ms_coord.request_id).unwrap() = query_id.clone();
