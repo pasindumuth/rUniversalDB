@@ -1,6 +1,7 @@
+use crate::common::{ColBound, SingleBound};
 use crate::expression::{
-  construct_cexpr, construct_colvaln, does_col_regions_intersect, evaluate_binary_op,
-  evaluate_c_expr, CExpr, EvalError,
+  col_bound_intersect_interval, construct_cexpr, construct_colvaln, does_col_regions_intersect,
+  evaluate_binary_op, evaluate_c_expr, CExpr, EvalError,
 };
 use crate::model::common::{iast, proc, ColVal};
 use crate::query_converter::flatten_val_expr_r;
@@ -82,6 +83,39 @@ fn evaluate_binary_op_test() {
 // -----------------------------------------------------------------------------------------------
 //  Region Isolation Property Utilities
 // -----------------------------------------------------------------------------------------------
+
+fn unb<T>() -> SingleBound<T> {
+  SingleBound::Unbounded
+}
+
+fn inc<T>(val: T) -> SingleBound<T> {
+  SingleBound::Included(val)
+}
+
+fn exl<T>(val: T) -> SingleBound<T> {
+  SingleBound::Excluded(val)
+}
+
+/// `ColBound` of `Int`
+fn cb<T>(start: SingleBound<T>, end: SingleBound<T>) -> ColBound<T> {
+  ColBound { start, end }
+}
+
+#[test]
+fn col_bound_intersect_interval_test() {
+  assert_eq!(
+    col_bound_intersect_interval(&cb(inc(3), inc(5)), &cb(inc(4), inc(6))),
+    (&inc(4), &inc(5))
+  );
+  assert_eq!(
+    col_bound_intersect_interval(&cb(unb(), exl(5)), &cb(unb(), inc(4))),
+    (&unb(), &inc(4))
+  );
+  assert_eq!(
+    col_bound_intersect_interval(&cb(exl(3), exl(5)), &cb(unb(), inc(3))),
+    (&exl(3), &inc(3))
+  );
+}
 
 #[test]
 fn does_col_regions_intersect_test() {

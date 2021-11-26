@@ -100,7 +100,7 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
     parent_context_schema: &ContextSchema,
     parent_context_row: &ContextRow,
     col_names: &Vec<ColName>,
-  ) -> Result<Vec<(Vec<ColValN>, u64)>, EvalError> {
+  ) -> Vec<(Vec<ColValN>, u64)> {
     // First, we look up the TransTableInstance
     let trans_table_name_pos = parent_context_schema
       .trans_table_context_schema
@@ -123,7 +123,7 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
       sub_view.add_row_multi(new_row, *count);
     }
 
-    Ok(sub_view.rows.into_iter().collect())
+    sub_view.rows.into_iter().collect()
   }
 }
 

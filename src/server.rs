@@ -241,16 +241,10 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
     // Compute the Row Region that this selection is accessing.
     let table_path_gen = (table_path.clone(), gen.clone());
     let key_cols = &self.gossip.db_schema.get(&table_path_gen).unwrap().key_cols;
-    match &compute_key_region(selection, BTreeMap::new(), key_cols) {
-      Ok(_) => {
-        // TODO: We use a trivial implementation for now. Do a proper implementation later.
-        self.get_all_tablets(table_path, gen)
-      }
-      Err(_) => {
-        // TODO: return an error to propagate back up if the selection cannot be evaluated.
-        panic!()
-      }
-    }
+
+    // TODO: We use a trivial implementation for now. Do a proper implementation later.
+    let _ = compute_key_region(selection, BTreeMap::new(), key_cols);
+    self.get_all_tablets(table_path, gen)
   }
 
   /// Simply returns all `TabletGroupId`s for a `TablePath` and `Gen`
@@ -731,7 +725,7 @@ pub trait LocalTable {
     parent_context_schema: &ContextSchema,
     parent_context_row: &ContextRow,
     col_names: &Vec<ColName>,
-  ) -> Result<Vec<(Vec<ColValN>, u64)>, EvalError>;
+  ) -> Vec<(Vec<ColValN>, u64)>;
 }
 
 /// This is used to construct Child Contexts and iterate over them, where it can
@@ -810,7 +804,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
     for parent_context_row_idx in 0..parent_context_rows.len() {
       let parent_context_row = parent_context_rows.get(parent_context_row_idx).unwrap();
       for (local_row, count) in
-        self.local_table.get_rows(&self.parent_context_schema, parent_context_row, &local_schema)?
+        self.local_table.get_rows(&self.parent_context_schema, parent_context_row, &local_schema)
       {
         // First, construct the child ContextRows.
         let mut child_context_rows = Vec::<(ContextRow, usize)>::new();

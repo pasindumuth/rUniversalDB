@@ -54,11 +54,11 @@ pub enum CExpr {
 
 /// This is the expression type we use to evaluate KeyBounds. Recall that we generally only have
 /// a subset of `ColumnRefs` with a known value; the remaining columns and subquery results are
-/// all unknown. We replace the known ColumnRefs with `Value`, the Key Columns with a `ColumnRef`,
-/// and the unknown things with `Unknown`.
+/// all unknown. We replace the known ColumnRefs with `Value`, the ColumnRefs that are Key Cols
+/// with a `KeyColumnRef`, and the unknown things with `Unknown`.
 #[derive(Debug)]
 pub enum KBExpr {
-  ColumnRef { col_ref: ColName },
+  KeyColumnRef { col_ref: ColName },
   UnaryExpr { op: iast::UnaryOp, expr: Box<KBExpr> },
   BinaryExpr { op: iast::BinaryOp, left: Box<KBExpr>, right: Box<KBExpr> },
   Value { val: ColValN },
@@ -233,6 +233,7 @@ fn evaluate_binary_op(
     (iast::BinaryOp::LtEq, Some(ColVal::Int(left_val)), Some(ColVal::Int(right_val))) => {
       Ok(Some(ColVal::Bool(left_val <= right_val)))
     }
+    // TODO: define this for strings and bool.
     (iast::BinaryOp::LtEq, Some(ColVal::Int(_)), None) => Ok(None),
     (iast::BinaryOp::LtEq, None, Some(ColVal::Int(_))) => Ok(None),
     (iast::BinaryOp::LtEq, None, None) => Ok(None),
@@ -320,7 +321,7 @@ fn construct_kb_expr(
       if let Some(val) = col_map.get(&col_ref) {
         KBExpr::Value { val: val.clone() }
       } else if key_cols.contains(&col_ref) {
-        KBExpr::ColumnRef { col_ref }
+        KBExpr::KeyColumnRef { col_ref }
       } else {
         KBExpr::UnknownValue
       }
@@ -339,11 +340,13 @@ fn construct_kb_expr(
   Ok(kb_expr)
 }
 
-/// This evaluates `KBExprs`, which is the same as `CExpr`, except if any sub-expr is an
-/// unknown value, then this returns an empty optional.
+/// This evaluates a `KBExpr`s if all of its nodes are a `UnaryExpr`, `BinaryExpr`, or `Value`.
+/// The evaluation would be identical to that of `CExpr`. If the `KBExpr` has other types of
+/// nodes, then we return `None`. As usual, if there is certainly an invalid expression, we
+/// return an error.
 fn evaluate_kb_expr(kb_expr: &KBExpr) -> Result<Option<ColValN>, EvalError> {
   let val = match kb_expr {
-    KBExpr::ColumnRef { .. } => None,
+    KBExpr::KeyColumnRef { .. } => None,
     KBExpr::UnaryExpr { op, expr } => {
       if let Some(val) = evaluate_kb_expr(expr.deref())? {
         Some(evaluate_unary_op(op, val)?)
@@ -388,7 +391,7 @@ pub fn is_true(val: &ColValN) -> Result<bool, EvalError> {
 
 /// This trait is used to cast the `ColValN` values down to their underlying
 /// types. This is necessary for expression evaluation.
-pub trait BoundType: Sized {
+trait BoundType: Sized {
   // We need `: Sized` here, otherwise for the `Result`, we get: "the size for values of type
   // `Self` cannot be known at compilation time". (Note that if we just returned `Self`, we
   // wouldn't get this error.)
@@ -414,6 +417,7 @@ impl BoundType for bool {
     }
   }
 }
+
 impl BoundType for String {
   fn col_val_cast(col_val: ColValN) -> Option<Self> {
     if let Some(ColVal::String(val)) = col_val {
@@ -424,226 +428,211 @@ impl BoundType for String {
   }
 }
 
+/// This function returns `ColBound`s such that `ColVal`s of type `T` outside of these
+/// bounds would surely evaluate `kb_expr` to `false` or `NULL`.
+///
+/// Importantly, `kb_expr` might not even be evaluatable for `ColVal` within the `ColBound`s
+/// (i.e. there might be runtime errors or type errors). But that is not something we check here.
+///
 /// This is used to help determine a ColBound for <, <=, =, <=>, >=, > operators,
 /// whose bounds are all determined very similarly. Here, `left_f` indicates what
 /// `ColBound` should be returned if `col_name` is on the left, and the RHS evaluates
 /// to a non-NULL value of compatible Type `T` (`right_f` is analogous).
 ///
+/// Note that every possible `BoundType` (i.e. the Types that implement it) have the
+/// comparison operators (including inequality) defined in Postgres. This includes
+/// `String` and `bool`.
+///
 /// Generally, we use Postgres conventions.
-///   1. If one of the sides is NULL, the `kb_expr` is always false.
-///   2. If there is a Type mismatch, then this is a fatal runtime error.
-pub fn boolean_leaf_constraint<T: BoundType + Clone>(
+///   1. If one of the sides is NULL, the `kb_expr` is always `NULL`.
+fn boolean_leaf_constraint<T: BoundType + Clone>(
   kb_expr: &KBExpr,
   col_name: &ColName,
   left: &Box<KBExpr>,
   right: &Box<KBExpr>,
   left_f: fn(T) -> ColBound<T>,
   right_f: fn(T) -> ColBound<T>,
-) -> Result<Vec<ColBound<T>>, EvalError> {
-  if let KBExpr::ColumnRef { col_ref } = left.deref() {
+) -> Vec<ColBound<T>> {
+  if let KBExpr::KeyColumnRef { col_ref } = left.deref() {
     // First, we see if the left side is a ColumnRef to `col_name`.
     if col_ref == col_name {
       // In this case, we see if we can evaluate the `right` expression.
-      if let Some(right_val) = evaluate_kb_expr(right.deref())? {
-        return if None == right_val {
+      if let Ok(Some(right_val)) = evaluate_kb_expr(right.deref()) {
+        if None == right_val {
           // If `right_val` is NULL, then `kb_expr` is always false.
-          Ok(vec![])
+          return vec![];
         } else if let Some(val) = T::col_val_cast(right_val) {
           // If `right_val` has the correct Type, then we can compute a keybounds.
-          Ok(vec![left_f(val)])
-        } else {
-          // Otherwise, we detected a TypeError.
-          Err(EvalError::TypeError)
-        };
+          return vec![left_f(val)];
+        }
       }
     }
-  } else if let KBExpr::ColumnRef { col_ref } = right.deref() {
+  } else if let KBExpr::KeyColumnRef { col_ref } = right.deref() {
     // Otherwise, we see if the right side is a ColumnRef to `col_name`.
     if col_ref == col_name {
       // In this case, we see if we can evaluate the `left` expression.
-      if let Some(left_val) = evaluate_kb_expr(left.deref())? {
-        return if None == left_val {
+      if let Ok(Some(left_val)) = evaluate_kb_expr(left.deref()) {
+        if None == left_val {
           // If `left_val` is NULL, then `kb_expr` is always false.
-          Ok(vec![])
+          return vec![];
         } else if let Some(val) = T::col_val_cast(left_val) {
           // If `left_val` has the correct Type, then we can compute a keybounds.
-          Ok(vec![right_f(val)])
-        } else {
-          // Otherwise, we detected a TypeError.
-          Err(EvalError::TypeError)
-        };
+          return vec![right_f(val)];
+        }
       }
     }
-  } else if let Some(val) = evaluate_kb_expr(kb_expr)? {
+  } else if let Ok(Some(val)) = evaluate_kb_expr(kb_expr) {
     if val == Some(ColVal::Bool(false)) || val == None {
       // Finally, we see if the KBExpr can be successfully evaluated, and it evaluates
       // to false (or NULL, which SQL interprets as false for boolean expressions), then
       // we can just return an empty bounds.
-      return Ok(vec![]);
+      return vec![];
     }
   }
 
   // Otherwise, we give up.
-  return Ok(vec![full_bound::<T>()]);
+  return vec![full_bound::<T>()];
 }
 
-/// This function expects the  `kb_expr` to be a boolean expression (with potentially
-/// `UnknownValue`s). It then computes a `Vec<ColBound>` such that any `ColValN`
-/// outside of these bounds for the `col_name` cannot possibly result in `kb_expr`
-/// evaluating to true, no matter what the `UnknownValue`s and other `ColumnRef`s take on.
+/// Computes `Vec<ColBound>` such that any `ColVal` not in any of these bounds with
+/// type `T` substituted in the `kb_expr` wherever `col_name` shows up as a `KeyColumnRef`
+/// would surely result the expression evaluating to `false` or `NULL`.
+///
+/// Importantly, `kb_expr` might not even be evaluatable for `ColVal` within the `ColBound`s
+/// (i.e. there might be runtime errors or type errors). But that is not something we check here.
+///
+/// The essence of this function is AND and OR, particularly AND. An important observation in
+/// Postgres was that for AND, if one side is `NULL` or `false`, then the whole expression is
+/// interpreted as `Null` or `false` without evaluating the other side. Note that the other
+/// side does not even have to evaluate successfully.
+///
+/// Read the Design Docs "Expression Evaluation" section for more information.
 fn compute_col_bounds<T: Ord + BoundType + Clone>(
   kb_expr: &KBExpr,
   col_name: &ColName,
-) -> Result<Vec<ColBound<T>>, EvalError> {
+) -> Vec<ColBound<T>> {
   match kb_expr {
-    KBExpr::ColumnRef { .. } => Err(EvalError::InvalidBoolExpr),
-    KBExpr::UnaryExpr { op, expr } => {
-      let inner_bounds = compute_col_bounds::<T>(expr.deref(), col_name)?;
-      match op {
-        iast::UnaryOp::Plus => Err(EvalError::InvalidBoolExpr),
-        iast::UnaryOp::Minus => Err(EvalError::InvalidBoolExpr),
-        iast::UnaryOp::Not => Ok(invert_col_bounds(inner_bounds)),
-        iast::UnaryOp::IsNull => {
-          if let Some(Some(_)) = evaluate_kb_expr(expr.deref())? {
-            // If the `expr` definitely evaluates to some non-NULL value, then this `kb_expr`
-            // definitely evaluates to false for every value of `col_name`. Thus, we return
-            // an empty bounds.
-            Ok(vec![])
-          } else {
-            Ok(vec![full_bound::<T>()])
-          }
-        }
-        iast::UnaryOp::IsNotNull => {
-          if let Some(None) = evaluate_kb_expr(expr.deref())? {
-            // If the `expr` definitely evaluates to NULL, then this `kb_expr` definitely
-            // evaluates to false for every value of `col_name`. Thus, we return an empty bounds.
-            Ok(vec![])
-          } else {
-            Ok(vec![full_bound::<T>()])
-          }
+    KBExpr::KeyColumnRef { .. } => vec![full_bound::<T>()],
+    KBExpr::UnaryExpr { .. } => vec![full_bound::<T>()],
+    KBExpr::BinaryExpr { op, left, right } => match op {
+      iast::BinaryOp::Plus => vec![full_bound::<T>()],
+      iast::BinaryOp::Minus => vec![full_bound::<T>()],
+      iast::BinaryOp::Multiply => vec![full_bound::<T>()],
+      iast::BinaryOp::Divide => vec![full_bound::<T>()],
+      iast::BinaryOp::Modulus => vec![full_bound::<T>()],
+      iast::BinaryOp::StringConcat => vec![full_bound::<T>()],
+      iast::BinaryOp::Gt => boolean_leaf_constraint(
+        kb_expr,
+        col_name,
+        left,
+        right,
+        |val| ColBound::<T>::new(SingleBound::Excluded(val), SingleBound::Unbounded),
+        |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Excluded(val)),
+      ),
+      iast::BinaryOp::Lt => boolean_leaf_constraint(
+        kb_expr,
+        col_name,
+        left,
+        right,
+        |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Excluded(val)),
+        |val| ColBound::<T>::new(SingleBound::Excluded(val), SingleBound::Unbounded),
+      ),
+      iast::BinaryOp::GtEq => boolean_leaf_constraint(
+        kb_expr,
+        col_name,
+        left,
+        right,
+        |val| ColBound::<T>::new(SingleBound::Included(val), SingleBound::Unbounded),
+        |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Included(val)),
+      ),
+      iast::BinaryOp::LtEq => boolean_leaf_constraint(
+        kb_expr,
+        col_name,
+        left,
+        right,
+        |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Included(val)),
+        |val| ColBound::<T>::new(SingleBound::Included(val), SingleBound::Unbounded),
+      ),
+      iast::BinaryOp::Spaceship | iast::BinaryOp::Eq => boolean_leaf_constraint(
+        kb_expr,
+        col_name,
+        left,
+        right,
+        |val: T| ColBound::<T>::new(SingleBound::Included(val.clone()), SingleBound::Included(val)),
+        |val: T| ColBound::<T>::new(SingleBound::Included(val.clone()), SingleBound::Included(val)),
+      ),
+      iast::BinaryOp::NotEq => vec![full_bound::<T>()],
+      iast::BinaryOp::And => {
+        let left_bounds = compute_col_bounds(left.deref(), col_name);
+        let right_bounds = compute_col_bounds(right.deref(), col_name);
+        merged_col_bounds(col_bounds_intersect(left_bounds, right_bounds))
+      }
+      iast::BinaryOp::Or => {
+        let mut left_bounds = compute_col_bounds(left.deref(), col_name);
+        let right_bounds = compute_col_bounds(right.deref(), col_name);
+        left_bounds.extend(right_bounds);
+        merged_col_bounds(left_bounds)
+      }
+    },
+    KBExpr::Value { val } => match val {
+      None => vec![],
+      Some(ColVal::Bool(bool_val)) => {
+        if *bool_val {
+          vec![full_bound::<T>()]
+        } else {
+          vec![]
         }
       }
-    }
-    KBExpr::BinaryExpr { op, left, right } => {
-      match op {
-        iast::BinaryOp::Plus => Err(EvalError::InvalidBoolExpr),
-        iast::BinaryOp::Minus => Err(EvalError::InvalidBoolExpr),
-        iast::BinaryOp::Multiply => Err(EvalError::InvalidBoolExpr),
-        iast::BinaryOp::Divide => Err(EvalError::InvalidBoolExpr),
-        iast::BinaryOp::Modulus => Err(EvalError::InvalidBoolExpr),
-        iast::BinaryOp::StringConcat => Err(EvalError::InvalidBoolExpr),
-        iast::BinaryOp::Gt => boolean_leaf_constraint(
-          kb_expr,
-          col_name,
-          left,
-          right,
-          |val| ColBound::<T>::new(SingleBound::Excluded(val), SingleBound::Unbounded),
-          |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Excluded(val)),
-        ),
-        iast::BinaryOp::Lt => boolean_leaf_constraint(
-          kb_expr,
-          col_name,
-          left,
-          right,
-          |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Excluded(val)),
-          |val| ColBound::<T>::new(SingleBound::Excluded(val), SingleBound::Unbounded),
-        ),
-        iast::BinaryOp::GtEq => boolean_leaf_constraint(
-          kb_expr,
-          col_name,
-          left,
-          right,
-          |val| ColBound::<T>::new(SingleBound::Included(val), SingleBound::Unbounded),
-          |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Included(val)),
-        ),
-        iast::BinaryOp::LtEq => boolean_leaf_constraint(
-          kb_expr,
-          col_name,
-          left,
-          right,
-          |val| ColBound::<T>::new(SingleBound::Unbounded, SingleBound::Included(val)),
-          |val| ColBound::<T>::new(SingleBound::Included(val), SingleBound::Unbounded),
-        ),
-        iast::BinaryOp::Spaceship | iast::BinaryOp::Eq => boolean_leaf_constraint(
-          kb_expr,
-          col_name,
-          left,
-          right,
-          |val: T| {
-            ColBound::<T>::new(SingleBound::Included(val.clone()), SingleBound::Included(val))
-          },
-          |val: T| {
-            ColBound::<T>::new(SingleBound::Included(val.clone()), SingleBound::Included(val))
-          },
-        ),
-        iast::BinaryOp::NotEq => {
-          // For simplicity, we don't try dig into the sides of binary operator. Note that this
-          // this renders `NotEq` fairly useless for decreasing ColBound.
-          if Some(Some(ColVal::Bool(false))) == evaluate_kb_expr(kb_expr)? {
-            // If the KBExpr can be evaluated succesfully, and it evalutes to false, then we
-            // can just return an empty bounds.
-            Ok(vec![])
-          } else {
-            // Otherwise, we give up.
-            Ok(vec![full_bound::<T>()])
-          }
-        }
-        iast::BinaryOp::And => {
-          let left_bounds = compute_col_bounds(left.deref(), col_name)?;
-          let right_bounds = compute_col_bounds(right.deref(), col_name)?;
-          Ok(col_bounds_intersect(left_bounds, right_bounds))
-        }
-        iast::BinaryOp::Or => {
-          let mut left_bounds = compute_col_bounds(left.deref(), col_name)?;
-          let right_bounds = compute_col_bounds(right.deref(), col_name)?;
-          left_bounds.extend(right_bounds);
-          Ok(left_bounds)
-        }
-      }
-    }
-    KBExpr::Value { val } => {
-      match val {
-        None => Ok(vec![]),
-        Some(ColVal::Bool(bool_val)) => {
-          if *bool_val {
-            Ok(vec![full_bound::<T>()])
-          } else {
-            Ok(vec![])
-          }
-        }
-        Some(_) => {
-          // Recall that only `ColVal::Bool` and NULL are permissing for boolean expressions.
-          Err(EvalError::InvalidBoolExpr)
-        }
-      }
-    }
-    KBExpr::UnknownValue => {
-      // Here, we merely don't know what the value is, so we don't make any constraints.
-      Ok(vec![full_bound::<T>()])
-    }
+      Some(_) => vec![full_bound::<T>()],
+    },
+    KBExpr::UnknownValue => vec![full_bound::<T>()],
   }
 }
 
 /// Same as above, but uses the `col_type` and wraps each `ColBound` into a `PolyColBound`.
-pub fn compute_poly_col_bounds(
+fn compute_poly_col_bounds(
   kb_expr: &KBExpr,
   col_name: &ColName,
   col_type: &ColType,
-) -> Result<Vec<PolyColBound>, EvalError> {
-  Ok(match col_type {
-    ColType::Int => compute_col_bounds::<i32>(&kb_expr, col_name)?
+) -> Vec<PolyColBound> {
+  match col_type {
+    ColType::Int => compute_col_bounds::<i32>(&kb_expr, col_name)
       .into_iter()
       .map(|bound| PolyColBound::Int(bound))
       .collect(),
-    ColType::Bool => compute_col_bounds::<bool>(&kb_expr, col_name)?
+    ColType::Bool => compute_col_bounds::<bool>(&kb_expr, col_name)
       .into_iter()
       .map(|bound| PolyColBound::Bool(bound))
       .collect(),
-    ColType::String => compute_col_bounds::<String>(&kb_expr, col_name)?
+    ColType::String => compute_col_bounds::<String>(&kb_expr, col_name)
       .into_iter()
       .map(|bound| PolyColBound::String(bound))
       .collect(),
-  })
+  }
+}
+
+/// Computes a single, all full `PolyColBound` for the given `col_type`.
+fn full_poly_col_bounds(col_type: &ColType) -> Vec<PolyColBound> {
+  match col_type {
+    ColType::Int => {
+      let bound = ColBound { start: SingleBound::Unbounded, end: SingleBound::Unbounded };
+      vec![(PolyColBound::Int(bound))]
+    }
+    ColType::Bool => {
+      let bound = ColBound { start: SingleBound::Unbounded, end: SingleBound::Unbounded };
+      vec![(PolyColBound::Bool(bound))]
+    }
+    ColType::String => {
+      let bound = ColBound { start: SingleBound::Unbounded, end: SingleBound::Unbounded };
+      vec![(PolyColBound::String(bound))]
+    }
+  }
+}
+
+/// Eliminates intersection between the `ColBound`s
+fn merged_col_bounds<T: Ord + BoundType + Clone>(col_bounds: Vec<ColBound<T>>) -> Vec<ColBound<T>> {
+  // TODO: Do this properly. This is a non-critical optimization.
+  col_bounds
 }
 
 /// This function removes redundancy in the `row_region`. Redundancy may easily
@@ -654,15 +643,19 @@ pub fn compress_row_region(row_region: Vec<KeyBound>) -> Vec<KeyBound> {
 }
 
 /// Computes `KeyBound`s that have a corresponding shape to `key_cols` such that any key
-/// outside of this is guaranteed to evaluate `expr` to false. We have `col_map` as concrete
-/// values that we substitute into `expr` first. This returns the compressed regions.
+/// outside of this is guaranteed to evaluate `expr` to `false` or `NULL`. We have `col_map`
+/// as concrete values that we substitute into `expr` first. This returns the compressed
+/// regions.
+///
+/// Importantly, `expr` might not even be evaluatable for keys within the  `KeyBound` (i.e.
+/// there might be runtime errors or type errors). But that is not something we check here.
 ///
 /// Note that `col_map` must have distinct `ColName`s from `key_cols`.
 pub fn compute_key_region(
   expr: &proc::ValExpr,
   col_map: BTreeMap<ColName, ColValN>,
   key_cols: &Vec<(ColName, ColType)>,
-) -> Result<Vec<KeyBound>, EvalError> {
+) -> Vec<KeyBound> {
   // Enforce the precondition.
   debug_assert!((|| {
     for (col_name, _) in key_cols {
@@ -674,7 +667,7 @@ pub fn compute_key_region(
   })());
 
   let key_col_names = Vec::from_iter(key_cols.iter().map(|(name, _)| name.clone()));
-  let kb_expr = construct_kb_expr(expr.clone(), &col_map, &key_col_names)?;
+  let kb_expr_res = construct_kb_expr(expr.clone(), &col_map, &key_col_names);
   let mut key_bounds = Vec::<KeyBound>::new();
 
   // The strategy here is to start with an all-encompassing KeyRegion, then reduce the
@@ -682,7 +675,11 @@ pub fn compute_key_region(
   key_bounds.push(KeyBound { col_bounds: vec![] });
   for (col_name, col_type) in key_cols {
     // Then, compute the ColBound and extend key_bounds.
-    let col_bounds = compute_poly_col_bounds(&kb_expr, col_name, col_type)?;
+    let col_bounds = if let Ok(kb_expr) = &kb_expr_res {
+      compute_poly_col_bounds(kb_expr, col_name, col_type)
+    } else {
+      full_poly_col_bounds(col_type)
+    };
     let mut new_key_bounds = Vec::<KeyBound>::new();
     for key_bound in key_bounds {
       for col_bound in col_bounds.clone() {
@@ -694,7 +691,7 @@ pub fn compute_key_region(
     key_bounds = compress_row_region(new_key_bounds);
   }
 
-  Ok(key_bounds)
+  key_bounds
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -703,7 +700,14 @@ pub fn compute_key_region(
 
 /// Essentially computes the intersection of 2 `ColBound`s, returning a pair
 /// of `SingleBound`. Note that the first element can be greater than the second.
-pub fn col_bound_intersect_interval<'a, T: Ord>(
+///
+/// This function can easily be proven. Suppose C is the true intersect, and C' is the
+/// interval that is returned. Observe C is in C', since the start of C' is the start of either
+/// `left` or `right`, and same with the end. To prove that C' is in C, the only tricky case is
+/// when `b1 > b2` or `b2 > b1` branches are taken to construct C'. See below for a brief
+/// explanation.
+/// TODO: prove this function formally.
+fn col_bound_intersect_interval<'a, T: Ord>(
   left: &'a ColBound<T>,
   right: &'a ColBound<T>,
 ) -> (&'a SingleBound<T>, &'a SingleBound<T>) {
@@ -714,16 +718,19 @@ pub fn col_bound_intersect_interval<'a, T: Ord>(
     | (SingleBound::Excluded(b1), SingleBound::Excluded(b2))
     | (SingleBound::Included(b1), SingleBound::Excluded(b2)) => {
       if b1 > b2 {
+        // A one-sided interval, [b1, inf) must be a subset of (b2, inf) since if c is in
+        // the former, then c >= b1 > b2, meaning it is in (b2, inf).
         &left.start
       } else {
         &right.start
       }
     }
     (SingleBound::Excluded(b1), SingleBound::Included(b2)) => {
-      if b1 >= b2 {
-        &left.start
-      } else {
+      if b2 > b1 {
+        // Similar reasoning as above
         &right.start
+      } else {
+        &left.start
       }
     }
   };
@@ -733,14 +740,16 @@ pub fn col_bound_intersect_interval<'a, T: Ord>(
     (SingleBound::Included(b1), SingleBound::Included(b2))
     | (SingleBound::Excluded(b1), SingleBound::Excluded(b2))
     | (SingleBound::Included(b1), SingleBound::Excluded(b2)) => {
-      if b1 >= b2 {
-        &right.end
-      } else {
+      if b2 > b1 {
+        // Similar reasoning as above
         &left.end
+      } else {
+        &right.end
       }
     }
     (SingleBound::Excluded(b1), SingleBound::Included(b2)) => {
       if b1 > b2 {
+        // Similar reasoning as above
         &right.end
       } else {
         &left.end
@@ -753,11 +762,11 @@ pub fn col_bound_intersect_interval<'a, T: Ord>(
 /// Returns true if the `interval` is surely empty. If it returns false, then its very likely
 /// that the set is non-empty, but it might be.
 ///
-/// To see how we can have a false negative, Consider the case that T is `bool`, and consider the
+/// To see how we can have a false negative, consider the case that T is `bool`, and consider the
 /// bound `(SingleBound::Excluded(false), SingleBound::Excluded(true))`. Although this set
 /// is empty, the below function will return false (since the last branch is taken, and since
-/// `false >= true` is a false statement). Thus, we see that this function does not actually
-pub fn is_surely_interval_empty<T: Ord>(interval: (&SingleBound<T>, &SingleBound<T>)) -> bool {
+/// `false >= true` is a false statement).
+fn is_surely_interval_empty<T: Ord>(interval: (&SingleBound<T>, &SingleBound<T>)) -> bool {
   match interval {
     (SingleBound::Unbounded, _) => false,
     (_, SingleBound::Unbounded) => false,
@@ -769,7 +778,7 @@ pub fn is_surely_interval_empty<T: Ord>(interval: (&SingleBound<T>, &SingleBound
 }
 
 /// This computes the intersection of 2 sets of `ColBound`s
-pub fn col_bounds_intersect<T: Ord + Clone>(
+fn col_bounds_intersect<T: Ord + Clone>(
   left_bounds: Vec<ColBound<T>>,
   right_bounds: Vec<ColBound<T>>,
 ) -> Vec<ColBound<T>> {
@@ -846,7 +855,7 @@ fn invert_col_bound<T: Ord>(bound: ColBound<T>) -> Vec<ColBound<T>> {
 }
 
 /// This function computes the complement of this `bounds`.
-pub fn invert_col_bounds<T: Ord + Clone>(bounds: Vec<ColBound<T>>) -> Vec<ColBound<T>> {
+fn invert_col_bounds<T: Ord + Clone>(bounds: Vec<ColBound<T>>) -> Vec<ColBound<T>> {
   // Recall that the complement of a union is the intersect of the complements.
   let mut cum = vec![full_bound::<T>()];
   for bound in bounds {

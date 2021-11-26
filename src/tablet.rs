@@ -390,7 +390,7 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
     parent_context_schema: &ContextSchema,
     parent_context_row: &ContextRow,
     col_names: &Vec<ColName>,
-  ) -> Result<Vec<(Vec<ColValN>, u64)>, EvalError> {
+  ) -> Vec<(Vec<ColValN>, u64)> {
     // We extract all `ColNames` in `parent_context_schema` that aren't shadowed by the LocalTable,
     // and then map them to their values in `parent_context_row`.
     let mut col_map = BTreeMap::<ColName, ColValN>::new();
@@ -406,8 +406,8 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
     }
 
     // Compute the KeyBound, the subtable, and return it.
-    let key_bounds = compute_key_region(&self.selection, col_map, &self.table_schema.key_cols)?;
-    Ok(self.storage.compute_subtable(&key_bounds, col_names, self.timestamp))
+    let key_bounds = compute_key_region(&self.selection, col_map, &self.table_schema.key_cols);
+    self.storage.compute_subtable(&key_bounds, col_names, self.timestamp)
   }
 }
 
@@ -2667,7 +2667,7 @@ impl ContextKeyboundComputer {
     }
 
     // Then, compute the keybound
-    compute_key_region(&self.selection, col_context, &self.key_cols)
+    Ok(compute_key_region(&self.selection, col_context, &self.key_cols))
   }
 }
 
