@@ -422,9 +422,19 @@ pub enum ExternalAbortedData {
   /// understand that their query was invalid, but might become valid for the same timestamp
   /// later (i.e. the invalidity is not idempotent).
   QueryExecutionError,
+
+  /// Cancellation
+  ///
   /// This is sent back as a response when a CancelExternalQuery comes in. If the
   /// transaction still exists, we make sure to abort it.
-  ConfirmCancel,
+  CancelConfirmed,
+  /// This is sent back as a response when a CancelExternalQuery comes in if the request is
+  /// in a state where it cannot be cancelled, like during FinishQueryTMES.
+  CancelDenied,
+  /// This is sent back as a response when a CancelExternalQuery comes in if the `RequestId`
+  /// in the cancel request does not exist.
+  CancelNonExistantRequestId,
+
   /// This is send back if the Coord's detects its Node's Leadership changes. This is to make
   /// sure that in case the Leadership change was spurious (i.e. the current node is still alive),
   /// the External is not left waiting forever.

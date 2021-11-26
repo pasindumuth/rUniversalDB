@@ -33,6 +33,9 @@ use std::convert::TryInto;
 use std::rc::Rc;
 use std::sync::Arc;
 
+#[path = "./coord_test.rs"]
+pub mod coord_test;
+
 // -----------------------------------------------------------------------------------------------
 //  CoordForwardMsg
 // -----------------------------------------------------------------------------------------------
@@ -111,7 +114,7 @@ pub struct CoordContext {
   /// Metadata
   pub this_sid: SlaveGroupId,
   pub this_cid: CoordGroupId,
-  pub sub_node_path: CTSubNodePath, // // Wraps `this_coord_group_id` for expedience
+  pub sub_node_path: CTSubNodePath, // Wraps `this_cid` for expedience
   pub this_eid: EndpointId,
 
   /// Gossip
@@ -120,8 +123,10 @@ pub struct CoordContext {
   /// Paxos
   pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
 
-  /// There is an entry here exactly when there is a corresponding `MSCoordES`, and it
-  /// is used to cancel an `MSCoordES` when when a CancelQueryExteral arrives.
+  /// This is used to allow the user to cancel requests. There is an element (`RequestId`,
+  /// `QueryId`) here exactly when there is an `MSCoordES` (exclusive) or `FinishQueryES`
+  /// stored at that `QueryId` in `statuses`. In addition, ES will hold the `RequestId` in
+  /// its `request_id` field.
   pub external_request_id_map: BTreeMap<RequestId, QueryId>,
 }
 
@@ -137,16 +142,16 @@ impl CoordState {
 
 impl CoordContext {
   pub fn new(
-    this_slave_group_id: SlaveGroupId,
-    this_coord_group_id: CoordGroupId,
+    this_sid: SlaveGroupId,
+    this_cid: CoordGroupId,
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
     leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
   ) -> CoordContext {
     CoordContext {
-      this_sid: this_slave_group_id,
-      this_cid: this_coord_group_id.clone(),
-      sub_node_path: CTSubNodePath::Coord(this_coord_group_id),
+      this_sid,
+      this_cid: this_cid.clone(),
+      sub_node_path: CTSubNodePath::Coord(this_cid),
       this_eid,
       gossip,
       leader_map,
@@ -207,22 +212,27 @@ impl CoordContext {
             }
           }
           msg::SlaveExternalReq::CancelExternalQuery(cancel) => {
-            if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
-              // ECU the transaction if it exists.
-              self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
+            let payload =
+              if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
+                if statuses.ms_coord_ess.contains_key(query_id) {
+                  // Recall that a request is only cancellable while it is an MSCoordES.
+                  self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
+                  msg::ExternalAbortedData::CancelConfirmed
+                } else {
+                  // Otherwise, it is a `FinishQueryES` and thus cannot be cancelled.
+                  msg::ExternalAbortedData::CancelDenied
+                }
+              } else {
+                msg::ExternalAbortedData::CancelNonExistantRequestId
+              };
 
-              // Recall that we need to respond with an ExternalQueryAborted
-              // to confirm the cancellation.
-              io_ctx.send(
-                &cancel.sender_eid,
-                msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
-                  msg::ExternalQueryAborted {
-                    request_id: cancel.request_id,
-                    payload: msg::ExternalAbortedData::ConfirmCancel,
-                  },
-                )),
-              );
-            }
+            // Send the payload back to the client.
+            io_ctx.send(
+              &cancel.sender_eid,
+              msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+                msg::ExternalQueryAborted { request_id: cancel.request_id, payload },
+              )),
+            );
           }
         }
       }
@@ -689,10 +699,10 @@ impl CoordContext {
       }
       MSQueryCoordAction::Success(all_rms, sql_query, table_view, timestamp) => {
         let ms_coord = statuses.ms_coord_ess.remove(&query_id).unwrap();
-        self.external_request_id_map.remove(&ms_coord.request_id);
 
         if all_rms.is_empty() {
           // If there are no RMs, respond immediately.
+          self.external_request_id_map.remove(&ms_coord.request_id);
           io_ctx.send(
             &ms_coord.sender_eid,
             msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
@@ -787,6 +797,7 @@ impl CoordContext {
         if es.inner.committed {
           // If the ES was successful, send back a success to the External.
           if let Some(response_data) = es.inner.response_data {
+            self.external_request_id_map.remove(&response_data.request_id);
             io_ctx.send(
               &response_data.sender_eid,
               msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(

@@ -3,6 +3,7 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::{
   mk_cid, BasicIOCtx, CoreIOCtx, GossipData, MasterIOCtx, RangeEnds, SlaveIOCtx,
 };
+use runiversal::coord::coord_test::assert_coord_consistency;
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::{FullMasterInput, MasterContext, MasterState, MasterTimerInput};
 use runiversal::model::common::{
@@ -634,6 +635,15 @@ impl Simulation {
     self.run_slave_timer_events();
   }
 
+  /// Run various consistency checks on the system validate whether it is in a good state.
+  pub fn run_consistency_check(&mut self) {
+    for (_, slave_data) in &self.slave_data {
+      for (_, coord) in &slave_data.coord_states {
+        assert_coord_consistency(coord);
+      }
+    }
+  }
+
   /// This function simply increments the `true_time` by 1ms and delivers 1ms worth of
   /// messages. For simplicity, we assume that this means that every non-empty queue
   /// of messages delivers about one message in this time.
@@ -647,6 +657,7 @@ impl Simulation {
     }
 
     self.run_timer_events();
+    self.run_consistency_check();
   }
 
   pub fn simulate_n_ms(&mut self, n: u32) {

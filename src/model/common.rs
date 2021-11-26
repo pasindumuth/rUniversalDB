@@ -117,7 +117,7 @@ pub struct SlaveGroupId(pub String);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoordGroupId(pub String);
 
-/// A request Id that globally identifies a request.
+/// A request ID used to help the sender cancel the query if they wanted to.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(pub String);
 

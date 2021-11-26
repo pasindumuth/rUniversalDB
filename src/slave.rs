@@ -267,17 +267,17 @@ impl SlaveState {
 impl SlaveContext {
   pub fn new(
     coord_positions: Vec<CoordGroupId>,
-    this_slave_group_id: SlaveGroupId,
+    this_sid: SlaveGroupId,
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
     leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
   ) -> SlaveContext {
     let all_gids = leader_map.keys().cloned().collect();
-    let paxos_nodes = gossip.slave_address_config.get(&this_slave_group_id).unwrap().clone();
+    let paxos_nodes = gossip.slave_address_config.get(&this_sid).unwrap().clone();
     SlaveContext {
       coord_positions,
-      this_sid: this_slave_group_id.clone(),
-      this_gid: this_slave_group_id.to_gid(),
+      this_sid: this_sid.clone(),
+      this_gid: this_sid.to_gid(),
       this_eid,
       gossip,
       leader_map,

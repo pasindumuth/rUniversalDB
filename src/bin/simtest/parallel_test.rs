@@ -1,6 +1,6 @@
 use crate::serial_test::{setup, TestContext};
 use crate::simulation::Simulation;
-use rand::RngCore;
+use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::mk_rid;
 use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId, Timestamp};
@@ -108,14 +108,18 @@ fn mk_inventory_select(r: &mut XorShiftRng) -> String {
 /// the results are the same.
 fn verify_req_res(
   req_res_map: BTreeMap<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>,
-) -> (u32, u32, u32) {
+) -> Option<(u32, u32, u32)> {
   let (mut sim, mut context) = setup();
   let mut sorted_success_res =
     BTreeMap::<Timestamp, (msg::PerformExternalQuery, msg::ExternalQuerySuccess)>::new();
   let total_queries = req_res_map.len() as u32;
   for (_, (req, res)) in req_res_map {
     if let msg::ExternalMessage::ExternalQuerySuccess(success) = res {
-      assert!(sorted_success_res.insert(success.timestamp.clone(), (req, success)).is_none());
+      if !sorted_success_res.insert(success.timestamp.clone(), (req, success)).is_none() {
+        // Here, two responses ahd the same timestamp. We cannot replay this, so we
+        // simply skip this test.
+        return None;
+      }
     }
   }
 
@@ -137,7 +141,7 @@ fn verify_req_res(
     context.send_query(&mut sim, req.query.as_str(), 10000, res.result);
   }
 
-  (*sim.true_timestamp() as u32, total_queries, successful_queries)
+  Some((*sim.true_timestamp() as u32, total_queries, successful_queries))
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -145,6 +149,16 @@ fn verify_req_res(
 // -----------------------------------------------------------------------------------------------
 
 pub fn test_all_parallel() {
+  let mut orig_rand = XorShiftRng::from_seed([0; 16]);
+  for i in 0..50 {
+    let mut seed = [0; 16];
+    orig_rand.fill_bytes(&mut seed);
+    println!("Running round {:?}", i);
+    basic_parallel_test(seed);
+  }
+}
+
+pub fn basic_parallel_test(seed: [u8; 16]) {
   let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
     (mk_sid("s0"), vec![mk_slave_eid(&0)]),
@@ -157,7 +171,7 @@ pub fn test_all_parallel() {
   .collect();
 
   // We create 3 clients.
-  let mut sim = Simulation::new([0; 16], 3, slave_address_config, master_address_config);
+  let mut sim = Simulation::new(seed, 3, slave_address_config, master_address_config);
   let mut context = TestContext::new();
 
   // Setup Tables
@@ -240,11 +254,13 @@ pub fn test_all_parallel() {
   }
 
   // Verify the responses are correct
-  let (true_time, total_queries, successful_queries) = verify_req_res(req_res_map);
-
-  println!(
-    "Test 'test_all_parallel' Passed! Replay time taken: {:?}ms.
-    Total Queries: {:?}, Succeeded: {:?}",
-    true_time, total_queries, successful_queries
-  );
+  if let Some((true_time, total_queries, successful_queries)) = verify_req_res(req_res_map) {
+    println!(
+      "Test 'test_all_parallel' Passed! Replay time taken: {:?}ms.
+       Total Queries: {:?}, Succeeded: {:?}",
+      true_time, total_queries, successful_queries
+    );
+  } else {
+    println!("Skipped Test 'test_all_parallel' due to Timestamp Conflict");
+  }
 }
