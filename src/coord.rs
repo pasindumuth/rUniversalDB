@@ -516,7 +516,7 @@ impl CoordContext {
         // Remove the `TMStatus` and take ownership
         let tm_status = statuses.tm_statuss.remove(tm_query_id).unwrap();
         // Merge there TableViews together
-        let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
+        let mut results = Vec::<(Vec<Option<ColName>>, Vec<TableView>)>::new();
         for (_, rm_result) in tm_status.tm_state {
           results.push(rm_result.unwrap());
         }
@@ -541,7 +541,7 @@ impl CoordContext {
     orig_p: OrigP,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    merged_result: (Vec<ColName>, Vec<TableView>),
+    merged_result: (Vec<Option<ColName>>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
     // Route TM results to MSQueryES
@@ -608,7 +608,7 @@ impl CoordContext {
     orig_p: OrigP,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
-    result: (Vec<ColName>, Vec<TableView>),
+    result: (Vec<Option<ColName>>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
     let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();

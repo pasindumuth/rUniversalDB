@@ -1,4 +1,6 @@
-use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
+use crate::col_usage::{
+  collect_top_level_cols, compute_select_schema, nodes_external_cols, nodes_external_trans_tables,
+};
 use crate::common::{mk_qid, CoreIOCtx, QueryESResult, QueryPlan};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
@@ -21,7 +23,7 @@ use std::rc::Rc;
 
 pub trait TransTableSource {
   fn get_instance(&self, prefix: &TransTableName, idx: usize) -> &TableView;
-  fn get_schema(&self, prefix: &TransTableName) -> Vec<ColName>;
+  fn get_schema(&self, prefix: &TransTableName) -> Vec<Option<ColName>>;
 }
 
 #[derive(Debug)]
@@ -74,7 +76,7 @@ struct TransLocalTable<'a, SourceT: TransTableSource> {
   trans_table_source: &'a SourceT,
   trans_table_name: &'a TransTableName,
   /// The schema read TransTable.
-  schema: Vec<ColName>,
+  schema: Vec<Option<ColName>>,
 }
 
 impl<'a, SourceT: TransTableSource> TransLocalTable<'a, SourceT> {
@@ -92,7 +94,7 @@ impl<'a, SourceT: TransTableSource> TransLocalTable<'a, SourceT> {
 
 impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> {
   fn contains_col(&self, col: &ColName) -> bool {
-    self.schema.contains(col)
+    self.schema.contains(&Some(col.clone()))
   }
 
   fn get_rows(
@@ -113,11 +115,24 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
       self.trans_table_source.get_instance(&self.trans_table_name, *trans_table_instance_pos);
 
     // Next, we select the desired columns and compress them before returning it.
-    let mut sub_view = TableView::new(col_names.clone());
+    let mut sub_view =
+      TableView::new(col_names.iter().cloned().map(|col| Some(col.clone())).collect());
     for (row, count) in &trans_table_instance.rows {
       let mut new_row = Vec::<ColValN>::new();
       for col in col_names {
-        let pos = trans_table_instance.col_names.iter().position(|cur_col| cur_col == col).unwrap();
+        let pos = trans_table_instance
+          .col_names
+          .iter()
+          .position(
+            |maybe_cur_col| {
+              if let Some(cur_col) = maybe_cur_col {
+                cur_col == col
+              } else {
+                false
+              }
+            },
+          )
+          .unwrap();
         new_row.push(row.get(pos).unwrap().clone());
       }
       sub_view.add_row_multi(new_row, *count);
@@ -226,7 +241,7 @@ impl TransTableReadES {
     trans_table_source: &SourceT,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
-    (_, table_views): (Vec<ColName>, Vec<TableView>),
+    (_, table_views): (Vec<Option<ColName>>, Vec<TableView>),
   ) -> TransTableAction {
     // Add the subquery results into the TableReadES.
     self.new_rms.extend(subquery_new_rms);
@@ -279,13 +294,16 @@ impl TransTableReadES {
     // These are all of the `ColNames` we need in order to evaluate the Select.
     let mut top_level_cols_set = BTreeSet::<ColName>::new();
     top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
-    top_level_cols_set.extend(self.sql_query.projection.clone());
+    for (expr, _) in &self.sql_query.projection {
+      top_level_cols_set.extend(collect_top_level_cols(expr));
+    }
     let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
 
     // Finally, iterate over the Context Rows of the subqueries and compute the final values.
+    let select_schema = compute_select_schema(&self.sql_query);
     let mut res_table_views = Vec::<TableView>::new();
     for _ in 0..self.context.context_rows.len() {
-      res_table_views.push(TableView::new(self.sql_query.projection.clone()));
+      res_table_views.push(TableView::new(select_schema.clone()));
     }
 
     let eval_res = context_constructor.run(
@@ -311,15 +329,8 @@ impl TransTableReadES {
           &subquery_vals,
         )?;
         if is_true(&evaluated_select.selection)? {
-          // This means that the current row should be selected for the result. Thus, we take
-          // the values of the project columns and insert it into the appropriate TableView.
-          let mut res_row = Vec::<ColValN>::new();
-          for res_col_name in &self.sql_query.projection {
-            let idx = top_level_col_names.iter().position(|k| res_col_name == k).unwrap();
-            res_row.push(top_level_col_vals.get(idx).unwrap().clone());
-          }
-
-          res_table_views[context_row_idx].add_row_multi(res_row, count);
+          // This means that the current row should be selected for the result.
+          res_table_views[context_row_idx].add_row_multi(evaluated_select.projection, count);
         };
         Ok(())
       },
@@ -333,7 +344,7 @@ impl TransTableReadES {
     // Signal Success and return the data.
     self.state = TransExecutionS::Done;
     TransTableAction::Success(QueryESResult {
-      result: (self.sql_query.projection.clone(), res_table_views),
+      result: (select_schema, res_table_views),
       new_rms: self.new_rms.iter().cloned().collect(),
     })
   }

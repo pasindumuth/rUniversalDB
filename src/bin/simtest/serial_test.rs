@@ -6,7 +6,7 @@ use runiversal::model::common::{
 };
 use runiversal::model::message as msg;
 use runiversal::simulation_utils::{mk_client_eid, mk_slave_eid};
-use runiversal::test_utils::{cn, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
+use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
 
 /**
@@ -148,7 +148,7 @@ fn setup_inventory_table(sim: &mut Simulation, context: &mut TestContext) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email"), cn("count")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     context.send_query(
@@ -177,7 +177,7 @@ fn setup_user_table(sim: &mut Simulation, context: &mut TestContext) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("email"), cn("balance")]);
+    let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
     exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);
@@ -202,6 +202,7 @@ pub fn test_all_serial() {
   simple_test();
   subquery_test();
   trans_table_test();
+  select_projection_test();
   multi_stage_test();
 }
 
@@ -211,7 +212,7 @@ pub fn test_all_serial() {
 
 /// This is a test that solely tests Transaction Processing. We take all PaxosGroups to just
 /// have one node. We only check for SQL semantics compatibility.
-pub fn simple_test() {
+fn simple_test() {
   let (mut sim, mut context) = setup();
 
   // Test Basic Queries
@@ -220,7 +221,7 @@ pub fn simple_test() {
   // Test Simple Update-Select
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
     context.send_query(
@@ -234,7 +235,7 @@ pub fn simple_test() {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
     context.send_query(
       &mut sim,
@@ -248,7 +249,7 @@ pub fn simple_test() {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
     context.send_query(
@@ -264,7 +265,7 @@ pub fn simple_test() {
   // Test Simple Multi-Stage Transactions
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5"))]);
     context.send_query(
       &mut sim,
@@ -282,7 +283,7 @@ pub fn simple_test() {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_4"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5"))]);
     context.send_query(
@@ -298,7 +299,7 @@ pub fn simple_test() {
   // Test NULL data
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(6)), Some(cvs("my_email_6"))]);
     context.send_query(
       &mut sim,
@@ -311,7 +312,7 @@ pub fn simple_test() {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email"), cn("count")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(6)), Some(cvs("my_email_6")), None]);
     context.send_query(
       &mut sim,
@@ -325,7 +326,7 @@ pub fn simple_test() {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email"), cn("count")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_4")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5")), Some(cvi(25))]);
     context.send_query(
@@ -346,7 +347,7 @@ pub fn simple_test() {
 //  subquery_test
 // -----------------------------------------------------------------------------------------------
 
-pub fn subquery_test() {
+fn subquery_test() {
   let (mut sim, mut context) = setup();
 
   // Setup Tables
@@ -365,7 +366,7 @@ pub fn subquery_test() {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("email"), cn("count")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(25))]);
     context.send_query(
@@ -392,7 +393,7 @@ pub fn subquery_test() {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("email"), cn("balance")]);
+    let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(30))]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(50))]);
     exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(30))]);
@@ -411,7 +412,7 @@ pub fn subquery_test() {
   // Test Simple Subquery
 
   {
-    let mut exp_result = TableView::new(vec![cn("balance")]);
+    let mut exp_result = TableView::new(vec![cno("balance")]);
     exp_result.add_row(vec![Some(cvi(30))]);
     context.send_query(
       &mut sim,
@@ -430,7 +431,7 @@ pub fn subquery_test() {
   // Test Correlated Subquery
 
   {
-    let mut exp_result = TableView::new(vec![cn("balance")]);
+    let mut exp_result = TableView::new(vec![cno("balance")]);
     exp_result.add_row(vec![Some(cvi(30))]);
     context.send_query(
       &mut sim,
@@ -449,7 +450,7 @@ pub fn subquery_test() {
   // Test Subquery with TransTable
 
   {
-    let mut exp_result = TableView::new(vec![cn("balance")]);
+    let mut exp_result = TableView::new(vec![cno("balance")]);
     exp_result.add_row(vec![Some(cvi(30))]);
     context.send_query(
       &mut sim,
@@ -475,7 +476,7 @@ pub fn subquery_test() {
 //  trans_table_test
 // -----------------------------------------------------------------------------------------------
 
-pub fn trans_table_test() {
+fn trans_table_test() {
   let (mut sim, mut context) = setup();
 
   // Setup Tables
@@ -485,7 +486,7 @@ pub fn trans_table_test() {
   // Test TransTable Reads
 
   {
-    let mut exp_result = TableView::new(vec![cn("email")]);
+    let mut exp_result = TableView::new(vec![cno("email")]);
     exp_result.add_row(vec![Some(cvs("my_email_1"))]);
     exp_result.add_row(vec![Some(cvs("my_email_2"))]);
     context.send_query(
@@ -506,10 +507,70 @@ pub fn trans_table_test() {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  select_projection_test
+// -----------------------------------------------------------------------------------------------
+
+fn select_projection_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+  setup_user_table(&mut sim, &mut context);
+
+  // Test advanced expression in the SELECT projection.
+
+  {
+    let mut exp_result = TableView::new(vec![cno("e"), cno("balance")]);
+    exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
+    exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);
+    context.send_query(
+      &mut sim,
+      " SELECT email AS e, balance
+        FROM  user
+        WHERE balance >= 60;
+      ",
+      100,
+      exp_result,
+    );
+
+    let mut exp_result = TableView::new(vec![None]);
+    exp_result.add_row(vec![Some(cvi(120))]);
+    exp_result.add_row(vec![Some(cvi(140))]);
+    context.send_query(
+      &mut sim,
+      " SELECT balance * 2
+        FROM  user
+        WHERE balance >= 60;
+      ",
+      100,
+      exp_result,
+    );
+
+    let mut exp_result = TableView::new(vec![cno("b")]);
+    exp_result.add_row(vec![Some(cvi(120))]);
+    exp_result.add_row(vec![Some(cvi(140))]);
+    context.send_query(
+      &mut sim,
+      " WITH
+          v1 AS (SELECT balance * 2 AS b
+                 FROM  user
+                 WHERE balance >= 60)
+        SELECT b
+        FROM v1;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Test 'select_projection_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
 //  multi_stage_test
 // -----------------------------------------------------------------------------------------------
 
-pub fn multi_stage_test() {
+fn multi_stage_test() {
   let (mut sim, mut context) = setup();
 
   // Setup Tables
@@ -519,7 +580,7 @@ pub fn multi_stage_test() {
   // Multi-Stage Transactions with TransTables
 
   {
-    let mut exp_result = TableView::new(vec![cn("email"), cn("balance")]);
+    let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(80))]);
     context.send_query(
       &mut sim,
@@ -536,7 +597,7 @@ pub fn multi_stage_test() {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cn("product_id"), cn("count")]);
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(30))]);
     context.send_query(
       &mut sim,

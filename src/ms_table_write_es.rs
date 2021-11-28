@@ -1,4 +1,4 @@
-use crate::col_usage::collect_top_level_cols;
+use crate::col_usage::{collect_top_level_cols, compute_update_schema};
 use crate::common::{
   lookup, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, WriteRegion,
   WriteRegionType,
@@ -395,7 +395,7 @@ impl MSTableWriteES {
     ms_query_es: &mut MSQueryES,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
-    (_, table_views): (Vec<ColName>, Vec<TableView>),
+    (_, table_views): (Vec<Option<ColName>>, Vec<TableView>),
   ) -> MSTableWriteAction {
     // Add the subquery results into the MSTableWriteES.
     self.new_rms.extend(subquery_new_rms);
@@ -468,9 +468,7 @@ impl MSTableWriteES {
 
     // Setup the TableView that we are going to return and the UpdateView that we're going
     // to hold in the MSQueryES.
-    let mut res_col_names = Vec::<ColName>::new();
-    res_col_names.extend(ctx.table_schema.get_key_cols());
-    res_col_names.extend(self.sql_query.assignment.iter().map(|(name, _)| name.clone()));
+    let res_col_names = compute_update_schema(&self.sql_query, &ctx.table_schema);
     let mut res_table_view = TableView::new(res_col_names.clone());
     let mut update_view = GenericTable::new();
 

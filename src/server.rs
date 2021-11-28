@@ -445,6 +445,7 @@ pub fn extract_subquery_vals(
 
 #[derive(Debug, Default)]
 pub struct EvaluatedSuperSimpleSelect {
+  pub projection: Vec<ColValN>,
   pub selection: ColValN,
 }
 
@@ -467,15 +468,20 @@ pub fn evaluate_super_simple_select(
   let subquery_vals = extract_subquery_vals(raw_subquery_vals)?;
 
   // Construct the Evaluated Select
+  let mut evaluated_select = EvaluatedSuperSimpleSelect::default();
   let mut next_subquery_idx = 0;
-  Ok(EvaluatedSuperSimpleSelect {
-    selection: evaluate_c_expr(&construct_cexpr(
-      &select.selection,
-      &col_map,
-      &subquery_vals,
-      &mut next_subquery_idx,
-    )?)?,
-  })
+  for (expr, _) in &select.projection {
+    let c_expr = construct_cexpr(expr, &col_map, &subquery_vals, &mut next_subquery_idx)?;
+    evaluated_select.projection.push(evaluate_c_expr(&c_expr)?);
+  }
+  evaluated_select.selection = evaluate_c_expr(&construct_cexpr(
+    &select.selection,
+    &col_map,
+    &subquery_vals,
+    &mut next_subquery_idx,
+  )?)?;
+
+  Ok(evaluated_select)
 }
 
 #[derive(Debug, Default)]
@@ -516,7 +522,7 @@ pub fn evaluate_update(
     &mut next_subquery_idx,
   )?)?;
 
-  return Ok(evaluated_update);
+  Ok(evaluated_update)
 }
 
 pub fn mk_eval_error(eval_error: EvalError) -> msg::QueryError {

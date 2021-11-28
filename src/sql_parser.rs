@@ -165,18 +165,21 @@ fn convert_update(
   }))
 }
 
-fn convert_select_clause(select_clause: Vec<ast::SelectItem>) -> Result<Vec<String>, String> {
-  let mut select_list = Vec::<String>::new();
+fn convert_select_clause(
+  select_clause: Vec<ast::SelectItem>,
+) -> Result<Vec<(iast::ValExpr, Option<String>)>, String> {
+  let mut select_list = Vec::<(iast::ValExpr, Option<String>)>::new();
   for item in select_clause {
-    match &item {
+    match item.clone() {
       ast::SelectItem::UnnamedExpr(expr) => {
-        if let ast::Expr::Identifier(ident) = expr {
-          select_list.push(ident.value.clone());
-        } else {
-          return Err(format!("{:?} is not supported in SelectItem", item));
-        }
+        select_list.push((convert_expr(expr)?, None));
       }
-      _ => return Err(format!("{:?} is not supported in SelectItem", item)),
+      ast::SelectItem::ExprWithAlias { expr, alias } => {
+        select_list.push((convert_expr(expr)?, Some(alias.value)));
+      }
+      ast::SelectItem::QualifiedWildcard(_) | ast::SelectItem::Wildcard => {
+        return Err(format!("{:?} is not supported in SelectItem", item))
+      }
     }
   }
   Ok(select_list)

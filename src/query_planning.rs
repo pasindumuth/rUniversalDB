@@ -88,11 +88,7 @@ pub fn compute_extra_req_cols(ms_query: &proc::MSQuery) -> BTreeMap<TablePath, V
 
   iterate_stage_ms_query(
     &mut |stage: GeneralStage| match stage {
-      GeneralStage::SuperSimpleSelect(query) => {
-        if let proc::TableRef::TablePath(table_path) = &query.from {
-          add_cols(&mut extra_req_cols, table_path, query.projection.clone());
-        }
-      }
+      GeneralStage::SuperSimpleSelect(_) => {}
       GeneralStage::Update(query) => {
         add_cols(
           &mut extra_req_cols,
@@ -150,7 +146,7 @@ pub enum KeyValidationError {
 /// and checks related to the Key Columns of the Tablets.
 ///
 /// Preconditions:
-///   1. All `TablePaths` that appear in `ms_query` must be present in `table_generation`.
+///   1. All `TablePaths` that appear in `ms_query` must be present in `table_generation`
 ///      at `timestamp` (by `static_read`).
 ///   2. All `(TablePath, Gen)` pairs in `table_generation` must be a key in `db_schema`.
 pub fn perform_static_validations(

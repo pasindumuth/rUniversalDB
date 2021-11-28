@@ -227,7 +227,7 @@ pub struct TMStatus {
   pub leaderships: BTreeMap<SlaveGroupId, LeadershipId>,
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   pub responded_count: usize,
-  pub tm_state: BTreeMap<CTNodePath, Option<(Vec<ColName>, Vec<TableView>)>>,
+  pub tm_state: BTreeMap<CTNodePath, Option<(Vec<Option<ColName>>, Vec<TableView>)>>,
   pub orig_p: OrigP,
 }
 
@@ -277,8 +277,8 @@ impl OrigP {
 /// Here, every element of `results` has the same `Vec<ColName>`, and all `Vec<TableView>`s
 /// have the same length. This function essentially merges together corresponding `TableView`.
 pub fn merge_table_views(
-  mut results: Vec<(Vec<ColName>, Vec<TableView>)>,
-) -> (Vec<ColName>, Vec<TableView>) {
+  mut results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
+) -> (Vec<Option<ColName>>, Vec<TableView>) {
   let (schema, mut views) = results.pop().unwrap();
   for (cur_schema, cur_views) in results {
     assert_eq!(cur_schema, schema);
@@ -387,6 +387,6 @@ pub struct WriteRegion {
 /// Contains the result of ESs like *Table*ES and TransTableReadES.
 #[derive(Debug, Clone)]
 pub struct QueryESResult {
-  pub result: (Vec<ColName>, Vec<TableView>),
+  pub result: (Vec<Option<ColName>>, Vec<TableView>),
   pub new_rms: Vec<TQueryPath>,
 }

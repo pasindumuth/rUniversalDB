@@ -285,7 +285,7 @@ pub struct QuerySuccess {
   pub return_qid: QueryId,
   /// Contains QueryId of the query that was succeeded.
   pub responder_path: CTQueryPath,
-  pub result: (Vec<ColName>, Vec<TableView>),
+  pub result: (Vec<Option<ColName>>, Vec<TableView>),
   pub new_rms: Vec<TQueryPath>,
 }
 
@@ -476,7 +476,7 @@ pub struct MasterQueryPlan {
   pub all_tier_maps: BTreeMap<TransTableName, TierMap>,
   pub table_location_map: BTreeMap<TablePath, Gen>,
   pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
-  pub col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
+  pub col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

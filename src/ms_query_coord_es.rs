@@ -30,7 +30,7 @@ pub struct CoordQueryPlan {
   query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   table_location_map: BTreeMap<TablePath, Gen>,
   extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
-  col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
+  col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
 }
 
 #[derive(Debug)]
@@ -77,7 +77,7 @@ pub struct MSCoordES {
 
   // The dynamically evolving fields.
   pub all_rms: BTreeSet<TQueryPath>,
-  pub trans_table_views: Vec<(TransTableName, (Vec<ColName>, TableView))>,
+  pub trans_table_views: Vec<(TransTableName, (Vec<Option<ColName>>, TableView))>,
   pub state: CoordState,
 
   /// Recall that since we remove a `TQueryPath` when its Leadership changes, that means that
@@ -93,7 +93,7 @@ impl TransTableSource for MSCoordES {
     instance
   }
 
-  fn get_schema(&self, trans_table_name: &TransTableName) -> Vec<ColName> {
+  fn get_schema(&self, trans_table_name: &TransTableName) -> Vec<Option<ColName>> {
     let (schema, _) = lookup(&self.trans_table_views, trans_table_name).unwrap();
     schema.clone()
   }
@@ -194,7 +194,7 @@ impl FullMSCoordES {
     io_ctx: &mut IO,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    (schema, table_views): (Vec<ColName>, Vec<TableView>),
+    (schema, table_views): (Vec<Option<ColName>>, Vec<TableView>),
   ) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
 

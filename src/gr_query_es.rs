@@ -25,7 +25,7 @@ pub enum InternalError {
 
 pub struct GRQueryResult {
   pub new_rms: BTreeSet<TQueryPath>,
-  pub schema: Vec<ColName>,
+  pub schema: Vec<Option<ColName>>,
   pub result: Vec<TableView>,
 }
 
@@ -73,7 +73,7 @@ pub struct GRQueryPlan {
   pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   pub table_location_map: BTreeMap<TablePath, Gen>,
   pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
-  pub col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
+  pub col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
 }
 
 #[derive(Debug)]
@@ -99,7 +99,7 @@ pub struct GRQueryES {
 
   // The dynamically evolving fields.
   pub new_rms: BTreeSet<TQueryPath>,
-  pub trans_table_views: Vec<(TransTableName, (Vec<ColName>, Vec<TableView>))>,
+  pub trans_table_views: Vec<(TransTableName, (Vec<Option<ColName>>, Vec<TableView>))>,
   pub state: GRExecutionS,
 
   /// This holds the path to the parent ES.
@@ -115,7 +115,7 @@ impl TransTableSource for GRQueryES {
     instances.get(idx).unwrap()
   }
 
-  fn get_schema(&self, trans_table_name: &TransTableName) -> Vec<ColName> {
+  fn get_schema(&self, trans_table_name: &TransTableName) -> Vec<Option<ColName>> {
     let (schema, _) = lookup(&self.trans_table_views, trans_table_name).unwrap();
     schema.clone()
   }
@@ -211,7 +211,7 @@ impl GRQueryES {
     ctx: &mut SlaveServerContext<IO>,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    (schema, table_views): (Vec<ColName>, Vec<TableView>),
+    (schema, table_views): (Vec<Option<ColName>>, Vec<TableView>),
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
     let stage_query_id = &read_stage.stage_query_id;

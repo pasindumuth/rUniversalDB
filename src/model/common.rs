@@ -78,7 +78,7 @@ pub struct Gen(pub u64);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TableView {
   /// The keys are the rows, and the values are the number of repetitions.
-  pub col_names: Vec<ColName>,
+  pub col_names: Vec<Option<ColName>>,
   /// The keys are the rows, and the values are the number of repetitions.
   pub rows: BTreeMap<Vec<ColValN>, u64>,
 }
@@ -326,7 +326,7 @@ impl Context {
 }
 
 impl TableView {
-  pub fn new(col_names: Vec<ColName>) -> TableView {
+  pub fn new(col_names: Vec<Option<ColName>>) -> TableView {
     TableView { col_names, rows: Default::default() }
   }
 
@@ -385,7 +385,7 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
-    pub projection: Vec<ColName>,
+    pub projection: Vec<(ValExpr, Option<ColName>)>,
     pub from: TableRef,
     pub selection: ValExpr,
   }
@@ -534,7 +534,7 @@ pub mod iast {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
-    pub projection: Vec<String>, // The select clause
+    pub projection: Vec<(ValExpr, Option<String>)>, // The select clause
     pub from: String,
     pub selection: ValExpr, // The where clause
   }

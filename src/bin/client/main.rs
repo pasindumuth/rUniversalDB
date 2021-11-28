@@ -40,7 +40,13 @@ fn sql() {
   //          WHERE a > b AND b < 100 \
   //          ORDER BY a DESC, b";
 
-  let sql = "CREATE TABLE mytable (product_id INT PRIMARY KEY);";
+  let sql = "\
+  SELECT *
+  FROM Customer
+  WHERE (3, 'B', bool) IN 
+    (SELECT *
+       FROM Customer
+       WHERE user_id = 3);";
 
   let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
 

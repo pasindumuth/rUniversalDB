@@ -448,7 +448,7 @@ fn convert_to_table_view(
   table_schema: &TableSchema,
   selection: &Vec<ColName>,
 ) -> TableView {
-  let mut table_view = TableView::new(selection.clone());
+  let mut table_view = TableView::new(selection.iter().cloned().map(|c| Some(c)).collect());
   let mut it = snapshot_table.iter();
   let mut entry = it.next();
   while let Some(((pkey, ci), val)) = entry {

@@ -6,6 +6,10 @@ pub fn cn(s: &str) -> ColName {
   ColName(s.to_string())
 }
 
+pub fn cno(s: &str) -> Option<ColName> {
+  Some(ColName(s.to_string()))
+}
+
 pub fn cvs(s: &str) -> ColVal {
   ColVal::String(s.to_string())
 }

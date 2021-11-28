@@ -1,4 +1,4 @@
-use crate::col_usage::collect_top_level_cols;
+use crate::col_usage::{collect_top_level_cols, compute_insert_schema};
 use crate::common::{
   lookup, lookup_pos, mk_qid, ColBound, CoreIOCtx, KeyBound, OrigP, PolyColBound, QueryESResult,
   QueryPlan, ReadRegion, SingleBound, WriteRegion, WriteRegionType,
@@ -289,7 +289,7 @@ impl MSTableInsertES {
 
     // Compute the UpdateView where we insert all of these rows as new rows.
     let mut update_view = GenericTable::new();
-    let mut res_table_view = TableView::new(self.sql_query.columns.clone());
+    let mut res_table_view = TableView::new(compute_insert_schema(&self.sql_query));
     let mut pkeys = BTreeSet::<PrimaryKey>::new();
     for row in eval_values {
       let mut row_map = BTreeMap::<ColName, ColValN>::new();
@@ -411,10 +411,9 @@ impl MSTableInsertES {
 
         // Signal Success and return the data.
         let res_table_view = pending.res_table_view.clone();
-        let res_table_cols = res_table_view.col_names.clone();
         self.state = MSTableInsertExecutionS::Done;
         MSTableInsertAction::Success(QueryESResult {
-          result: (res_table_cols, vec![res_table_view]),
+          result: (compute_insert_schema(&self.sql_query), vec![res_table_view]),
           new_rms: self.new_rms.iter().cloned().collect(),
         })
       }

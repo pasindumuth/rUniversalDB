@@ -1925,7 +1925,7 @@ impl TabletContext {
         // Remove the `TMStatus` and take ownership
         let tm_status = statuses.tm_statuss.remove(tm_query_id).unwrap();
         // Merge there TableViews together
-        let mut results = Vec::<(Vec<ColName>, Vec<TableView>)>::new();
+        let mut results = Vec::<(Vec<Option<ColName>>, Vec<TableView>)>::new();
         for (_, rm_result) in tm_status.tm_state {
           results.push(rm_result.unwrap());
         }
@@ -1975,7 +1975,7 @@ impl TabletContext {
     orig_p: OrigP,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
-    result: (Vec<ColName>, Vec<TableView>),
+    result: (Vec<Option<ColName>>, Vec<TableView>),
   ) {
     let query_id = orig_p.query_id;
     if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {

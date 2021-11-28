@@ -47,9 +47,12 @@ fn to_table_ref(table_ref: &String) -> proc::TableRef {
 // -----------------------------------------------------------------------------------------------
 
 struct RenameContext {
-  trans_table_map: BTreeMap<String, Vec<String>>, // This stays unmuted across a function call
-  counter: u32,                                   // This is incremented
-  table_names: BTreeSet<String>, // The set of regular table names we detect. This is needed
+  /// This stays unmuted across a function call.
+  trans_table_map: BTreeMap<String, Vec<String>>,
+  /// This is incremented.
+  counter: u32,
+  /// The set of regular table names we detect.
+  table_names: BTreeSet<String>,
 }
 
 /// This functions renames the TransTables in `query` by prepending 'tt\\n\\',
@@ -79,6 +82,11 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
         select.from = rename_stack.last().unwrap().clone();
       } else {
         ctx.table_names.insert(select.from.clone());
+      }
+
+      // Rename the Projection Clause
+      for (val_expr, _) in &mut select.projection {
+        rename_trans_tables_val_expr_r(ctx, val_expr);
       }
 
       // Rename the Where Clause
@@ -171,11 +179,16 @@ fn flatten_top_level_query_r(
       flatten_top_level_query_r(assignment_name, child_query, counter, trans_table_map)
     }
     iast::QueryBody::SuperSimpleSelect(select) => {
-      let ms_select = proc::SuperSimpleSelect {
-        projection: select.projection.iter().map(|x| ColName(x.clone())).collect(),
+      let mut ms_select = proc::SuperSimpleSelect {
+        projection: Vec::new(),
         from: to_table_ref(&select.from),
         selection: flatten_val_expr_r(&select.selection, counter)?,
       };
+      for (val_expr, alias) in &select.projection {
+        ms_select
+          .projection
+          .push((flatten_val_expr_r(val_expr, counter)?, alias.clone().map(|x| ColName(x))))
+      }
       trans_table_map.push((
         TransTableName(assignment_name.clone()),
         proc::MSQueryStage::SuperSimpleSelect(ms_select),
@@ -261,11 +274,16 @@ fn flatten_sub_query_r(
       flatten_sub_query_r(assignment_name, child_query, counter, trans_table_map)
     }
     iast::QueryBody::SuperSimpleSelect(select) => {
-      let ms_select = proc::SuperSimpleSelect {
-        projection: select.projection.iter().map(|x| ColName(x.clone())).collect(),
+      let mut ms_select = proc::SuperSimpleSelect {
+        projection: Vec::new(),
         from: to_table_ref(&select.from),
         selection: flatten_val_expr_r(&select.selection, counter)?,
       };
+      for (val_expr, alias) in &select.projection {
+        ms_select
+          .projection
+          .push((flatten_val_expr_r(val_expr, counter)?, alias.clone().map(|x| ColName(x))))
+      }
       trans_table_map.push((
         TransTableName(assignment_name.clone()),
         proc::GRQueryStage::SuperSimpleSelect(ms_select),

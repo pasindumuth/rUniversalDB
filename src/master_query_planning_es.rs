@@ -160,7 +160,7 @@ fn check_node_lats(ctx: &MasterContext, node: &FrozenColUsageNode, timestamp: Ti
 /// Same as above, except we do it for every `FrozenColUsageNode` in `nodes`.
 fn check_nodes_lats(
   ctx: &MasterContext,
-  nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
+  nodes: &Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
   timestamp: Timestamp,
 ) -> bool {
   for (_, (_, node)) in nodes {
@@ -272,7 +272,7 @@ fn increase_node_lats(ctx: &mut MasterContext, node: &FrozenColUsageNode, timest
 /// Same as above, except we do it for every `FrozenColUsageNode` in `nodes`.
 fn increase_nodes_lats(
   ctx: &mut MasterContext,
-  nodes: &Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>,
+  nodes: &Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
   timestamp: Timestamp,
 ) {
   for (_, (_, node)) in nodes {
