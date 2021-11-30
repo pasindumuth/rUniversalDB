@@ -1,4 +1,4 @@
-use crate::col_usage::{collect_top_level_cols, compute_insert_schema};
+use crate::col_usage::{compute_insert_schema, free_external_cols};
 use crate::common::{
   lookup, lookup_pos, mk_qid, ColBound, CoreIOCtx, KeyBound, OrigP, PolyColBound, QueryESResult,
   QueryPlan, ReadRegion, SingleBound, WriteRegion, WriteRegionType,
@@ -17,9 +17,8 @@ use crate::server::{
 };
 use crate::storage::{static_read, GenericTable, MSStorageView, PRESENCE_VALN};
 use crate::tablet::{
-  compute_subqueries, ColumnsLocking, ContextKeyboundComputer, Executing, MSQueryES,
-  RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
-  SubqueryPending, TabletContext,
+  compute_subqueries, ColumnsLocking, Executing, MSQueryES, RequestedReadProtected,
+  SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryPending, TabletContext,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
@@ -88,11 +87,11 @@ impl MSTableInsertES {
     assert!(matches!(self.state, MSTableInsertExecutionS::Start));
 
     let mut all_cols = BTreeSet::<ColName>::new();
-    all_cols.extend(self.query_plan.col_usage_node.external_cols.clone());
+    all_cols.extend(free_external_cols(&self.query_plan.col_usage_node.external_cols));
     all_cols.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
 
     // If there are extra required cols, we add them in.
-    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(&self.sql_query.table) {
+    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(&self.sql_query.table.source_ref) {
       all_cols.extend(extra_cols.clone());
     }
 
@@ -113,10 +112,10 @@ impl MSTableInsertES {
   /// Note: this does *not* required columns to be locked.
   fn does_query_plan_align(&self, ctx: &TabletContext) -> bool {
     // First, check that `external_cols are absent.
-    for col in &self.query_plan.col_usage_node.external_cols {
+    for col in free_external_cols(&self.query_plan.col_usage_node.external_cols) {
       // Since the `key_cols` are static, no query plan should have one of
       // these as an External Column.
-      assert!(lookup(&ctx.table_schema.key_cols, col).is_none());
+      assert!(lookup(&ctx.table_schema.key_cols, &col).is_none());
       if ctx.table_schema.val_cols.static_read(&col, self.timestamp).is_some() {
         return false;
       }
@@ -130,7 +129,7 @@ impl MSTableInsertES {
     }
 
     // Next, check that `extra_req_cols` are present.
-    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(&self.sql_query.table) {
+    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(&self.sql_query.table.source_ref) {
       for col in extra_cols {
         if !weak_contains_col(&ctx.table_schema, col, &self.timestamp) {
           return false;

@@ -454,8 +454,8 @@ impl GRQueryES {
     // Send out the PerformQuery and populate TMStatus accordingly.
     let (_, stage) = self.sql_query.trans_tables.get(stage_idx).unwrap();
     let child_sql_query = cast!(proc::GRQueryStage::SuperSimpleSelect, stage).unwrap();
-    match &child_sql_query.from {
-      proc::TableRef::TablePath(table_path) => {
+    match &child_sql_query.from.source_ref {
+      proc::GeneralSourceRef::TablePath(table_path) => {
         // Here, we must do a SuperSimpleTableSelectQuery.
         let child_query = msg::SuperSimpleTableSelectQuery {
           timestamp: self.timestamp.clone(),
@@ -467,7 +467,8 @@ impl GRQueryES {
         // Validate the LeadershipId of PaxosGroups that the PerformQuery will be sent to.
         // We do this before sending any messages, in case it fails.
         let gen = self.query_plan.table_location_map.get(table_path).unwrap();
-        let tids = ctx.get_min_tablets(table_path, gen, &child_sql_query.selection);
+        let tids =
+          ctx.get_min_tablets(table_path, &child_sql_query.from, gen, &child_sql_query.selection);
         for tid in &tids {
           let sid = ctx.gossip.tablet_address_config.get(&tid).unwrap();
           if let Some(lid) = query_leader_map.get(sid) {
@@ -513,7 +514,7 @@ impl GRQueryES {
           }
         }
       }
-      proc::TableRef::TransTableName(trans_table_name) => {
+      proc::GeneralSourceRef::TransTableName(trans_table_name) => {
         // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
         let location_prefix = context
           .context_schema

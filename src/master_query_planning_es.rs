@@ -1,9 +1,13 @@
-use crate::col_usage::{iterate_stage_ms_query, ColUsagePlanner, FrozenColUsageNode, GeneralStage};
+use crate::col_usage::{
+  free_external_cols, iterate_stage_ms_query, ColUsageError, ColUsagePlanner, FrozenColUsageNode,
+  GeneralStage,
+};
 use crate::common::{lookup, TableSchema};
 use crate::master::{plm, MasterContext};
 use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{proc, CQueryPath, ColName, QueryId, Timestamp, TransTableName};
 use crate::model::message as msg;
+use crate::model::message::ExternalAbortedData::QueryPlanningError;
 use crate::query_planning::{
   collect_table_paths, compute_all_tier_maps, compute_extra_req_cols, compute_query_plan_data,
   perform_static_validations, KeyValidationError,
@@ -39,6 +43,10 @@ pub enum MasterQueryPlanningAction {
   Respond(msg::MasteryQueryPlanningResult),
 }
 
+fn respond_error(error: msg::QueryPlanningError) -> MasterQueryPlanningAction {
+  MasterQueryPlanningAction::Respond(msg::MasteryQueryPlanningResult::QueryPlanningError(error))
+}
+
 /// Handle an incoming `PerformMasterQueryPlanning` message.
 pub fn master_query_planning(
   ctx: &MasterContext,
@@ -49,9 +57,7 @@ pub fn master_query_planning(
       return MasterQueryPlanningAction::Wait;
     } else if ctx.table_generation.get_last_version(&table_path).is_none() {
       // Otherwise, if the TablePath does not exist, we respond accordingly.
-      return MasterQueryPlanningAction::Respond(msg::MasteryQueryPlanningResult::TablePathDNE(
-        vec![table_path],
-      ));
+      return respond_error(msg::QueryPlanningError::TablesDNE(vec![table_path]));
     }
   }
 
@@ -64,10 +70,10 @@ pub fn master_query_planning(
   ) {
     Ok(_) => {}
     Err(KeyValidationError::InvalidUpdate) => {
-      return MasterQueryPlanningAction::Respond(msg::MasteryQueryPlanningResult::InvalidUpdate)
+      return respond_error(msg::QueryPlanningError::InvalidUpdate)
     }
     Err(KeyValidationError::InvalidInsert) => {
-      return MasterQueryPlanningAction::Respond(msg::MasteryQueryPlanningResult::InvalidInsert)
+      return respond_error(msg::QueryPlanningError::InvalidInsert)
     }
   }
 
@@ -87,9 +93,7 @@ pub fn master_query_planning(
           if schema.val_cols.static_read(&col_name, planning_msg.timestamp).is_none() {
             // Here, we know for sure this `col_name` does not exist. We break out and
             // respond immediately.
-            return MasterQueryPlanningAction::Respond(
-              msg::MasteryQueryPlanningResult::RequiredColumnDNE(vec![col_name]),
-            );
+            return respond_error(msg::QueryPlanningError::RequiredColumnDNE(vec![col_name]));
           }
         }
       }
@@ -110,7 +114,13 @@ pub fn master_query_planning(
     table_generation: &ctx.table_generation,
     timestamp: planning_msg.timestamp,
   };
-  let col_usage_nodes = planner.plan_ms_query(&planning_msg.ms_query);
+
+  let col_usage_nodes = match planner.plan_ms_query(&planning_msg.ms_query) {
+    Ok(col_usage_nodes) => col_usage_nodes,
+    Err(ColUsageError::InvalidColumnRef) => {
+      return respond_error(msg::QueryPlanningError::InvalidColUsage);
+    }
+  };
 
   // Check that the LATs are high enough.
   if !check_nodes_lats(ctx, &col_usage_nodes, planning_msg.timestamp) {
@@ -131,12 +141,13 @@ pub fn master_query_planning(
 /// that `timestamp` for all `FrozenColUsageNode`s under `node`, where that node refers to a
 /// Table (as opposed to a TransTable).
 fn check_node_lats(ctx: &MasterContext, node: &FrozenColUsageNode, timestamp: Timestamp) -> bool {
-  match &node.table_ref {
-    proc::TableRef::TablePath(table_path) => {
+  match &node.source.source_ref {
+    proc::GeneralSourceRef::TablePath(table_path) => {
       let gen = ctx.table_generation.static_read(table_path, timestamp).unwrap();
       let schema = ctx.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
       // Check `safe_present_cols` and `external_cols`.
-      for col_name in node.safe_present_cols.iter().chain(node.external_cols.iter()) {
+      let free_external_cols = free_external_cols(&node.external_cols);
+      for col_name in node.safe_present_cols.iter().chain(free_external_cols.iter()) {
         if lookup(&schema.key_cols, col_name).is_none() {
           if schema.val_cols.get_lat(col_name) < timestamp {
             return false;
@@ -152,7 +163,7 @@ fn check_node_lats(ctx: &MasterContext, node: &FrozenColUsageNode, timestamp: Ti
         }
       }
     }
-    proc::TableRef::TransTableName(_) => {}
+    proc::GeneralSourceRef::TransTableName(_) => {}
   }
   true
 }
@@ -184,7 +195,9 @@ pub fn master_query_planning_post(
   for table_path in &table_paths {
     if ctx.table_generation.read(table_path, planning_plm.timestamp).is_none() {
       // If the TablePath does not exist, we respond accordingly.
-      return msg::MasteryQueryPlanningResult::TablePathDNE(vec![table_path.clone()]);
+      return msg::MasteryQueryPlanningResult::QueryPlanningError(
+        msg::QueryPlanningError::TablesDNE(vec![table_path.clone()]),
+      );
     }
   }
 
@@ -197,10 +210,14 @@ pub fn master_query_planning_post(
   ) {
     Ok(_) => {}
     Err(KeyValidationError::InvalidUpdate) => {
-      return msg::MasteryQueryPlanningResult::InvalidUpdate
+      return msg::MasteryQueryPlanningResult::QueryPlanningError(
+        msg::QueryPlanningError::InvalidUpdate,
+      );
     }
     Err(KeyValidationError::InvalidInsert) => {
-      return msg::MasteryQueryPlanningResult::InvalidInsert
+      return msg::MasteryQueryPlanningResult::QueryPlanningError(
+        msg::QueryPlanningError::InvalidInsert,
+      );
     }
   }
 
@@ -215,7 +232,9 @@ pub fn master_query_planning_post(
         if schema.val_cols.read(&col_name, planning_plm.timestamp).is_none() {
           // Here, we know for sure this `col_name` does not exist, and will never since we
           // just increased the LAT. Thus, we respond with it to the sender.
-          return msg::MasteryQueryPlanningResult::RequiredColumnDNE(vec![col_name]);
+          return msg::MasteryQueryPlanningResult::QueryPlanningError(
+            msg::QueryPlanningError::RequiredColumnDNE(vec![col_name]),
+          );
         }
       }
     }
@@ -227,7 +246,15 @@ pub fn master_query_planning_post(
     table_generation: &ctx.table_generation,
     timestamp: planning_plm.timestamp,
   };
-  let col_usage_nodes = planner.plan_ms_query(&planning_plm.ms_query);
+
+  let col_usage_nodes = match planner.plan_ms_query(&planning_plm.ms_query) {
+    Ok(col_usage_nodes) => col_usage_nodes,
+    Err(ColUsageError::InvalidColumnRef) => {
+      return msg::MasteryQueryPlanningResult::QueryPlanningError(
+        msg::QueryPlanningError::InvalidColUsage,
+      );
+    }
+  };
 
   // Check that the LATs are high enough.
   increase_nodes_lats(ctx, &col_usage_nodes, planning_plm.timestamp);
@@ -248,12 +275,13 @@ pub fn master_query_planning_post(
 /// that `timestamp` for all `FrozenColUsageNode`s under `node`, where that node refers to a
 /// Table (as opposed to a TransTable).
 fn increase_node_lats(ctx: &mut MasterContext, node: &FrozenColUsageNode, timestamp: Timestamp) {
-  match &node.table_ref {
-    proc::TableRef::TablePath(table_path) => {
+  match &node.source.source_ref {
+    proc::GeneralSourceRef::TablePath(table_path) => {
       let gen = ctx.table_generation.static_read(table_path, timestamp).unwrap();
       let schema = ctx.db_schema.get_mut(&(table_path.clone(), gen.clone())).unwrap();
       // Check `safe_present_cols` and `external_cols`.
-      for col_name in node.safe_present_cols.iter().chain(node.external_cols.iter()) {
+      let free_external_cols = free_external_cols(&node.external_cols);
+      for col_name in node.safe_present_cols.iter().chain(free_external_cols.iter()) {
         if lookup(&schema.key_cols, col_name).is_none() {
           schema.val_cols.update_lat(col_name, timestamp);
         }
@@ -265,7 +293,7 @@ fn increase_node_lats(ctx: &mut MasterContext, node: &FrozenColUsageNode, timest
         }
       }
     }
-    proc::TableRef::TransTableName(_) => {}
+    proc::GeneralSourceRef::TransTableName(_) => {}
   }
 }
 

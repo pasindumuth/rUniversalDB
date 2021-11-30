@@ -75,6 +75,8 @@ struct TransLocalTable<'a, SourceT: TransTableSource> {
   /// The TransTableSource the ES is operating on.
   trans_table_source: &'a SourceT,
   trans_table_name: &'a TransTableName,
+  /// The `GeneralSource` in the Data Source of the Query.
+  source: &'a proc::GeneralSource,
   /// The schema read TransTable.
   schema: Vec<Option<ColName>>,
 }
@@ -83,9 +85,11 @@ impl<'a, SourceT: TransTableSource> TransLocalTable<'a, SourceT> {
   fn new(
     trans_table_source: &'a SourceT,
     trans_table_name: &'a TransTableName,
+    source: &'a proc::GeneralSource,
   ) -> TransLocalTable<'a, SourceT> {
     TransLocalTable {
       trans_table_source,
+      source,
       trans_table_name,
       schema: trans_table_source.get_schema(trans_table_name),
     }
@@ -95,6 +99,10 @@ impl<'a, SourceT: TransTableSource> TransLocalTable<'a, SourceT> {
 impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> {
   fn contains_col(&self, col: &ColName) -> bool {
     self.schema.contains(&Some(col.clone()))
+  }
+
+  fn source(&self) -> &proc::GeneralSource {
+    self.source
   }
 
   fn get_rows(
@@ -166,16 +174,23 @@ impl TransTableReadES {
     // ContextConstructor, and then we construct GRQueryESs.
 
     // Compute children.
-    let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+    let mut children = Vec::<(Vec<proc::ColumnRef>, Vec<TransTableName>)>::new();
     for child in &self.query_plan.col_usage_node.children {
       children.push((nodes_external_cols(child), nodes_external_trans_tables(child)));
     }
 
     // Create the child context. Recall that we are able to unwrap `compute_contexts`
     // for the case TransTables since there is no KeyBound Computation.
-    let trans_table_name = &self.location_prefix.trans_table_name;
-    let local_table = TransLocalTable::new(trans_table_source, trans_table_name);
-    let child_contexts = compute_contexts(self.context.deref(), local_table, children).unwrap();
+    let child_contexts = compute_contexts(
+      self.context.deref(),
+      TransLocalTable::new(
+        trans_table_source,
+        &self.location_prefix.trans_table_name,
+        &self.query_plan.col_usage_node.source,
+      ),
+      children,
+    )
+    .unwrap();
 
     // Finally, compute the GRQueryESs.
     let subquery_view = GRQueryConstructorView {
@@ -274,7 +289,7 @@ impl TransTableReadES {
     let executing_state = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
 
     // Compute children.
-    let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+    let mut children = Vec::<(Vec<proc::ColumnRef>, Vec<TransTableName>)>::new();
     let mut subquery_results = Vec::<Vec<TableView>>::new();
     for single_status in &executing_state.subqueries {
       let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
@@ -287,12 +302,16 @@ impl TransTableReadES {
     // Create the ContextConstructor.
     let context_constructor = ContextConstructor::new(
       self.context.context_schema.clone(),
-      TransLocalTable::new(trans_table_source, &self.location_prefix.trans_table_name),
+      TransLocalTable::new(
+        trans_table_source,
+        &self.location_prefix.trans_table_name,
+        &self.query_plan.col_usage_node.source,
+      ),
       children,
     );
 
     // These are all of the `ColNames` we need in order to evaluate the Select.
-    let mut top_level_cols_set = BTreeSet::<ColName>::new();
+    let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
     top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
     for (expr, _) in &self.sql_query.projection {
       top_level_cols_set.extend(collect_top_level_cols(expr));

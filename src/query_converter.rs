@@ -1,3 +1,4 @@
+use crate::model::common::proc::SimpleSource;
 use crate::model::common::{iast, proc, ColName, TablePath, TransTableName};
 use crate::model::message as msg;
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,15 +31,17 @@ fn unique_name(counter: &mut u32, trans_table_name: &String) -> String {
 
 /// Recovers the original name of a TransTable given its new, unique name.
 fn orig_name(renamed_trans_table_name: &String) -> String {
+  // TODO: this is wrong when the `counter` above is bigger than 10. Just remove this function
+  //  and maintain a orig_name -> new_name mapping in rename_trans_tables_query_r.
   renamed_trans_table_name[5..].to_string()
 }
 
-/// Check if a table_ref is a TransTable, assuming that it's would be a unique name.
-fn to_table_ref(table_ref: &String) -> proc::TableRef {
-  if table_ref.len() >= 3 && &table_ref[..3] == "tt\\" {
-    proc::TableRef::TransTableName(TransTableName(table_ref.clone()))
+/// Check if a `table_name` is a TransTable, assuming that it would already have been made unique.
+fn to_source_ref(table_name: &String) -> proc::GeneralSourceRef {
+  if table_name.len() >= 3 && &table_name[..3] == "tt\\" {
+    proc::GeneralSourceRef::TransTableName(TransTableName(table_name.clone()))
   } else {
-    proc::TableRef::TablePath(TablePath(table_ref.clone()))
+    proc::GeneralSourceRef::TablePath(TablePath(table_name.clone()))
   }
 }
 
@@ -47,7 +50,7 @@ fn to_table_ref(table_ref: &String) -> proc::TableRef {
 // -----------------------------------------------------------------------------------------------
 
 struct RenameContext {
-  /// This stays unmuted across a function call.
+  /// This stays unmutated across a function call.
   trans_table_map: BTreeMap<String, Vec<String>>,
   /// This is incremented.
   counter: u32,
@@ -56,7 +59,11 @@ struct RenameContext {
 }
 
 /// This functions renames the TransTables in `query` by prepending 'tt\\n\\',
-/// where 'n' is a counter the increments by 1 for every TransTable.
+/// where 'n' is a counter the increments by 1 for every TransTable. It updates updates
+/// TransTable usages in `SuperSimpleSelects`, since writes are not allows to use TransTables
+/// (which we validate during Flattening later).
+///
+/// Note: this function leaves the `ctx.trans_table_map` that is passed in unmodified.
 fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query) {
   for (trans_table_name, cte_query) in &mut query.ctes {
     rename_trans_tables_query_r(ctx, cte_query); // Recurse
@@ -78,10 +85,13 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
     }
     iast::QueryBody::SuperSimpleSelect(select) => {
       // Rename the Table to select if it's a TransTable.
-      if let Some(rename_stack) = ctx.trans_table_map.get_mut(&select.from) {
-        select.from = rename_stack.last().unwrap().clone();
-      } else {
-        ctx.table_names.insert(select.from.clone());
+      if let Some(rename_stack) = ctx.trans_table_map.get_mut(&select.from.source_ref) {
+        select.from.source_ref = rename_stack.last().unwrap().clone();
+        if select.from.alias.is_none() {
+          // To avoid having to rename ColumnRefs that have a `table_ref` present that
+          // refers to this Data Source, we add a table alias with the original name.
+          select.from.alias = Some(select.from.source_ref.clone());
+        }
       }
 
       // Rename the Projection Clause
@@ -93,13 +103,6 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
       rename_trans_tables_val_expr_r(ctx, &mut select.selection);
     }
     iast::QueryBody::Update(update) => {
-      // Rename the Table to update if it's a TransTable.
-      if let Some(rename_stack) = ctx.trans_table_map.get_mut(&update.table) {
-        update.table = rename_stack.last().unwrap().clone();
-      } else {
-        ctx.table_names.insert(update.table.clone());
-      }
-
       // Rename the Set Clause
       for (_, val_expr) in &mut update.assignments {
         rename_trans_tables_val_expr_r(ctx, val_expr);
@@ -111,7 +114,7 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
     iast::QueryBody::Insert(_) => {}
   }
 
-  // Remove the TransTables defined this Query from the ctx.
+  // Remove the TransTables defined by this Query from the ctx.
   for (trans_table_name, _) in &mut query.ctes {
     let orig_name = orig_name(&trans_table_name);
     let rename_stack = ctx.trans_table_map.get_mut(&orig_name).unwrap();
@@ -181,7 +184,10 @@ fn flatten_top_level_query_r(
     iast::QueryBody::SuperSimpleSelect(select) => {
       let mut ms_select = proc::SuperSimpleSelect {
         projection: Vec::new(),
-        from: to_table_ref(&select.from),
+        from: proc::GeneralSource {
+          source_ref: to_source_ref(&select.from.source_ref),
+          alias: select.from.alias.clone(),
+        },
         selection: flatten_val_expr_r(&select.selection, counter)?,
       };
       for (val_expr, alias) in &select.projection {
@@ -197,7 +203,10 @@ fn flatten_top_level_query_r(
     }
     iast::QueryBody::Update(update) => {
       let mut ms_update = proc::Update {
-        table: TablePath(update.table.clone()),
+        table: SimpleSource {
+          source_ref: TablePath(update.table.source_ref.clone()),
+          alias: update.table.alias.clone(),
+        },
         assignment: Vec::new(),
         selection: flatten_val_expr_r(&update.selection, counter)?,
       };
@@ -214,7 +223,10 @@ fn flatten_top_level_query_r(
       trans_table_map.push((
         TransTableName(assignment_name.clone()),
         proc::MSQueryStage::Insert(proc::Insert {
-          table: TablePath(insert.table.clone()),
+          table: SimpleSource {
+            source_ref: TablePath(insert.table.source_ref.clone()),
+            alias: insert.table.alias.clone(),
+          },
           columns: insert.columns.iter().map(|x| ColName(x.clone())).collect(),
           values: insert.values.clone(),
         }),
@@ -229,8 +241,11 @@ pub fn flatten_val_expr_r(
   counter: &mut u32,
 ) -> Result<proc::ValExpr, msg::ExternalAbortedData> {
   match val_expr {
-    iast::ValExpr::ColumnRef { col_ref } => {
-      Ok(proc::ValExpr::ColumnRef { col_ref: ColName(col_ref.clone()) })
+    iast::ValExpr::ColumnRef { table_name, col_name } => {
+      Ok(proc::ValExpr::ColumnRef(proc::ColumnRef {
+        table_name: table_name.clone(),
+        col_name: ColName(col_name.clone()),
+      }))
     }
     iast::ValExpr::UnaryExpr { op, expr } => Ok(proc::ValExpr::UnaryExpr {
       op: op.clone(),
@@ -276,7 +291,10 @@ fn flatten_sub_query_r(
     iast::QueryBody::SuperSimpleSelect(select) => {
       let mut ms_select = proc::SuperSimpleSelect {
         projection: Vec::new(),
-        from: to_table_ref(&select.from),
+        from: proc::GeneralSource {
+          source_ref: to_source_ref(&select.from.source_ref),
+          alias: select.from.alias.clone(),
+        },
         selection: flatten_val_expr_r(&select.selection, counter)?,
       };
       for (val_expr, alias) in &select.projection {
@@ -290,8 +308,12 @@ fn flatten_sub_query_r(
       ));
       Ok(())
     }
-    iast::QueryBody::Update(_) => Err(msg::ExternalAbortedData::InvalidUpdate),
-    iast::QueryBody::Insert(_) => Err(msg::ExternalAbortedData::InvalidInsert),
+    iast::QueryBody::Update(_) => {
+      Err(msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidUpdate))
+    }
+    iast::QueryBody::Insert(_) => {
+      Err(msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidInsert))
+    }
   }
 }
 
@@ -306,7 +328,7 @@ mod rename_test {
   fn basic_select(table_ref: &str) -> iast::SuperSimpleSelect {
     iast::SuperSimpleSelect {
       projection: vec![],
-      from: table_ref.to_string(),
+      from: iast::TableRef { source_ref: table_ref.to_string(), alias: None },
       selection: iast::ValExpr::Value { val: iast::Value::Boolean(true) },
     }
   }
@@ -356,8 +378,6 @@ mod rename_test {
         "tt\\2\\tt2",
       )
     );
-
-    assert_eq!(ctx.table_names, BTreeSet::from_iter(vec!["t2".to_string()].into_iter()))
   }
 
   // This tests for a basic flattening of the Query.
@@ -383,7 +403,10 @@ mod rename_test {
           TransTableName("tt\\0\\tt1".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
             projection: vec![],
-            from: proc::TableRef::TablePath(TablePath("t2".to_string())),
+            from: proc::GeneralSource {
+              source_ref: proc::GeneralSourceRef::TablePath(TablePath("t2".to_string())),
+              alias: None,
+            },
             selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
           }),
         ),
@@ -391,7 +414,12 @@ mod rename_test {
           TransTableName("tt\\1\\tt1".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
             projection: vec![],
-            from: proc::TableRef::TransTableName(TransTableName("tt\\0\\tt1".to_string())),
+            from: proc::GeneralSource {
+              source_ref: proc::GeneralSourceRef::TransTableName(TransTableName(
+                "tt\\0\\tt1".to_string(),
+              )),
+              alias: None,
+            },
             selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
           }),
         ),
@@ -399,7 +427,12 @@ mod rename_test {
           TransTableName("tt\\2\\tt2".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
             projection: vec![],
-            from: proc::TableRef::TransTableName(TransTableName("tt\\1\\tt1".to_string())),
+            from: proc::GeneralSource {
+              source_ref: proc::GeneralSourceRef::TransTableName(TransTableName(
+                "tt\\1\\tt1".to_string(),
+              )),
+              alias: None,
+            },
             selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
           }),
         ),
@@ -407,7 +440,12 @@ mod rename_test {
           TransTableName("tt\\3\\".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
             projection: vec![],
-            from: proc::TableRef::TransTableName(TransTableName("tt\\2\\tt2".to_string())),
+            from: proc::GeneralSource {
+              source_ref: proc::GeneralSourceRef::TransTableName(TransTableName(
+                "tt\\2\\tt2".to_string(),
+              )),
+              alias: None,
+            },
             selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
           }),
         ),

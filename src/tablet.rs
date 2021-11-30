@@ -363,6 +363,8 @@ pub struct StorageLocalTable<'a, StorageViewT: StorageView> {
   table_schema: &'a TableSchema,
   /// The Timestamp which we are reading data at.
   timestamp: &'a Timestamp,
+  /// The `GeneralSource` in the Data Source of the Query.
+  source: &'a proc::GeneralSource,
   /// The row-filtering expression (i.e. WHERE clause) to compute subtables with.
   selection: &'a proc::ValExpr,
   /// This is used to compute the KeyBound
@@ -373,10 +375,11 @@ impl<'a, StorageViewT: StorageView> StorageLocalTable<'a, StorageViewT> {
   pub fn new(
     table_schema: &'a TableSchema,
     timestamp: &'a Timestamp,
+    source: &'a proc::GeneralSource,
     selection: &'a proc::ValExpr,
     storage: StorageViewT,
   ) -> StorageLocalTable<'a, StorageViewT> {
-    StorageLocalTable { table_schema, timestamp, selection, storage }
+    StorageLocalTable { table_schema, source, timestamp, selection, storage }
   }
 }
 
@@ -385,30 +388,43 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
     weak_contains_col(self.table_schema, col, self.timestamp)
   }
 
+  fn source(&self) -> &proc::GeneralSource {
+    self.source
+  }
+
   fn get_rows(
     &self,
     parent_context_schema: &ContextSchema,
     parent_context_row: &ContextRow,
     col_names: &Vec<ColName>,
   ) -> Vec<(Vec<ColValN>, u64)> {
-    // We extract all `ColNames` in `parent_context_schema` that aren't shadowed by the LocalTable,
-    // and then map them to their values in `parent_context_row`.
-    let mut col_map = BTreeMap::<ColName, ColValN>::new();
-    let context_col_names = &parent_context_schema.column_context_schema;
-    let context_col_vals = &parent_context_row.column_context_row;
-    for i in 0..context_col_names.len() {
-      if !self.contains_col(context_col_names.get(i).unwrap()) {
-        col_map.insert(
-          context_col_names.get(i).unwrap().clone(),
-          context_col_vals.get(i).unwrap().clone(),
-        );
-      }
-    }
-
-    // Compute the KeyBound, the subtable, and return it.
-    let key_bounds = compute_key_region(&self.selection, col_map, &self.table_schema.key_cols);
+    // Recall that since `contains_col_ref` is false for the `parent_context_schema`, this
+    // `col_map` passes the precondition of `compute_key_region`.
+    let col_map = compute_col_map(parent_context_schema, parent_context_row);
+    let key_bounds =
+      compute_key_region(&self.selection, col_map, &self.source, &self.table_schema.key_cols);
     self.storage.compute_subtable(&key_bounds, col_names, self.timestamp)
   }
+}
+
+/// Constructs a map from the `column_context_schema` to the `column_context_row`.
+pub fn compute_col_map(
+  parent_context_schema: &ContextSchema,
+  parent_context_row: &ContextRow,
+) -> BTreeMap<proc::ColumnRef, ColValN> {
+  debug_assert_eq!(
+    parent_context_schema.column_context_schema.len(),
+    parent_context_row.column_context_row.len()
+  );
+  let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
+  let context_col_names = &parent_context_schema.column_context_schema;
+  let context_col_vals = &parent_context_row.column_context_row;
+  for i in 0..context_col_names.len() {
+    let context_col_name = context_col_names.get(i).unwrap().clone();
+    let context_col_val = context_col_vals.get(i).unwrap().clone();
+    col_map.insert(context_col_name, context_col_val);
+  }
+  col_map
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -846,7 +862,9 @@ impl TabletContext {
               }
               msg::GeneralQuery::SuperSimpleTableSelectQuery(query) => {
                 // We inspect the TierMap to see what kind of ES to create
-                let table_path = cast!(proc::TableRef::TablePath, &query.sql_query.from).unwrap();
+                let table_path =
+                  cast!(proc::GeneralSourceRef::TablePath, &query.sql_query.from.source_ref)
+                    .unwrap();
                 if query.query_plan.tier_map.map.contains_key(table_path) {
                   // Here, we create an MSTableReadES.
                   let root_query_path = perform_query.root_query_path;
@@ -957,8 +975,9 @@ impl TabletContext {
                     // written, update the `tier_map`.
                     let sql_query = query.sql_query;
                     let mut query_plan = query.query_plan;
-                    let tier = query_plan.tier_map.map.get(&sql_query.table).unwrap().clone();
-                    *query_plan.tier_map.map.get_mut(&sql_query.table).unwrap() += 1;
+                    let tier =
+                      query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
+                    *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
 
                     // Create an MSWriteTableES in the QueryReplanning state, and add it to
                     // the MSQueryES.
@@ -1028,8 +1047,9 @@ impl TabletContext {
                     // written, update the `tier_map`.
                     let sql_query = query.sql_query;
                     let mut query_plan = query.query_plan;
-                    let tier = query_plan.tier_map.map.get(&sql_query.table).unwrap().clone();
-                    *query_plan.tier_map.map.get_mut(&sql_query.table).unwrap() += 1;
+                    let tier =
+                      query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
+                    *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
 
                     // Create an MSTableInsertTableES in the QueryReplanning state, and add it to
                     // the MSQueryES.
@@ -2591,87 +2611,6 @@ impl TabletContext {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Old Table Subquery Construction
-// -----------------------------------------------------------------------------------------------
-
-/// This is used to compute the Keybound of a selection expression for
-/// a given ContextRow containing external columns. Recall that the
-/// selection expression might have ColumnRefs that aren't part of
-/// the TableSchema (i.e. part of the external Context), and we can use
-/// that to compute a tigher Keybound.
-pub struct ContextKeyboundComputer {
-  /// The `ColName`s here are the ones we must read from the Context, and the `usize`
-  /// points to them in the ContextRows.
-  context_col_index: BTreeMap<ColName, usize>,
-  selection: proc::ValExpr,
-  /// These are the KeyColumns we are trying to tighten.
-  key_cols: Vec<(ColName, ColType)>,
-}
-
-impl ContextKeyboundComputer {
-  /// Here, `selection` is the the filtering expression. `parent_context_schema` is the set
-  /// of External columns whose values we can fill in (during `compute_keybounds` calls)
-  /// to help reduce the KeyBound. However, we need `table_schema` and the `timestamp` of
-  /// the Query to determine which of these External columns are shadowed so we can avoid
-  /// using them.
-  ///
-  /// Formally, `selection`'s Top-Level Cols must all be locked in `table_schema` at `timestamp`.
-  /// They must either be in the `table_schema` or in the `parent_context_schema`.
-  pub fn new(
-    selection: &proc::ValExpr,
-    table_schema: &TableSchema,
-    timestamp: &Timestamp,
-    parent_context_schema: &ContextSchema,
-  ) -> ContextKeyboundComputer {
-    // Compute the ColNames directly used in the `selection` that's not part of
-    // the TableSchema (i.e. part of the external Context).
-    let mut external_cols = BTreeSet::<ColName>::new();
-    for col in collect_top_level_cols(selection) {
-      if !weak_contains_col(table_schema, &col, timestamp) {
-        external_cols.insert(col);
-      }
-    }
-
-    // Map the `external_cols` to their position in the parent context. Recall that
-    // every element `external_cols` should exist in the parent_context, so we
-    // assert as such.
-    let mut context_col_index = BTreeMap::<ColName, usize>::new();
-    for (index, col) in parent_context_schema.column_context_schema.iter().enumerate() {
-      if external_cols.contains(col) {
-        context_col_index.insert(col.clone(), index);
-      }
-    }
-    assert_eq!(context_col_index.len(), external_cols.len());
-
-    ContextKeyboundComputer {
-      context_col_index,
-      selection: selection.clone(),
-      key_cols: table_schema.key_cols.clone(),
-    }
-  }
-
-  /// Compute the tightest keybound for the given `parent_context_row`.
-  ///
-  /// Formally, these `parent_context_row` must correspond to the `parent_context_schema`
-  /// provided in the constructor.
-  pub fn compute_keybounds(
-    &self,
-    parent_context_row: &ContextRow,
-  ) -> Result<Vec<KeyBound>, EvalError> {
-    // First, map all External Columns names to the corresponding values
-    // in this ContextRow
-    let mut col_context = BTreeMap::<ColName, ColValN>::new();
-    for (col, index) in &self.context_col_index {
-      let col_val = parent_context_row.column_context_row.get(*index).unwrap().clone();
-      col_context.insert(col.clone(), col_val);
-    }
-
-    // Then, compute the keybound
-    Ok(compute_key_region(&self.selection, col_context, &self.key_cols))
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
 //  New Table Subquery Construction
 // -----------------------------------------------------------------------------------------------
 
@@ -2680,7 +2619,7 @@ impl ContextKeyboundComputer {
 pub fn compute_contexts<LocalTableT: LocalTable>(
   parent_context: &Context,
   local_table: LocalTableT,
-  children: Vec<(Vec<ColName>, Vec<TransTableName>)>,
+  children: Vec<(Vec<proc::ColumnRef>, Vec<TransTableName>)>,
 ) -> Result<Vec<Context>, EvalError> {
   // Create the ContextConstruct.
   let context_constructor =
@@ -2727,7 +2666,7 @@ pub fn compute_subqueries<
   // ContextConstructor, and then we construct GRQueryESs.
 
   // Compute children.
-  let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+  let mut children = Vec::<(Vec<proc::ColumnRef>, Vec<TransTableName>)>::new();
   for child in &subquery_view.query_plan.col_usage_node.children {
     children.push((nodes_external_cols(child), nodes_external_trans_tables(child)));
   }

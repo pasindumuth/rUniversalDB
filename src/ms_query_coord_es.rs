@@ -1,6 +1,6 @@
 use crate::col_usage::{
-  iterate_stage_ms_query, node_external_trans_tables, ColUsagePlanner, FrozenColUsageNode,
-  GeneralStage,
+  iterate_stage_ms_query, node_external_trans_tables, ColUsageError, ColUsagePlanner,
+  FrozenColUsageNode, GeneralStage,
 };
 use crate::common::{lookup, mk_qid, OrigP, QueryPlan, TMStatus};
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
@@ -431,8 +431,8 @@ impl FullMSCoordES {
     // Send out the PerformQuery.
     let helper = match ms_query_stage {
       proc::MSQueryStage::SuperSimpleSelect(select_query) => {
-        match &select_query.from {
-          proc::TableRef::TablePath(table_path) => {
+        match &select_query.from.source_ref {
+          proc::GeneralSourceRef::TablePath(table_path) => {
             let perform_query = msg::PerformQuery {
               root_query_path: root_query_path.clone(),
               sender_path: sender_path.clone().into_ct(),
@@ -447,10 +447,15 @@ impl FullMSCoordES {
               ),
             };
             let gen = es.query_plan.table_location_map.get(table_path).unwrap();
-            let tids = ctx.ctx(io_ctx).get_min_tablets(&table_path, gen, &select_query.selection);
+            let tids = ctx.ctx(io_ctx).get_min_tablets(
+              &table_path,
+              &select_query.from,
+              gen,
+              &select_query.selection,
+            );
             SendHelper::TableQuery(perform_query, tids)
           }
-          proc::TableRef::TransTableName(sub_trans_table_name) => {
+          proc::GeneralSourceRef::TransTableName(sub_trans_table_name) => {
             // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
             let location_prefix = context
               .context_schema
@@ -489,8 +494,13 @@ impl FullMSCoordES {
           }),
         };
         let table_path = &update_query.table;
-        let gen = es.query_plan.table_location_map.get(table_path).unwrap();
-        let tids = ctx.ctx(io_ctx).get_min_tablets(table_path, gen, &update_query.selection);
+        let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
+        let tids = ctx.ctx(io_ctx).get_min_tablets(
+          &table_path.source_ref,
+          &table_path.to_read_source(),
+          gen,
+          &update_query.selection,
+        );
         SendHelper::TableQuery(perform_query, tids)
       }
       proc::MSQueryStage::Insert(insert_query) => {
@@ -508,8 +518,8 @@ impl FullMSCoordES {
         // As an optimization, for inserts, we can evaluate the VALUES and select only the
         // Tablets that are written to. For now, we just consider all.
         let table_path = &insert_query.table;
-        let gen = es.query_plan.table_location_map.get(table_path).unwrap();
-        let tids = ctx.ctx(io_ctx).get_all_tablets(table_path, gen);
+        let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
+        let tids = ctx.ctx(io_ctx).get_all_tablets(&table_path.source_ref, gen);
         SendHelper::TableQuery(perform_query, tids)
       }
     };
@@ -672,10 +682,14 @@ impl QueryPlanningES {
     ) {
       Ok(_) => {}
       Err(KeyValidationError::InvalidUpdate) => {
-        return QueryPlanningAction::Failed(msg::ExternalAbortedData::InvalidUpdate);
+        return QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::InvalidUpdate,
+        ));
       }
       Err(KeyValidationError::InvalidInsert) => {
-        return QueryPlanningAction::Failed(msg::ExternalAbortedData::InvalidInsert);
+        return QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::InvalidInsert,
+        ));
       }
     }
 
@@ -698,14 +712,13 @@ impl QueryPlanningES {
       table_generation: &ctx.gossip.table_generation,
       timestamp: self.timestamp.clone(),
     };
-    let col_usage_nodes = planner.plan_ms_query(&self.sql_query);
 
-    // If there is an External Column at the top-level, we must go to MasterQueryPlanning.
-    for (_, (_, child)) in &col_usage_nodes {
-      if !child.external_cols.is_empty() {
+    let col_usage_nodes = match planner.plan_ms_query(&self.sql_query) {
+      Ok(col_usage_nodes) => col_usage_nodes,
+      Err(ColUsageError::InvalidColumnRef) => {
         return self.perform_master_query_planning(ctx, io_ctx);
       }
-    }
+    };
 
     // If we get here, the QueryPlan is valid, so we return it and go to Done.
     let all_tier_maps = compute_all_tier_maps(&self.sql_query);
@@ -774,15 +787,6 @@ impl QueryPlanningES {
     assert_eq!(last_state.master_query_id, master_qid);
     match result {
       MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
-        // We must still check that there are no top-level External Columns.
-        for (_, (_, child)) in &master_query_plan.col_usage_nodes {
-          if !child.external_cols.is_empty() {
-            // If so, we can definitively return an failure.
-            self.state = QueryPlanningS::Done;
-            return QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryExecutionError);
-          }
-        }
-
         // By now, we know the QueryPlanning can succeed. However, recall that the MasterQueryPlan
         // might have used a db_schema that is beyond what this node has in its GossipData. Thus,
         // we check if all TablePaths are in the GossipData, waiting if not. This is only needed
@@ -803,13 +807,9 @@ impl QueryPlanningES {
         // Otherwise, we can finish QueryPlanning and return a Success.
         self.finish_master_query_plan(ctx, io_ctx, master_query_plan)
       }
-      MasteryQueryPlanningResult::TablePathDNE(_)
-      | MasteryQueryPlanningResult::InvalidUpdate
-      | MasteryQueryPlanningResult::InvalidInsert
-      | MasteryQueryPlanningResult::RequiredColumnDNE(_) => {
-        // We just return a generic error to the External
+      MasteryQueryPlanningResult::QueryPlanningError(error) => {
         self.state = QueryPlanningS::Done;
-        QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryExecutionError)
+        QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryPlanningError(error))
       }
     }
   }

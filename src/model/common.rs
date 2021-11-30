@@ -287,7 +287,7 @@ pub struct TransTableLocationPrefix {
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextSchema {
-  pub column_context_schema: Vec<ColName>,
+  pub column_context_schema: Vec<proc::ColumnRef>,
   pub trans_table_context_schema: Vec<TransTableLocationPrefix>,
 }
 
@@ -368,15 +368,37 @@ pub mod proc {
   use crate::model::common::{ColName, ColType, TablePath, TransTableName};
   use serde::{Deserialize, Serialize};
 
+  // Basic types
+
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub enum TableRef {
+  pub enum GeneralSourceRef {
     TablePath(TablePath),
     TransTableName(TransTableName),
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct SimpleSource {
+    pub source_ref: TablePath,
+    pub alias: Option<String>,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct GeneralSource {
+    pub source_ref: GeneralSourceRef,
+    pub alias: Option<String>,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+  pub struct ColumnRef {
+    pub table_name: Option<String>,
+    pub col_name: ColName,
+  }
+
+  // Query Types
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum ValExpr {
-    ColumnRef { col_ref: ColName },
+    ColumnRef(ColumnRef),
     UnaryExpr { op: UnaryOp, expr: Box<ValExpr> },
     BinaryExpr { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
     Value { val: Value },
@@ -386,20 +408,20 @@ pub mod proc {
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
     pub projection: Vec<(ValExpr, Option<ColName>)>,
-    pub from: TableRef,
+    pub from: GeneralSource,
     pub selection: ValExpr,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Update {
-    pub table: TablePath,
+    pub table: SimpleSource,
     pub assignment: Vec<(ColName, ValExpr)>,
     pub selection: ValExpr,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Insert {
-    pub table: TablePath,
+    pub table: SimpleSource,
     /// The columns to insert to
     pub columns: Vec<ColName>,
     /// The values to insert (where the inner `Vec` is a row)
@@ -464,6 +486,30 @@ pub mod proc {
   pub struct DropTable {
     pub table_path: TablePath,
   }
+
+  // Implementations
+
+  impl GeneralSource {
+    pub fn name(&self) -> &String {
+      if let Some(alias) = &self.alias {
+        alias
+      } else {
+        match &self.source_ref {
+          GeneralSourceRef::TablePath(TablePath(name)) => name,
+          GeneralSourceRef::TransTableName(TransTableName(name)) => name,
+        }
+      }
+    }
+  }
+
+  impl SimpleSource {
+    pub fn to_read_source(&self) -> GeneralSource {
+      GeneralSource {
+        source_ref: GeneralSourceRef::TablePath(self.source_ref.clone()),
+        alias: self.alias.clone(),
+      }
+    }
+  }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -475,7 +521,7 @@ pub mod iast {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum ValExpr {
-    ColumnRef { col_ref: String },
+    ColumnRef { table_name: Option<String>, col_name: String },
     UnaryExpr { op: UnaryOp, expr: Box<ValExpr> },
     BinaryExpr { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
     Value { val: Value },
@@ -533,22 +579,28 @@ pub mod iast {
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct TableRef {
+    pub source_ref: String,
+    pub alias: Option<String>,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
     pub projection: Vec<(ValExpr, Option<String>)>, // The select clause
-    pub from: String,
+    pub from: TableRef,
     pub selection: ValExpr, // The where clause
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Update {
-    pub table: String,
+    pub table: TableRef,
     pub assignments: Vec<(String, ValExpr)>,
     pub selection: ValExpr,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Insert {
-    pub table: String,
+    pub table: TableRef,
     /// The columns to insert to
     pub columns: Vec<String>,
     /// The values to insert (where the inner `Vec` is a row)

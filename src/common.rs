@@ -177,8 +177,13 @@ impl TableSchema {
     TableSchema { key_cols, val_cols: mvm }
   }
 
-  pub fn get_key_cols(&self) -> Vec<ColName> {
-    self.key_cols.iter().map(|(col, _)| col.clone()).collect()
+  pub fn get_key_col_refs(&self) -> Vec<proc::ColumnRef> {
+    self
+      .key_cols
+      .iter()
+      .cloned()
+      .map(|(col_name, _)| proc::ColumnRef { table_name: None, col_name })
+      .collect()
   }
 }
 
@@ -298,8 +303,8 @@ pub fn merge_table_views(
   (schema, views)
 }
 
-pub fn to_table_path(table_ref: &proc::TableRef) -> &TablePath {
-  cast!(proc::TableRef::TablePath, table_ref).unwrap()
+pub fn to_table_path(source: &proc::GeneralSource) -> &TablePath {
+  cast!(proc::GeneralSourceRef::TablePath, &source.source_ref).unwrap()
 }
 
 // -----------------------------------------------------------------------------------------------

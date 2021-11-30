@@ -1,5 +1,5 @@
 use crate::common::{
-  ColBound, KeyBound, PolyColBound, ReadRegion, SingleBound, WriteRegion, WriteRegionType,
+  lookup, ColBound, KeyBound, PolyColBound, ReadRegion, SingleBound, WriteRegion, WriteRegionType,
 };
 use crate::model::common::proc::ValExpr;
 use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
@@ -58,7 +58,7 @@ pub enum CExpr {
 /// with a `KeyColumnRef`, and the unknown things with `Unknown`.
 #[derive(Debug)]
 pub enum KBExpr {
-  KeyColumnRef { col_ref: ColName },
+  KeyColumnRef { col_name: ColName },
   UnaryExpr { op: iast::UnaryOp, expr: Box<KBExpr> },
   BinaryExpr { op: iast::BinaryOp, left: Box<KBExpr>, right: Box<KBExpr> },
   Value { val: ColValN },
@@ -89,12 +89,12 @@ pub fn construct_colvaln(val: iast::Value) -> Result<ColValN, EvalError> {
 /// should be increment to point passed the final subquery_val that was used.
 pub fn construct_cexpr(
   sql_expr: &proc::ValExpr,
-  col_map: &BTreeMap<ColName, ColValN>,
+  col_map: &BTreeMap<proc::ColumnRef, ColValN>,
   subquery_vals: &Vec<ColValN>,
   next_subquery_idx: &mut usize,
 ) -> Result<CExpr, EvalError> {
   let c_expr = match sql_expr {
-    ValExpr::ColumnRef { col_ref } => CExpr::Value { val: col_map.get(col_ref).unwrap().clone() },
+    ValExpr::ColumnRef(col) => CExpr::Value { val: col_map.get(col).unwrap().clone() },
     ValExpr::UnaryExpr { op, expr } => CExpr::UnaryExpr {
       op: op.clone(),
       expr: Box::new(construct_cexpr(expr.deref(), col_map, subquery_vals, next_subquery_idx)?),
@@ -306,33 +306,55 @@ pub fn evaluate_c_expr(c_expr: &CExpr) -> Result<ColValN, EvalError> {
   }
 }
 
+fn contains_key_col_ref(
+  source: &proc::GeneralSource,
+  key_cols: &Vec<(ColName, ColType)>,
+  col: &proc::ColumnRef,
+) -> bool {
+  if let Some(table_name) = &col.table_name {
+    if table_name == source.name() {
+      if lookup(key_cols, &col.col_name).is_some() {
+        return true;
+      }
+    }
+  } else {
+    if lookup(key_cols, &col.col_name).is_some() {
+      return true;
+    }
+  }
+  false
+}
+
 /// Construct a `KBExpr` for evaluating KeyBounds. The `col_map` contains values for
 /// columns which are known (i.e. the ColNames from the parent context that we should
 /// use), and `key_cols` are the Key Columns of the Table.
 ///
-/// Note that `col_map` must have distinct `ColName`s from `key_cols`.
+/// Note that the `ColumnRef`s in `col_map` must evaluate `contains_key_col_ref` to false.
 fn construct_kb_expr(
   expr: proc::ValExpr,
-  col_map: &BTreeMap<ColName, ColValN>,
-  key_cols: &Vec<ColName>,
+  col_map: &BTreeMap<proc::ColumnRef, ColValN>,
+  source: &proc::GeneralSource,
+  key_cols: &Vec<(ColName, ColType)>,
 ) -> Result<KBExpr, EvalError> {
   let kb_expr = match expr {
-    ValExpr::ColumnRef { col_ref } => {
-      if let Some(val) = col_map.get(&col_ref) {
+    ValExpr::ColumnRef(col) => {
+      if let Some(val) = col_map.get(&col) {
         KBExpr::Value { val: val.clone() }
-      } else if key_cols.contains(&col_ref) {
-        KBExpr::KeyColumnRef { col_ref }
       } else {
-        KBExpr::UnknownValue
+        if contains_key_col_ref(source, key_cols, &col) {
+          KBExpr::KeyColumnRef { col_name: col.col_name }
+        } else {
+          KBExpr::UnknownValue
+        }
       }
     }
     ValExpr::UnaryExpr { op, expr } => {
-      KBExpr::UnaryExpr { op, expr: Box::new(construct_kb_expr(*expr, col_map, key_cols)?) }
+      KBExpr::UnaryExpr { op, expr: Box::new(construct_kb_expr(*expr, col_map, source, key_cols)?) }
     }
     ValExpr::BinaryExpr { op, left, right } => KBExpr::BinaryExpr {
       op,
-      left: Box::new(construct_kb_expr(*left, col_map, key_cols)?),
-      right: Box::new(construct_kb_expr(*right, col_map, key_cols)?),
+      left: Box::new(construct_kb_expr(*left, col_map, source, key_cols)?),
+      right: Box::new(construct_kb_expr(*right, col_map, source, key_cols)?),
     },
     ValExpr::Value { val } => KBExpr::Value { val: construct_colvaln(val.clone())? },
     ValExpr::Subquery { .. } => KBExpr::UnknownValue,
@@ -453,9 +475,9 @@ fn boolean_leaf_constraint<T: BoundType + Clone>(
   left_f: fn(T) -> ColBound<T>,
   right_f: fn(T) -> ColBound<T>,
 ) -> Vec<ColBound<T>> {
-  if let KBExpr::KeyColumnRef { col_ref } = left.deref() {
+  if let KBExpr::KeyColumnRef { col_name: key_col_name } = left.deref() {
     // First, we see if the left side is a ColumnRef to `col_name`.
-    if col_ref == col_name {
+    if key_col_name == col_name {
       // In this case, we see if we can evaluate the `right` expression.
       if let Ok(Some(right_val)) = evaluate_kb_expr(right.deref()) {
         if None == right_val {
@@ -467,9 +489,9 @@ fn boolean_leaf_constraint<T: BoundType + Clone>(
         }
       }
     }
-  } else if let KBExpr::KeyColumnRef { col_ref } = right.deref() {
+  } else if let KBExpr::KeyColumnRef { col_name: key_col_name } = right.deref() {
     // Otherwise, we see if the right side is a ColumnRef to `col_name`.
-    if col_ref == col_name {
+    if key_col_name == col_name {
       // In this case, we see if we can evaluate the `left` expression.
       if let Ok(Some(left_val)) = evaluate_kb_expr(left.deref()) {
         if None == left_val {
@@ -650,24 +672,24 @@ pub fn compress_row_region(row_region: Vec<KeyBound>) -> Vec<KeyBound> {
 /// Importantly, `expr` might not even be evaluatable for keys within the  `KeyBound` (i.e.
 /// there might be runtime errors or type errors). But that is not something we check here.
 ///
-/// Note that `col_map` must have distinct `ColName`s from `key_cols`.
+/// Note that the `ColumnRef`s in `col_map` must evaluate `contains_key_col_ref` to false.
 pub fn compute_key_region(
   expr: &proc::ValExpr,
-  col_map: BTreeMap<ColName, ColValN>,
+  col_map: BTreeMap<proc::ColumnRef, ColValN>,
+  source: &proc::GeneralSource,
   key_cols: &Vec<(ColName, ColType)>,
 ) -> Vec<KeyBound> {
   // Enforce the precondition.
   debug_assert!((|| {
-    for (col_name, _) in key_cols {
-      if col_map.contains_key(col_name) {
+    for (col, _) in &col_map {
+      if contains_key_col_ref(source, key_cols, &col) {
         return false;
       }
     }
     true
   })());
 
-  let key_col_names = Vec::from_iter(key_cols.iter().map(|(name, _)| name.clone()));
-  let kb_expr_res = construct_kb_expr(expr.clone(), &col_map, &key_col_names);
+  let kb_expr_res = construct_kb_expr(expr.clone(), &col_map, source, key_cols);
   let mut key_bounds = Vec::<KeyBound>::new();
 
   // The strategy here is to start with an all-encompassing KeyRegion, then reduce the

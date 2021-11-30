@@ -11,15 +11,15 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
   iterate_stage_ms_query(
     &mut |stage: GeneralStage| match stage {
       GeneralStage::SuperSimpleSelect(query) => {
-        if let proc::TableRef::TablePath(table_path) = &query.from {
+        if let proc::GeneralSourceRef::TablePath(table_path) = &query.from.source_ref {
           table_paths.insert(table_path.clone());
         }
       }
       GeneralStage::Update(query) => {
-        table_paths.insert(query.table.clone());
+        table_paths.insert(query.table.source_ref.clone());
       }
       GeneralStage::Insert(query) => {
-        table_paths.insert(query.table.clone());
+        table_paths.insert(query.table.source_ref.clone());
       }
     },
     query,
@@ -39,10 +39,10 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(update) => {
-        cur_tier_map.insert(update.table.clone(), 0);
+        cur_tier_map.insert(update.table.source_ref.clone(), 0);
       }
       proc::MSQueryStage::Insert(insert) => {
-        cur_tier_map.insert(insert.table.clone(), 0);
+        cur_tier_map.insert(insert.table.source_ref.clone(), 0);
       }
     }
   }
@@ -51,10 +51,10 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(update) => {
-        *cur_tier_map.get_mut(&update.table).unwrap() += 1;
+        *cur_tier_map.get_mut(&update.table.source_ref).unwrap() += 1;
       }
       proc::MSQueryStage::Insert(insert) => {
-        *cur_tier_map.get_mut(&insert.table).unwrap() += 1;
+        *cur_tier_map.get_mut(&insert.table.source_ref).unwrap() += 1;
       }
     }
   }
@@ -92,12 +92,12 @@ pub fn compute_extra_req_cols(ms_query: &proc::MSQuery) -> BTreeMap<TablePath, V
       GeneralStage::Update(query) => {
         add_cols(
           &mut extra_req_cols,
-          &query.table,
+          &query.table.source_ref,
           query.assignment.iter().map(|(c, _)| c).cloned().collect(),
         );
       }
       GeneralStage::Insert(query) => {
-        add_cols(&mut extra_req_cols, &query.table, query.columns.clone());
+        add_cols(&mut extra_req_cols, &query.table.source_ref, query.columns.clone());
       }
     },
     ms_query,
@@ -117,18 +117,18 @@ pub fn compute_query_plan_data(
   iterate_stage_ms_query(
     &mut |stage: GeneralStage| match stage {
       GeneralStage::SuperSimpleSelect(query) => {
-        if let proc::TableRef::TablePath(table_path) = &query.from {
+        if let proc::GeneralSourceRef::TablePath(table_path) = &query.from.source_ref {
           let gen = table_generation.static_read(table_path, timestamp).unwrap();
           table_location_map.insert(table_path.clone(), gen.clone());
         }
       }
       GeneralStage::Update(query) => {
-        let gen = table_generation.static_read(&query.table, timestamp).unwrap();
-        table_location_map.insert(query.table.clone(), gen.clone());
+        let gen = table_generation.static_read(&query.table.source_ref, timestamp).unwrap();
+        table_location_map.insert(query.table.source_ref.clone(), gen.clone());
       }
       GeneralStage::Insert(query) => {
-        let gen = table_generation.static_read(&query.table, timestamp).unwrap();
-        table_location_map.insert(query.table.clone(), gen.clone());
+        let gen = table_generation.static_read(&query.table.source_ref, timestamp).unwrap();
+        table_location_map.insert(query.table.source_ref.clone(), gen.clone());
       }
     },
     ms_query,
@@ -161,9 +161,8 @@ pub fn perform_static_validations(
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(query) => {
-        // The TablePath exists, from the above.
-        let gen = table_generation.static_read(&query.table, timestamp).unwrap();
-        let schema = db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
+        let gen = table_generation.static_read(&query.table.source_ref, timestamp).unwrap();
+        let schema = db_schema.get(&(query.table.source_ref.clone(), gen.clone())).unwrap();
         for (col_name, _) in &query.assignment {
           if lookup(&schema.key_cols, col_name).is_some() {
             return Err(KeyValidationError::InvalidUpdate);
@@ -183,8 +182,8 @@ pub fn perform_static_validations(
       proc::MSQueryStage::Update(_) => {}
       proc::MSQueryStage::Insert(query) => {
         // The TablePath exists, from the above.
-        let gen = table_generation.static_read(&query.table, timestamp).unwrap();
-        let schema = db_schema.get(&(query.table.clone(), gen.clone())).unwrap();
+        let gen = table_generation.static_read(&query.table.source_ref, timestamp).unwrap();
+        let schema = db_schema.get(&(query.table.source_ref.clone(), gen.clone())).unwrap();
         // Check that all KeyCols are present
         for (col_name, _) in &schema.key_cols {
           if !query.columns.contains(col_name) {

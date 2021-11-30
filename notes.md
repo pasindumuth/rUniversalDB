@@ -70,3 +70,19 @@ Example (unrefined) of impelmenting Debug for an enum:
     }
   }
 ```
+
+
+```
+  let successful_queries = sorted_success_res.len() as u32;
+  let mut count = 0;
+  for (_, (req, res)) in sorted_success_res {
+    println!(
+      "         QUERY {:?}:
+                Req: {:?}
+                Res: {:?}",
+      count, req, res
+    );
+    count += 1;
+    context.send_query(&mut sim, req.query.as_str(), 10000, res.result);
+  }
+```

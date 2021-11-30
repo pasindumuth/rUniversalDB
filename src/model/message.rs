@@ -402,21 +402,31 @@ pub struct ExternalQuerySuccess {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum QueryPlanningError {
+  /// Occurs when the query contains a `TablePath` that does exist in the database schema.
+  /// This is idempotent.
+  TablesDNE(Vec<TablePath>),
+  /// Occurs if an `Update` occurs as a subquery or if it is trying to write to a KeyCol.
+  InvalidUpdate,
+  /// Occurs if an Insert appears as a Subquery, if it does not write to every KeyCol,
+  /// or if the VALUES clause does not correspond to the columns to insert to.
+  InvalidInsert,
+  /// Occurs if a `ColumnRef` has an `table_name`, but the reference table does not exist, or
+  /// the does not contain the `col_name`, or if the `ColumnRef` appears as an `external_cols`
+  /// in the top-level `FrozenColUsageNode`s
+  InvalidColUsage,
+  /// Occurs when `ColName`s are not present in the database schema.
+  RequiredColumnDNE(Vec<ColName>),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ExternalAbortedData {
   /// Happens if we get an External Query with a RequestId that's already in use.
   NonUniqueRequestId,
   /// Happens during the initial parsing of the Query.
   ParseError(String),
-  /// This occurs in the when the SQL query contains a table reference
-  /// that is neither a TransTable or a Table in the gossiped_db_schema.
-  TableDNE(String),
-  /// This occurs if an Update appears as a Subquery (i.e. not at the top-level
-  /// of the SQL transaction) an if the Update is trying to write to a key column.
-  InvalidUpdate,
-  /// This occurs if an Insert appears as a Subquery (i.e. not at the top-level
-  /// of the SQL transaction), if it does not write to very key column, and if the VALUES clause
-  /// is does not correspond to the columns to insert to.
-  InvalidInsert,
+  /// QueryPlanning related errors
+  QueryPlanningError(QueryPlanningError),
   /// This is a fatal Query Execution error, including non-recoverable QueryErrors
   /// and ColumnsDNEs. We don't give any details for simplicity. The External should just
   /// understand that their query was invalid, but might become valid for the same timestamp
@@ -424,7 +434,7 @@ pub enum ExternalAbortedData {
   QueryExecutionError,
 
   /// Cancellation
-  ///
+
   /// This is sent back as a response when a CancelExternalQuery comes in. If the
   /// transaction still exists, we make sure to abort it.
   CancelConfirmed,
@@ -482,13 +492,7 @@ pub struct MasterQueryPlan {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasteryQueryPlanningResult {
   MasterQueryPlan(MasterQueryPlan),
-  TablePathDNE(Vec<TablePath>),
-  /// This is returned if one of the Update queries tried modifiying a KeyCol.
-  InvalidUpdate,
-  /// This is returned if one of the Insert queries does not contain a KeyCol, or the
-  /// `values` is not a grid whose width is `columns.len()`.
-  InvalidInsert,
-  RequiredColumnDNE(Vec<ColName>),
+  QueryPlanningError(QueryPlanningError),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

@@ -1,8 +1,8 @@
-use crate::col_usage::{collect_top_level_cols, compute_select_schema};
+use crate::col_usage::{collect_top_level_cols, compute_select_schema, free_external_cols};
 use crate::common::{
   lookup, mk_qid, to_table_path, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion,
 };
-use crate::expression::{compress_row_region, is_true};
+use crate::expression::{compress_row_region, compute_key_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
   proc, CQueryPath, ColName, ColValN, Context, ContextRow, QueryId, TQueryPath, TableView,
@@ -15,7 +15,7 @@ use crate::server::{
 };
 use crate::storage::MSStorageView;
 use crate::tablet::{
-  compute_subqueries, ColumnsLocking, ContextKeyboundComputer, Executing, MSQueryES, Pending,
+  compute_col_map, compute_subqueries, ColumnsLocking, Executing, MSQueryES, Pending,
   RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
   SubqueryPending, TabletContext,
 };
@@ -83,7 +83,7 @@ impl MSTableReadES {
     assert!(matches!(self.state, MSReadExecutionS::Start));
 
     let mut all_cols = BTreeSet::<ColName>::new();
-    all_cols.extend(self.query_plan.col_usage_node.external_cols.clone());
+    all_cols.extend(free_external_cols(&self.query_plan.col_usage_node.external_cols));
     all_cols.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
 
     // If there are extra required cols, we add them in.
@@ -110,10 +110,10 @@ impl MSTableReadES {
   /// Note: this does *not* required columns to be locked.
   fn does_query_plan_align(&self, ctx: &TabletContext) -> bool {
     // First, check that `external_cols are absent.
-    for col in &self.query_plan.col_usage_node.external_cols {
+    for col in free_external_cols(&self.query_plan.col_usage_node.external_cols) {
       // Since the `key_cols` are static, no query plan should have one of
       // these as an External Column.
-      assert!(lookup(&ctx.table_schema.key_cols, col).is_none());
+      assert!(lookup(&ctx.table_schema.key_cols, &col).is_none());
       if ctx.table_schema.val_cols.static_read(&col, self.timestamp).is_some() {
         return false;
       }
@@ -237,27 +237,17 @@ impl MSTableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
   ) -> MSTableReadAction {
-    // Setup ability to compute a tight Keybound for every ContextRow.
-    let keybound_computer = ContextKeyboundComputer::new(
-      &self.sql_query.selection,
-      &ctx.table_schema,
-      &self.timestamp,
-      &self.context.context_schema,
-    );
-
     // Compute the Row Region by taking the union across all ContextRows
     let mut row_region = Vec::<KeyBound>::new();
     for context_row in &self.context.context_rows {
-      match keybound_computer.compute_keybounds(&context_row) {
-        Ok(key_bounds) => {
-          for key_bound in key_bounds {
-            row_region.push(key_bound);
-          }
-        }
-        Err(eval_error) => {
-          self.state = MSReadExecutionS::Done;
-          return MSTableReadAction::QueryError(mk_eval_error(eval_error));
-        }
+      let key_bounds = compute_key_region(
+        &self.sql_query.selection,
+        compute_col_map(&self.context.context_schema, context_row),
+        &self.query_plan.col_usage_node.source,
+        &ctx.table_schema.key_cols,
+      );
+      for key_bound in key_bounds {
+        row_region.push(key_bound);
       }
     }
     row_region = compress_row_region(row_region);
@@ -311,6 +301,7 @@ impl MSTableReadES {
           StorageLocalTable::new(
             &ctx.table_schema,
             &self.timestamp,
+            &self.query_plan.col_usage_node.source,
             &self.sql_query.selection,
             MSStorageView::new(
               &ctx.storage,
@@ -410,7 +401,7 @@ impl MSTableReadES {
     let executing_state = cast!(MSReadExecutionS::Executing, &mut self.state).unwrap();
 
     // Compute children.
-    let mut children = Vec::<(Vec<ColName>, Vec<TransTableName>)>::new();
+    let mut children = Vec::<(Vec<proc::ColumnRef>, Vec<TransTableName>)>::new();
     let mut subquery_results = Vec::<Vec<TableView>>::new();
     for single_status in &executing_state.subqueries {
       let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
@@ -426,6 +417,7 @@ impl MSTableReadES {
       StorageLocalTable::new(
         &ctx.table_schema,
         &self.timestamp,
+        &self.query_plan.col_usage_node.source,
         &self.sql_query.selection,
         MSStorageView::new(
           &ctx.storage,
@@ -438,7 +430,7 @@ impl MSTableReadES {
     );
 
     // These are all of the `ColNames` we need in order to evaluate the Select.
-    let mut top_level_cols_set = BTreeSet::<ColName>::new();
+    let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
     top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
     for (expr, _) in &self.sql_query.projection {
       top_level_cols_set.extend(collect_top_level_cols(expr));

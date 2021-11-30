@@ -1,11 +1,12 @@
 use crate::common::{lookup, TableSchema};
-use crate::model::common::proc::MSQueryStage;
+use crate::model::common::proc::GeneralSourceRef;
 use crate::model::common::{
   iast, proc, ColName, Gen, TablePath, TierMap, Timestamp, TransTableName,
 };
 use crate::multiversion_map::MVM;
-use crate::server::weak_contains_col;
+use crate::server::{contains_col, weak_contains_col};
 use serde::{Deserialize, Serialize};
+use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
@@ -14,39 +15,43 @@ use std::ops::Deref;
 // -----------------------------------------------------------------------------------------------
 
 /// There are several uses of this.
-/// 1. The purpose of the `FrozenColUsageNode` is for a parent ES to be able to compute
-///    the `Context` that it should send a child ES. That is why `requested_cols` only contains
-///    `ColumnRef`s that can reference an ancestral `TableRef` if its query's table's schema
-///    does not have it. (Hence why we do not include projected columns in SELECT queries,
-///    or assigned columns in UPDATE queries.)
-/// 2. When the MSCoordES creates this using its GossipData, things like `safe_present_cols`
-///    and `external_cols` should be considered expectations on what the schemas should be.
+/// 1. The purpose of the `FrozenColUsageNode` is for a parent ES to be able to compute the
+///    `Context` that should be used for a child ES. That is why `requested_cols` only contains
+///    `ColumnRef`s that can reference an ancestral `GeneralSource` if its query's table's schema
+///    does not have it. (Hence why we do not include assigned columns in UPDATE queries or
+///    inserted column in INSERT queries.)
+/// 2. When the MSCoordES creates this using its GossipData, `ColName`s in `safe_present_cols`
+///    should be present, and `free_external_cols(external_cols)` should be absent in the schema.
 ///    The schemas should be checked and the Transaction aborted if the expectations fail.
 /// 3. Instead, if this is sent back with a MasterQueryPlanning, it will be hard facts that
-///    `safe_present_cols` and `external_cols` *will* align with the table schemas.
+///    `safe_present_cols` and `free_external_cols(external_cols)` *will* align with the table
+///    schemas.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FrozenColUsageNode {
-  /// The (Trans)Table used in the `GeneralQuery` corresponding to this node.
-  pub table_ref: proc::TableRef,
+  /// The (Trans)Table used in the `proc::GeneralQuery` corresponding to this node.
+  pub source: proc::GeneralSource,
 
   /// These are the ColNames used within all ValExprs outside of `Subquery` nodes.
   /// This is a convenience field used only in the ColUsagePlanner.
-  pub requested_cols: Vec<ColName>,
+  pub requested_cols: Vec<proc::ColumnRef>,
 
   /// Take the union of `requested_cols` and all `external_cols` of all `FrozenColUsageNodes`
   /// in `children`. Call this all_cols.
   ///
   /// Below, `safe_present_cols` is the subset of all_cols that are present in the (Trans)Table
-  /// (according to the gossiped_db_schema). `external_cols` are the complement of that.
+  /// (according to the gossiped_db_schema). `external_cols` is the complement of that.
   pub children: Vec<Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>>,
   pub safe_present_cols: Vec<ColName>,
-  pub external_cols: Vec<ColName>,
+  /// The External Cols Property is where if a `table_name` is present in a `ColumnRef`, this
+  /// will be different from `source.name()`. This can be seen since such a `ColumnRef` must
+  /// either be placed into `safe_present_cols`, or the QueryPlanning should fail.
+  pub external_cols: Vec<proc::ColumnRef>,
 }
 
 impl FrozenColUsageNode {
-  pub fn new(table_ref: proc::TableRef) -> FrozenColUsageNode {
+  pub fn new(source: proc::GeneralSource) -> FrozenColUsageNode {
     FrozenColUsageNode {
-      table_ref,
+      source,
       requested_cols: vec![],
       children: vec![],
       safe_present_cols: vec![],
@@ -55,24 +60,31 @@ impl FrozenColUsageNode {
   }
 }
 
-/// This algorithm computes a `Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>` that
-/// is parallel to the provided `MSQuery`. This is a tree. Every `FrozenColUsageNode` corresponds
-/// to an `(MS/GR)QueryStage`, and every `Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))>`
-/// corresponds to an `(MS/GR)Query`.
+pub enum ColUsageError {
+  /// This is returned two ways:
+  ///   1. If `ColumnRef` has a `source` that does not exist.
+  ///   2. If `ColumnRef` has a `source` that exists, but the `ColName` is not in the
+  ///      schema of that table.
+  InvalidColumnRef,
+}
+
+/// This algorithm computes a `Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>`
+/// that is parallel to the provided `MSQuery`. This is a tree. Every `FrozenColUsageNode`
+/// corresponds to an `(MS/GR)QueryStage`, and every `Vec<(TransTableName, (Vec<Option<ColName>>,
+/// FrozenColUsageNode))>` corresponds to an `(MS/GR)Query`.
 ///
 /// This algorithm contains the following assumptions:
 ///   1. All `TablePath`s referenced in the `MSQuery` exist in `table_generation` and `db_schema`
 ///      at the given `Timestamp` (by `static_read`).
-///   2. All projected columns in `SELECT` queries and all assigned columns in `UPDATE` queries
+///   2. All inserted columns in `INSERT` queries and all assigned columns in `UPDATE` queries
 ///      exist in the `db_schema`.
 ///   3. The assigned columns in an `UPDATE` are disjoint from the Key Columns. (This algorithm
 ///      does not support such queries).
-///   4. The `columns` in an `INSERT` are all present in the Table.
 ///
 /// In the above, (1) is critical (otherwise we might crash). The others might will not lead to
-/// a crash, but since we use the projected columns, assigned columns, and `columns` in these
-/// queries to compute the schema of the resulting TransTable, we would like them to be present
-/// so that the resulting `FrozenColUsageNode`s makes sense.
+/// a crash, but since we use the inserted columns and assigned columns to compute the schema
+/// of the resulting TransTable, we would like them to be present so that the resulting
+/// `FrozenColUsageNode`s makes sense.
 ///
 /// Users of this algorithm must verify these facts first.
 pub struct ColUsagePlanner<'a> {
@@ -90,19 +102,19 @@ impl<'a> ColUsagePlanner<'a> {
   pub fn compute_frozen_col_usage_node(
     &mut self,
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<Option<ColName>>>,
-    table_ref: &proc::TableRef,
+    source: &proc::GeneralSource,
     exprs: &Vec<proc::ValExpr>,
-  ) -> FrozenColUsageNode {
-    let mut node = FrozenColUsageNode::new(table_ref.clone());
+  ) -> Result<FrozenColUsageNode, ColUsageError> {
+    let mut node = FrozenColUsageNode::new(source.clone());
     for expr in exprs {
       collect_top_level_cols_r(expr, &mut node.requested_cols);
       for query in collect_expr_subqueries(expr) {
-        node.children.push(self.plan_gr_query(trans_table_ctx, &query));
+        node.children.push(self.plan_gr_query(trans_table_ctx, &query)?);
       }
     }
 
     // Determine which columns are safe, and which are external.
-    let mut all_cols = BTreeSet::<ColName>::new();
+    let mut all_cols = BTreeSet::<proc::ColumnRef>::new();
     for child_map in &node.children {
       for (_, (_, child)) in child_map {
         for col in &child.external_cols {
@@ -115,35 +127,45 @@ impl<'a> ColUsagePlanner<'a> {
       all_cols.insert(col.clone());
     }
 
-    // Split `all_cols` into `safe_present_cols` and `external_cols` based on
+    // Split `all_cols` into `safe_present_cols` and `external_cols` based on the schema of
     // the (Trans)Table in question.
-    match table_ref {
-      proc::TableRef::TransTableName(trans_table_name) => {
-        // The Query converter should make sure that all TransTableNames actually exist.
-        let table_schema = trans_table_ctx.get(trans_table_name).unwrap();
-        for col in all_cols {
-          if table_schema.contains(&Some(col.clone())) {
-            node.safe_present_cols.push(col);
-          } else {
-            node.external_cols.push(col);
-          }
+    let contains_col = |col_name: &ColName| {
+      match &source.source_ref {
+        GeneralSourceRef::TransTableName(trans_table_name) => {
+          // The Query converter will have made sure that all TransTableNames actually exist.
+          let table_schema = trans_table_ctx.get(trans_table_name).unwrap();
+          table_schema.contains(&Some(col_name.clone()))
         }
-      }
-      proc::TableRef::TablePath(table_path) => {
-        // The Query converter should make sure that all TablePaths actually exist.
-        let gen = self.table_generation.static_read(table_path, self.timestamp).unwrap();
-        let table_schema = self.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
-        for col in all_cols {
-          if weak_contains_col(&table_schema, &col, &self.timestamp) {
-            node.safe_present_cols.push(col);
-          } else {
-            node.external_cols.push(col);
-          }
+        GeneralSourceRef::TablePath(table_path) => {
+          // The Query converter will have made sure that all TablePaths actually exist.
+          let gen = self.table_generation.static_read(table_path, self.timestamp).unwrap();
+          let table_schema = self.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
+          weak_contains_col(&table_schema, col_name, &self.timestamp)
         }
       }
     };
 
-    return node;
+    for col in all_cols {
+      if let Some(table_name) = &col.table_name {
+        if source.name() == table_name {
+          if contains_col(&col.col_name) {
+            node.safe_present_cols.push(col.col_name);
+          } else {
+            return Err(ColUsageError::InvalidColumnRef);
+          }
+        } else {
+          node.external_cols.push(col);
+        }
+      } else {
+        if contains_col(&col.col_name) {
+          node.safe_present_cols.push(col.col_name);
+        } else {
+          node.external_cols.push(col);
+        }
+      }
+    }
+
+    Ok(node)
   }
 
   /// Constructs a `FrozenColUsageNode` and the schema of the returned TransTable.
@@ -151,7 +173,7 @@ impl<'a> ColUsagePlanner<'a> {
     &mut self,
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<Option<ColName>>>,
     select: &proc::SuperSimpleSelect,
-  ) -> (Vec<Option<ColName>>, FrozenColUsageNode) {
+  ) -> Result<(Vec<Option<ColName>>, FrozenColUsageNode), ColUsageError> {
     let mut projection = compute_select_schema(select);
 
     let mut exprs = Vec::new();
@@ -160,7 +182,7 @@ impl<'a> ColUsagePlanner<'a> {
     }
     exprs.push(select.selection.clone());
 
-    (projection, self.compute_frozen_col_usage_node(trans_table_ctx, &select.from, &exprs))
+    Ok((projection, self.compute_frozen_col_usage_node(trans_table_ctx, &select.from, &exprs)?))
   }
 
   /// Constructs a `FrozenColUsageNode` and the schema of the returned TransTable.
@@ -168,9 +190,10 @@ impl<'a> ColUsagePlanner<'a> {
     &mut self,
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<Option<ColName>>>,
     update: &proc::Update,
-  ) -> (Vec<Option<ColName>>, FrozenColUsageNode) {
-    let gen = self.table_generation.static_read(&update.table, self.timestamp).unwrap();
-    let table_schema = &self.db_schema.get(&(update.table.clone(), gen.clone())).unwrap();
+  ) -> Result<(Vec<Option<ColName>>, FrozenColUsageNode), ColUsageError> {
+    let gen = self.table_generation.static_read(&update.table.source_ref, self.timestamp).unwrap();
+    let table_schema =
+      &self.db_schema.get(&(update.table.source_ref.clone(), gen.clone())).unwrap();
     let mut projection = compute_update_schema(update, table_schema);
 
     let mut exprs = Vec::new();
@@ -179,14 +202,17 @@ impl<'a> ColUsagePlanner<'a> {
     }
     exprs.push(update.selection.clone());
 
-    (
+    Ok((
       projection,
       self.compute_frozen_col_usage_node(
         trans_table_ctx,
-        &proc::TableRef::TablePath(update.table.clone()),
+        &proc::GeneralSource {
+          source_ref: proc::GeneralSourceRef::TablePath(update.table.source_ref.clone()),
+          alias: update.table.alias.clone(),
+        },
         &exprs,
-      ),
-    )
+      )?,
+    ))
   }
 
   /// Constructs a `FrozenColUsageNode` and the schema of the returned TransTable.
@@ -194,16 +220,19 @@ impl<'a> ColUsagePlanner<'a> {
     &mut self,
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<Option<ColName>>>,
     insert: &proc::Insert,
-  ) -> (Vec<Option<ColName>>, FrozenColUsageNode) {
+  ) -> Result<(Vec<Option<ColName>>, FrozenColUsageNode), ColUsageError> {
     let projection = compute_insert_schema(insert);
-    (
+    Ok((
       projection,
       self.compute_frozen_col_usage_node(
         trans_table_ctx,
-        &proc::TableRef::TablePath(insert.table.clone()),
+        &proc::GeneralSource {
+          source_ref: proc::GeneralSourceRef::TablePath(insert.table.source_ref.clone()),
+          alias: insert.table.alias.clone(),
+        },
         &Vec::new(), // No expressions
-      ),
-    )
+      )?,
+    ))
   }
 
   /// Construct a `FrozenColUsageNode` and the schema of the returned TransTable.
@@ -211,7 +240,7 @@ impl<'a> ColUsagePlanner<'a> {
     &mut self,
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<Option<ColName>>>,
     stage_query: &proc::MSQueryStage,
-  ) -> (Vec<Option<ColName>>, FrozenColUsageNode) {
+  ) -> Result<(Vec<Option<ColName>>, FrozenColUsageNode), ColUsageError> {
     match stage_query {
       proc::MSQueryStage::SuperSimpleSelect(select) => self.plan_select(trans_table_ctx, select),
       proc::MSQueryStage::Update(update) => self.plan_update(trans_table_ctx, update),
@@ -224,33 +253,41 @@ impl<'a> ColUsagePlanner<'a> {
     &mut self,
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<Option<ColName>>>,
     gr_query: &proc::GRQuery,
-  ) -> Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))> {
+  ) -> Result<Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>, ColUsageError> {
     let mut children = Vec::<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>::new();
     for (trans_table_name, child_query) in &gr_query.trans_tables {
       match child_query {
         proc::GRQueryStage::SuperSimpleSelect(select) => {
-          let (cols, node) = self.plan_select(trans_table_ctx, select);
+          let (cols, node) = self.plan_select(trans_table_ctx, select)?;
           children.push((trans_table_name.clone(), (cols.clone(), node)));
           trans_table_ctx.insert(trans_table_name.clone(), cols);
         }
       }
     }
-    return children;
+    Ok(children)
   }
 
   /// Construct `FrozenColUsageNode`s for the `ms_query`.
   pub fn plan_ms_query(
     &mut self,
     ms_query: &proc::MSQuery,
-  ) -> Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))> {
+  ) -> Result<Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>, ColUsageError> {
     let mut trans_table_ctx = BTreeMap::<TransTableName, Vec<Option<ColName>>>::new();
     let mut children = Vec::<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>::new();
     for (trans_table_name, child_query) in &ms_query.trans_tables {
-      let (cols, node) = self.plan_ms_query_stage(&mut trans_table_ctx, child_query);
+      let (cols, node) = self.plan_ms_query_stage(&mut trans_table_ctx, child_query)?;
       children.push((trans_table_name.clone(), (cols.clone(), node)));
       trans_table_ctx.insert(trans_table_name.clone(), cols);
     }
-    return children;
+
+    // The top level `FrozenColUsageNode`s cannot have external `ColumnRef`s.
+    for (_, (_, child)) in &children {
+      if !child.external_cols.is_empty() {
+        return Err(ColUsageError::InvalidColumnRef);
+      }
+    }
+
+    Ok(children)
   }
 }
 
@@ -259,8 +296,8 @@ pub fn compute_select_schema(select: &proc::SuperSimpleSelect) -> Vec<Option<Col
   for (expr, alias) in &select.projection {
     if let Some(col) = alias {
       projection.push(Some(col.clone()));
-    } else if let proc::ValExpr::ColumnRef { col_ref } = expr {
-      projection.push(Some(col_ref.clone()));
+    } else if let proc::ValExpr::ColumnRef(col_ref) = expr {
+      projection.push(Some(col_ref.col_name.clone()));
     } else {
       projection.push(None);
     }
@@ -292,15 +329,15 @@ pub fn compute_insert_schema(insert: &proc::Insert) -> Vec<Option<ColName>> {
 
 /// This function returns all `ColName`s in the `expr` that don't fall
 /// under a `Subquery`.
-pub fn collect_top_level_cols(expr: &proc::ValExpr) -> Vec<ColName> {
-  let mut cols = Vec::<ColName>::new();
+pub fn collect_top_level_cols(expr: &proc::ValExpr) -> Vec<proc::ColumnRef> {
+  let mut cols = Vec::<proc::ColumnRef>::new();
   collect_top_level_cols_r(expr, &mut cols);
   cols
 }
 
-fn collect_top_level_cols_r(expr: &proc::ValExpr, cols: &mut Vec<ColName>) {
+fn collect_top_level_cols_r(expr: &proc::ValExpr, cols: &mut Vec<proc::ColumnRef>) {
   match expr {
-    proc::ValExpr::ColumnRef { col_ref } => cols.push(col_ref.clone()),
+    proc::ValExpr::ColumnRef(col_ref) => cols.push(col_ref.clone()),
     proc::ValExpr::UnaryExpr { expr, .. } => collect_top_level_cols_r(&expr, cols),
     proc::ValExpr::BinaryExpr { left, right, .. } => {
       collect_top_level_cols_r(&left, cols);
@@ -376,7 +413,7 @@ fn node_external_trans_tables_r(
   defined_trans_tables: &mut BTreeSet<TransTableName>,
   accum: &mut Vec<TransTableName>,
 ) {
-  if let proc::TableRef::TransTableName(trans_table_name) = &node.table_ref {
+  if let proc::GeneralSourceRef::TransTableName(trans_table_name) = &node.source.source_ref {
     if !defined_trans_tables.contains(trans_table_name) {
       accum.push(trans_table_name.clone())
     }
@@ -404,12 +441,25 @@ fn nodes_external_trans_tables_r(
 /// Accumulates all External Columns in `nodes`.
 pub fn nodes_external_cols(
   nodes: &Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
-) -> Vec<ColName> {
-  let mut col_name_set = BTreeSet::<ColName>::new();
+) -> Vec<proc::ColumnRef> {
+  let mut col_name_set = BTreeSet::<proc::ColumnRef>::new();
   for (_, (_, node)) in nodes {
     col_name_set.extend(node.external_cols.clone())
   }
   col_name_set.into_iter().collect()
+}
+
+/// Filters for only the `ColumnRef`s without an alias. These are the `ColName`s that must not
+/// exist in the Data Source of the `FrozenColUsageNode` that this `external_col` is present in.
+/// This is because of the External Cols Property in `FrozenColUsageNode`.
+pub fn free_external_cols(external_cols: &Vec<proc::ColumnRef>) -> Vec<ColName> {
+  let mut free_external_cols = Vec::<ColName>::new();
+  for col in external_cols {
+    if col.table_name.is_none() {
+      free_external_cols.push(col.col_name.clone())
+    }
+  }
+  free_external_cols
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -518,35 +568,43 @@ mod test {
     .into_iter()
     .collect();
 
+    fn cref(s: &str) -> proc::ColumnRef {
+      proc::ColumnRef { table_name: None, col_name: cn("c1") }
+    }
+
+    fn mk_read_src(s: &str) -> proc::GeneralSource {
+      proc::GeneralSource { source_ref: proc::GeneralSourceRef::TablePath(mk_tab(s)), alias: None };
+    }
+
     let ms_query = proc::MSQuery {
       trans_tables: vec![
         (
           mk_ttab("tt0"),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
             projection: vec![
-              (proc::ValExpr::ColumnRef { col_ref: cn("c1") }, None),
-              (proc::ValExpr::ColumnRef { col_ref: cn("c4") }, None),
+              (proc::ValExpr::ColumnRef(cref("c1")), None),
+              (proc::ValExpr::ColumnRef(cref("c4")), None),
             ],
-            from: proc::TableRef::TablePath(mk_tab("t2")),
+            from: mk_read_src("t2"),
             selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
           }),
         ),
         (
           mk_ttab("tt1"),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
-            projection: vec![(proc::ValExpr::ColumnRef { col_ref: cn("c1") }, None)],
-            from: proc::TableRef::TransTableName(mk_ttab("tt0")),
+            projection: vec![(proc::ValExpr::ColumnRef(cref("c1")), None)],
+            from: mk_read_src("tt0"),
             selection: proc::ValExpr::Subquery {
               query: Box::new(proc::GRQuery {
                 trans_tables: vec![(
                   mk_ttab("tt2"),
                   proc::GRQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
-                    projection: vec![(proc::ValExpr::ColumnRef { col_ref: cn("c5") }, None)],
-                    from: proc::TableRef::TablePath(mk_tab("t3")),
+                    projection: vec![(proc::ValExpr::ColumnRef(cref("c5")), None)],
+                    from: mk_read_src("t3"),
                     selection: proc::ValExpr::BinaryExpr {
                       op: iast::BinaryOp::Plus,
-                      left: Box::new(proc::ValExpr::ColumnRef { col_ref: cn("c1") }),
-                      right: Box::new(proc::ValExpr::ColumnRef { col_ref: cn("c5") }),
+                      left: Box::new(proc::ValExpr::ColumnRef(cref("c1"))),
+                      right: Box::new(proc::ValExpr::ColumnRef(cref("c5"))),
                     },
                   }),
                 )]
@@ -560,8 +618,8 @@ mod test {
         (
           mk_ttab("tt3"),
           proc::MSQueryStage::Update(proc::Update {
-            table: mk_tab("t1"),
-            assignment: vec![(cn("c2"), proc::ValExpr::ColumnRef { col_ref: cn("c1") })],
+            table: proc::SimpleSource { source_ref: mk_tab("t1"), alias: None },
+            assignment: vec![(cn("c2"), proc::ValExpr::ColumnRef(cref("c1")))],
             selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
           }),
         ),
@@ -581,7 +639,10 @@ mod test {
         (
           vec![cn("c1"), cn("c4")],
           FrozenColUsageNode {
-            table_ref: proc::TableRef::TablePath(mk_tab("t2")),
+            source: proc::GeneralSource {
+              source_ref: proc::GeneralSourceRef::TablePath(mk_tab("t2")),
+              alias: None,
+            },
             requested_cols: vec![],
             children: vec![],
             safe_present_cols: vec![],
@@ -594,17 +655,24 @@ mod test {
         (
           vec![cn("c1")],
           FrozenColUsageNode {
-            table_ref: proc::TableRef::TransTableName(mk_ttab("tt0")),
+            source: proc::GeneralSource {
+              source_ref: proc::GeneralSourceRef::TablePath(mk_tab("tt0")),
+              alias: None,
+            },
             children: vec![vec![(
               mk_ttab("tt2"),
               (
                 vec![cn("c5")],
                 FrozenColUsageNode {
-                  table_ref: proc::TableRef::TablePath(mk_tab("t3")),
-                  requested_cols: vec![cn("c1"), cn("c5")],
+                  source: proc::GeneralSource {
+                    source_ref: proc::GeneralSourceRef::TablePath(mk_tab("t3")),
+                    alias: None,
+                  },
+
+                  requested_cols: vec![cref("c1"), cref("c5")],
                   children: vec![],
                   safe_present_cols: vec![cn("c5")],
-                  external_cols: vec![cn("c1")],
+                  external_cols: vec![cref("c1")],
                 },
               ),
             )]
@@ -621,8 +689,11 @@ mod test {
         (
           vec![cn("c1"), cn("c2")],
           FrozenColUsageNode {
-            table_ref: proc::TableRef::TablePath(mk_tab("t1")),
-            requested_cols: vec![cn("c1")],
+            source: proc::GeneralSource {
+              source_ref: proc::GeneralSourceRef::TablePath(mk_tab("t1")),
+              alias: None,
+            },
+            requested_cols: vec![cref("c1")],
             children: vec![],
             safe_present_cols: vec![cn("c1")],
             external_cols: vec![],

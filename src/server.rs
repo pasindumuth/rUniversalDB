@@ -235,6 +235,7 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
   pub fn get_min_tablets(
     &self,
     table_path: &TablePath,
+    table_ref: &proc::GeneralSource,
     gen: &Gen,
     selection: &proc::ValExpr,
   ) -> Vec<TabletGroupId> {
@@ -243,7 +244,7 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
     let key_cols = &self.gossip.db_schema.get(&table_path_gen).unwrap().key_cols;
 
     // TODO: We use a trivial implementation for now. Do a proper implementation later.
-    let _ = compute_key_region(selection, BTreeMap::new(), key_cols);
+    let _ = compute_key_region(selection, BTreeMap::new(), table_ref, key_cols);
     self.get_all_tablets(table_path, gen)
   }
 
@@ -454,12 +455,12 @@ pub struct EvaluatedSuperSimpleSelect {
 /// have a length equal to that of how many GRQuerys there are in the `expr`.
 pub fn evaluate_super_simple_select(
   select: &proc::SuperSimpleSelect,
-  col_names: &Vec<ColName>,
+  col_names: &Vec<proc::ColumnRef>,
   col_vals: &Vec<ColValN>,
   raw_subquery_vals: &Vec<TableView>,
 ) -> Result<EvaluatedSuperSimpleSelect, EvalError> {
   // We map all ColNames to their ColValNs using the Context and subtable.
-  let mut col_map = BTreeMap::<ColName, ColValN>::new();
+  let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
   for i in 0..col_names.len() {
     col_map.insert(col_names.get(i).unwrap().clone(), col_vals.get(i).unwrap().clone());
   }
@@ -495,12 +496,12 @@ pub struct EvaluatedUpdate {
 /// have a length equal to that of how many GRQuerys there are in the `expr`.
 pub fn evaluate_update(
   update: &proc::Update,
-  col_names: &Vec<ColName>,
+  col_names: &Vec<proc::ColumnRef>,
   col_vals: &Vec<ColValN>,
   raw_subquery_vals: &Vec<TableView>,
 ) -> Result<EvaluatedUpdate, EvalError> {
   // We map all ColNames to their ColValNs.
-  let mut col_map = BTreeMap::<ColName, ColValN>::new();
+  let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
   for i in 0..col_names.len() {
     col_map.insert(col_names.get(i).unwrap().clone(), col_vals.get(i).unwrap().clone());
   }
@@ -587,40 +588,46 @@ pub fn are_cols_locked(
 /// `trans_table_split` aren't guaranteed.
 #[derive(Default)]
 struct ContextConverter {
-  // This is the child query's ContextSchema, and it's computed in the constructor.
-  pub context_schema: ContextSchema,
+  /// This is the child query's ContextSchema, and it is computed in the constructor.
+  context_schema: ContextSchema,
 
   // These fields partition `context_schema` above. However, we split the
   // ColumnContextSchema according to which are in the Table and which are not.
-  pub safe_present_split: Vec<ColName>,
-  pub external_split: Vec<ColName>,
-  pub trans_table_split: Vec<TransTableName>,
+  safe_present_split: Vec<ColName>,
+  external_split: Vec<proc::ColumnRef>,
+  trans_table_split: Vec<TransTableName>,
 
   /// This maps the `ColName`s in `external_split` to their positions in the
   /// parent ColumnContextSchema.
-  context_col_index: BTreeMap<ColName, usize>,
+  context_col_index: BTreeMap<proc::ColumnRef, usize>,
   /// This maps the `TransTableName`s in `trans_table_split` to their positions in the
   /// parent TransTableContextSchema.
   context_trans_table_index: BTreeMap<TransTableName, usize>,
 }
 
 impl ContextConverter {
-  /// This is a unified approach to `general_create` and `trans_general_create` that uses a
-  /// `LocalTable` to infer table schema instead.
-  pub fn local_table_create<LocalTableT: LocalTable>(
+  /// Sets up and creates a `ContextConverter`. Here, `child_columns` and `child_trans_table_names`
+  /// are the column and TransTable that are to be used in the `Context` that is constructed.
+  /// Importantly, `ContextSchema` of this new `Context` does not preserve the order of
+  /// `child_cols`. Here, `local_table` is only used to infer if a column in `child_columns`
+  /// needs to be read from the parent `Context` or not.
+  fn create<LocalTableT: LocalTable>(
     parent_context_schema: &ContextSchema,
     local_table: &LocalTableT,
-    child_columns: Vec<ColName>,
+    child_columns: Vec<proc::ColumnRef>,
     child_trans_table_names: Vec<TransTableName>,
   ) -> ContextConverter {
     let mut safe_present_split = Vec::<ColName>::new();
-    let mut external_split = Vec::<ColName>::new();
+    let mut external_split = Vec::<proc::ColumnRef>::new();
+    // Same as `safe_present_split` but we keep the table alias.
+    let mut aliased_safe_present_split = Vec::<proc::ColumnRef>::new();
 
     // Whichever `ColName`s in `child_columns` that are also present in `local_table` should
     // be added to `safe_present_cols`. Otherwise, they should be added to `external_split`.
     for col in child_columns {
-      if local_table.contains_col(&col) {
-        safe_present_split.push(col);
+      if local_table.contains_col_ref(&col) {
+        safe_present_split.push(col.col_name.clone());
+        aliased_safe_present_split.push(col);
       } else {
         external_split.push(col);
       }
@@ -641,7 +648,7 @@ impl ContextConverter {
 
     // Compute the ColumnContextSchema so that `safe_present_split` is first, and
     // `external_split` is second. This is relevent when we compute ContextRows.
-    conv.context_schema.column_context_schema.extend(conv.safe_present_split.clone());
+    conv.context_schema.column_context_schema.extend(aliased_safe_present_split);
     conv.context_schema.column_context_schema.extend(conv.external_split.clone());
 
     // Point all `trans_table_split` to their index in main Query's ContextSchema.
@@ -664,8 +671,9 @@ impl ContextConverter {
 
   /// Computes a child ContextRow. Note that the schema of `row` should be
   /// `self.safe_present_cols`. (Here, `parent_context_row` must have the schema
-  /// of the `parent_context_schema` that was passed into the constructors).
-  pub fn compute_child_context_row(
+  /// of the `parent_context_schema` that was passed into the constructors). The `ContextRow`
+  /// that is constructed has a Schema of `context_schema`.
+  fn compute_child_context_row(
     &self,
     parent_context_row: &ContextRow,
     mut row: Vec<ColValN>,
@@ -687,7 +695,7 @@ impl ContextConverter {
 
   /// Extracts the subset of `subtable_row` whose ColNames correspond to
   /// `self.safe_present_cols` and returns it in the order of `self.safe_present_cols`.
-  pub fn extract_child_relevent_cols(
+  fn extract_child_relevent_cols(
     &self,
     subtable_schema: &Vec<ColName>,
     subtable_row: &Vec<ColValN>,
@@ -699,19 +707,6 @@ impl ContextConverter {
     }
     row
   }
-
-  /// Extracts the column values for the ColNames in `external_split`. Here,
-  /// `parent_context_row` must have the schema of `parent_context_schema` that was passed
-  /// into the construct, as usual.
-  pub fn compute_col_context(&self, parent_context_row: &ContextRow) -> BTreeMap<ColName, ColValN> {
-    // First, map all columns in `external_split` to their values in this ContextRow.
-    let mut col_context = BTreeMap::<ColName, ColValN>::new();
-    for (col, index) in &self.context_col_index {
-      col_context
-        .insert(col.clone(), parent_context_row.column_context_row.get(*index).unwrap().clone());
-    }
-    col_context
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -722,7 +717,28 @@ pub trait LocalTable {
   /// Checks if the given `col` is in the schema of the LocalTable.
   fn contains_col(&self, col: &ColName) -> bool;
 
-  /// Gets all rows in the local table that's associated with the given parent ContextRow.
+  /// The `GeneralSource` used in the query that this LocalTable is being used as a Data
+  /// Source for. This is needed to interpret `ColumnRef`s as refering to the Data Source or not.
+  fn source(&self) -> &proc::GeneralSource;
+
+  /// Checks whether this `ColumnRef` refers to a column in this `LocalTable`, taking the alias
+  /// in the `source` into account.
+  fn contains_col_ref(&self, col: &proc::ColumnRef) -> bool {
+    if let Some(table_name) = &col.table_name {
+      if self.source().name() == table_name {
+        debug_assert!(self.contains_col(&col.col_name));
+        true
+      } else {
+        false
+      }
+    } else {
+      self.contains_col(&col.col_name)
+    }
+  }
+
+  /// Here, every `col_names` must be in `contains_col`, and every `ColumnRef` in
+  /// `parent_context_schema` must have `contains_col_ref` evaluate to false. This function
+  /// get all rows in the local table that's associated with the given parent ContextRow.
   /// Here, we return the value of every row (`Vec<ColValN>`), as well as the count of how
   /// many times that row occurred (this is more performant than returning the same row over
   /// and over again).
@@ -739,9 +755,8 @@ pub trait LocalTable {
 pub struct ContextConstructor<LocalTableT: LocalTable> {
   parent_context_schema: ContextSchema,
   local_table: LocalTableT,
-  children: Vec<(Vec<ColName>, Vec<TransTableName>)>,
 
-  /// Here, there is on converter for each element in `children` above.
+  /// Here, there is on converter for each element in `children` passed into the constructor.
   converters: Vec<ContextConverter>,
 }
 
@@ -752,18 +767,18 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
   pub fn new(
     parent_context_schema: ContextSchema,
     local_table: LocalTableT,
-    children: Vec<(Vec<ColName>, Vec<TransTableName>)>,
+    children: Vec<(Vec<proc::ColumnRef>, Vec<TransTableName>)>,
   ) -> ContextConstructor<LocalTableT> {
     let mut converters = Vec::<ContextConverter>::new();
     for (col_names, trans_table_names) in &children {
-      converters.push(ContextConverter::local_table_create(
+      converters.push(ContextConverter::create(
         &parent_context_schema,
         &local_table,
         col_names.clone(),
         trans_table_names.clone(),
       ));
     }
-    ContextConstructor { parent_context_schema, local_table, children, converters }
+    ContextConstructor { parent_context_schema, local_table, converters }
   }
 
   /// This gets the schemas for every element in `children` passed in the constructor.
@@ -783,7 +798,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
   >(
     &self,
     parent_context_rows: &Vec<ContextRow>,
-    extra_cols: Vec<ColName>,
+    extra_cols: Vec<proc::ColumnRef>,
     callback: &mut CbT,
   ) -> Result<(), EvalError> {
     // Compute the set of all columns that we have to read from the LocalTable. First,
@@ -791,8 +806,8 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
     // figure the which of the `ColName`s in each child are in the LocalTable.
     let mut local_schema_set = BTreeSet::<ColName>::new();
     for col in &extra_cols {
-      if self.local_table.contains_col(col) {
-        local_schema_set.insert(col.clone());
+      if self.local_table.contains_col_ref(col) {
+        local_schema_set.insert(col.col_name.clone());
       }
     }
     for conv in &self.converters {
@@ -809,7 +824,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
 
     for parent_context_row_idx in 0..parent_context_rows.len() {
       let parent_context_row = parent_context_rows.get(parent_context_row_idx).unwrap();
-      for (local_row, count) in
+      for (mut local_row, count) in
         self.local_table.get_rows(&self.parent_context_schema, parent_context_row, &local_schema)
       {
         // First, construct the child ContextRows.
@@ -835,9 +850,10 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
         // Then, extract values for the `extra_cols` by first searching the `local_schema`,
         // and then the parent Context.
         let mut extra_col_vals = Vec::<ColValN>::new();
+        let mut local_row_it = local_row.into_iter();
         for col in &extra_cols {
-          if let Some(pos) = local_schema.iter().position(|local_col| col == local_col) {
-            extra_col_vals.push(local_row.get(pos).unwrap().clone());
+          if self.local_table.contains_col_ref(col) {
+            extra_col_vals.push(local_row_it.next().unwrap());
           } else {
             let pos = self
               .parent_context_schema

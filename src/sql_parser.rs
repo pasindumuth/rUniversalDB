@@ -7,13 +7,47 @@ use sqlparser::test_utils::table;
 //  Utils
 // -----------------------------------------------------------------------------------------------
 
+/// Gets a table name used in a DDL Query. This only supports one part in the name.
+fn get_table_name(idents: Vec<ast::Ident>) -> Result<String, String> {
+  if idents.len() == 1 {
+    Ok(idents.into_iter().next().unwrap().value)
+  } else {
+    Err(format!("Invalid Table name {:?}.", idents))
+  }
+}
+
 /// Gets a table reference from a list of identifiers. Since we do not support multi-part
 /// table references, we return an error in that case.
-fn get_table_ref(idents: Vec<ast::Ident>) -> Result<String, String> {
-  if idents.len() != 1 {
-    Err(format!("Multi-part table references not supported"))
+fn get_table_ref(idents: Vec<ast::Ident>) -> Result<iast::TableRef, String> {
+  if idents.len() == 1 {
+    Ok(iast::TableRef { source_ref: idents.into_iter().next().unwrap().value, alias: None })
+  } else if idents.len() == 2 {
+    let mut iter = idents.into_iter();
+    Ok(iast::TableRef {
+      source_ref: iter.next().unwrap().value,
+      alias: Some(iter.next().unwrap().value),
+    })
   } else {
-    Ok(idents.into_iter().next().unwrap().value)
+    Err(format!("Table Reference {:?} not supported.", idents))
+  }
+}
+
+/// Gets a table reference from a list of identifiers. Since we do not support multi-part
+/// table references, we return an error in that case.
+fn get_column_ref(idents: Vec<ast::Ident>) -> Result<iast::ValExpr, String> {
+  if idents.len() == 1 {
+    Ok(iast::ValExpr::ColumnRef {
+      table_name: None,
+      col_name: idents.into_iter().next().unwrap().value,
+    })
+  } else if idents.len() == 2 {
+    let mut iter = idents.into_iter();
+    Ok(iast::ValExpr::ColumnRef {
+      table_name: Some(iter.next().unwrap().value),
+      col_name: iter.next().unwrap().value,
+    })
+  } else {
+    Err(format!("Column Reference {:?} not supported.", idents))
   }
 }
 
@@ -198,10 +232,8 @@ fn convert_value(value: ast::Value) -> Result<iast::Value, String> {
 
 pub fn convert_expr(expr: ast::Expr) -> Result<iast::ValExpr, String> {
   Ok(match expr {
-    ast::Expr::Identifier(ident) => iast::ValExpr::ColumnRef { col_ref: ident.value },
-    ast::Expr::CompoundIdentifier(idents) => {
-      iast::ValExpr::ColumnRef { col_ref: get_table_ref(idents)? }
-    }
+    ast::Expr::Identifier(ident) => get_column_ref(vec![ident])?,
+    ast::Expr::CompoundIdentifier(idents) => get_column_ref(idents)?,
     ast::Expr::UnaryOp { op, expr } => {
       let iop = match op {
         ast::UnaryOperator::Minus => iast::UnaryOp::Minus,
@@ -270,7 +302,7 @@ pub fn convert_ddl_ast(raw_query: Vec<ast::Statement>) -> Result<DDLQuery, Strin
   let stmt = raw_query.into_iter().next().unwrap();
   match &stmt {
     ast::Statement::CreateTable { name, columns, .. } => {
-      let table_path = TablePath(get_table_ref(name.0.clone())?);
+      let table_path = TablePath(get_table_name(name.0.clone())?);
       let mut key_cols = Vec::<(ColName, ColType)>::new();
       let mut val_cols = Vec::<(ColName, ColType)>::new();
       for col in columns {
@@ -299,12 +331,12 @@ pub fn convert_ddl_ast(raw_query: Vec<ast::Statement>) -> Result<DDLQuery, Strin
     }
     ast::Statement::Drop { names, .. } => {
       let name = names.into_iter().next().unwrap();
-      let table_path = TablePath(get_table_ref(name.0.clone())?);
+      let table_path = TablePath(get_table_name(name.0.clone())?);
       Ok(DDLQuery::Drop(proc::DropTable { table_path }))
     }
     ast::Statement::AlterTable { name, operation } => match operation {
       ast::AlterTableOperation::AddColumn { column_def } => Ok(DDLQuery::Alter(proc::AlterTable {
-        table_path: TablePath(get_table_ref(name.0.clone())?),
+        table_path: TablePath(get_table_name(name.0.clone())?),
         alter_op: proc::AlterOp {
           col_name: ColName(column_def.name.value.clone()),
           maybe_col_type: Some(convert_data_type(&column_def.data_type)?),
@@ -312,7 +344,7 @@ pub fn convert_ddl_ast(raw_query: Vec<ast::Statement>) -> Result<DDLQuery, Strin
       })),
       ast::AlterTableOperation::DropColumn { column_name, .. } => {
         Ok(DDLQuery::Alter(proc::AlterTable {
-          table_path: TablePath(get_table_ref(name.0.clone())?),
+          table_path: TablePath(get_table_name(name.0.clone())?),
           alter_op: proc::AlterOp {
             col_name: ColName(column_name.value.clone()),
             maybe_col_type: None,
