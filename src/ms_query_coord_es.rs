@@ -715,7 +715,7 @@ impl QueryPlanningES {
 
     let col_usage_nodes = match planner.plan_ms_query(&self.sql_query) {
       Ok(col_usage_nodes) => col_usage_nodes,
-      Err(ColUsageError::InvalidColumnRef) => {
+      Err(_) => {
         return self.perform_master_query_planning(ctx, io_ctx);
       }
     };

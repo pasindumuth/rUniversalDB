@@ -331,17 +331,13 @@ impl TableView {
   }
 
   pub fn add_row(&mut self, row: Vec<ColValN>) {
-    if let Some(count) = self.rows.get_mut(&row) {
-      *count += 1;
-    } else {
-      self.rows.insert(row, 1);
-    }
+    self.add_row_multi(row, 1);
   }
 
   pub fn add_row_multi(&mut self, row: Vec<ColValN>, row_count: u64) {
     if let Some(count) = self.rows.get_mut(&row) {
       *count += row_count;
-    } else {
+    } else if row_count > 0 {
       self.rows.insert(row, row_count);
     }
   }
@@ -364,7 +360,7 @@ impl RequestId {
 // -------------------------------------------------------------------------------------------------
 
 pub mod proc {
-  use crate::model::common::iast::{BinaryOp, UnaryOp, Value};
+  use crate::model::common::iast::{BinaryOp, UnaryAggregateOp, UnaryOp, Value};
   use crate::model::common::{ColName, ColType, TablePath, TransTableName};
   use serde::{Deserialize, Serialize};
 
@@ -406,8 +402,22 @@ pub mod proc {
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct UnaryAggregate {
+    pub distinct: bool,
+    pub op: UnaryAggregateOp,
+    pub expr: ValExpr,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum SelectItem {
+    ValExpr(ValExpr),
+    UnaryAggregate(UnaryAggregate),
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
-    pub projection: Vec<(ValExpr, Option<ColName>)>,
+    pub distinct: bool,
+    pub projection: Vec<(SelectItem, Option<ColName>)>,
     pub from: GeneralSource,
     pub selection: ValExpr,
   }
@@ -585,8 +595,28 @@ pub mod iast {
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum UnaryAggregateOp {
+    Count,
+    Sum,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct UnaryAggregate {
+    pub distinct: bool,
+    pub op: UnaryAggregateOp,
+    pub expr: ValExpr,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum SelectItem {
+    ValExpr(ValExpr),
+    UnaryAggregate(UnaryAggregate),
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
-    pub projection: Vec<(ValExpr, Option<String>)>, // The select clause
+    pub distinct: bool,
+    pub projection: Vec<(SelectItem, Option<String>)>, // The select clause
     pub from: TableRef,
     pub selection: ValExpr, // The where clause
   }

@@ -411,6 +411,8 @@ pub enum QueryPlanningError {
   /// Occurs if an Insert appears as a Subquery, if it does not write to every KeyCol,
   /// or if the VALUES clause does not correspond to the columns to insert to.
   InvalidInsert,
+  /// Occurs if an Select has a mixure of aggregate columns and non-aggregate columns.
+  InvalidSelect,
   /// Occurs if a `ColumnRef` has an `table_name`, but the reference table does not exist, or
   /// the does not contain the `col_name`, or if the `ColumnRef` appears as an `external_cols`
   /// in the top-level `FrozenColUsageNode`s

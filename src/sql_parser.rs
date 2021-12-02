@@ -115,6 +115,7 @@ fn convert_query(query: ast::Query) -> Result<iast::Query, String> {
       let relation = from_clause.into_iter().next().unwrap().relation;
       if let ast::TableFactor::Table { name, .. } = relation {
         iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
+          distinct: select.distinct,
           projection: convert_select_clause(select.projection)?,
           from: get_table_ref(name.0)?,
           selection: if let Some(selection) = select.selection {
@@ -201,21 +202,44 @@ fn convert_update(
 
 fn convert_select_clause(
   select_clause: Vec<ast::SelectItem>,
-) -> Result<Vec<(iast::ValExpr, Option<String>)>, String> {
-  let mut select_list = Vec::<(iast::ValExpr, Option<String>)>::new();
+) -> Result<Vec<(iast::SelectItem, Option<String>)>, String> {
+  let mut select_list = Vec::<(iast::SelectItem, Option<String>)>::new();
+
+  fn select_item(expr: ast::Expr) -> Result<iast::SelectItem, String> {
+    // We hande `func` as a special case, since `convert_expr` ignores it.
+    if let ast::Expr::Function(func) = expr {
+      let func_name = &func.name.0.get(0).unwrap().value.clone();
+      let op = match &func_name.to_lowercase()[..] {
+        "count" => iast::UnaryAggregateOp::Count,
+        "sum" => iast::UnaryAggregateOp::Sum,
+        _ => return Err(format!("{:?} aggregate function", func_name)),
+      };
+      let expr = cast!(ast::FunctionArg::Unnamed, func.args.get(0).unwrap()).unwrap();
+      let i_select_item = iast::SelectItem::UnaryAggregate(iast::UnaryAggregate {
+        distinct: func.distinct,
+        op,
+        expr: convert_expr(expr.clone())?,
+      });
+      Ok(i_select_item)
+    } else {
+      Ok(iast::SelectItem::ValExpr(convert_expr(expr)?))
+    }
+  }
+
   for item in select_clause {
     match item.clone() {
       ast::SelectItem::UnnamedExpr(expr) => {
-        select_list.push((convert_expr(expr)?, None));
+        select_list.push((select_item(expr)?, None));
       }
       ast::SelectItem::ExprWithAlias { expr, alias } => {
-        select_list.push((convert_expr(expr)?, Some(alias.value)));
+        select_list.push((select_item(expr)?, Some(alias.value)));
       }
       ast::SelectItem::QualifiedWildcard(_) | ast::SelectItem::Wildcard => {
         return Err(format!("{:?} is not supported in SelectItem", item))
       }
     }
   }
+
   Ok(select_list)
 }
 

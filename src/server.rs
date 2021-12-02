@@ -446,6 +446,7 @@ pub fn extract_subquery_vals(
 
 #[derive(Debug, Default)]
 pub struct EvaluatedSuperSimpleSelect {
+  /// This is the evaluated `expr` in every `proc::SelectItem`, both for aggregate and not.
   pub projection: Vec<ColValN>,
   pub selection: ColValN,
 }
@@ -471,7 +472,11 @@ pub fn evaluate_super_simple_select(
   // Construct the Evaluated Select
   let mut evaluated_select = EvaluatedSuperSimpleSelect::default();
   let mut next_subquery_idx = 0;
-  for (expr, _) in &select.projection {
+  for (select_item, _) in &select.projection {
+    let expr = match select_item {
+      proc::SelectItem::ValExpr(expr) => expr,
+      proc::SelectItem::UnaryAggregate(unary_agg) => &unary_agg.expr,
+    };
     let c_expr = construct_cexpr(expr, &col_map, &subquery_vals, &mut next_subquery_idx)?;
     evaluated_select.projection.push(evaluate_c_expr(&c_expr)?);
   }

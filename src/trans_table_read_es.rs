@@ -13,6 +13,7 @@ use crate::model::message as msg;
 use crate::server::{
   evaluate_super_simple_select, mk_eval_error, ContextConstructor, LocalTable, SlaveServerContext,
 };
+use crate::table_read_es::fully_evaluate_select;
 use crate::tablet::{
   compute_contexts, Executing, SingleSubqueryStatus, SubqueryFinished, SubqueryPending,
 };
@@ -310,62 +311,28 @@ impl TransTableReadES {
       children,
     );
 
-    // These are all of the `ColNames` we need in order to evaluate the Select.
-    let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
-    top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
-    for (expr, _) in &self.sql_query.projection {
-      top_level_cols_set.extend(collect_top_level_cols(expr));
-    }
-    let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
-
-    // Finally, iterate over the Context Rows of the subqueries and compute the final values.
-    let select_schema = compute_select_schema(&self.sql_query);
-    let mut res_table_views = Vec::<TableView>::new();
-    for _ in 0..self.context.context_rows.len() {
-      res_table_views.push(TableView::new(select_schema.clone()));
-    }
-
-    let eval_res = context_constructor.run(
-      &self.context.context_rows,
-      top_level_col_names.clone(),
-      &mut |context_row_idx: usize,
-            top_level_col_vals: Vec<ColValN>,
-            contexts: Vec<(ContextRow, usize)>,
-            count: u64| {
-        // First, we extract the subquery values using the child Context indices.
-        let mut subquery_vals = Vec::<TableView>::new();
-        for (subquery_idx, (_, child_context_idx)) in contexts.iter().enumerate() {
-          let val = subquery_results.get(subquery_idx).unwrap().get(*child_context_idx).unwrap();
-          subquery_vals.push(val.clone());
-        }
-
-        // Now, we evaluate all expressions in the SQL query and amend the
-        // result to this TableView (if the WHERE clause evaluates to true).
-        let evaluated_select = evaluate_super_simple_select(
-          &self.sql_query,
-          &top_level_col_names,
-          &top_level_col_vals,
-          &subquery_vals,
-        )?;
-        if is_true(&evaluated_select.selection)? {
-          // This means that the current row should be selected for the result.
-          res_table_views[context_row_idx].add_row_multi(evaluated_select.projection, count);
-        };
-        Ok(())
-      },
+    // Evaluate
+    let eval_res = fully_evaluate_select(
+      context_constructor,
+      &self.context.deref(),
+      subquery_results,
+      &self.sql_query,
     );
 
-    if let Err(eval_error) = eval_res {
-      self.state = TransExecutionS::Done;
-      return TransTableAction::QueryError(mk_eval_error(eval_error));
+    match eval_res {
+      Ok((select_schema, res_table_views)) => {
+        // Signal Success and return the data.
+        self.state = TransExecutionS::Done;
+        TransTableAction::Success(QueryESResult {
+          result: (select_schema, res_table_views),
+          new_rms: self.new_rms.iter().cloned().collect(),
+        })
+      }
+      Err(eval_error) => {
+        self.state = TransExecutionS::Done;
+        TransTableAction::QueryError(mk_eval_error(eval_error))
+      }
     }
-
-    // Signal Success and return the data.
-    self.state = TransExecutionS::Done;
-    TransTableAction::Success(QueryESResult {
-      result: (select_schema, res_table_views),
-      new_rms: self.new_rms.iter().cloned().collect(),
-    })
   }
 
   /// Cleans up all currently owned resources, and goes to Done.

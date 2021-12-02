@@ -3,17 +3,17 @@ use crate::common::{
   btree_multimap_insert, lookup, mk_qid, to_table_path, CoreIOCtx, KeyBound, OrigP, QueryESResult,
   QueryPlan, ReadRegion,
 };
-use crate::expression::{compress_row_region, compute_key_region, is_true};
+use crate::expression::{compress_row_region, compute_key_region, is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, CQueryPath, ColName, ColValN, Context, ContextRow, QueryId, TQueryPath, TablePath,
-  TableView, Timestamp, TransTableName,
+  iast, proc, CQueryPath, ColName, ColVal, ColValN, Context, ContextRow, QueryId, TQueryPath,
+  TablePath, TableView, Timestamp, TransTableName,
 };
 use crate::model::message as msg;
-use crate::server::ServerContextBase;
 use crate::server::{
   evaluate_super_simple_select, mk_eval_error, weak_contains_col, ContextConstructor,
 };
+use crate::server::{LocalTable, ServerContextBase};
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColumnsLocking, Executing, Pending, RequestedReadProtected,
@@ -21,6 +21,7 @@ use crate::tablet::{
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
+use std::ops::Deref;
 use std::rc::Rc;
 
 // -----------------------------------------------------------------------------------------------
@@ -443,68 +444,34 @@ impl TableReadES {
       children,
     );
 
-    // These are all of the `ColNames` we need in order to evaluate the Select.
-    let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
-    top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
-    for (expr, _) in &self.sql_query.projection {
-      top_level_cols_set.extend(collect_top_level_cols(expr));
-    }
-    let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
-
-    // Finally, iterate over the Context Rows of the subqueries and compute the final values.
-    let select_schema = compute_select_schema(&self.sql_query);
-    let mut res_table_views = Vec::<TableView>::new();
-    for _ in 0..self.context.context_rows.len() {
-      res_table_views.push(TableView::new(select_schema.clone()));
-    }
-
-    let eval_res = context_constructor.run(
-      &self.context.context_rows,
-      top_level_col_names.clone(),
-      &mut |context_row_idx: usize,
-            top_level_col_vals: Vec<ColValN>,
-            contexts: Vec<(ContextRow, usize)>,
-            count: u64| {
-        // First, we extract the subquery values using the child Context indices.
-        let mut subquery_vals = Vec::<TableView>::new();
-        for (subquery_idx, (_, child_context_idx)) in contexts.iter().enumerate() {
-          let val = subquery_results.get(subquery_idx).unwrap().get(*child_context_idx).unwrap();
-          subquery_vals.push(val.clone());
-        }
-
-        // Now, we evaluate all expressions in the SQL query and amend the
-        // result to this TableView (if the WHERE clause evaluates to true).
-        let evaluated_select = evaluate_super_simple_select(
-          &self.sql_query,
-          &top_level_col_names,
-          &top_level_col_vals,
-          &subquery_vals,
-        )?;
-        if is_true(&evaluated_select.selection)? {
-          // This means that the current row should be selected for the result.
-          res_table_views[context_row_idx].add_row_multi(evaluated_select.projection, count);
-        };
-        Ok(())
-      },
+    // Evaluate
+    let eval_res = fully_evaluate_select(
+      context_constructor,
+      &self.context.deref(),
+      subquery_results,
+      &self.sql_query,
     );
 
-    if let Err(eval_error) = eval_res {
-      self.state = ExecutionS::Done;
-      return TableAction::QueryError(mk_eval_error(eval_error));
-    }
+    match eval_res {
+      Ok((select_schema, res_table_views)) => {
+        let res = QueryESResult {
+          result: (select_schema, res_table_views),
+          new_rms: self.new_rms.iter().cloned().collect(),
+        };
 
-    let res = QueryESResult {
-      result: (select_schema, res_table_views),
-      new_rms: self.new_rms.iter().cloned().collect(),
-    };
-
-    if self.waiting_global_locks.is_empty() {
-      // Signal Success and return the data.
-      self.state = ExecutionS::Done;
-      TableAction::Success(res)
-    } else {
-      self.state = ExecutionS::WaitingGlobalLockedCols(res);
-      TableAction::Wait
+        if self.waiting_global_locks.is_empty() {
+          // Signal Success and return the data.
+          self.state = ExecutionS::Done;
+          TableAction::Success(res)
+        } else {
+          self.state = ExecutionS::WaitingGlobalLockedCols(res);
+          TableAction::Wait
+        }
+      }
+      Err(eval_error) => {
+        self.state = ExecutionS::Done;
+        TableAction::QueryError(mk_eval_error(eval_error))
+      }
     }
   }
 
@@ -512,4 +479,151 @@ impl TableReadES {
   pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {
     self.state = ExecutionS::Done;
   }
+}
+
+/// Fully evaluate a `Select` query, including aggregation.
+pub fn fully_evaluate_select<LocalTableT: LocalTable>(
+  context_constructor: ContextConstructor<LocalTableT>,
+  context: &Context,
+  subquery_results: Vec<Vec<TableView>>,
+  sql_query: &proc::SuperSimpleSelect,
+) -> Result<(Vec<Option<ColName>>, Vec<TableView>), EvalError> {
+  // These are all of the `ColNames` we need in order to evaluate the Select.
+  let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
+  top_level_cols_set.extend(collect_top_level_cols(&sql_query.selection));
+  for (select_item, _) in &sql_query.projection {
+    top_level_cols_set.extend(collect_top_level_cols(match select_item {
+      proc::SelectItem::ValExpr(expr) => expr,
+      proc::SelectItem::UnaryAggregate(unary_agg) => &unary_agg.expr,
+    }));
+  }
+  let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
+
+  // Finally, iterate over the Context Rows of the subqueries and compute the final values.
+  let mut pre_agg_table_views = Vec::<TableView>::new();
+  for _ in 0..context.context_rows.len() {
+    // TODO: we shouldn't need to pass in a bogus schema for intermediary tables.
+    pre_agg_table_views.push(TableView::new(Vec::new()));
+  }
+
+  context_constructor.run(
+    &context.context_rows,
+    top_level_col_names.clone(),
+    &mut |context_row_idx: usize,
+          top_level_col_vals: Vec<ColValN>,
+          contexts: Vec<(ContextRow, usize)>,
+          count: u64| {
+      // First, we extract the subquery values using the child Context indices.
+      let mut subquery_vals = Vec::<TableView>::new();
+      for (subquery_idx, (_, child_context_idx)) in contexts.iter().enumerate() {
+        let val = subquery_results.get(subquery_idx).unwrap().get(*child_context_idx).unwrap();
+        subquery_vals.push(val.clone());
+      }
+
+      // Now, we evaluate all expressions in the SQL query and amend the
+      // result to this TableView (if the WHERE clause evaluates to true).
+      let evaluated_select = evaluate_super_simple_select(
+        &sql_query,
+        &top_level_col_names,
+        &top_level_col_vals,
+        &subquery_vals,
+      )?;
+      if is_true(&evaluated_select.selection)? {
+        // This means that the current row should be selected for the result.
+        pre_agg_table_views[context_row_idx].add_row_multi(evaluated_select.projection, count);
+      };
+      Ok(())
+    },
+  )?;
+
+  // Produce the result table, handling aggregates and DISTINCT accordingly.
+  let is_agg = if let Some((proc::SelectItem::UnaryAggregate(_), _)) = sql_query.projection.get(0) {
+    true
+  } else {
+    false
+  };
+
+  let mut res_table_views = Vec::<TableView>::new();
+  let select_schema = compute_select_schema(&sql_query);
+  for pre_agg_table_view in pre_agg_table_views {
+    let mut res_table_view = TableView::new(select_schema.clone());
+
+    // Handle aggregation
+    if is_agg {
+      // Invert `pre_agg_table_view.rows` having indexes in the outer vector
+      // correspond to the columns. Recall that there are as many columns in ``pre_agg_table_view`
+      // as there are in the final result table (due to how all SelectItems must be aggregates,
+      // and how all aggregates take only one argument).
+      // TODO perhaps introduce a SingleColumn type.
+      let mut columns = Vec::<TableView>::new();
+      for _ in 0..sql_query.projection.len() {
+        columns.push(TableView::new(Vec::new()));
+      }
+      for (row, count) in pre_agg_table_view.rows {
+        for (i, val) in row.into_iter().enumerate() {
+          columns[i].add_row_multi(vec![val], count);
+        }
+      }
+
+      // Perform the aggregation
+      let mut res_row = Vec::<ColValN>::new();
+      for ((select_item, _), mut column) in sql_query.projection.iter().zip(columns.into_iter()) {
+        let unary_agg = cast!(proc::SelectItem::UnaryAggregate, select_item).unwrap();
+
+        // Handle inner DISTICT
+        if unary_agg.distinct {
+          for (_, count) in &mut column.rows {
+            *count = 1;
+          }
+        }
+
+        // Compute the result row
+        let res_col_val = match &unary_agg.op {
+          iast::UnaryAggregateOp::Count => {
+            let mut total_count: i32 = 0;
+            for (val_row, count) in column.rows {
+              let val = val_row.into_iter().next().unwrap();
+              match val {
+                None => {}
+                Some(_) => {
+                  total_count += count as i32;
+                }
+              }
+            }
+            Some(ColVal::Int(total_count))
+          }
+          iast::UnaryAggregateOp::Sum => {
+            let mut total_sum: i32 = 0;
+            for (val_row, count) in column.rows {
+              let val = val_row.into_iter().next().unwrap();
+              match val {
+                None => {}
+                Some(ColVal::Int(int_val)) => {
+                  total_sum += int_val * count as i32;
+                }
+                Some(_) => return Err(EvalError::GenericError),
+              }
+            }
+            Some(ColVal::Int(total_sum))
+          }
+        };
+        res_row.push(res_col_val);
+      }
+
+      res_table_view.add_row(res_row);
+    } else {
+      res_table_view.rows = pre_agg_table_view.rows;
+    }
+
+    // Handle outer DISTINCT
+    if sql_query.distinct {
+      for (_, count) in &mut res_table_view.rows {
+        *count = 1;
+      }
+    }
+
+    res_table_views.push(res_table_view);
+  }
+
+  Ok((select_schema, res_table_views))
 }

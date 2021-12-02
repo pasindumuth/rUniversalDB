@@ -95,8 +95,15 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
       }
 
       // Rename the Projection Clause
-      for (val_expr, _) in &mut select.projection {
-        rename_trans_tables_val_expr_r(ctx, val_expr);
+      for (select_item, _) in &mut select.projection {
+        match select_item {
+          iast::SelectItem::ValExpr(val_expr) => {
+            rename_trans_tables_val_expr_r(ctx, val_expr);
+          }
+          iast::SelectItem::UnaryAggregate(unary_agg) => {
+            rename_trans_tables_val_expr_r(ctx, &mut unary_agg.expr);
+          }
+        }
       }
 
       // Rename the Where Clause
@@ -182,22 +189,9 @@ fn flatten_top_level_query_r(
       flatten_top_level_query_r(assignment_name, child_query, counter, trans_table_map)
     }
     iast::QueryBody::SuperSimpleSelect(select) => {
-      let mut ms_select = proc::SuperSimpleSelect {
-        projection: Vec::new(),
-        from: proc::GeneralSource {
-          source_ref: to_source_ref(&select.from.source_ref),
-          alias: select.from.alias.clone(),
-        },
-        selection: flatten_val_expr_r(&select.selection, counter)?,
-      };
-      for (val_expr, alias) in &select.projection {
-        ms_select
-          .projection
-          .push((flatten_val_expr_r(val_expr, counter)?, alias.clone().map(|x| ColName(x))))
-      }
       trans_table_map.push((
         TransTableName(assignment_name.clone()),
-        proc::MSQueryStage::SuperSimpleSelect(ms_select),
+        proc::MSQueryStage::SuperSimpleSelect(flatten_select(select, counter)?),
       ));
       Ok(())
     }
@@ -289,22 +283,9 @@ fn flatten_sub_query_r(
       flatten_sub_query_r(assignment_name, child_query, counter, trans_table_map)
     }
     iast::QueryBody::SuperSimpleSelect(select) => {
-      let mut ms_select = proc::SuperSimpleSelect {
-        projection: Vec::new(),
-        from: proc::GeneralSource {
-          source_ref: to_source_ref(&select.from.source_ref),
-          alias: select.from.alias.clone(),
-        },
-        selection: flatten_val_expr_r(&select.selection, counter)?,
-      };
-      for (val_expr, alias) in &select.projection {
-        ms_select
-          .projection
-          .push((flatten_val_expr_r(val_expr, counter)?, alias.clone().map(|x| ColName(x))))
-      }
       trans_table_map.push((
         TransTableName(assignment_name.clone()),
-        proc::GRQueryStage::SuperSimpleSelect(ms_select),
+        proc::GRQueryStage::SuperSimpleSelect(flatten_select(select, counter)?),
       ));
       Ok(())
     }
@@ -317,6 +298,37 @@ fn flatten_sub_query_r(
   }
 }
 
+fn flatten_select(
+  select: &iast::SuperSimpleSelect,
+  counter: &mut u32,
+) -> Result<proc::SuperSimpleSelect, msg::ExternalAbortedData> {
+  let mut p_select = proc::SuperSimpleSelect {
+    distinct: select.distinct,
+    projection: Vec::new(),
+    from: proc::GeneralSource {
+      source_ref: to_source_ref(&select.from.source_ref),
+      alias: select.from.alias.clone(),
+    },
+    selection: flatten_val_expr_r(&select.selection, counter)?,
+  };
+  for (item, alias) in &select.projection {
+    let select_item = match item {
+      iast::SelectItem::ValExpr(val_expr) => {
+        proc::SelectItem::ValExpr(flatten_val_expr_r(val_expr, counter)?)
+      }
+      iast::SelectItem::UnaryAggregate(unary_agg) => {
+        proc::SelectItem::UnaryAggregate(proc::UnaryAggregate {
+          distinct: unary_agg.distinct,
+          op: unary_agg.op.clone(),
+          expr: flatten_val_expr_r(&unary_agg.expr, counter)?,
+        })
+      }
+    };
+    p_select.projection.push((select_item, alias.clone().map(|x| ColName(x))))
+  }
+  Ok(p_select)
+}
+
 // -----------------------------------------------------------------------------------------------
 //  Tests
 // -----------------------------------------------------------------------------------------------
@@ -327,6 +339,7 @@ mod rename_test {
 
   fn basic_select(table_ref: &str) -> iast::SuperSimpleSelect {
     iast::SuperSimpleSelect {
+      distinct: false,
       projection: vec![],
       from: iast::TableRef { source_ref: table_ref.to_string(), alias: None },
       selection: iast::ValExpr::Value { val: iast::Value::Boolean(true) },
@@ -402,6 +415,7 @@ mod rename_test {
         (
           TransTableName("tt\\0\\tt1".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+            distinct: false,
             projection: vec![],
             from: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TablePath(TablePath("t2".to_string())),
@@ -413,6 +427,7 @@ mod rename_test {
         (
           TransTableName("tt\\1\\tt1".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+            distinct: false,
             projection: vec![],
             from: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TransTableName(TransTableName(
@@ -426,6 +441,7 @@ mod rename_test {
         (
           TransTableName("tt\\2\\tt2".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+            distinct: false,
             projection: vec![],
             from: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TransTableName(TransTableName(
@@ -439,6 +455,7 @@ mod rename_test {
         (
           TransTableName("tt\\3\\".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+            distinct: false,
             projection: vec![],
             from: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TransTableName(TransTableName(

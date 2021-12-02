@@ -115,10 +115,19 @@ pub fn master_query_planning(
     timestamp: planning_msg.timestamp,
   };
 
+  // TODO: I believe this is broken. Doing weak static reads and resulting in an error does
+  //  not mean that we should respond as such. Some errors can be responded to definitively,
+  //  like something with keycols (e.g. insert now having key col). Fix this. Like for runtime
+  //  errors, if we let go of the desire to have idempotence or strong consistency for failure
+  //  scenarios, then the below code is okay and we can extract lots of commonality between
+  //  this function and the lower function.
   let col_usage_nodes = match planner.plan_ms_query(&planning_msg.ms_query) {
     Ok(col_usage_nodes) => col_usage_nodes,
-    Err(ColUsageError::InvalidColumnRef) => {
-      return respond_error(msg::QueryPlanningError::InvalidColUsage);
+    Err(error) => {
+      return respond_error(match error {
+        ColUsageError::InvalidColumnRef => msg::QueryPlanningError::InvalidColUsage,
+        ColUsageError::InvalidSelectClause => msg::QueryPlanningError::InvalidSelect,
+      });
     }
   };
 
@@ -249,10 +258,11 @@ pub fn master_query_planning_post(
 
   let col_usage_nodes = match planner.plan_ms_query(&planning_plm.ms_query) {
     Ok(col_usage_nodes) => col_usage_nodes,
-    Err(ColUsageError::InvalidColumnRef) => {
-      return msg::MasteryQueryPlanningResult::QueryPlanningError(
-        msg::QueryPlanningError::InvalidColUsage,
-      );
+    Err(error) => {
+      return msg::MasteryQueryPlanningResult::QueryPlanningError(match error {
+        ColUsageError::InvalidColumnRef => msg::QueryPlanningError::InvalidColUsage,
+        ColUsageError::InvalidSelectClause => msg::QueryPlanningError::InvalidSelect,
+      });
     }
   };
 

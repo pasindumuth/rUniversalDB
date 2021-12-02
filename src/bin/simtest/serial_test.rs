@@ -204,6 +204,7 @@ pub fn test_all_serial() {
   trans_table_test();
   select_projection_test();
   multi_stage_test();
+  aggregation_test();
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -621,4 +622,109 @@ fn multi_stage_test() {
   }
 
   println!("Test 'multi_stage_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  aggregation_test
+// -----------------------------------------------------------------------------------------------
+
+fn aggregation_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+  setup_user_table(&mut sim, &mut context);
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(25))]);
+    exp_result.add_row(vec![Some(cvi(3)), Some(cvs("my_email_3")), None]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email, count)
+        VALUES (2, 'my_email_2', 25),
+               (3, 'my_email_3', NULL);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  // Test basic Aggregates
+
+  {
+    let mut exp_result = TableView::new(vec![None]);
+    exp_result.add_row(vec![Some(cvi(65))]);
+    context.send_query(
+      &mut sim,
+      " SELECT SUM(count)
+        FROM inventory;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![None]);
+    exp_result.add_row(vec![Some(cvi(3))]);
+    context.send_query(
+      &mut sim,
+      " SELECT COUNT(count)
+        FROM inventory;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  // Test inner DISTINCT
+
+  {
+    let mut exp_result = TableView::new(vec![None]);
+    exp_result.add_row(vec![Some(cvi(40))]);
+    context.send_query(
+      &mut sim,
+      " SELECT SUM(DISTINCT count)
+        FROM inventory;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  // Test outer DISTINCT
+
+  {
+    let mut exp_result = TableView::new(vec![cno("count")]);
+    exp_result.add_row(vec![Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(25))]);
+    exp_result.add_row(vec![Some(cvi(25))]);
+    exp_result.add_row(vec![None]);
+    context.send_query(
+      &mut sim,
+      " SELECT count
+        FROM inventory;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("count")]);
+    exp_result.add_row(vec![Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(25))]);
+    exp_result.add_row(vec![None]);
+    context.send_query(
+      &mut sim,
+      " SELECT DISTINCT count
+        FROM inventory;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Test 'aggregation_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
 }

@@ -40,13 +40,13 @@ fn sql() {
   //          WHERE a > b AND b < 100 \
   //          ORDER BY a DESC, b";
 
-  let sql = "\
-  SELECT *
-  FROM Customer
-  WHERE (3, 'B', bool) IN 
-    (SELECT *
-       FROM Customer
-       WHERE user_id = 3);";
+  let sql = "
+    INSERT INTO inventory (product_id, email, count)
+    VALUES (2, 'my_email_2', 25);
+  
+    SELECT SUM(DISTINCT count)
+    FROM inventory;
+  ";
 
   let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
 

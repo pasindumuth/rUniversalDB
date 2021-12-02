@@ -66,6 +66,8 @@ pub enum ColUsageError {
   ///   2. If `ColumnRef` has a `source` that exists, but the `ColName` is not in the
   ///      schema of that table.
   InvalidColumnRef,
+  /// Returned if we detect that the Select clause is not right.
+  InvalidSelectClause,
 }
 
 /// This algorithm computes a `Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>`
@@ -177,9 +179,24 @@ impl<'a> ColUsagePlanner<'a> {
     let mut projection = compute_select_schema(select);
 
     let mut exprs = Vec::new();
-    for (expr, _) in &select.projection {
-      exprs.push(expr.clone());
+    let mut val_expr_count = 0;
+    let mut unary_agg_count = 0;
+    for (select_item, _) in &select.projection {
+      match select_item {
+        proc::SelectItem::ValExpr(expr) => {
+          val_expr_count += 1;
+          exprs.push(expr.clone());
+        }
+        proc::SelectItem::UnaryAggregate(unary_agg) => {
+          unary_agg_count += 1;
+          exprs.push(unary_agg.expr.clone());
+        }
+      }
     }
+    if val_expr_count > 0 && unary_agg_count > 0 {
+      return Err(ColUsageError::InvalidSelectClause);
+    }
+
     exprs.push(select.selection.clone());
 
     Ok((projection, self.compute_frozen_col_usage_node(trans_table_ctx, &select.from, &exprs)?))
@@ -293,10 +310,10 @@ impl<'a> ColUsagePlanner<'a> {
 
 pub fn compute_select_schema(select: &proc::SuperSimpleSelect) -> Vec<Option<ColName>> {
   let mut projection = Vec::<Option<ColName>>::new();
-  for (expr, alias) in &select.projection {
+  for (select_item, alias) in &select.projection {
     if let Some(col) = alias {
       projection.push(Some(col.clone()));
-    } else if let proc::ValExpr::ColumnRef(col_ref) = expr {
+    } else if let proc::SelectItem::ValExpr(proc::ValExpr::ColumnRef(col_ref)) = select_item {
       projection.push(Some(col_ref.col_name.clone()));
     } else {
       projection.push(None);
@@ -573,7 +590,7 @@ mod test {
     }
 
     fn mk_read_src(s: &str) -> proc::GeneralSource {
-      proc::GeneralSource { source_ref: proc::GeneralSourceRef::TablePath(mk_tab(s)), alias: None };
+      proc::GeneralSource { source_ref: proc::GeneralSourceRef::TablePath(mk_tab(s)), alias: None }
     }
 
     let ms_query = proc::MSQuery {
@@ -581,9 +598,10 @@ mod test {
         (
           mk_ttab("tt0"),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+            distinct: false,
             projection: vec![
-              (proc::ValExpr::ColumnRef(cref("c1")), None),
-              (proc::ValExpr::ColumnRef(cref("c4")), None),
+              (proc::SelectItem::ValExpr(proc::ValExpr::ColumnRef(cref("c1"))), None),
+              (proc::SelectItem::ValExpr(proc::ValExpr::ColumnRef(cref("c4"))), None),
             ],
             from: mk_read_src("t2"),
             selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
@@ -592,14 +610,22 @@ mod test {
         (
           mk_ttab("tt1"),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
-            projection: vec![(proc::ValExpr::ColumnRef(cref("c1")), None)],
+            distinct: false,
+            projection: vec![(
+              proc::SelectItem::ValExpr(proc::ValExpr::ColumnRef(cref("c1"))),
+              None,
+            )],
             from: mk_read_src("tt0"),
             selection: proc::ValExpr::Subquery {
               query: Box::new(proc::GRQuery {
                 trans_tables: vec![(
                   mk_ttab("tt2"),
                   proc::GRQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
-                    projection: vec![(proc::ValExpr::ColumnRef(cref("c5")), None)],
+                    distinct: false,
+                    projection: vec![(
+                      proc::SelectItem::ValExpr(proc::ValExpr::ColumnRef(cref("c5"))),
+                      None,
+                    )],
                     from: mk_read_src("t3"),
                     selection: proc::ValExpr::BinaryExpr {
                       op: iast::BinaryOp::Plus,
