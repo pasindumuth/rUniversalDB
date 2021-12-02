@@ -1,7 +1,8 @@
 #![feature(map_first_last)]
 
+use crate::advanced_serial_test::test_all_advanced_serial;
+use crate::basic_serial_test::test_all_basic_serial;
 use crate::parallel_test::test_all_parallel;
-use crate::serial_test::test_all_serial;
 
 #[macro_export]
 macro_rules! cast {
@@ -14,11 +15,19 @@ macro_rules! cast {
   }};
 }
 
+mod advanced_serial_test;
+mod basic_serial_test;
 mod parallel_test;
-mod serial_test;
+mod serial_test_utils;
 mod simulation;
 
 fn main() {
-  test_all_serial();
+  println!("Basic Serial Tests:");
+  test_all_basic_serial();
+  println!("\n");
+  println!("Advanced Serial Tests:");
+  test_all_advanced_serial();
+  println!("\n");
+  println!("Parallel Tests:");
   test_all_parallel();
 }

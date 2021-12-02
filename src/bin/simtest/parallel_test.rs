@@ -1,4 +1,4 @@
-use crate::serial_test::{setup, TestContext};
+use crate::serial_test_utils::{setup, TestContext};
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
