@@ -480,6 +480,7 @@ pub fn evaluate_super_simple_select(
     let c_expr = construct_cexpr(expr, &col_map, &subquery_vals, &mut next_subquery_idx)?;
     evaluated_select.projection.push(evaluate_c_expr(&c_expr)?);
   }
+
   evaluated_select.selection = evaluate_c_expr(&construct_cexpr(
     &select.selection,
     &col_map,
@@ -791,6 +792,59 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
     self.converters.iter().map(|conv| conv.context_schema.clone()).collect()
   }
 
+  /// An initial pass that's used to construct the child `Context`s in a deterministic order.
+  /// Recall that when `run` executes similar code, the presence of `extra_cols` might change
+  /// the order in which child `ContextRow`s are constructed. This is a problem if we want the
+  /// child `ContextRow` index (`usize`) to be consisted before sending subqueries, and after
+  /// results are received.
+  fn create_child_context_row_maps(
+    &self,
+    parent_context_rows: &Vec<ContextRow>,
+  ) -> Vec<BTreeMap<ContextRow, usize>> {
+    // Compute the set of all columns that we have to read from the LocalTable, only for
+    // context construction.
+    let mut local_schema_set = BTreeSet::<ColName>::new();
+    for conv in &self.converters {
+      local_schema_set.extend(conv.safe_present_split.clone());
+    }
+    let local_schema = Vec::from_iter(local_schema_set.into_iter());
+
+    // Iterate through all parent ContextRows, compute the local rows, then iterate through those,
+    // construct child ContextRows, populate `child_context_row_maps`, then run the callback.
+    let mut child_context_row_maps = Vec::<BTreeMap<ContextRow, usize>>::new();
+    for _ in 0..self.converters.len() {
+      child_context_row_maps.push(BTreeMap::new());
+    }
+
+    for parent_context_row_idx in 0..parent_context_rows.len() {
+      let parent_context_row = parent_context_rows.get(parent_context_row_idx).unwrap();
+      for (mut local_row, _) in
+        self.local_table.get_rows(&self.parent_context_schema, parent_context_row, &local_schema)
+      {
+        // First, construct the child ContextRows.
+        let mut child_context_rows = Vec::<(ContextRow, usize)>::new();
+        for index in 0..self.converters.len() {
+          // Compute the child ContextRow for this subquery, and populate
+          // `child_context_row_map` accordingly.
+          let conv = self.converters.get(index).unwrap();
+          let child_context_row_map = child_context_row_maps.get_mut(index).unwrap();
+          let row = conv.extract_child_relevent_cols(&local_schema, &local_row);
+          let child_context_row = conv.compute_child_context_row(parent_context_row, row);
+          if !child_context_row_map.contains_key(&child_context_row) {
+            let idx = child_context_row_map.len();
+            child_context_row_map.insert(child_context_row.clone(), idx);
+          }
+
+          // Get the child_context_idx to get the relevent TableView from the subquery
+          // results, and populate `subquery_vals`.
+          let child_context_idx = child_context_row_map.get(&child_context_row).unwrap();
+          child_context_rows.push((child_context_row, *child_context_idx));
+        }
+      }
+    }
+    child_context_row_maps
+  }
+
   /// Here, the rows in the `parent_context_rows` must correspond to `parent_context_schema`.
   /// The elements in `extra_cols` must be in either `parent_context_schema` or the LocalTable.
   ///
@@ -819,13 +873,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
       local_schema_set.extend(conv.safe_present_split.clone());
     }
     let local_schema = Vec::from_iter(local_schema_set.into_iter());
-
-    // Iterate through all parent ContextRows, compute the local rows, then iterate through those,
-    // construct child ContextRows, populate `child_context_row_maps`, then run the callback.
-    let mut child_context_row_maps = Vec::<BTreeMap<ContextRow, usize>>::new();
-    for _ in 0..self.converters.len() {
-      child_context_row_maps.push(BTreeMap::new());
-    }
+    let child_context_row_maps = self.create_child_context_row_maps(parent_context_rows);
 
     for parent_context_row_idx in 0..parent_context_rows.len() {
       let parent_context_row = parent_context_rows.get(parent_context_row_idx).unwrap();
@@ -838,13 +886,9 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
           // Compute the child ContextRow for this subquery, and populate
           // `child_context_row_map` accordingly.
           let conv = self.converters.get(index).unwrap();
-          let child_context_row_map = child_context_row_maps.get_mut(index).unwrap();
+          let child_context_row_map = child_context_row_maps.get(index).unwrap();
           let row = conv.extract_child_relevent_cols(&local_schema, &local_row);
           let child_context_row = conv.compute_child_context_row(parent_context_row, row);
-          if !child_context_row_map.contains_key(&child_context_row) {
-            let idx = child_context_row_map.len();
-            child_context_row_map.insert(child_context_row.clone(), idx);
-          }
 
           // Get the child_context_idx to get the relevent TableView from the subquery
           // results, and populate `subquery_vals`.
@@ -855,10 +899,10 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
         // Then, extract values for the `extra_cols` by first searching the `local_schema`,
         // and then the parent Context.
         let mut extra_col_vals = Vec::<ColValN>::new();
-        let mut local_row_it = local_row.into_iter();
         for col in &extra_cols {
           if self.local_table.contains_col_ref(col) {
-            extra_col_vals.push(local_row_it.next().unwrap());
+            let pos = local_schema.iter().position(|col_name| &col.col_name == col_name).unwrap();
+            extra_col_vals.push(local_row.get(pos).unwrap().clone());
           } else {
             let pos = self
               .parent_context_schema

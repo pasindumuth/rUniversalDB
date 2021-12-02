@@ -18,18 +18,18 @@ fn get_table_name(idents: Vec<ast::Ident>) -> Result<String, String> {
 
 /// Gets a table reference from a list of identifiers. Since we do not support multi-part
 /// table references, we return an error in that case.
-fn get_table_ref(idents: Vec<ast::Ident>) -> Result<iast::TableRef, String> {
-  if idents.len() == 1 {
-    Ok(iast::TableRef { source_ref: idents.into_iter().next().unwrap().value, alias: None })
-  } else if idents.len() == 2 {
-    let mut iter = idents.into_iter();
-    Ok(iast::TableRef {
-      source_ref: iter.next().unwrap().value,
-      alias: Some(iter.next().unwrap().value),
-    })
-  } else {
-    Err(format!("Table Reference {:?} not supported.", idents))
+fn get_table_ref(
+  idents: Vec<ast::Ident>,
+  alias: Option<ast::TableAlias>,
+) -> Result<iast::TableRef, String> {
+  if idents.len() != 1 {
+    return Err(format!("Table Reference {:?} not supported.", idents));
   }
+
+  Ok(iast::TableRef {
+    source_ref: idents.into_iter().next().unwrap().value,
+    alias: alias.map(|table_alias| table_alias.name.value),
+  })
 }
 
 /// Gets a table reference from a list of identifiers. Since we do not support multi-part
@@ -113,11 +113,11 @@ fn convert_query(query: ast::Query) -> Result<iast::Query, String> {
         return Err(format!("Joins not supported"));
       }
       let relation = from_clause.into_iter().next().unwrap().relation;
-      if let ast::TableFactor::Table { name, .. } = relation {
+      if let ast::TableFactor::Table { name, alias, .. } = relation {
         iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
           distinct: select.distinct,
           projection: convert_select_clause(select.projection)?,
-          from: get_table_ref(name.0)?,
+          from: get_table_ref(name.0, alias)?,
           selection: if let Some(selection) = select.selection {
             convert_expr(selection)?
           } else {
@@ -162,7 +162,7 @@ fn convert_insert(
       i_values.push(i_row);
     }
     // Construct Table name
-    let i_table = get_table_ref(table_name.0)?;
+    let i_table = get_table_ref(table_name.0, None)?;
     // Construct Columns
     let mut i_columns = Vec::<String>::new();
     for col in columns {
@@ -184,7 +184,7 @@ fn convert_update(
   selection: Option<ast::Expr>,
 ) -> Result<iast::QueryBody, String> {
   Ok(iast::QueryBody::Update(iast::Update {
-    table: get_table_ref(table_name.0)?,
+    table: get_table_ref(table_name.0, None)?,
     assignments: {
       let mut internal_assignments = Vec::<(String, iast::ValExpr)>::new();
       for a in assignments {

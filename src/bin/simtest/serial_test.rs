@@ -146,7 +146,9 @@ fn setup_inventory_table(sim: &mut Simulation, context: &mut TestContext) {
       100,
     );
   }
+}
 
+fn populate_inventory_table_basic(sim: &mut Simulation, context: &mut TestContext) {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
@@ -175,7 +177,9 @@ fn setup_user_table(sim: &mut Simulation, context: &mut TestContext) {
       100,
     );
   }
+}
 
+fn populate_setup_user_table_basic(sim: &mut Simulation, context: &mut TestContext) {
   {
     let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
@@ -205,6 +209,7 @@ pub fn test_all_serial() {
   select_projection_test();
   multi_stage_test();
   aggregation_test();
+  aliased_column_resolution_test();
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -218,6 +223,7 @@ fn simple_test() {
 
   // Test Basic Queries
   setup_inventory_table(&mut sim, &mut context);
+  populate_inventory_table_basic(&mut sim, &mut context);
 
   // Test Simple Update-Select
 
@@ -352,19 +358,7 @@ fn subquery_test() {
   let (mut sim, mut context) = setup();
 
   // Setup Tables
-
-  {
-    context.send_ddl_query(
-      &mut sim,
-      " CREATE TABLE inventory (
-          product_id INT PRIMARY KEY,
-          email      VARCHAR,
-          count      INT
-        );
-      ",
-      100,
-    );
-  }
+  setup_inventory_table(&mut sim, &mut context);
 
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
@@ -381,17 +375,7 @@ fn subquery_test() {
     );
   }
 
-  {
-    context.send_ddl_query(
-      &mut sim,
-      " CREATE TABLE user (
-          email      VARCHAR PRIMARY KEY,
-          balance    INT,
-        );
-      ",
-      100,
-    );
-  }
+  setup_user_table(&mut sim, &mut context);
 
   {
     let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
@@ -482,7 +466,9 @@ fn trans_table_test() {
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut context);
+  populate_inventory_table_basic(&mut sim, &mut context);
   setup_user_table(&mut sim, &mut context);
+  populate_setup_user_table_basic(&mut sim, &mut context);
 
   // Test TransTable Reads
 
@@ -516,7 +502,9 @@ fn select_projection_test() {
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut context);
+  populate_inventory_table_basic(&mut sim, &mut context);
   setup_user_table(&mut sim, &mut context);
+  populate_setup_user_table_basic(&mut sim, &mut context);
 
   // Test advanced expression in the SELECT projection.
 
@@ -576,7 +564,9 @@ fn multi_stage_test() {
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut context);
+  populate_inventory_table_basic(&mut sim, &mut context);
   setup_user_table(&mut sim, &mut context);
+  populate_setup_user_table_basic(&mut sim, &mut context);
 
   // Multi-Stage Transactions with TransTables
 
@@ -633,7 +623,7 @@ fn aggregation_test() {
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut context);
-  setup_user_table(&mut sim, &mut context);
+  populate_inventory_table_basic(&mut sim, &mut context);
 
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
@@ -727,4 +717,77 @@ fn aggregation_test() {
   }
 
   println!("Test 'aggregation_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  aliased_column_resolution_test
+// -----------------------------------------------------------------------------------------------
+
+fn aliased_column_resolution_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(25))]);
+    exp_result.add_row(vec![Some(cvi(3)), Some(cvs("my_email_3")), None]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email, count)
+        VALUES (0, 'my_email_0', 15),
+               (1, 'my_email_1', 25),
+               (2, 'my_email_2', 25),
+               (3, 'my_email_3', NULL);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  // Basic column shadowing test
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id")]);
+    exp_result.add_row(vec![Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvi(2))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id
+        FROM inventory AS outer
+        WHERE count = (
+           SELECT count
+           FROM inventory AS inner
+           WHERE inner.email = outer.email);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id")]);
+    exp_result.add_row(vec![Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvi(2))]);
+    exp_result.add_row(vec![Some(cvi(3))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id
+        FROM inventory AS outer
+        WHERE email = (
+           SELECT email
+           FROM inventory AS inner
+           WHERE inner.email = outer.email);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Test 'aliased_column_resolution_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
 }
