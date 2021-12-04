@@ -30,6 +30,7 @@ pub fn test_all_basic_serial() {
   multi_stage_test();
   aggregation_test();
   aliased_column_resolution_test();
+  alter_table();
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -630,4 +631,89 @@ fn aliased_column_resolution_test() {
   }
 
   println!("Test 'aliased_column_resolution_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  alter_table
+// -----------------------------------------------------------------------------------------------
+
+fn alter_table() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+  populate_inventory_table_basic(&mut sim, &mut context);
+
+  {
+    context.send_ddl_query(
+      &mut sim,
+      " ALTER TABLE inventory
+        ADD COLUMN price INT;
+      ",
+      100,
+    );
+  }
+
+  // Add Column and Write to it
+
+  {
+    let mut exp_result =
+      TableView::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15)), None]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25)), None]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count, price
+        FROM inventory;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("price")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(100))]);
+    context.send_query(
+      &mut sim,
+      " UPDATE inventory
+        SET price = 100
+        WHERE product_id = 0;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result =
+      TableView::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35)), Some(cvi(200))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email, count, price)
+        VALUES (2, 'my_email_2', 35, 200);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result =
+      TableView::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15)), Some(cvi(100))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25)), None]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35)), Some(cvi(200))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count, price
+        FROM inventory;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Test 'alter_table' Passed! Time taken: {:?}ms", sim.true_timestamp())
 }
