@@ -116,7 +116,7 @@ fn verify_req_res(
   for (_, (req, res)) in req_res_map {
     if let msg::ExternalMessage::ExternalQuerySuccess(success) = res {
       if !sorted_success_res.insert(success.timestamp.clone(), (req, success)).is_none() {
-        // Here, two responses ahd the same timestamp. We cannot replay this, so we
+        // Here, two responses had the same timestamp. We cannot replay this, so we
         // simply skip this test.
         return None;
       }
@@ -145,10 +145,10 @@ fn verify_req_res(
 }
 
 // -----------------------------------------------------------------------------------------------
-//  test_all_parallel
+//  test_all_basic_parallel
 // -----------------------------------------------------------------------------------------------
 
-pub fn test_all_parallel() {
+pub fn test_all_basic_parallel() {
   let mut orig_rand = XorShiftRng::from_seed([0; 16]);
   for i in 0..50 {
     let mut seed = [0; 16];
@@ -256,11 +256,11 @@ pub fn basic_parallel_test(seed: [u8; 16]) {
   // Verify the responses are correct
   if let Some((true_time, total_queries, successful_queries)) = verify_req_res(req_res_map) {
     println!(
-      "Test 'test_all_parallel' Passed! Replay time taken: {:?}ms.
+      "Test 'test_all_basic_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}",
       true_time, total_queries, successful_queries
     );
   } else {
-    println!("Skipped Test 'test_all_parallel' due to Timestamp Conflict");
+    println!("Skipped Test 'test_all_basic_parallel' due to Timestamp Conflict");
   }
 }

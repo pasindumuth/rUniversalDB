@@ -116,7 +116,7 @@ fn trans_table_test() {
         WHERE email = (
           WITH
             v1 AS (SELECT email, balance
-                   FROM  user
+                   FROM user
                    WHERE balance >= 60),
             v2 AS (SELECT product_id, email
                    FROM  inventory

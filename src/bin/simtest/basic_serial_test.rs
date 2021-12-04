@@ -27,6 +27,8 @@ pub fn test_all_basic_serial() {
   subquery_test();
   trans_table_test();
   select_projection_test();
+  insert_test();
+  multi_key_test();
   multi_stage_test();
   aggregation_test();
   aliased_column_resolution_test();
@@ -374,6 +376,127 @@ fn select_projection_test() {
   }
 
   println!("Test 'select_projection_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  insert_test
+// -----------------------------------------------------------------------------------------------
+
+fn insert_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+
+  // Fully Insert with NULL
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), None]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email, count)
+        VALUES (0, 'my_email_0', 15),
+               (1, 'my_email_1', NULL);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  // Partial Insert with NULL
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2"))]);
+    exp_result.add_row(vec![Some(cvi(3)), None]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email)
+        VALUES (2, 'my_email_2'),
+               (3, NULL);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Test 'insert_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  multi_key_test
+// -----------------------------------------------------------------------------------------------
+
+fn multi_key_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+
+  {
+    context.send_ddl_query(
+      &mut sim,
+      " CREATE TABLE table1 (
+          k1 INT PRIMARY KEY,
+          k2 INT PRIMARY KEY,
+          v1 INT,
+          v2 INT
+        );
+      ",
+      100,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("k1"), cno("k2"), cno("v1"), cno("v2")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(0)), Some(cvi(0)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(1)), Some(cvi(0)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(0)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(3)), Some(cvi(0)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(0)), Some(cvi(0)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(0)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(2)), Some(cvi(0)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvi(0)), Some(cvi(0)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvi(1)), Some(cvi(0)), Some(cvi(0))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO table1 (k1, k2, v1, v2)
+        VALUES (0, 0, 0, 0),
+               (0, 1, 0, 0),
+               (0, 2, 0, 0),
+               (0, 3, 0, 0),
+               (1, 0, 0, 0),
+               (1, 1, 0, 0),
+               (1, 2, 0, 0),
+               (2, 0, 0, 0),
+               (2, 1, 0, 0);
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  // Range queries for multiple Key Columns
+
+  {
+    let mut exp_result = TableView::new(vec![cno("k1"), cno("k2"), cno("v1")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(1)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(2)), Some(cvi(0))]);
+    context.send_query(
+      &mut sim,
+      " SELECT k1, k2, v1
+        FROM table1
+        WHERE 0 <= k1 AND k1 <= 1 AND 1 <= k2 AND k2 <= 2;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  println!("Test 'multi_key_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
 }
 
 // -----------------------------------------------------------------------------------------------

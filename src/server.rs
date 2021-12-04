@@ -767,8 +767,8 @@ pub struct ContextConstructor<LocalTableT: LocalTable> {
 }
 
 impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
-  /// Here, the `Vec<ColName>` in each child has to either exist in the LocalTable, or in the
-  /// `parent_context_schema`. In addition the `Vec<TransTableName>` must exist in the
+  /// Here, the `Vec<proc::ColumnRef>` in each child has to either exist in the LocalTable, or
+  /// in the `parent_context_schema`. In addition the `Vec<TransTableName>` must exist in the
   /// `parent_context_schema`.
   pub fn new(
     parent_context_schema: ContextSchema,
