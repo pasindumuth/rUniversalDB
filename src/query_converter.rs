@@ -29,13 +29,6 @@ fn unique_name(counter: &mut u32, trans_table_name: &String) -> String {
   format!("tt\\{}\\{}", *counter - 1, trans_table_name)
 }
 
-/// Recovers the original name of a TransTable given its new, unique name.
-fn orig_name(renamed_trans_table_name: &String) -> String {
-  // TODO: this is wrong when the `counter` above is bigger than 10. Just remove this function
-  //  and maintain a orig_name -> new_name mapping in rename_trans_tables_query_r.
-  renamed_trans_table_name[5..].to_string()
-}
-
 /// Check if a `table_name` is a TransTable, assuming that it would already have been made unique.
 fn to_source_ref(table_name: &String) -> proc::GeneralSourceRef {
   if table_name.len() >= 3 && &table_name[..3] == "tt\\" {
@@ -65,6 +58,7 @@ struct RenameContext {
 ///
 /// Note: this function leaves the `ctx.trans_table_map` that is passed in unmodified.
 fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query) {
+  let mut trans_table_map = BTreeMap::<String, String>::new(); // Maps new name to old name.
   for (trans_table_name, cte_query) in &mut query.ctes {
     rename_trans_tables_query_r(ctx, cte_query); // Recurse
 
@@ -75,6 +69,7 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
     } else {
       ctx.trans_table_map.insert(trans_table_name.clone(), vec![renamed_trans_table_name.clone()]);
     }
+    trans_table_map.insert(renamed_trans_table_name.clone(), trans_table_name.clone());
     *trans_table_name = renamed_trans_table_name; // Rename the TransTable
   }
 
@@ -86,12 +81,12 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
     iast::QueryBody::SuperSimpleSelect(select) => {
       // Rename the Table to select if it's a TransTable.
       if let Some(rename_stack) = ctx.trans_table_map.get_mut(&select.from.source_ref) {
-        select.from.source_ref = rename_stack.last().unwrap().clone();
         if select.from.alias.is_none() {
           // To avoid having to rename ColumnRefs that have a `table_ref` present that
           // refers to this Data Source, we add a table alias with the original name.
           select.from.alias = Some(select.from.source_ref.clone());
         }
+        select.from.source_ref = rename_stack.last().unwrap().clone();
       }
 
       // Rename the Projection Clause
@@ -122,9 +117,9 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
   }
 
   // Remove the TransTables defined by this Query from the ctx.
-  for (trans_table_name, _) in &mut query.ctes {
-    let orig_name = orig_name(&trans_table_name);
-    let rename_stack = ctx.trans_table_map.get_mut(&orig_name).unwrap();
+  for (trans_table_name, _) in &query.ctes {
+    let orig_name = trans_table_map.get(trans_table_name).unwrap();
+    let rename_stack = ctx.trans_table_map.get_mut(orig_name).unwrap();
     rename_stack.pop();
     if rename_stack.is_empty() {
       ctx.trans_table_map.remove(trans_table_name);

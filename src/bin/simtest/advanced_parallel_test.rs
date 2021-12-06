@@ -6,12 +6,12 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_rid, TableSchema};
 use runiversal::master::FullDBSchema;
 use runiversal::model::common::{
-  ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, Timestamp,
+  ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TableView, Timestamp,
 };
 use runiversal::model::message as msg;
-use runiversal::model::message::ExternalAbortedData::ParseError;
+use runiversal::model::message::ExternalAbortedData;
 use runiversal::simulation_utils::mk_slave_eid;
-use runiversal::test_utils::{mk_eid, mk_sid};
+use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid};
 use sqlformat;
 use std::collections::BTreeMap;
 
@@ -78,7 +78,7 @@ impl<'a> QueryGenCtx<'a> {
     }
 
     // Construct the Insert Rows
-    let num_rows = self.rand.next_u32() % 10; // We only insert at most 10 rows at a time
+    let num_rows = (self.rand.next_u32() % 10) + 1; // We only insert at most 10 rows at a time
     let row_len = key_cols.len() + chosen_cols.len();
     let mut rows = Vec::<String>::new();
     for _ in 0..num_rows {
@@ -91,7 +91,7 @@ impl<'a> QueryGenCtx<'a> {
 
     Some(format!(
       " INSERT INTO {} ({})
-        VALUES {};
+        VALUES {}
       ",
       source,
       insert_cols.join(", "),
@@ -207,8 +207,24 @@ impl<'a> QueryGenCtx<'a> {
     }
 
     // Construct the WHERE clause
-    let where_clause =
-      if !bound_exprs.is_empty() { bound_exprs.join(" AND ") } else { "true".to_string() };
+    let mut it = bound_exprs.into_iter();
+    let where_clause = if let Some(expr) = it.next() {
+      // Construct a boolean expression with a mixture of AND and OR
+      let mut exprs_with_ops = Vec::<String>::new();
+      exprs_with_ops.push(expr);
+      while let Some(next_expr) = it.next() {
+        if self.rand.next_u32() % 2 == 0 {
+          exprs_with_ops.push("OR".to_string());
+        } else {
+          exprs_with_ops.push("AND".to_string());
+        }
+        exprs_with_ops.push(next_expr);
+      }
+      exprs_with_ops.join(" ")
+    } else {
+      "true".to_string()
+    };
+
     Some(where_clause)
   }
 
@@ -291,7 +307,7 @@ impl<'a> QueryGenCtx<'a> {
       // Choose a random, non-empty set of columns as the elements in the SELECT clause
       let num_cols = (self.rand.next_u32() as usize % all_cols.len()) + 1;
       for _ in 0..num_cols {
-        let col = all_cols.get(self.rand.next_u32() as usize % all_cols.len()).unwrap();
+        let col = all_cols.remove(self.rand.next_u32() as usize % all_cols.len());
         select_clause.push(format!("{}", &col.0));
         schema.push(Some(col.clone()));
       }
@@ -337,7 +353,7 @@ impl<'a> QueryGenCtx<'a> {
         let new_cte_name = format!("tt{}", self.trans_table_counter);
         *self.trans_table_counter += 1;
         let (new_schema, new_cte) = self.mk_cte_query(depth + 1, false)?;
-        new_ctes.push(format!("{} = ({})", new_cte_name, new_cte));
+        new_ctes.push(format!("{} AS ({})", new_cte_name, new_cte));
         new_cte_names.push(new_cte_name.clone());
         self.trans_table_schemas.insert(new_cte_name, new_schema);
       }
@@ -397,12 +413,10 @@ impl<'a> QueryGenCtx<'a> {
     let chosen_cols: Vec<ColName> = present_val_cols.into_iter().take(num_chosen_cols).collect();
 
     // Potentially generate an alias to use as the Data Source name.
-    let alias_opt = if self.rand.next_u32() % 2 == 0 {
-      // Generate a random alias. We do this in a way that is not totally immune from collisions.
-      Some(format!("a{}_{}", (self.rand.next_u32() % 10), source))
-    } else {
-      None
-    };
+    //
+    // NOTE: although Postgres allows for aliases here, the `sqlparser` library does not. Thus,
+    // we take this to be None every time.
+    let alias_opt = None;
 
     // Collect all columns in the table into one vector
     let mut all_cols = Vec::<ColName>::new();
@@ -485,12 +499,6 @@ impl QueryGenerator {
     QueryType::TPQuery
   }
 
-  /// Chooses a QueryType based on some target probability distribution.
-  fn choose_tp_query_type(_: &mut XorShiftRng) -> TPQueryType {
-    // TODO implement
-    TPQueryType::CTEQuery
-  }
-
   /// Create a TP Query.
   fn mk_tp_query(&mut self, sim: &mut Simulation) -> Option<String> {
     let timestamp = *sim.true_timestamp();
@@ -519,17 +527,23 @@ impl QueryGenerator {
       column_context: &mut BTreeMap::<(String, String), u32>::new(),
     };
 
-    // We add at most 10 stages to the query
+    // We add at most 10 stages to the query. We choose write queries for all stages
+    // prior to the last.
     let mut stages = Vec::<String>::new();
     for _ in 0..(ctx.rand.next_u32() % 10) {
-      let tp_query_type = Self::choose_tp_query_type(ctx.rand);
-      let stage = match tp_query_type {
-        TPQueryType::Insert => ctx.mk_insert()?,
-        TPQueryType::Update => ctx.mk_update(0)?,
-        TPQueryType::CTEQuery => ctx.mk_cte_query(0, false)?.1,
+      let stage = match ctx.rand.next_u32() % 2 {
+        0 => ctx.mk_insert()?,
+        1 => ctx.mk_update(0)?,
+        _ => panic!(),
       };
       stages.push(format!("{};", stage));
     }
+    let stage = match ctx.rand.next_u32() % 2 {
+      0 => ctx.mk_update(0)?,
+      1 => ctx.mk_cte_query(0, false)?.1,
+      _ => panic!(),
+    };
+    stages.push(format!("{};", stage));
 
     Some(stages.join("\n"))
   }
@@ -619,36 +633,21 @@ fn verify_req_res(
     }
   }
 
-  {
-    context.send_ddl_query(
-      &mut sim,
-      " CREATE TABLE table1 (
-          k1 INT PRIMARY KEY,
-          k2 INT PRIMARY KEY,
-          v1 INT,
-          v2 INT,
-          v3 INT
-        );
-      ",
-      100,
-    );
-  }
-
-  {
-    context.send_ddl_query(
-      &mut sim,
-      " CREATE TABLE table2 (
-          k1 INT PRIMARY KEY,
-          v1 INT,
-          v2 INT
-        );
-      ",
-      100,
-    );
-  }
+  setup_tables(&mut sim, &mut context);
+  sim.remove_all_responses(); // Clear the DDL response.
 
   let successful_queries = sorted_success_res.len() as u32;
+  let mut count = 0;
   for (_, (req, res)) in sorted_success_res {
+    println!(
+      "         QUERY {:?}:
+                Req: {}
+                Res: {:?}",
+      count,
+      format_sql(&req.query),
+      res
+    );
+    count += 1;
     context.send_query(&mut sim, req.query.as_str(), 10000, res.result);
   }
 
@@ -660,16 +659,95 @@ fn verify_req_res(
 // -----------------------------------------------------------------------------------------------
 
 /// Formats a raw, generated SQL string and formats it for printing.
-fn format_sql(query: String) -> String {
+fn format_sql(query: &str) -> String {
   sqlformat::format(
     &query,
     &sqlformat::QueryParams::None,
     sqlformat::FormatOptions {
       indent: sqlformat::Indent::Spaces(1),
       uppercase: false,
-      lines_between_queries: 0,
+      lines_between_queries: 1,
     },
   )
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Setup Utils
+// -----------------------------------------------------------------------------------------------
+
+fn setup_tables(sim: &mut Simulation, context: &mut TestContext) {
+  {
+    context.send_ddl_query(
+      sim,
+      " CREATE TABLE table1 (
+          k11 INT PRIMARY KEY,
+          k12 INT PRIMARY KEY,
+          v11 INT,
+          v12 INT,
+          v13 INT
+        );
+      ",
+      10000,
+    );
+  }
+
+  {
+    context.send_ddl_query(
+      sim,
+      " CREATE TABLE table2 (
+          k21 INT PRIMARY KEY,
+          v21 INT,
+          v22 INT
+        );
+      ",
+      10000,
+    );
+  }
+
+  let mki = |i: i32| Some(cvi(i));
+
+  {
+    let mut exp_result =
+      TableView::new(vec![cno("k11"), cno("k12"), cno("v11"), cno("v12"), cno("v13")]);
+    exp_result.add_row(vec![mki(0), mki(1), mki(2), mki(3), mki(4)]);
+    exp_result.add_row(vec![mki(1), mki(2), mki(3), mki(4), mki(5)]);
+    exp_result.add_row(vec![mki(2), mki(3), mki(4), mki(5), mki(6)]);
+    exp_result.add_row(vec![mki(3), mki(4), mki(5), mki(6), mki(7)]);
+    exp_result.add_row(vec![mki(4), mki(5), mki(6), mki(7), mki(8)]);
+    context.send_query(
+      sim,
+      " INSERT INTO table1 (k11, k12, v11, v12, v13)
+        VALUES (0, 1, 2, 3, 4),
+               (1, 2, 3, 4, 5),
+               (2, 3, 4, 5, 6),
+               (3, 4, 5, 6, 7),
+               (4, 5, 6, 7, 8);
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("k21"), cno("v21"), cno("v22")]);
+    exp_result.add_row(vec![mki(0), mki(2), mki(3)]);
+    exp_result.add_row(vec![mki(1), mki(3), mki(4)]);
+    exp_result.add_row(vec![mki(2), mki(4), mki(5)]);
+    exp_result.add_row(vec![mki(3), mki(5), mki(6)]);
+    exp_result.add_row(vec![mki(4), mki(6), mki(7)]);
+    context.send_query(
+      sim,
+      " INSERT INTO table2 (k21, v21, v22)
+        VALUES (0, 2, 3),
+               (1, 3, 4),
+               (2, 4, 5),
+               (3, 5, 6),
+               (4, 6, 7);
+      ",
+      10000,
+      exp_result,
+    );
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -678,7 +756,7 @@ fn format_sql(query: String) -> String {
 
 pub fn test_all_advanced_parallel() {
   let mut orig_rand = XorShiftRng::from_seed([0; 16]);
-  for i in 0..50 {
+  for i in 0..10 {
     let mut seed = [0; 16];
     orig_rand.fill_bytes(&mut seed);
     println!("Running round {:?}", i);
@@ -703,35 +781,7 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
   let mut context = TestContext::new();
 
   // Setup Tables
-
-  {
-    context.send_ddl_query(
-      &mut sim,
-      " CREATE TABLE table1 (
-          k1 INT PRIMARY KEY,
-          k2 INT PRIMARY KEY,
-          v1 INT,
-          v2 INT,
-          v3 INT
-        );
-      ",
-      100,
-    );
-  }
-
-  {
-    context.send_ddl_query(
-      &mut sim,
-      " CREATE TABLE table2 (
-          k1 INT PRIMARY KEY,
-          v1 INT,
-          v2 INT
-        );
-      ",
-      100,
-    );
-  }
-
+  setup_tables(&mut sim, &mut context);
   sim.remove_all_responses(); // Clear the DDL response.
 
   // Create the QueryGenerator
@@ -784,8 +834,19 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
         let external = cast!(msg::NetworkMessage::External, res).unwrap();
         let request_id = match &external {
           msg::ExternalMessage::ExternalQuerySuccess(success) => &success.request_id,
-          msg::ExternalMessage::ExternalQueryAborted(aborted) => &aborted.request_id,
-          // TODO: do not allow stupid errors, like parsing errors.
+          msg::ExternalMessage::ExternalQueryAborted(aborted) => match &aborted.payload {
+            ExternalAbortedData::ParseError(error) => {
+              println!("Invalid query! Parse error: {:?}", error);
+              println!("Query: {}\n", format_sql(&query));
+              panic!();
+            }
+            ExternalAbortedData::QueryPlanningError(error) => {
+              println!("Invalid query! QueryPlanning error: {:?}", error);
+              println!("Query: {}\n", format_sql(&query));
+              panic!();
+            }
+            _ => &aborted.request_id,
+          },
           _ => panic!(),
         };
 
