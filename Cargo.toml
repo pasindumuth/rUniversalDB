@@ -10,6 +10,7 @@ default-run = "transact"
 [dependencies]
 serde = { version = "1.0.117", features = ["derive"] }
 sqlparser = "0.9.0"
+sqlformat = "0.1.8"
 rmp-serde = "0.14.4"
 rand = "0.7.3"
 rand_xorshift = "0.2.0"

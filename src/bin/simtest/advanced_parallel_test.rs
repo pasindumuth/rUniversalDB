@@ -12,55 +12,12 @@ use runiversal::model::message as msg;
 use runiversal::model::message::ExternalAbortedData::ParseError;
 use runiversal::simulation_utils::mk_slave_eid;
 use runiversal::test_utils::{mk_eid, mk_sid};
+use sqlformat;
 use std::collections::BTreeMap;
 
-// TODO:
-// we randomly choose the set of valcols to write to. Now, do we want to create functions
-// where the table schema is unknown or where it is known? i guess uknown would be better so
-// that when we have change schemas by adding and removing columns, queries can be generated
-// accordingly.
-//
-// Okay, let's see here. I suppose we can have a query constructing context, where we have a
-// view of what the current schema in the system is. We could also do table schema changes
-// serially if we wanted to. That way, we don't get into a terminally inaccurate view of the
-// table schema. Alterantively, we can just dig it out of the GossipData. We can just introduce
-// a public getter. Only useful here. Okay, then we can do a snapshot read at `timestamp` and
-// then use that to infer the current schema.
-//
-// Okay, how do we add and remove columns? I guess we can have a monotonically increasing index
-// where we know a column with that name for that table had already existed. Then, we can decide
-// whether we want to create a new column or recreate an old column. We can also do this for tables.
-//
-// During query generation, just randomly generate it. Few recursive functions, no problem. Then
-// for liveness, recall we just see what ratio of queries succeed and then count the average
-// number of rows returned per-query.
-
 // -----------------------------------------------------------------------------------------------
-//  Query Generation Utils
+//  QueryGenCtx
 // -----------------------------------------------------------------------------------------------
-
-struct QueryGenerator {
-  table_counter: u32,
-  column_counter: BTreeMap<String, u32>,
-}
-
-enum QueryType {
-  /// Different variants of DDL queries
-  CreateNewTable,
-  RecreateTable,
-  DropTable,
-  CreateNewColumn,
-  RecreateColumn,
-  DeleteColumm,
-  /// A DQL or DML query
-  TPQuery,
-}
-
-enum TPQueryType {
-  Insert,
-  Update,
-  CTEQuery,
-}
 
 /// Gets the key at the given index
 fn read_index<K: Ord, V>(map: &BTreeMap<K, V>, idx: usize) -> Option<(&K, &V)> {
@@ -185,7 +142,7 @@ impl<'a> QueryGenCtx<'a> {
       self.add_to_column_context(&all_cols, source_name);
       let (_, cte) = self.mk_cte_query(depth + 1, true)?;
       self.remove_from_column_context(&all_cols, source_name);
-      cte
+      format!("({})", cte)
     } else {
       // Use an external column. From the else-if, we see column_context is non-empty.
       let idx = self.rand.next_u32() as usize % self.column_context.len();
@@ -217,12 +174,12 @@ impl<'a> QueryGenCtx<'a> {
     let mut cols_to_bound = Vec::<&String>::new();
     // Amend bound_exprs for some prefix of key_cols. We use a prefix so that the KeyBound
     // used by TP is non-trivial.
-    for i in 0..(self.rand.next_u32() as usize % key_cols.len()) {
+    for i in 0..(self.rand.next_u32() as usize % (key_cols.len() + 1)) {
       cols_to_bound.push(&key_cols.get(i).unwrap().0);
     }
 
     // Amend bound_exprs with some val_cols.
-    for i in 0..(self.rand.next_u32() as usize % val_cols.len()) {
+    for i in 0..(self.rand.next_u32() as usize % (val_cols.len() + 1)) {
       if let Some(val_col) = val_cols.get(i).unwrap() {
         cols_to_bound.push(&val_col.0);
       }
@@ -250,7 +207,8 @@ impl<'a> QueryGenCtx<'a> {
     }
 
     // Construct the WHERE clause
-    let where_clause = bound_exprs.join(" AND ");
+    let where_clause =
+      if !bound_exprs.is_empty() { bound_exprs.join(" AND ") } else { "true".to_string() };
     Some(where_clause)
   }
 
@@ -368,7 +326,8 @@ impl<'a> QueryGenCtx<'a> {
   ) -> Option<(Vec<Option<ColName>>, String)> {
     // Generate CTEs. We reduce the number of CTEs for every level of depth to avoid
     // exponential blow-up of the query.
-    let num_ctes = if depth >= 3 { 0 } else { self.rand.next_u32() % (3 - depth) };
+    const MAX_DEPTH: u32 = 3;
+    let num_ctes = if depth >= MAX_DEPTH { 0 } else { self.rand.next_u32() % (MAX_DEPTH - depth) };
 
     // If there are CTEs to create, we create a query using WITH.
     if num_ctes > 0 {
@@ -488,7 +447,38 @@ impl<'a> QueryGenCtx<'a> {
   }
 }
 
+// -----------------------------------------------------------------------------------------------
+//  QueryGenerator
+// -----------------------------------------------------------------------------------------------
+
+struct QueryGenerator {
+  table_counter: u32,
+  column_counter: BTreeMap<String, u32>,
+}
+
+enum QueryType {
+  /// Different variants of DDL queries
+  CreateNewTable,
+  RecreateTable,
+  DropTable,
+  CreateNewColumn,
+  RecreateColumn,
+  DeleteColumm,
+  /// A DQL or DML query
+  TPQuery,
+}
+
+enum TPQueryType {
+  Insert,
+  Update,
+  CTEQuery,
+}
+
 impl QueryGenerator {
+  fn new() -> QueryGenerator {
+    QueryGenerator { table_counter: 0, column_counter: Default::default() }
+  }
+
   /// Chooses a QueryType based on some target probability distribution.
   fn choose_query_type(_: &mut XorShiftRng) -> QueryType {
     // TODO implement
@@ -499,6 +489,49 @@ impl QueryGenerator {
   fn choose_tp_query_type(_: &mut XorShiftRng) -> TPQueryType {
     // TODO implement
     TPQueryType::CTEQuery
+  }
+
+  /// Create a TP Query.
+  fn mk_tp_query(&mut self, sim: &mut Simulation) -> Option<String> {
+    let timestamp = *sim.true_timestamp();
+
+    // Create a new RNG for query generation
+    let mut seed = [0; 16];
+    sim.rand.fill_bytes(&mut seed);
+    let mut rand = XorShiftRng::from_seed(seed);
+
+    // Extract all current TableSchemas
+    let (_, full_db_schema) = sim.full_db_schema();
+    let cur_tables = full_db_schema.table_generation.static_snapshot_read(timestamp);
+    let mut table_schemas = BTreeMap::<TablePath, &TableSchema>::new();
+    for (table_path, gen) in cur_tables {
+      let table_schema = full_db_schema.db_schema.get(&(table_path.clone(), gen)).unwrap();
+      table_schemas.insert(table_path, table_schema);
+    }
+
+    // Construct a Query generation context
+    let mut ctx = QueryGenCtx {
+      rand: &mut rand,
+      timestamp,
+      table_schemas: &table_schemas,
+      trans_table_counter: &mut 0,
+      trans_table_schemas: &mut BTreeMap::<String, Vec<Option<ColName>>>::new(),
+      column_context: &mut BTreeMap::<(String, String), u32>::new(),
+    };
+
+    // We add at most 10 stages to the query
+    let mut stages = Vec::<String>::new();
+    for _ in 0..(ctx.rand.next_u32() % 10) {
+      let tp_query_type = Self::choose_tp_query_type(ctx.rand);
+      let stage = match tp_query_type {
+        TPQueryType::Insert => ctx.mk_insert()?,
+        TPQueryType::Update => ctx.mk_update(0)?,
+        TPQueryType::CTEQuery => ctx.mk_cte_query(0, false)?.1,
+      };
+      stages.push(format!("{};", stage));
+    }
+
+    Some(stages.join("\n"))
   }
 
   fn mk_query(&mut self, sim: &mut Simulation) -> Option<String> {
@@ -558,47 +591,7 @@ impl QueryGenerator {
         // Delete a Column
         Some(String::new())
       }
-      QueryType::TPQuery => {
-        let timestamp = *sim.true_timestamp();
-
-        // Create a new RNG for query generation
-        let mut seed = [0; 16];
-        sim.rand.fill_bytes(&mut seed);
-        let mut rand = XorShiftRng::from_seed(seed);
-
-        // Extract all current TableSchemas
-        let (_, full_db_schema) = sim.full_db_schema();
-        let cur_tables = full_db_schema.table_generation.static_snapshot_read(timestamp);
-        let mut table_schemas = BTreeMap::<TablePath, &TableSchema>::new();
-        for (table_path, gen) in cur_tables {
-          let table_schema = full_db_schema.db_schema.get(&(table_path.clone(), gen)).unwrap();
-          table_schemas.insert(table_path, table_schema);
-        }
-
-        // Construct a Query generation context
-        let mut ctx = QueryGenCtx {
-          rand: &mut rand,
-          timestamp,
-          table_schemas: &table_schemas,
-          trans_table_counter: &mut 0,
-          trans_table_schemas: &mut BTreeMap::<String, Vec<Option<ColName>>>::new(),
-          column_context: &mut BTreeMap::<(String, String), u32>::new(),
-        };
-
-        // We add at most 10 stages to the query
-        let mut stages = Vec::<String>::new();
-        for _ in 0..(ctx.rand.next_u32() % 10) {
-          let tp_query_type = Self::choose_tp_query_type(ctx.rand);
-          let stage = match tp_query_type {
-            TPQueryType::Insert => ctx.mk_insert()?,
-            TPQueryType::Update => ctx.mk_update(0)?,
-            TPQueryType::CTEQuery => ctx.mk_cte_query(0, false)?.1,
-          };
-          stages.push(stage);
-        }
-
-        Some(format!("{};", stages.join("\n")))
-      }
+      QueryType::TPQuery => self.mk_tp_query(sim),
     }
   }
 }
@@ -629,12 +622,25 @@ fn verify_req_res(
   {
     context.send_ddl_query(
       &mut sim,
-      " CREATE TABLE inventory (
+      " CREATE TABLE table1 (
           k1 INT PRIMARY KEY,
           k2 INT PRIMARY KEY,
           v1 INT,
           v2 INT,
-          v3 INT,
+          v3 INT
+        );
+      ",
+      100,
+    );
+  }
+
+  {
+    context.send_ddl_query(
+      &mut sim,
+      " CREATE TABLE table2 (
+          k1 INT PRIMARY KEY,
+          v1 INT,
+          v2 INT
         );
       ",
       100,
@@ -647,6 +653,23 @@ fn verify_req_res(
   }
 
   Some((*sim.true_timestamp() as u32, total_queries, successful_queries))
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Print Utils
+// -----------------------------------------------------------------------------------------------
+
+/// Formats a raw, generated SQL string and formats it for printing.
+fn format_sql(query: String) -> String {
+  sqlformat::format(
+    &query,
+    &sqlformat::QueryParams::None,
+    sqlformat::FormatOptions {
+      indent: sqlformat::Indent::Spaces(1),
+      uppercase: false,
+      lines_between_queries: 0,
+    },
+  )
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -675,11 +698,6 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
   .into_iter()
   .collect();
 
-  /**
-  Okay, so we create the sim and the context. Then, we create the table like this.
-  and then we generate queries.
-
-   */
   // We create 3 clients.
   let mut sim = Simulation::new(seed, 3, slave_address_config, master_address_config);
   let mut context = TestContext::new();
@@ -689,12 +707,25 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
   {
     context.send_ddl_query(
       &mut sim,
-      " CREATE TABLE inventory (
+      " CREATE TABLE table1 (
           k1 INT PRIMARY KEY,
           k2 INT PRIMARY KEY,
           v1 INT,
           v2 INT,
-          v3 INT,
+          v3 INT
+        );
+      ",
+      100,
+    );
+  }
+
+  {
+    context.send_ddl_query(
+      &mut sim,
+      " CREATE TABLE table2 (
+          k1 INT PRIMARY KEY,
+          v1 INT,
+          v2 INT
         );
       ",
       100,
@@ -702,6 +733,9 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
   }
 
   sim.remove_all_responses(); // Clear the DDL response.
+
+  // Create the QueryGenerator
+  let mut query_generator = QueryGenerator::new();
 
   // Run the simulation
   let client_eids: Vec<_> = sim.get_all_responses().keys().cloned().collect();
@@ -716,8 +750,7 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
   const SIM_DURATION: u128 = 1000; // The duration that we run the simulation
   while sim.true_timestamp() < &SIM_DURATION {
     // Generate a random query
-    // let query = self.mk_query(&mut sim.rand);
-    let query = "".to_string();
+    let query = query_generator.mk_tp_query(&mut sim).unwrap();
 
     // Construct a request and populate `req_map`
     let request_id = mk_rid(&mut sim.rand);

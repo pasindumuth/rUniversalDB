@@ -1,5 +1,6 @@
 #![feature(map_first_last)]
 
+use crate::advanced_parallel_test::advanced_parallel_test;
 use crate::advanced_serial_test::test_all_advanced_serial;
 use crate::basic_parallel_test::test_all_basic_parallel;
 use crate::basic_serial_test::test_all_basic_serial;
@@ -31,4 +32,6 @@ fn main() {
   println!("\n");
   println!("Basic Parallel Tests:");
   test_all_basic_parallel();
+  println!("Advanced Parallel Tests:");
+  advanced_parallel_test([0; 16]);
 }
