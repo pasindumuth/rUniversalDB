@@ -5,7 +5,9 @@ use runiversal::common::{
 };
 use runiversal::coord::coord_test::assert_coord_consistency;
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
-use runiversal::master::{FullMasterInput, MasterContext, MasterState, MasterTimerInput};
+use runiversal::master::{
+  FullDBSchema, FullMasterInput, MasterContext, MasterState, MasterTimerInput,
+};
 use runiversal::model::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, RequestId,
   SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
@@ -448,6 +450,14 @@ impl Simulation {
 
   pub fn true_timestamp(&self) -> &Timestamp {
     &self.true_timestamp
+  }
+
+  /// This returns the `FullDBSchema` of some random Master node. This might not be
+  /// the most recent Leader. Thus, this is only an approximate of the latest `FullDBSchema`.
+  pub fn full_db_schema(&mut self) -> (&mut XorShiftRng, FullDBSchema) {
+    let master_eid = self.master_address_config.get(0).unwrap();
+    let master_data = self.master_data.get(master_eid).unwrap();
+    (&mut self.rand, master_data.master_state.ctx.full_db_schema())
   }
 
   // -----------------------------------------------------------------------------------------------

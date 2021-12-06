@@ -224,6 +224,15 @@ impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  Reflection
+// -----------------------------------------------------------------------------------------------
+
+pub struct FullDBSchema<'a> {
+  pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
+  pub table_generation: &'a MVM<TablePath, Gen>,
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Master State
 // -----------------------------------------------------------------------------------------------
 
@@ -1112,6 +1121,11 @@ impl MasterContext {
       sid,
       msg::SlaveRemotePayload::MasterGossip(msg::MasterGossip { gossip_data: gossip_data.clone() }),
     );
+  }
+
+  /// This is used by the simulation tester to inspect what the current database schema is.
+  pub fn full_db_schema(&self) -> FullDBSchema {
+    FullDBSchema { db_schema: &self.db_schema, table_generation: &self.table_generation }
   }
 }
 
