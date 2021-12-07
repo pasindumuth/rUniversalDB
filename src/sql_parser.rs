@@ -2,6 +2,7 @@ use crate::model::common::{iast, ColName, ColType};
 use crate::model::common::{proc, TablePath};
 use sqlparser::ast;
 use sqlparser::test_utils::table;
+use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
 //  Utils
@@ -325,27 +326,90 @@ pub fn convert_ddl_ast(raw_query: Vec<ast::Statement>) -> Result<DDLQuery, Strin
   }
   let stmt = raw_query.into_iter().next().unwrap();
   match &stmt {
-    ast::Statement::CreateTable { name, columns, .. } => {
-      let table_path = TablePath(get_table_name(name.0.clone())?);
-      let mut key_cols = Vec::<(ColName, ColType)>::new();
-      let mut val_cols = Vec::<(ColName, ColType)>::new();
+    ast::Statement::CreateTable { name, columns, constraints, .. } => {
+      // Every table needs exactly one PRIMARY KEY declaration, either for a single column in its
+      // Column Definition, or as a Table Constraint with potentially multiple columns. We track
+      // whether we already encoutered such a declaration for error detection.
+      let mut key_col_delcared = false;
+
+      // Read in all columns, marking whether it is primary or not.
+      let mut all_cols = BTreeMap::<ColName, (ColType, bool)>::new();
       for col in columns {
+        // Read the name and type
         let col_name = ColName(col.name.value.clone());
         let col_type = match &col.data_type {
           ast::DataType::Varchar(_) => ColType::String,
           ast::DataType::Int => ColType::Int,
           ast::DataType::Boolean => ColType::Bool,
-          _ => return Err(format!("Unsupported Create Table datatype {:?}", col.data_type)),
+          _ => return Err(format!("Unsupported data type in CREATE TABLE: {:?}.", col.data_type)),
         };
+        // Read whether this is declared as a PRIMARY KEY or not
         let mut is_key_col = false;
         for option_def in &col.options {
-          if let ast::ColumnOption::Unique { is_primary, .. } = &option_def.option {
-            if *is_primary {
-              is_key_col = true;
+          match &option_def.option {
+            ast::ColumnOption::Unique { is_primary, .. } => {
+              if *is_primary {
+                is_key_col = true;
+              }
             }
+            _ => return Err(format!("Unsupported column option {:?}.", option_def)),
           }
         }
         if is_key_col {
+          // Check whether a PRIMARY KEY declaration had already occurred.
+          if key_col_delcared {
+            return Err(format!("Cannot have multiple PRIMARY KEY declarations in a table."));
+          } else {
+            key_col_delcared = true;
+          }
+        }
+        all_cols.insert(col_name, (col_type, is_key_col));
+      }
+
+      // Next, process the Table Constraints, handing PRIMARY KEY constraints.
+      for constraint in constraints {
+        match constraint {
+          ast::TableConstraint::Unique { columns, is_primary, .. } => {
+            if *is_primary {
+              if key_col_delcared {
+                return Err(format!("Cannot have multiple PRIMARY KEY declarations in a table."));
+              } else {
+                key_col_delcared = true;
+                for col in columns {
+                  let col_name = ColName(col.value.clone());
+                  if let Some((_, primary)) = all_cols.get_mut(&col_name) {
+                    if *primary {
+                      // This can only occur if this Table Constraint itself has a key repeated
+                      return Err(format!(
+                        "Cannot have multiple PRIMARY KEY declarations in a table."
+                      ));
+                    } else {
+                      *primary = true;
+                    }
+                  } else {
+                    return Err(format!(
+                      "Column {:?} in Table Constraint {:?} does not exist",
+                      col_name, constraint
+                    ));
+                  }
+                }
+              }
+            } else {
+              return Err(format!("UNIQUE constraints not supported."));
+            }
+          }
+          _ => {
+            return Err(format!("Unsupported table constraint in CREATE TABLE: {:?}.", constraint))
+          }
+        }
+      }
+
+      // Construct and return the DDLQuery
+      let table_path = TablePath(get_table_name(name.0.clone())?);
+      let mut key_cols = Vec::<(ColName, ColType)>::new();
+      let mut val_cols = Vec::<(ColName, ColType)>::new();
+      for (col_name, (col_type, primary)) in all_cols {
+        if primary {
           key_cols.push((col_name, col_type));
         } else {
           val_cols.push((col_name, col_type));

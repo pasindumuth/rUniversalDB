@@ -680,11 +680,12 @@ fn setup_tables(sim: &mut Simulation, context: &mut TestContext) {
     context.send_ddl_query(
       sim,
       " CREATE TABLE table1 (
-          k11 INT PRIMARY KEY,
-          k12 INT PRIMARY KEY,
+          k11 INT,
+          k12 INT,
           v11 INT,
           v12 INT,
-          v13 INT
+          v13 INT,
+          PRIMARY KEY (k11, k12)
         );
       ",
       10000,

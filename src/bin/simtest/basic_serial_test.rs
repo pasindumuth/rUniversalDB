@@ -438,10 +438,11 @@ fn multi_key_test() {
     context.send_ddl_query(
       &mut sim,
       " CREATE TABLE table1 (
-          k1 INT PRIMARY KEY,
-          k2 INT PRIMARY KEY,
+          k1 INT,
+          k2 INT,
           v1 INT,
-          v2 INT
+          v2 INT,
+          PRIMARY KEY (k1, k2)
         );
       ",
       100,
@@ -485,6 +486,42 @@ fn multi_key_test() {
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(2)), Some(cvi(0))]);
+    context.send_query(
+      &mut sim,
+      " SELECT k1, k2, v1
+        FROM table1
+        WHERE 0 <= k1 AND k1 <= 1 AND 1 <= k2 AND k2 <= 2;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  // Update using a complex WHERE clause
+
+  {
+    let mut exp_result = TableView::new(vec![cno("k1"), cno("k2"), cno("v1")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(1)), Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(2))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(2)), Some(cvi(2))]);
+    context.send_query(
+      &mut sim,
+      " UPDATE table1
+        SET v1 = k1 + 1
+        WHERE 0 <= k1 AND k1 <= 1 AND 1 <= k2 AND k2 <= 2;
+      ",
+      100,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("k1"), cno("k2"), cno("v1")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(1)), Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(2))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(2)), Some(cvi(2))]);
     context.send_query(
       &mut sim,
       " SELECT k1, k2, v1
