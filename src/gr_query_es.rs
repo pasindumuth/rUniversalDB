@@ -2,7 +2,9 @@ use crate::col_usage::{
   collect_select_subqueries, collect_update_subqueries, node_external_trans_tables,
   FrozenColUsageNode,
 };
-use crate::common::{lookup, lookup_pos, mk_qid, CoreIOCtx, OrigP, QueryPlan, TMStatus};
+use crate::common::{
+  lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, OrigP, QueryPlan, TMStatus,
+};
 use crate::model::common::{
   proc, CQueryPath, ColName, Context, ContextRow, ContextSchema, Gen, LeadershipId,
   PaxosGroupIdTrait, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TierMap, Timestamp,
@@ -11,6 +13,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::server::{CommonQuery, SlaveServerContext};
+use crate::table_read_es::{is_agg, perform_aggregation};
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -211,11 +214,23 @@ impl GRQueryES {
     ctx: &mut SlaveServerContext<IO>,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    (schema, table_views): (Vec<Option<ColName>>, Vec<TableView>),
+    results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
     let stage_query_id = &read_stage.stage_query_id;
     assert_eq!(stage_query_id, &tm_qid);
+
+    // Combine the results into a single one
+    let (_, proc::GRQueryStage::SuperSimpleSelect(sql_query)) =
+      self.sql_query.trans_tables.get(read_stage.stage_idx).unwrap();
+    let (_, pre_agg_table_views) = merge_table_views(results);
+    let (schema, table_views) = match perform_aggregation(sql_query, pre_agg_table_views) {
+      Ok(result) => result,
+      Err(_) => {
+        // TODO: Handle this erroneous situation gracefully.
+        panic!()
+      }
+    };
 
     // For now, just assert that the schema that we get corresponds to that in the QueryPlan.
     let (trans_table_name, (cur_schema, _)) =

@@ -1953,7 +1953,6 @@ impl TabletContext {
         for (_, rm_result) in tm_status.tm_state {
           results.push(rm_result.unwrap());
         }
-        let merged_result = merge_table_views(results);
         let gr_query_id = tm_status.orig_p.query_id;
         let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
         remove_item(&mut gr_query.child_queries, tm_query_id);
@@ -1961,7 +1960,7 @@ impl TabletContext {
           &mut self.ctx(io_ctx),
           tm_query_id.clone(),
           tm_status.new_rms,
-          merged_result,
+          results,
         );
         self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
       }

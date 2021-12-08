@@ -2,9 +2,11 @@ use crate::col_usage::{
   iterate_stage_ms_query, node_external_trans_tables, ColUsageError, ColUsagePlanner,
   FrozenColUsageNode, GeneralStage,
 };
-use crate::common::{lookup, mk_qid, OrigP, QueryPlan, TMStatus};
+use crate::common::{lookup, merge_table_views, mk_qid, OrigP, QueryPlan, TMStatus};
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
+use crate::expression::EvalError;
+use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
   proc, ColName, Context, ContextRow, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId,
   SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId, TierMap, Timestamp,
@@ -17,6 +19,7 @@ use crate::query_planning::{
   perform_static_validations, KeyValidationError,
 };
 use crate::server::{weak_contains_col, CommonQuery, ServerContextBase};
+use crate::table_read_es::perform_aggregation;
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -194,7 +197,7 @@ impl FullMSCoordES {
     io_ctx: &mut IO,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    (schema, table_views): (Vec<Option<ColName>>, Vec<TableView>),
+    results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
   ) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
 
@@ -203,6 +206,24 @@ impl FullMSCoordES {
     assert_eq!(tm_qid, es.state.stage_query_id().unwrap());
     // Look up the schema for the stage in the QueryPlan, and assert it's the same as the result.
     let stage = cast!(CoordState::Stage, &es.state).unwrap();
+
+    // Combine the results into a single one
+    let (_, query_stage) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
+    let (schema, table_views) = match query_stage {
+      proc::MSQueryStage::SuperSimpleSelect(sql_query) => {
+        let (_, pre_agg_table_views) = merge_table_views(results);
+        match perform_aggregation(sql_query, pre_agg_table_views) {
+          Ok(result) => result,
+          Err(_) => {
+            // TODO: Handle this erroneous situation gracefully.
+            panic!()
+          }
+        }
+      }
+      proc::MSQueryStage::Update(_) => merge_table_views(results),
+      proc::MSQueryStage::Insert(_) => merge_table_views(results),
+    };
+
     let (trans_table_name, _) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
     let (plan_schema, _) = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
     assert_eq!(plan_schema, &schema);

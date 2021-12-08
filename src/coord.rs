@@ -520,14 +520,13 @@ impl CoordContext {
         for (_, rm_result) in tm_status.tm_state {
           results.push(rm_result.unwrap());
         }
-        let merged_result = merge_table_views(results);
         self.handle_tm_done(
           io_ctx,
           statuses,
           tm_status.orig_p,
           tm_status.query_id,
           tm_status.new_rms,
-          merged_result,
+          results,
         );
       }
     }
@@ -541,20 +540,19 @@ impl CoordContext {
     orig_p: OrigP,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    merged_result: (Vec<Option<ColName>>, Vec<TableView>),
+    results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
   ) {
     let query_id = orig_p.query_id;
     // Route TM results to MSQueryES
     if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
       remove_item(&mut ms_coord.child_queries, &tm_qid);
-      let action = ms_coord.es.handle_tm_success(self, io_ctx, tm_qid, new_rms, merged_result);
+      let action = ms_coord.es.handle_tm_success(self, io_ctx, tm_qid, new_rms, results);
       self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
     }
     // Route TM results to GRQueryES
     else if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
       remove_item(&mut gr_query.child_queries, &tm_qid);
-      let action =
-        gr_query.es.handle_tm_success(&mut self.ctx(io_ctx), tm_qid, new_rms, merged_result);
+      let action = gr_query.es.handle_tm_success(&mut self.ctx(io_ctx), tm_qid, new_rms, results);
       self.handle_gr_query_es_action(io_ctx, statuses, query_id, action);
     }
   }

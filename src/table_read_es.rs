@@ -536,20 +536,21 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
     },
   )?;
 
-  // Produce the result table, handling aggregates and DISTINCT accordingly.
-  let is_agg = if let Some((proc::SelectItem::UnaryAggregate(_), _)) = sql_query.projection.get(0) {
-    true
-  } else {
-    false
-  };
+  Ok((compute_select_schema(sql_query), pre_agg_table_views))
+}
 
+pub fn perform_aggregation(
+  sql_query: &proc::SuperSimpleSelect,
+  pre_agg_table_views: Vec<TableView>,
+) -> Result<(Vec<Option<ColName>>, Vec<TableView>), EvalError> {
+  // Produce the result table, handling aggregates and DISTINCT accordingly.
   let mut res_table_views = Vec::<TableView>::new();
-  let select_schema = compute_select_schema(&sql_query);
+  let select_schema = compute_select_schema(sql_query);
   for pre_agg_table_view in pre_agg_table_views {
     let mut res_table_view = TableView::new(select_schema.clone());
 
     // Handle aggregation
-    if is_agg {
+    if is_agg(sql_query) {
       // Invert `pre_agg_table_view.rows` having indexes in the outer vector
       // correspond to the columns. Recall that there are as many columns in ``pre_agg_table_view`
       // as there are in the final result table (due to how all SelectItems must be aggregates,
@@ -626,4 +627,15 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
   }
 
   Ok((select_schema, res_table_views))
+}
+
+/// Checks if the `SuperSimpleSelect` has aggregates in its projection.
+/// NOTE: Recall that in this case, all elements in the projection are aggregates
+/// for now for simplicity.
+pub fn is_agg(sql_query: &proc::SuperSimpleSelect) -> bool {
+  if let Some((proc::SelectItem::UnaryAggregate(_), _)) = sql_query.projection.get(0) {
+    true
+  } else {
+    false
+  }
 }

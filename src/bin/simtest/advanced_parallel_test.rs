@@ -637,17 +637,7 @@ fn verify_req_res(
   sim.remove_all_responses(); // Clear the DDL response.
 
   let successful_queries = sorted_success_res.len() as u32;
-  let mut count = 0;
   for (_, (req, res)) in sorted_success_res {
-    println!(
-      "         QUERY {:?}:
-                Req: {}
-                Res: {:?}",
-      count,
-      format_sql(&req.query),
-      res
-    );
-    count += 1;
     context.send_query(&mut sim, req.query.as_str(), 10000, res.result);
   }
 
