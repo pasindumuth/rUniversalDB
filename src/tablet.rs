@@ -3,7 +3,7 @@ use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
 use crate::common::{
   btree_multimap_insert, lookup, map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx,
-  CoreIOCtx, GossipData, KeyBound, OrigP, ReadRegion, RemoteLeaderChangedPLm, TMStatus,
+  BoundType, CoreIOCtx, GossipData, KeyBound, OrigP, ReadRegion, RemoteLeaderChangedPLm, TMStatus,
   TableSchema, WriteRegion,
 };
 use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
@@ -15,9 +15,9 @@ use crate::finish_query_rm_es::{FinishQueryRMES, FinishQueryRMInner};
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
 use crate::model::common::{
-  proc, CNodePath, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColValN, Context, ContextRow,
-  ContextSchema, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, TNodePath, TQueryPath,
-  TSubNodePath, TableView, TransTableName,
+  proc, CNodePath, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColVal, ColValN, Context,
+  ContextRow, ContextSchema, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, PrimaryKey, TNodePath,
+  TQueryPath, TSubNodePath, TableView, TransTableName,
 };
 use crate::model::common::{
   ColName, EndpointId, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
@@ -45,10 +45,14 @@ use crate::table_read_es::{ExecutionS, TableAction, TableReadES};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::rc::Rc;
 use std::sync::Arc;
+
+#[path = "./tablet_test.rs"]
+pub mod tablet_test;
 
 // -----------------------------------------------------------------------------------------------
 //  SubqueryStatus
@@ -2608,11 +2612,34 @@ impl TabletContext {
     let lid = self.leader_map.get(&self.this_sid.to_gid()).unwrap();
     lid.eid == self.this_eid
   }
+
+  /// Check whether the `pkey` falls in the range of this Tablet's `TabletKeyRange`. The `pkey`
+  /// must conform the tablets KeyCol schema (which the `TabletKeyRange` also does).
+  pub fn check_range_inclusion(&self, pkey: &PrimaryKey) -> bool {
+    check_range_inclusion(&self.this_table_key_range, pkey)
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
 //  New Table Subquery Construction
 // -----------------------------------------------------------------------------------------------
+
+/// Use the ordering relation on `PrimaryKey` to check that `pkey` is within `tablet_key_range`.
+fn check_range_inclusion(tablet_key_range: &TabletKeyRange, pkey: &PrimaryKey) -> bool {
+  if let Some(start_key) = &tablet_key_range.start {
+    if pkey < start_key {
+      return false;
+    }
+  }
+
+  if let Some(end_key) = &tablet_key_range.end {
+    if pkey >= end_key {
+      return false;
+    }
+  }
+
+  true
+}
 
 /// This runs the `ContextConstructor` with the given inputs and simply accumulates the
 /// `ContextRow` to produce a `Context` for each element in `children`.

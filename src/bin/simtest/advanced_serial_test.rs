@@ -58,7 +58,7 @@ fn subquery_test() {
           FROM user
           WHERE email = inv.email) 
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -99,7 +99,7 @@ fn trans_table_test() {
         SELECT email
         FROM v2;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -134,7 +134,7 @@ fn trans_table_test() {
           FROM user
           WHERE balance >= 80);
       ",
-      100,
+      10000,
       exp_result,
     );
   }

@@ -327,7 +327,7 @@ pub fn convert_ddl_ast(raw_query: Vec<ast::Statement>) -> Result<DDLQuery, Strin
   let stmt = raw_query.into_iter().next().unwrap();
   match &stmt {
     ast::Statement::CreateTable { name, columns, constraints, .. } => {
-      // Every table needs exactly one PRIMARY KEY declaration, either for a single column in its
+      // Every table needs at most one PRIMARY KEY declaration, either for a single column in its
       // Column Definition, or as a Table Constraint with potentially multiple columns. We track
       // whether we already encoutered such a declaration for error detection.
       let mut key_col_delcared = false;

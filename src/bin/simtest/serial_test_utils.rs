@@ -134,7 +134,7 @@ pub fn setup_inventory_table(sim: &mut Simulation, context: &mut TestContext) {
           count      INT
         );
       ",
-      100,
+      10000,
     );
   }
 }
@@ -150,7 +150,7 @@ pub fn populate_inventory_table_basic(sim: &mut Simulation, context: &mut TestCo
         VALUES (0, 'my_email_0', 15),
                (1, 'my_email_1', 25);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -165,7 +165,7 @@ pub fn setup_user_table(sim: &mut Simulation, context: &mut TestContext) {
           balance    INT,
         );
       ",
-      100,
+      10000,
     );
   }
 }
@@ -183,7 +183,7 @@ pub fn populate_setup_user_table_basic(sim: &mut Simulation, context: &mut TestC
                ('my_email_1', 60),
                ('my_email_2', 70);
       ",
-      100,
+      10000,
       exp_result,
     );
   }

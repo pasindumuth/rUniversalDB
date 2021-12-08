@@ -421,6 +421,13 @@ pub enum QueryPlanningError {
   RequiredColumnDNE(Vec<ColName>),
 }
 
+/// Data to send back to the External in case of a fatal Error.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ExternalQueryError {
+  TypeError { msg: String },
+  RuntimeError { msg: String },
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ExternalAbortedData {
   /// Happens if we get an External Query with a RequestId that's already in use.
@@ -429,11 +436,8 @@ pub enum ExternalAbortedData {
   ParseError(String),
   /// QueryPlanning related errors
   QueryPlanningError(QueryPlanningError),
-  /// This is a fatal Query Execution error, including non-recoverable QueryErrors
-  /// and ColumnsDNEs. We don't give any details for simplicity. The External should just
-  /// understand that their query was invalid, but might become valid for the same timestamp
-  /// later (i.e. the invalidity is not idempotent).
-  QueryExecutionError,
+  /// Fatal, non-recoverable errors
+  QueryExecutionError(ExternalQueryError),
 
   /// Cancellation
 

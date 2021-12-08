@@ -11,7 +11,7 @@ use crate::model::common::{
   TransTableLocationPrefix, TransTableName,
 };
 use crate::model::message as msg;
-use crate::model::message::MasteryQueryPlanningResult;
+use crate::model::message::{ExternalAbortedData, MasteryQueryPlanningResult};
 use crate::query_planning::{
   collect_table_paths, compute_all_tier_maps, compute_extra_req_cols, compute_query_plan_data,
   perform_static_validations, KeyValidationError,
@@ -225,12 +225,19 @@ impl FullMSCoordES {
   ) -> MSQueryCoordAction {
     // Interpret the `aborted_data`.
     match aborted_data {
-      msg::AbortedData::QueryError(msg::QueryError::TypeError { .. })
-      | msg::AbortedData::QueryError(msg::QueryError::RuntimeError { .. }) => {
-        // This implies an unrecoverable error, since trying again at a higher timestamp won't
-        // generally fix the issue. Thus we ECU and return accordingly.
+      // `TypeError` and `RuntimeError` both imply an unrecoverable error, since trying again at
+      // a higher timestamp will not generally fix the issue. Thus we ECU and return accordingly.
+      msg::AbortedData::QueryError(msg::QueryError::TypeError { msg: err_msg }) => {
         self.exit_and_clean_up(ctx, io_ctx);
-        MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError)
+        MSQueryCoordAction::FatalFailure(ExternalAbortedData::QueryExecutionError(
+          msg::ExternalQueryError::TypeError { msg: err_msg },
+        ))
+      }
+      msg::AbortedData::QueryError(msg::QueryError::RuntimeError { msg: err_msg }) => {
+        self.exit_and_clean_up(ctx, io_ctx);
+        MSQueryCoordAction::FatalFailure(ExternalAbortedData::QueryExecutionError(
+          msg::ExternalQueryError::RuntimeError { msg: err_msg },
+        ))
       }
       msg::AbortedData::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
       | msg::AbortedData::QueryError(msg::QueryError::DeadlockSafetyAbortion)

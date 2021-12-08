@@ -1,5 +1,6 @@
 use crate::common::{
-  lookup, ColBound, KeyBound, PolyColBound, ReadRegion, SingleBound, WriteRegion, WriteRegionType,
+  lookup, BoundType, ColBound, KeyBound, PolyColBound, ReadRegion, SingleBound, WriteRegion,
+  WriteRegionType,
 };
 use crate::model::common::proc::ValExpr;
 use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
@@ -411,45 +412,6 @@ pub fn is_true(val: &ColValN) -> Result<bool, EvalError> {
 //  Keybound Computation
 // -----------------------------------------------------------------------------------------------
 
-/// This trait is used to cast the `ColValN` values down to their underlying
-/// types. This is necessary for expression evaluation.
-trait BoundType: Sized {
-  // We need `: Sized` here, otherwise for the `Result`, we get: "the size for values of type
-  // `Self` cannot be known at compilation time". (Note that if we just returned `Self`, we
-  // wouldn't get this error.)
-  fn col_val_cast(col_val: ColValN) -> Option<Self>;
-}
-
-impl BoundType for i32 {
-  fn col_val_cast(col_val: ColValN) -> Option<Self> {
-    if let Some(ColVal::Int(val)) = col_val {
-      Some(val)
-    } else {
-      None
-    }
-  }
-}
-
-impl BoundType for bool {
-  fn col_val_cast(col_val: ColValN) -> Option<Self> {
-    if let Some(ColVal::Bool(val)) = col_val {
-      Some(val)
-    } else {
-      None
-    }
-  }
-}
-
-impl BoundType for String {
-  fn col_val_cast(col_val: ColValN) -> Option<Self> {
-    if let Some(ColVal::String(val)) = col_val {
-      Some(val)
-    } else {
-      None
-    }
-  }
-}
-
 /// This function returns `ColBound`s such that `ColVal`s of type `T` outside of these
 /// bounds would surely evaluate `kb_expr` to `false` or `NULL`.
 ///
@@ -483,7 +445,7 @@ fn boolean_leaf_constraint<T: BoundType + Clone>(
         if None == right_val {
           // If `right_val` is NULL, then `kb_expr` is always false.
           return vec![];
-        } else if let Some(val) = T::col_val_cast(right_val) {
+        } else if let Some(val) = T::col_valn_cast(right_val) {
           // If `right_val` has the correct Type, then we can compute a keybounds.
           return vec![left_f(val)];
         }
@@ -497,7 +459,7 @@ fn boolean_leaf_constraint<T: BoundType + Clone>(
         if None == left_val {
           // If `left_val` is NULL, then `kb_expr` is always false.
           return vec![];
-        } else if let Some(val) = T::col_val_cast(left_val) {
+        } else if let Some(val) = T::col_valn_cast(left_val) {
           // If `left_val` has the correct Type, then we can compute a keybounds.
           return vec![right_f(val)];
         }

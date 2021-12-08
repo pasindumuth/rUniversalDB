@@ -60,6 +60,7 @@ impl FrozenColUsageNode {
   }
 }
 
+#[derive(Debug)]
 pub enum ColUsageError {
   /// This is returned two ways:
   ///   1. If `ColumnRef` has a `source` that does not exist.
@@ -552,7 +553,7 @@ pub fn iterate_stage_ms_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
 mod test {
   use super::*;
   use crate::model::common::ColType;
-  use crate::test_utils::{cn, mk_tab, mk_ttab};
+  use crate::test_utils::{cn, cno, mk_tab, mk_ttab};
   use std::collections::BTreeMap;
 
   #[test]
@@ -657,13 +658,13 @@ mod test {
 
     let mut planner =
       ColUsagePlanner { db_schema: &db_schema, table_generation: &table_generation, timestamp: 1 };
-    let col_usage_nodes = planner.plan_ms_query(&ms_query);
+    let col_usage_nodes = planner.plan_ms_query(&ms_query).unwrap();
 
-    let exp_col_usage_nodes: Vec<(TransTableName, (Vec<ColName>, FrozenColUsageNode))> = vec![
+    let exp_col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))> = vec![
       (
         mk_ttab("tt0"),
         (
-          vec![cn("c1"), cn("c4")],
+          vec![cno("c1"), cno("c4")],
           FrozenColUsageNode {
             source: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TablePath(mk_tab("t2")),
@@ -679,7 +680,7 @@ mod test {
       (
         mk_ttab("tt1"),
         (
-          vec![cn("c1")],
+          vec![cno("c1")],
           FrozenColUsageNode {
             source: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TablePath(mk_tab("tt0")),
@@ -688,7 +689,7 @@ mod test {
             children: vec![vec![(
               mk_ttab("tt2"),
               (
-                vec![cn("c5")],
+                vec![cno("c5")],
                 FrozenColUsageNode {
                   source: proc::GeneralSource {
                     source_ref: proc::GeneralSourceRef::TablePath(mk_tab("t3")),
@@ -713,7 +714,7 @@ mod test {
       (
         mk_ttab("tt3"),
         (
-          vec![cn("c1"), cn("c2")],
+          vec![cno("c1"), cno("c2")],
           FrozenColUsageNode {
             source: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TablePath(mk_tab("t1")),

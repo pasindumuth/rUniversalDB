@@ -291,6 +291,7 @@ impl MSTableInsertES {
     let mut res_table_view = TableView::new(compute_insert_schema(&self.sql_query));
     let mut pkeys = BTreeSet::<PrimaryKey>::new();
     for row in eval_values {
+      // Construct PrimaryKey.
       let mut row_map = BTreeMap::<ColName, ColValN>::new();
       for i in 0..row.len() {
         row_map.insert(self.sql_query.columns.get(i).unwrap().clone(), row.get(i).unwrap().clone());
@@ -307,16 +308,19 @@ impl MSTableInsertES {
         }
       }
 
-      // Add the ValCol values. These are the remaining elements of `row_map`.
-      update_view.insert((pkey.clone(), None), PRESENCE_VALN);
-      for (col_name, valn) in row_map {
-        update_view.insert((pkey.clone(), Some(col_name)), valn);
+      // Only add the row if it falls within the rage of this Tablet.
+      if ctx.check_range_inclusion(&pkey) {
+        // Add the ValCol values. These are the remaining elements of `row_map`.
+        update_view.insert((pkey.clone(), None), PRESENCE_VALN);
+        for (col_name, valn) in row_map {
+          update_view.insert((pkey.clone(), Some(col_name)), valn);
+        }
+
+        pkeys.insert(pkey);
+
+        // We also construct `res_table_view`, which is what we return to the sender
+        res_table_view.add_row(row)
       }
-
-      pkeys.insert(pkey);
-
-      // We also construct `res_table_view`, which is what we return to the sender
-      res_table_view.add_row(row)
     }
 
     // Construct a set of KeyBounds for each row that is added

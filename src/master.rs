@@ -10,8 +10,9 @@ use crate::master_query_planning_es::{
   MasterQueryPlanningES,
 };
 use crate::model::common::{
-  EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId, SlaveGroupId,
-  TNodePath, TablePath, TabletGroupId, TabletKeyRange,
+  proc, ColName, ColType, ColVal, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
+  PrimaryKey, QueryId, RequestId, SlaveGroupId, TNodePath, TablePath, TabletGroupId,
+  TabletKeyRange,
 };
 use crate::model::message as msg;
 use crate::model::message::{
@@ -31,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
+use std::cmp::min;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter};
 use std::iter::FromIterator;
@@ -595,15 +597,8 @@ impl MasterContext {
                 self.external_request_id_map.insert(request_id.clone(), query_id.clone());
                 match ddl_query {
                   DDLQuery::Create(create_table) => {
-                    // Choose a random SlaveGroupId to place the Tablet
-                    // TODO: do multishard
-                    let sids = Vec::from_iter(self.slave_address_config.keys().into_iter());
-                    let idx = io_ctx.rand().next_u32() as usize % sids.len();
-                    let sid = sids[idx].clone();
-
-                    // Construct shards
-                    let shards =
-                      vec![(TabletKeyRange { start: None, end: None }, mk_tid(io_ctx.rand()), sid)];
+                    // Generate random shards
+                    let shards = self.simple_partition(io_ctx, &create_table);
 
                     // Construct ES
                     map_insert(
@@ -895,6 +890,130 @@ impl MasterContext {
         }
       }
     }
+  }
+
+  /// Uses a simple scheme to create an initial partition of the Table.
+  /// NOTE: This is only meant to help test sharding while we lack automatic partitioning.
+  fn simple_partition<IO: MasterIOCtx>(
+    &self,
+    io_ctx: &mut IO,
+    create_table: &proc::CreateTable,
+  ) -> Vec<(TabletKeyRange, TabletGroupId, SlaveGroupId)> {
+    let mut sids = Vec::from_iter(self.slave_address_config.keys().into_iter());
+    debug_assert!(!sids.is_empty());
+    let mut shards = Vec::<(TabletKeyRange, TabletGroupId, SlaveGroupId)>::new();
+
+    // For all remaining KeyCols, amend `pkey` with the minimum value of the corresponding type.
+    fn mk_key(
+      first_val: ColVal,
+      mut rem_cols: core::slice::Iter<(ColName, ColType)>,
+    ) -> PrimaryKey {
+      let mut split_key = PrimaryKey { cols: vec![] };
+      split_key.cols.push(first_val);
+      while let Some((_, col_type)) = rem_cols.next() {
+        match col_type {
+          ColType::Int => split_key.cols.push(ColVal::Int(i32::MIN)),
+          ColType::Bool => split_key.cols.push(ColVal::Bool(false)),
+          ColType::String => split_key.cols.push(ColVal::String("".to_string())),
+        }
+      }
+      split_key
+    }
+
+    // Removes one random element from `sids` (which the caller must ensure exists) and
+    // constructs the output.
+    fn mk_shard<IO: MasterIOCtx>(
+      io_ctx: &mut IO,
+      sids: &mut Vec<&SlaveGroupId>,
+      start: Option<PrimaryKey>,
+      end: Option<PrimaryKey>,
+    ) -> (TabletKeyRange, TabletGroupId, SlaveGroupId) {
+      let idx = io_ctx.rand().next_u32() as usize % sids.len();
+      let sid = sids.remove(idx);
+      (TabletKeyRange { start, end }, mk_tid(io_ctx.rand()), sid.clone())
+    }
+
+    // If the Table has no KeyCols (which means the Tablet can have only at-most one row),
+    // we just create a trivial shard. Otherwise, we create non-trivial shards.
+    if create_table.key_cols.is_empty() {
+      // 1 shard
+      shards.push(mk_shard(io_ctx, &mut sids, None, None));
+    } else {
+      // Get the first KeyCol
+      let mut it = create_table.key_cols.iter();
+      let (_, col_type) = it.next().unwrap();
+      match col_type {
+        ColType::Int => {
+          // Decide if we want 1 shard or 2 shards. Make sure we do not choose more shards
+          // than there are Slaves.
+          let num_shards = min(io_ctx.rand().next_u32() % 2 + 1, sids.len() as u32);
+          if num_shards == 1 {
+            // 1 shard
+            shards.push(mk_shard(io_ctx, &mut sids, None, None));
+          } else {
+            // 2 shards
+            let split_key = mk_key(ColVal::Int(0), it);
+            shards.push(mk_shard(io_ctx, &mut sids, None, Some(split_key.clone())));
+            shards.push(mk_shard(io_ctx, &mut sids, Some(split_key.clone()), None));
+          }
+        }
+        ColType::Bool => {
+          // Decide if we want 1 shard or 2 shards. Make sure we do not choose more shards
+          // than there are Slaves.
+          let num_shards = min(io_ctx.rand().next_u32() % 2 + 1, sids.len() as u32);
+          if num_shards == 1 {
+            // 1 shard
+            shards.push(mk_shard(io_ctx, &mut sids, None, None));
+          } else {
+            // 2 shards
+            let split_key = mk_key(ColVal::Bool(true), it);
+            shards.push(mk_shard(io_ctx, &mut sids, None, Some(split_key.clone())));
+            shards.push(mk_shard(io_ctx, &mut sids, Some(split_key.clone()), None));
+          }
+        }
+        ColType::String => {
+          // Decide the number of shards, which is 1 <= and <= 4. Make sure we do not choose
+          // more shards than there are Slaves.
+          let num_shards = min(io_ctx.rand().next_u32() % 4 + 1, sids.len() as u32);
+
+          // Create the splitting characters. These must be unique and sorted in ascending order.
+          let mut all_shards = Vec::from_iter("abcdefghijklmnopqrstuvwxyz".to_string().chars());
+          let mut split_chars = Vec::<char>::new();
+          for _ in 0..(num_shards - 1) {
+            split_chars
+              .push(all_shards.remove(io_ctx.rand().next_u32() as usize % all_shards.len()));
+          }
+          split_chars.sort();
+
+          // Construct the shards
+          let mut char_it = split_chars.into_iter();
+          if let Some(first_char) = char_it.next() {
+            // Create the first partition
+            let mut prev_split_key = mk_key(ColVal::String(first_char.to_string()), it.clone());
+            shards.push(mk_shard(io_ctx, &mut sids, None, Some(prev_split_key.clone())));
+
+            // Create middle partitions
+            while let Some(next_char) = char_it.next() {
+              let split_key = mk_key(ColVal::String(next_char.to_string()), it.clone());
+              shards.push(mk_shard(
+                io_ctx,
+                &mut sids,
+                Some(std::mem::replace(&mut prev_split_key, split_key.clone())),
+                Some(split_key),
+              ));
+            }
+
+            // Create final partition
+            shards.push(mk_shard(io_ctx, &mut sids, Some(prev_split_key.clone()), None));
+          } else {
+            // 1 shard
+            shards.push(mk_shard(io_ctx, &mut sids, None, None));
+          }
+        }
+      };
+    }
+
+    return shards;
   }
 
   /// Used to broadcast out `RemoteLeaderChanged` to all other

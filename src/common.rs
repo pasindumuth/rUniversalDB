@@ -2,8 +2,8 @@ use crate::col_usage::FrozenColUsageNode;
 use crate::coord::CoordForwardMsg;
 use crate::master::MasterTimerInput;
 use crate::model::common::{
-  proc, CTNodePath, ColName, ColType, CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId,
-  QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
+  proc, CTNodePath, ColName, ColType, ColVal, ColValN, CoordGroupId, EndpointId, Gen, LeadershipId,
+  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
   TabletKeyRange, TierMap, Timestamp,
 };
 use crate::model::message as msg;
@@ -394,4 +394,81 @@ pub struct WriteRegion {
 pub struct QueryESResult {
   pub result: (Vec<Option<ColName>>, Vec<TableView>),
   pub new_rms: Vec<TQueryPath>,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  BoundType
+// -------------------------------------------------------------------------------------------------
+
+/// This trait is used to cast `ColVal` and `ColValN` values down to their underlying
+/// types. This is necessary for expression evaluation.
+///
+/// NOTE: We need `Sized` since we return `Option<Self>`.
+pub trait BoundType: Sized {
+  fn col_val_cast(col_val: ColVal) -> Option<Self>;
+  fn col_valn_cast(col_val: ColValN) -> Option<Self> {
+    Self::col_val_cast(col_val?)
+  }
+
+  fn col_val_cast_ref(col_val: &ColVal) -> Option<&Self>;
+  fn col_valn_cast_ref(col_val: &ColValN) -> Option<&Self> {
+    Self::col_val_cast_ref(col_val.as_ref()?)
+  }
+}
+
+/// `BoundType` for `i32`
+impl BoundType for i32 {
+  fn col_val_cast(col_val: ColVal) -> Option<Self> {
+    if let ColVal::Int(val) = col_val {
+      Some(val)
+    } else {
+      None
+    }
+  }
+
+  fn col_val_cast_ref(col_val: &ColVal) -> Option<&Self> {
+    if let ColVal::Int(val) = col_val {
+      Some(val)
+    } else {
+      None
+    }
+  }
+}
+
+/// `BoundType` for `bool`
+impl BoundType for bool {
+  fn col_val_cast(col_val: ColVal) -> Option<Self> {
+    if let ColVal::Bool(val) = col_val {
+      Some(val)
+    } else {
+      None
+    }
+  }
+
+  fn col_val_cast_ref(col_val: &ColVal) -> Option<&Self> {
+    if let ColVal::Bool(val) = col_val {
+      Some(val)
+    } else {
+      None
+    }
+  }
+}
+
+/// `BoundType` for `String`
+impl BoundType for String {
+  fn col_val_cast(col_val: ColVal) -> Option<Self> {
+    if let ColVal::String(val) = col_val {
+      Some(val)
+    } else {
+      None
+    }
+  }
+
+  fn col_val_cast_ref(col_val: &ColVal) -> Option<&Self> {
+    if let ColVal::String(val) = col_val {
+      Some(val)
+    } else {
+      None
+    }
+  }
 }

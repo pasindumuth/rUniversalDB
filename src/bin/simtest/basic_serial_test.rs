@@ -59,7 +59,7 @@ fn simple_test() {
       " SELECT product_id, email
         FROM inventory;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -73,7 +73,7 @@ fn simple_test() {
         SET email = 'my_email_3'
         WHERE product_id = 1;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -87,7 +87,7 @@ fn simple_test() {
       " SELECT product_id, email
         FROM inventory;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -107,7 +107,7 @@ fn simple_test() {
         SET email = 'my_email_5'
         WHERE product_id = 1;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -121,7 +121,7 @@ fn simple_test() {
       " SELECT product_id, email
         FROM inventory;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -136,7 +136,7 @@ fn simple_test() {
       " INSERT INTO inventory (product_id, email)
         VALUES (6, 'my_email_6');
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -150,7 +150,7 @@ fn simple_test() {
         FROM inventory
         WHERE product_id = 6
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -165,7 +165,7 @@ fn simple_test() {
         FROM inventory
         WHERE count IS NOT NULL
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -193,7 +193,7 @@ fn subquery_test() {
         VALUES (0, 'my_email_0', 15),
                (2, 'my_email_2', 25);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -212,7 +212,7 @@ fn subquery_test() {
                ('my_email_1', 50),
                ('my_email_2', 30);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -231,7 +231,7 @@ fn subquery_test() {
           FROM inventory
           WHERE product_id = 0);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -250,7 +250,7 @@ fn subquery_test() {
           FROM inventory
           WHERE count = balance / 2);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -272,7 +272,7 @@ fn subquery_test() {
           FROM v1
           WHERE count = balance / 2);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -308,7 +308,7 @@ fn trans_table_test() {
         SELECT email
         FROM v1;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -341,7 +341,7 @@ fn select_projection_test() {
         FROM  user
         WHERE balance >= 60;
       ",
-      100,
+      10000,
       exp_result,
     );
 
@@ -354,7 +354,7 @@ fn select_projection_test() {
         FROM  user
         WHERE balance >= 60;
       ",
-      100,
+      10000,
       exp_result,
     );
 
@@ -370,7 +370,7 @@ fn select_projection_test() {
         SELECT b
         FROM v1;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -400,7 +400,7 @@ fn insert_test() {
         VALUES (0, 'my_email_0', 15),
                (1, 'my_email_1', NULL);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -417,7 +417,7 @@ fn insert_test() {
         VALUES (2, 'my_email_2'),
                (3, NULL);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -445,7 +445,7 @@ fn multi_key_test() {
           PRIMARY KEY (k1, k2)
         );
       ",
-      100,
+      10000,
     );
   }
 
@@ -473,7 +473,7 @@ fn multi_key_test() {
                (2, 0, 0, 0),
                (2, 1, 0, 0);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -492,7 +492,7 @@ fn multi_key_test() {
         FROM table1
         WHERE 0 <= k1 AND k1 <= 1 AND 1 <= k2 AND k2 <= 2;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -511,7 +511,7 @@ fn multi_key_test() {
         SET v1 = k1 + 1
         WHERE 0 <= k1 AND k1 <= 1 AND 1 <= k2 AND k2 <= 2;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -528,7 +528,7 @@ fn multi_key_test() {
         FROM table1
         WHERE 0 <= k1 AND k1 <= 1 AND 1 <= k2 AND k2 <= 2;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -563,7 +563,7 @@ fn multi_stage_test() {
           FROM inventory
           WHERE product_id = 1);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -587,7 +587,7 @@ fn multi_stage_test() {
           FROM user
           WHERE balance >= 80);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -616,7 +616,7 @@ fn aggregation_test() {
         VALUES (2, 'my_email_2', 25),
                (3, 'my_email_3', NULL);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -631,7 +631,7 @@ fn aggregation_test() {
       " SELECT SUM(count)
         FROM inventory;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -644,7 +644,7 @@ fn aggregation_test() {
       " SELECT COUNT(count)
         FROM inventory;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -659,7 +659,7 @@ fn aggregation_test() {
       " SELECT SUM(DISTINCT count)
         FROM inventory;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -677,7 +677,7 @@ fn aggregation_test() {
       " SELECT count
         FROM inventory;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -692,7 +692,7 @@ fn aggregation_test() {
       " SELECT DISTINCT count
         FROM inventory;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -724,7 +724,7 @@ fn aliased_column_resolution_test() {
                (2, 'my_email_2', 25),
                (3, 'my_email_3', NULL);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -745,7 +745,7 @@ fn aliased_column_resolution_test() {
            FROM inventory AS inner
            WHERE inner.email = outer.email);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -765,7 +765,7 @@ fn aliased_column_resolution_test() {
            FROM inventory AS inner
            WHERE inner.email = outer.email);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -785,7 +785,7 @@ fn aliased_column_resolution_test() {
            FROM inventory
            WHERE inventory.email = outer.email);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -810,7 +810,7 @@ fn alter_table() {
       " ALTER TABLE inventory
         ADD COLUMN price INT;
       ",
-      100,
+      10000,
     );
   }
 
@@ -826,7 +826,7 @@ fn alter_table() {
       " SELECT product_id, email, count, price
         FROM inventory;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -840,7 +840,7 @@ fn alter_table() {
         SET price = 100
         WHERE product_id = 0;
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -854,7 +854,7 @@ fn alter_table() {
       " INSERT INTO inventory (product_id, email, count, price)
         VALUES (2, 'my_email_2', 35, 200);
       ",
-      100,
+      10000,
       exp_result,
     );
   }
@@ -870,7 +870,7 @@ fn alter_table() {
       " SELECT product_id, email, count, price
         FROM inventory;
       ",
-      100,
+      10000,
       exp_result,
     );
   }

@@ -18,6 +18,10 @@ pub fn cvi(i: i32) -> ColVal {
   ColVal::Int(i)
 }
 
+pub fn cvb(b: bool) -> ColVal {
+  ColVal::Bool(b)
+}
+
 pub fn mk_sid(id: &str) -> SlaveGroupId {
   SlaveGroupId(id.to_string())
 }
