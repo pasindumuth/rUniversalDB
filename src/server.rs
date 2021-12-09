@@ -542,7 +542,11 @@ pub fn mk_eval_error(eval_error: EvalError) -> msg::QueryError {
 
 /// Computes whether `col` is in `table_schema` at `timestamp`. Note that it must be
 /// ensured that `col` is a locked column at this Timestamp.
-pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
+pub fn strong_contains_col(
+  table_schema: &TableSchema,
+  col: &ColName,
+  timestamp: &Timestamp,
+) -> bool {
   lookup_pos(&table_schema.key_cols, col).is_some()
     || table_schema.val_cols.strong_static_read(col, *timestamp).is_some()
 }
@@ -550,14 +554,14 @@ pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Times
 /// Computes whether `col` is in `table_schema` at `timestamp`. Here, the `col` need not be
 /// locked at `timestamp`; we just use a `static_read`, which doesn't guarantee idempotence
 /// of any sort.
-pub fn weak_contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
+pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
   lookup_pos(&table_schema.key_cols, col).is_some()
     || table_schema.val_cols.static_read(col, *timestamp).is_some()
 }
 
 /// Computes whether `col` is in `table_schema` at the latest time which `col` had been modified
 /// in the schema. Obviously, this function is not idempotent.
-pub fn weak_contains_col_latest(table_schema: &TableSchema, col: &ColName) -> bool {
+pub fn contains_col_latest(table_schema: &TableSchema, col: &ColName) -> bool {
   lookup_pos(&table_schema.key_cols, col).is_some()
     || table_schema.val_cols.get_last_version(col).is_some()
 }

@@ -32,8 +32,7 @@ use crate::paxos2pc_rm::Paxos2PCRMAction;
 use crate::paxos2pc_tm;
 use crate::paxos2pc_tm::{Paxos2PCContainer, RMMessage, RMPLm};
 use crate::server::{
-  contains_col, weak_contains_col, CommonQuery, ContextConstructor, LocalTable, ServerContextBase,
-  SlaveServerContext,
+  contains_col, CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
 };
 use crate::slave::{SlaveBackMessage, TabletBundleInsertion};
 use crate::stmpaxos2pc_rm;
@@ -389,7 +388,7 @@ impl<'a, StorageViewT: StorageView> StorageLocalTable<'a, StorageViewT> {
 
 impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, StorageViewT> {
   fn contains_col(&self, col: &ColName) -> bool {
-    weak_contains_col(self.table_schema, col, self.timestamp)
+    contains_col(self.table_schema, col, self.timestamp)
   }
 
   fn source(&self) -> &proc::GeneralSource {

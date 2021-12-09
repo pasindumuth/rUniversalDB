@@ -4,7 +4,7 @@ use crate::model::common::{
   iast, proc, ColName, Gen, TablePath, TierMap, Timestamp, TransTableName,
 };
 use crate::multiversion_map::MVM;
-use crate::server::{contains_col, weak_contains_col};
+use crate::server::contains_col;
 use serde::{Deserialize, Serialize};
 use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
@@ -143,7 +143,7 @@ impl<'a> ColUsagePlanner<'a> {
           // The Query converter will have made sure that all TablePaths actually exist.
           let gen = self.table_generation.static_read(table_path, self.timestamp).unwrap();
           let table_schema = self.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
-          weak_contains_col(&table_schema, col_name, &self.timestamp)
+          contains_col(&table_schema, col_name, &self.timestamp)
         }
       }
     };

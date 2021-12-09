@@ -21,7 +21,7 @@ use crate::model::message::{
 use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
-use crate::server::{weak_contains_col_latest, MasterServerContext, ServerContextBase};
+use crate::server::{contains_col_latest, MasterServerContext, ServerContextBase};
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::{
@@ -1114,7 +1114,7 @@ impl MasterContext {
                 &self.db_schema.get(&(es.inner.table_path.clone(), gen.clone())).unwrap();
               if lookup_pos(&schema.key_cols, &es.inner.alter_op.col_name).is_none() {
                 // The `col_name` is not a KeyCol.
-                let contains_col = weak_contains_col_latest(schema, &es.inner.alter_op.col_name);
+                let contains_col = contains_col_latest(schema, &es.inner.alter_op.col_name);
                 let is_add_col = es.inner.alter_op.maybe_col_type.is_some();
                 if contains_col && !is_add_col || !contains_col && is_add_col {
                   // We have Column Validity, so we move it to WaitingInsertTMPrepared.

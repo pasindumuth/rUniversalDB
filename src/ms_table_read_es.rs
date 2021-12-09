@@ -10,8 +10,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::server::{
-  evaluate_super_simple_select, mk_eval_error, weak_contains_col, ContextConstructor,
-  ServerContextBase,
+  contains_col, evaluate_super_simple_select, mk_eval_error, ContextConstructor, ServerContextBase,
 };
 use crate::storage::MSStorageView;
 use crate::table_read_es::fully_evaluate_select;
@@ -123,7 +122,7 @@ impl MSTableReadES {
 
     // Next, check that `safe_present_cols` are present.
     for col in &self.query_plan.col_usage_node.safe_present_cols {
-      if !weak_contains_col(&ctx.table_schema, col, &self.timestamp) {
+      if !contains_col(&ctx.table_schema, col, &self.timestamp) {
         return false;
       }
     }
@@ -133,7 +132,7 @@ impl MSTableReadES {
       self.query_plan.extra_req_cols.get(to_table_path(&self.sql_query.from))
     {
       for col in extra_cols {
-        if !weak_contains_col(&ctx.table_schema, col, &self.timestamp) {
+        if !contains_col(&ctx.table_schema, col, &self.timestamp) {
           return false;
         }
       }

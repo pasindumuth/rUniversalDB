@@ -11,7 +11,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::server::{
-  evaluate_update, mk_eval_error, weak_contains_col, ContextConstructor, ServerContextBase,
+  contains_col, evaluate_update, mk_eval_error, ContextConstructor, ServerContextBase,
 };
 use crate::storage::{GenericTable, MSStorageView};
 use crate::tablet::{
@@ -119,7 +119,7 @@ impl MSTableWriteES {
 
     // Next, check that `safe_present_cols` are present.
     for col in &self.query_plan.col_usage_node.safe_present_cols {
-      if !weak_contains_col(&ctx.table_schema, col, &self.timestamp) {
+      if !contains_col(&ctx.table_schema, col, &self.timestamp) {
         return false;
       }
     }
@@ -127,7 +127,7 @@ impl MSTableWriteES {
     // Next, check that `extra_req_cols` are present.
     if let Some(extra_cols) = self.query_plan.extra_req_cols.get(&self.sql_query.table.source_ref) {
       for col in extra_cols {
-        if !weak_contains_col(&ctx.table_schema, col, &self.timestamp) {
+        if !contains_col(&ctx.table_schema, col, &self.timestamp) {
           return false;
         }
       }

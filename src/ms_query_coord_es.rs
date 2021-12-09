@@ -18,7 +18,7 @@ use crate::query_planning::{
   collect_table_paths, compute_all_tier_maps, compute_extra_req_cols, compute_query_plan_data,
   perform_static_validations, KeyValidationError,
 };
-use crate::server::{weak_contains_col, CommonQuery, ServerContextBase};
+use crate::server::{contains_col, CommonQuery, ServerContextBase};
 use crate::table_read_es::perform_aggregation;
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{BTreeMap, BTreeSet};
@@ -733,7 +733,7 @@ impl QueryPlanningES {
         // The TablePath exists, from the above.
         let gen = ctx.gossip.table_generation.static_read(&table_path, self.timestamp).unwrap();
         let schema = ctx.gossip.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
-        if !weak_contains_col(schema, &col_name, &self.timestamp) {
+        if !contains_col(schema, &col_name, &self.timestamp) {
           // We must go to MasterQueryPlanning.
           return self.perform_master_query_planning(ctx, io_ctx);
         }

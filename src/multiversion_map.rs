@@ -94,8 +94,8 @@ where
     None
   }
 
-  /// Reads the version prior to the timestamp.
-  /// NOTE: This does not mutate the `lat` if the read happens with a future timestamp.
+  /// Reads the version prior to the timestamp. This does not mutate the `lat` if the read
+  /// happens with a future timestamp. Thus, the values read are not idempotent.
   pub fn static_read(&self, key: &K, timestamp: Timestamp) -> Option<&V> {
     if let Some((_, versions)) = self.map.get(key) {
       find_version(versions, timestamp)
