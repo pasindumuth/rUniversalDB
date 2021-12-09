@@ -226,9 +226,10 @@ impl GRQueryES {
     let (_, pre_agg_table_views) = merge_table_views(results);
     let (schema, table_views) = match perform_aggregation(sql_query, pre_agg_table_views) {
       Ok(result) => result,
-      Err(_) => {
-        // TODO: Handle this erroneous situation gracefully.
-        panic!()
+      Err(eval_error) => {
+        return GRQueryAction::QueryError(msg::QueryError::RuntimeError {
+          msg: format!("Aggregation of GRQueryES failed with error {:?}", eval_error),
+        });
       }
     };
 

@@ -214,9 +214,15 @@ impl FullMSCoordES {
         let (_, pre_agg_table_views) = merge_table_views(results);
         match perform_aggregation(sql_query, pre_agg_table_views) {
           Ok(result) => result,
-          Err(_) => {
-            // TODO: Handle this erroneous situation gracefully.
-            panic!()
+          Err(eval_error) => {
+            self.exit_and_clean_up(ctx, io_ctx);
+            return MSQueryCoordAction::FatalFailure(
+              msg::ExternalAbortedData::QueryExecutionError(
+                msg::ExternalQueryError::RuntimeError {
+                  msg: format!("Aggregation of MSQueryES failed with error {:?}", eval_error),
+                },
+              ),
+            );
           }
         }
       }
