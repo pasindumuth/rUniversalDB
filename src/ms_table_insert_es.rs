@@ -15,7 +15,7 @@ use crate::model::message as msg;
 use crate::server::{
   contains_col, evaluate_update, mk_eval_error, ContextConstructor, ServerContextBase,
 };
-use crate::storage::{static_read, GenericTable, MSStorageView, PRESENCE_VALN};
+use crate::storage::{static_read, GenericTable, MSStorageView, StorageView, PRESENCE_VALN};
 use crate::tablet::{
   compute_subqueries, ColumnsLocking, Executing, MSQueryES, RequestedReadProtected,
   SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryPending, TabletContext,
@@ -29,6 +29,8 @@ use std::rc::Rc;
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct Pending {
+  /// The keys of the row that is trying to be inserted to in terms of as `Vec<KeyBound>`.
+  row_region: Vec<KeyBound>,
   update_view: GenericTable,
   res_table_view: TableView,
 }
@@ -363,7 +365,11 @@ impl MSTableInsertES {
       MSTableInsertAction::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
     } else {
       // Move the MSTableInsertES to the Pending state with the computed update view.
-      self.state = MSTableInsertExecutionS::Pending(Pending { update_view, res_table_view });
+      self.state = MSTableInsertExecutionS::Pending(Pending {
+        row_region: row_region.clone(),
+        update_view,
+        res_table_view,
+      });
 
       // Construct a ReadRegion for checking that none of the new rows already exist. Note that
       // we take `val_col_region` is empty, since we do not need it.
@@ -393,14 +399,26 @@ impl MSTableInsertES {
   ) -> MSTableInsertAction {
     match &self.state {
       MSTableInsertExecutionS::Pending(pending) => {
-        // Iterate over the keys and make sure they do not already exist in the storage.
+        // Verify that the keys are not in the storage. We create a PresenceSnapshot only
+        // consisting of keys and verify that the Insert does not write to these keys.
+        let storage_view = MSStorageView::new(
+          &ctx.storage,
+          &ctx.table_schema,
+          &ms_query_es.update_views,
+          self.tier.clone() + 1,
+        );
+
+        // TODO: test this logic once DELETE is implemented.
+
+        let snapshot =
+          storage_view.compute_presence_snapshot(&pending.row_region, &vec![], &self.timestamp);
+
+        // Iterate over the Insert keys.
         let update_view = &pending.update_view;
-        for (key, _) in update_view {
-          if key.1 == None {
-            // TODO: This check needs to be done with the existing update_view applied
-            //  onto storage.
-            if static_read(&ctx.storage, key, self.timestamp).is_some() {
-              // This key exists, so we must respond with an abort.
+        for ((pkey, ci), _) in update_view {
+          if ci == &None {
+            if snapshot.contains_key(pkey) {
+              // This already key exists, so we must respond with an abort.
               self.state = MSTableInsertExecutionS::Done;
               return MSTableInsertAction::QueryError(msg::QueryError::RuntimeError {
                 msg: "Inserting a row that already exists.".to_string(),

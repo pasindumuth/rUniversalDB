@@ -32,7 +32,8 @@ pub fn test_all_basic_serial() {
   multi_stage_test();
   aggregation_test();
   aliased_column_resolution_test();
-  alter_table();
+  basic_add_column();
+  drop_column();
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -794,15 +795,17 @@ fn aliased_column_resolution_test() {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  alter_table
+//  basic_add_column
 // -----------------------------------------------------------------------------------------------
 
-fn alter_table() {
+fn basic_add_column() {
   let (mut sim, mut context) = setup();
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut context);
   populate_inventory_table_basic(&mut sim, &mut context);
+
+  // Add Column and Write to it
 
   {
     context.send_ddl_query(
@@ -813,8 +816,6 @@ fn alter_table() {
       10000,
     );
   }
-
-  // Add Column and Write to it
 
   {
     let mut exp_result =
@@ -875,5 +876,114 @@ fn alter_table() {
     );
   }
 
-  println!("Test 'alter_table' Passed! Time taken: {:?}ms", sim.true_timestamp())
+  println!("Test 'basic_add_column' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  drop_column
+// -----------------------------------------------------------------------------------------------
+
+fn drop_column() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+  populate_inventory_table_basic(&mut sim, &mut context);
+
+  // See if deleting a column and adding it back results in SELECTs now reading null
+  // for that column (rather than a non-null value that was previously there).
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email, count)
+        VALUES (2, 'my_email_2', 35);
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Drop the column and add it back
+  {
+    context.send_ddl_query(
+      &mut sim,
+      " ALTER TABLE inventory
+        DROP COLUMN count;
+      ",
+      10000,
+    );
+
+    context.send_ddl_query(
+      &mut sim,
+      " ALTER TABLE inventory
+        ADD COLUMN count INT;
+      ",
+      10000,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), None]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), None]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), None]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Re-populated "count"
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(16))]);
+    context.send_query(
+      &mut sim,
+      " UPDATE inventory
+        SET count = 16
+        WHERE product_id = 0;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(16))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), None]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), None]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  println!("Test 'drop_column' Passed! Time taken: {:?}ms", sim.true_timestamp())
 }

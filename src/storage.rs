@@ -2,7 +2,7 @@ use crate::common::{
   lookup, lookup_pos, ColBound, KeyBound, PolyColBound, SingleBound, TableSchema,
 };
 use crate::model::common::{ColName, ColType, ColVal, ColValN, PrimaryKey, TableView, Timestamp};
-use std::cmp::min;
+use std::cmp::max;
 use std::collections::{BTreeMap, Bound};
 
 #[cfg(test)]
@@ -519,7 +519,7 @@ fn prior_versions_to_presence_snapshot(
       let storage_key = (pkey.clone(), Some(col.clone()));
       // Compute the Resolved Value (where we ignore `val` if `timestamp` is too early).
       let resolved_val = if let Some((timestamp, val)) = all_prior_versions.get(&storage_key) {
-        if timestamp >= min(pkey_ts, col_ts) {
+        if timestamp >= max(pkey_ts, col_ts) {
           val.clone()
         } else {
           None
