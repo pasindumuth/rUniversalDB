@@ -44,7 +44,7 @@ where
   pub fn read(&mut self, key: &K, timestamp: Timestamp) -> Option<V> {
     if let Some((lat, versions)) = self.map.get_mut(key) {
       *lat = max(*lat, timestamp);
-      find_version(versions, timestamp).cloned()
+      find_prior_value(versions, timestamp).cloned()
     } else {
       self.map.insert(key.clone(), (timestamp, vec![]));
       None
@@ -63,7 +63,7 @@ where
   pub fn strong_static_read(&self, key: &K, timestamp: Timestamp) -> Option<&V> {
     if let Some((lat, versions)) = self.map.get(key) {
       assert!(&timestamp <= lat);
-      find_version(versions, timestamp)
+      find_prior_value(versions, timestamp)
     } else {
       None
     }
@@ -94,11 +94,22 @@ where
     None
   }
 
-  /// Reads the version prior to the timestamp. This does not mutate the `lat` if the read
+  /// Reads the prior value at the timestamp. This does not mutate the `lat` if the read
   /// happens with a future timestamp. Thus, the values read are not idempotent.
   pub fn static_read(&self, key: &K, timestamp: Timestamp) -> Option<&V> {
+    let (_, value) = self.static_read_version(key, timestamp)?;
+    value.as_ref()
+  }
+
+  /// Reads the prior version at the timestamp. This does not mutate the `lat` if the read
+  /// happens with a future timestamp. Thus, the values read are not idempotent.
+  pub fn static_read_version(
+    &self,
+    key: &K,
+    timestamp: Timestamp,
+  ) -> Option<&(Timestamp, Option<V>)> {
     if let Some((_, versions)) = self.map.get(key) {
-      find_version(versions, timestamp)
+      find_prior_version(versions, timestamp)
     } else {
       None
     }
@@ -109,7 +120,7 @@ where
   pub fn static_snapshot_read(&self, timestamp: Timestamp) -> BTreeMap<K, V> {
     let mut snapshot = BTreeMap::new();
     for (key, (_, versions)) in &self.map {
-      if let Some(value) = find_version(versions, timestamp) {
+      if let Some(value) = find_prior_value(versions, timestamp) {
         snapshot.insert(key.clone(), value.clone());
       }
     }
@@ -135,10 +146,19 @@ where
   }
 }
 
-pub fn find_version<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> Option<&V> {
-  for (t, value) in versions.iter().rev() {
+fn find_prior_value<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> Option<&V> {
+  let (_, value) = find_prior_version(versions, timestamp)?;
+  value.as_ref()
+}
+
+fn find_prior_version<V>(
+  versions: &Vec<(Timestamp, Option<V>)>,
+  timestamp: Timestamp,
+) -> Option<&(Timestamp, Option<V>)> {
+  for version in versions.iter().rev() {
+    let (t, _) = version;
     if *t <= timestamp {
-      return value.as_ref();
+      return Some(version);
     }
   }
   return None;

@@ -40,6 +40,7 @@ pub enum MSWriteExecutionS {
 pub struct MSTableWriteES {
   pub root_query_path: CQueryPath,
   pub timestamp: Timestamp,
+  /// This is the Tier that the new UpdateView should be added at.
   pub tier: u32,
   pub context: Rc<Context>,
 

@@ -2,6 +2,7 @@ use crate::common::{
   lookup, lookup_pos, ColBound, KeyBound, PolyColBound, SingleBound, TableSchema,
 };
 use crate::model::common::{ColName, ColType, ColVal, ColValN, PrimaryKey, TableView, Timestamp};
+use std::cmp::min;
 use std::collections::{BTreeMap, Bound};
 
 #[cfg(test)]
@@ -19,9 +20,13 @@ mod storage_test;
 /// a "Presence Row". The Storage Value in the Presence Row is `None` or `PRESENCE_VALN`,
 /// indicate that the row is absent or present respectively.
 pub type GenericMVTable = BTreeMap<(PrimaryKey, Option<ColName>), Vec<(Timestamp, ColValN)>>;
+
 /// A single-versioned version of the above to hold views constructed by a write. We use
 /// similar terminology to `GenericMVTable` to describe this.
 pub type GenericTable = BTreeMap<(PrimaryKey, Option<ColName>), ColValN>;
+
+/// The type of Presence Snapshot, which is the fundamental object whose idempotence is preserved.
+pub type PresenceSnapshot = BTreeMap<PrimaryKey, Vec<(ColName, ColValN)>>;
 
 /// A constant that indicates that a row is present.
 pub const PRESENCE_VALN: ColValN = Some(ColVal::Int(0));
@@ -34,6 +39,20 @@ pub fn find_version<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timest
     }
   }
   return &None;
+}
+
+/// Finds the Non-Strict Prior Version in `versions` at `timestamp`.
+pub fn find_version2<V>(
+  versions: &Vec<(Timestamp, Option<V>)>,
+  timestamp: Timestamp,
+) -> Option<&(Timestamp, Option<V>)> {
+  for version in versions.iter().rev() {
+    let (t, _) = version;
+    if *t <= timestamp {
+      return Some(version);
+    }
+  }
+  return None;
 }
 
 /// Reads the version prior to the timestamp. This doesn't mutate
@@ -62,12 +81,84 @@ type RangeQuery = (Bound<(PrimaryKey, Option<ColName>)>, Bound<(PrimaryKey, Opti
 ///
 /// This function must a pure function; the order of the returned vectors matter.
 pub trait StorageView {
+  fn table_schema(&self) -> &TableSchema;
+  fn storage(&self) -> &GenericMVTable;
+
+  /// Combines `storage` along with potential updates to compute a `PresenceSnapshot`.
+  fn compute_presence_snapshot(
+    &self,
+    key_region: &Vec<KeyBound>,
+    val_cols: &Vec<ColName>,
+    timestamp: &Timestamp,
+  ) -> PresenceSnapshot;
+
+  /// Amend `all_prior_versions` by adding the prior versions in `storage` over the given
+  /// `key_bound` and `val_cols` at `timestamp`.
+  ///
+  /// The general strategy that we use to extract a subtable for `KeyBound` in `key_region` is
+  /// to take the lower bound, get an iterator to it in `storage`, and then iterate forward,
+  /// adding in every row that's within the `KeyBound` until we are beyond the upper bound of
+  /// `KeyBound`. We first construct a `GenericTable` containing rows for every KeyBound,
+  /// and then finally convert that to the return type.
+  fn amend_all_prior_versions(
+    &self,
+    all_prior_versions: &mut BTreeMap<(PrimaryKey, Option<ColName>), (Timestamp, ColValN)>,
+    key_bound: &KeyBound,
+    val_cols: &Vec<ColName>,
+    timestamp: &Timestamp,
+  ) {
+    let bound = compute_range_query(key_bound);
+    // Iterate through storage rows.
+    for ((pkey, ci), versions) in self.storage().range(bound.clone()) {
+      // If this is a ValCol Cell that we do not care about, then skip it.
+      if let Some(col_name) = ci {
+        if !val_cols.contains(col_name) {
+          continue;
+        }
+      }
+
+      match check_inclusion(key_bound, pkey) {
+        KeyBoundInclusionResult::Included => {
+          // This row is present within the `key_bound`, so we  amend `snapshot_table`
+          // unless there is already an entry that shadows this one.
+          let storage_key = (pkey.clone(), ci.clone());
+          if !all_prior_versions.contains_key(&storage_key) {
+            if let Some(version) = find_version2(versions, *timestamp) {
+              all_prior_versions.insert(storage_key, version.clone());
+            }
+          }
+        }
+        KeyBoundInclusionResult::Done => break,
+        KeyBoundInclusionResult::Excluded => {}
+      }
+    }
+  }
+
+  /// Note that `key_region` does need to be disjoint.
+  ///
+  /// Preconditions:
+  ///   1. For all `ColName`s in `column_region` that are not KeyCols, the Prior Value at
+  ///      `timestamp` in `table_schema.val_cols` is `Some(_)`.
   fn compute_subtable(
     &self,
     key_region: &Vec<KeyBound>,
-    col_region: &Vec<ColName>,
+    column_region: &Vec<ColName>,
     timestamp: &Timestamp,
-  ) -> Vec<(Vec<ColValN>, u64)>;
+  ) -> Vec<(Vec<ColValN>, u64)> {
+    // Select the `ColNames` in `column_region` that are not KeyCols.
+    let mut val_cols = Vec::<ColName>::new();
+    for col in column_region {
+      if lookup(&self.table_schema().key_cols, col).is_none() {
+        val_cols.push(col.clone());
+      }
+    }
+
+    let presence_snapshot = self.compute_presence_snapshot(key_region, &val_cols, timestamp);
+    presence_snapshot_to_table_view(presence_snapshot, self.table_schema(), column_region)
+      .rows
+      .into_iter()
+      .collect()
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -87,54 +178,34 @@ impl<'a> SimpleStorageView<'a> {
 }
 
 impl<'a> StorageView for SimpleStorageView<'a> {
-  /// Here, note that `key_region` doesn't need to be disjoint.
-  fn compute_subtable(
+  fn table_schema(&self) -> &TableSchema {
+    &self.table_schema
+  }
+
+  fn storage(&self) -> &GenericMVTable {
+    &self.storage
+  }
+
+  /// Compute Non-Strict Prior Presence Snapshot.
+  ///
+  /// Preconditions:
+  ///   1. For all `ColName`s in `column_region` that are not KeyCols, the Prior Value at
+  ///      `timestamp` in `table_schema.val_cols` is `Some(_)`.
+  fn compute_presence_snapshot(
     &self,
     key_region: &Vec<KeyBound>,
-    column_region: &Vec<ColName>,
+    val_cols: &Vec<ColName>,
     timestamp: &Timestamp,
-  ) -> Vec<(Vec<ColValN>, u64)> {
-    // The general strategy that we use to extract a subtable for each `KeyBound` in `key_region`
-    // is to take the lower bound, get an iterator to it in `storage`, and then iterate forward,
-    // adding in every row that's within the `KeyBound` until we are beyond the upper bound of
-    // `KeyBound`. We first construct a `GenericTable` containing rows for every KeyBound,
-    // and then finally convert that to the return type.
-    let mut snapshot_table = GenericTable::new();
+  ) -> PresenceSnapshot {
+    // Compute the non-strict prior version of all Presence Cells and ValCol Cells within
+    // `key_bound` and val_cols.
+    let mut all_prior_versions =
+      BTreeMap::<(PrimaryKey, Option<ColName>), (Timestamp, ColValN)>::new();
     for key_bound in key_region {
-      // Iterate over the the Storage Rows and insert them into `snapshot_table` if they
-      // are within `key_bound` and aren't shadowed by an existing entry.
-      let mut it = self.storage.range(compute_range_query(key_bound));
-      let mut entry = it.next();
-      while let Some(((pkey, ci), versions)) = entry {
-        assert!(ci.is_none()); // Recall that this should be the Presence Storage Row of `pkey`.
-        match check_inclusion(key_bound, pkey) {
-          KeyBoundInclusionResult::Included => {
-            // This row is present within the `key_bound`, so we add it to `snapshot_table`.
-            let storage_key = (pkey.clone(), ci.clone());
-            snapshot_table.insert(storage_key, find_version(versions, *timestamp).clone());
-            entry = it.next();
-            while let Some(((_, Some(col_name)), versions)) = entry {
-              let storage_key = (pkey.clone(), Some(col_name.clone()));
-              snapshot_table.insert(storage_key, find_version(versions, *timestamp).clone());
-              entry = it.next();
-            }
-          }
-          KeyBoundInclusionResult::Done => break,
-          KeyBoundInclusionResult::Excluded => {
-            // Skip this row
-            entry = it.next();
-            while let Some(((_, Some(_)), _)) = entry {
-              entry = it.next();
-            }
-          }
-        }
-      }
+      self.amend_all_prior_versions(&mut all_prior_versions, &key_bound, &val_cols, timestamp);
     }
 
-    convert_to_table_view(snapshot_table, self.table_schema, column_region)
-      .rows
-      .into_iter()
-      .collect()
+    prior_versions_to_presence_snapshot(&self.table_schema, val_cols, timestamp, all_prior_versions)
   }
 }
 
@@ -165,31 +236,52 @@ impl<'a> MSStorageView<'a> {
 }
 
 impl<'a> StorageView for MSStorageView<'a> {
-  /// Here, note that `key_region` doesn't need to be disjoint.
-  fn compute_subtable(
+  fn table_schema(&self) -> &TableSchema {
+    &self.table_schema
+  }
+
+  fn storage(&self) -> &GenericMVTable {
+    &self.storage
+  }
+
+  /// Compute Non-Strict Prior Presence Snapshot assuming that `update_views` gets compressed
+  /// and inserted into `storage` at `timestamp`.
+  ///
+  /// Preconditions:
+  ///   1. For all `ColName`s in `column_region` that are not KeyCols, the Prior Value at
+  ///      `timestamp` in `table_schema.val_cols` is `Some(_)`.
+  fn compute_presence_snapshot(
     &self,
     key_region: &Vec<KeyBound>,
-    column_region: &Vec<ColName>,
+    val_cols: &Vec<ColName>,
     timestamp: &Timestamp,
-  ) -> Vec<(Vec<ColValN>, u64)> {
-    // Here, we first compress all `update_views`, along with the `storage`,
-    // to an auxiliary GenericTable only containing the relevent keys in `key_region`.
-    // Then, we do something similar to `SimpleStorageView` to convert it to the return
-    // type (via TableView).
-    let mut snapshot_table = GenericTable::new();
+  ) -> PresenceSnapshot {
+    // Compute the non-strict prior version of all Presence Cells and ValCol Cells within
+    // `key_bound` and val_cols, assuming that `update_views` gets compressed
+    // and inserted into `storage` at `timestamp`.
+    let mut all_prior_versions =
+      BTreeMap::<(PrimaryKey, Option<ColName>), (Timestamp, ColValN)>::new();
     for key_bound in key_region {
       let bound = compute_range_query(key_bound);
       // First, apply the UpdateViews to `snapshot_table`.
       let tier_bound = (Bound::Included(self.tier), Bound::Unbounded);
       for (_, generic_table) in self.update_views.range(tier_bound) {
-        // Iterate over the the UpdateView Rows and insert them into `snapshot_table` if they
-        // are within `key_bound` and are not shadowed by an existing entry.
+        // Iterate over the the UpdateView Rows.
         for ((pkey, ci), val) in generic_table.range(bound.clone()) {
+          // If this is a ValCol Cell that we do not care about, then skip it.
+          if let Some(col_name) = ci {
+            if !val_cols.contains(col_name) {
+              continue;
+            }
+          }
+
+          // Otherwise, see if the `pkey` is within the `key_bound`. If so, amend
+          // `snapshot_table` unless there is already an entry that shadows this one.
           match check_inclusion(key_bound, pkey) {
             KeyBoundInclusionResult::Included => {
               let storage_key = (pkey.clone(), ci.clone());
-              if !snapshot_table.contains_key(&storage_key) {
-                snapshot_table.insert(storage_key, val.clone());
+              if !all_prior_versions.contains_key(&storage_key) {
+                all_prior_versions.insert(storage_key, (*timestamp, val.clone()));
               }
             }
             KeyBoundInclusionResult::Done => break,
@@ -198,44 +290,11 @@ impl<'a> StorageView for MSStorageView<'a> {
         }
       }
 
-      // Iterate over the the Storage Rows and insert them into `snapshot_table` if they
-      // are within `key_bound` and aren't shadowed by an existing entry.
-      let mut it = self.storage.range(bound.clone());
-      let mut entry = it.next();
-      while let Some(((pkey, ci), versions)) = entry {
-        assert!(ci.is_none()); // Recall that this should be the Presence Storage Row of `pkey`.
-        match check_inclusion(key_bound, pkey) {
-          KeyBoundInclusionResult::Included => {
-            // This row is present within the `key_bound`, so we add it to `snapshot_table`.
-            let storage_key = (pkey.clone(), ci.clone());
-            if !snapshot_table.contains_key(&storage_key) {
-              snapshot_table.insert(storage_key, find_version(versions, *timestamp).clone());
-            }
-            entry = it.next();
-            while let Some(((_, Some(col_name)), versions)) = entry {
-              let storage_key = (pkey.clone(), Some(col_name.clone()));
-              if !snapshot_table.contains_key(&storage_key) {
-                snapshot_table.insert(storage_key, find_version(versions, *timestamp).clone());
-              }
-              entry = it.next();
-            }
-          }
-          KeyBoundInclusionResult::Done => break,
-          KeyBoundInclusionResult::Excluded => {
-            // Skip this row
-            entry = it.next();
-            while let Some(((_, Some(_)), _)) = entry {
-              entry = it.next();
-            }
-          }
-        }
-      }
+      // Add in the prior versions from storage.
+      self.amend_all_prior_versions(&mut all_prior_versions, &key_bound, &val_cols, timestamp);
     }
 
-    convert_to_table_view(snapshot_table, self.table_schema, column_region)
-      .rows
-      .into_iter()
-      .collect()
+    prior_versions_to_presence_snapshot(&self.table_schema, val_cols, timestamp, all_prior_versions)
   }
 }
 
@@ -388,7 +447,7 @@ fn check_inclusion(key_bound: &KeyBound, pkey: &PrimaryKey) -> KeyBoundInclusion
 /// Computes a BTeeMap range query such that the upper bound is unbounded, and where the
 /// lower bound is as high as possible yet still encompasses all of `keybound`.
 fn compute_range_query(key_bound: &KeyBound) -> RangeQuery {
-  // To get a Bound that's immediately below all Storage Keys of interest,
+  // To get a Bound that is immediately below all Storage Keys of interest,
   // we simply use the prefix of the lower bound of `key_bound` where ColBound is not
   // Unbounded. Observe that the lexicographical ordering of vectors helps us here.
   let mut start_prefix = Vec::<ColVal>::new();
@@ -418,60 +477,85 @@ fn compute_range_query(key_bound: &KeyBound) -> RangeQuery {
   (Bound::Included((PrimaryKey::new(start_prefix), None)), Bound::Unbounded)
 }
 
-/// Select only the columns in `selection` from the other arguments.
-fn select_row(
-  pkey: &PrimaryKey,
-  key_cols: &Vec<(ColName, ColType)>,
-  val_cols: &Vec<(ColName, ColValN)>,
-  selection: &Vec<ColName>,
-) -> Vec<ColValN> {
-  let mut row = Vec::<ColValN>::new();
-  for col_name in selection {
-    if let Some(col_val) = lookup_pos(key_cols, &col_name) {
-      // `col_name` is a KeyCol.
-      row.push(Some(pkey.cols.get(col_val).unwrap().clone()));
-    } else if let Some(col_val) = lookup(val_cols, &col_name) {
-      // `col_name` is a ValCol that has a value in storage.
-      row.push(col_val.clone());
-    } else {
-      // `col_name` is a ValCol that does not not have a value in storage. This means
-      // that its value is `None`, abstractly speaking.
-      row.push(None);
+/// Given the prior version of various Presence Cells and ValCols at `timestamp` (where
+/// such a value is missing in `all_prior_version`), where the prior version of `val_cols`
+/// in `table_schema.val_cols` is `Some(_)`, compute the `PresenceSnapshot`.
+fn prior_versions_to_presence_snapshot(
+  table_schema: &TableSchema,
+  val_cols: &Vec<ColName>,
+  timestamp: &Timestamp,
+  all_prior_versions: BTreeMap<(PrimaryKey, Option<ColName>), (Timestamp, ColValN)>,
+) -> PresenceSnapshot {
+  // Assert the precondition
+  debug_assert!((|| {
+    for col in val_cols {
+      if table_schema.val_cols.static_read(col, *timestamp).is_none() {
+        return false;
+      }
+    }
+    return true;
+  })());
+
+  // Compute which `PrimaryKey`s are present
+  let mut present_key_timestamps = BTreeMap::<PrimaryKey, Timestamp>::new();
+  for ((pkey, ci), (timestamp, val)) in &all_prior_versions {
+    if ci.is_none() && val == &PRESENCE_VALN {
+      present_key_timestamps.insert(pkey.clone(), *timestamp);
     }
   }
-  row
+
+  // Compute the timestamps that the `val_cols` were added at.
+  let mut col_timestamps = BTreeMap::<ColName, Timestamp>::new();
+  for col in val_cols {
+    let (timestamp, _) = table_schema.val_cols.static_read_version(col, *timestamp).unwrap();
+    col_timestamps.insert(col.clone(), *timestamp);
+  }
+
+  // Compute the Presence Snapshot
+  let mut presence_snapshot = BTreeMap::<PrimaryKey, Vec<(ColName, ColValN)>>::new();
+  for (pkey, pkey_ts) in &present_key_timestamps {
+    let mut snapshot_row = Vec::<(ColName, ColValN)>::new();
+    for (col, col_ts) in &col_timestamps {
+      let storage_key = (pkey.clone(), Some(col.clone()));
+      // Compute the Resolved Value (where we ignore `val` if `timestamp` is too early).
+      let resolved_val = if let Some((timestamp, val)) = all_prior_versions.get(&storage_key) {
+        if timestamp >= min(pkey_ts, col_ts) {
+          val.clone()
+        } else {
+          None
+        }
+      } else {
+        None
+      };
+      snapshot_row.push((col.clone(), resolved_val));
+    }
+    presence_snapshot.insert(pkey.clone(), snapshot_row);
+  }
+  presence_snapshot
 }
 
-/// Convert a `GenericTable` to a `TableView` by selecting the columns in `selection`.
-fn convert_to_table_view(
-  snapshot_table: GenericTable,
+/// Convert a `PresenceSnapshot` to a `TableView` by selecting the columns in `selection`.
+/// Note that every `ColName` in `selection` must either be in the key or the value in
+/// `presence_snapshot`.
+fn presence_snapshot_to_table_view(
+  presence_snapshot: PresenceSnapshot,
   table_schema: &TableSchema,
   selection: &Vec<ColName>,
 ) -> TableView {
   let mut table_view = TableView::new(selection.iter().cloned().map(|c| Some(c)).collect());
-  let mut it = snapshot_table.iter();
-  let mut entry = it.next();
-  while let Some(((pkey, ci), val)) = entry {
-    assert!(ci.is_none()); // Recall that this should be the Presence Storage Row of `pkey`.
-    let is_row_present = val.is_some();
-    if is_row_present {
-      // This row is both present and falls within the `key_bound`,
-      // so we add it to `table_view`.
-      let mut col_name_vals = Vec::<(ColName, ColValN)>::new();
-      entry = it.next();
-      while let Some(((_, Some(col_name)), val)) = entry {
-        col_name_vals.push((col_name.clone(), val.clone()));
-        entry = it.next();
-      }
-
-      table_view.add_row(select_row(&pkey, &table_schema.key_cols, &col_name_vals, &selection));
-    } else {
-      // Skip this row
-      entry = it.next();
-      while let Some(((_, Some(_)), _)) = entry {
-        entry = it.next();
+  for (pkey, col_name_vals) in presence_snapshot {
+    let mut row = Vec::<ColValN>::new();
+    for col_name in selection {
+      if let Some(key_col_index) = lookup_pos(&table_schema.key_cols, &col_name) {
+        // `col_name` is a KeyCol.
+        row.push(Some(pkey.cols.get(key_col_index).unwrap().clone()));
+      } else {
+        // `col_name` is a ValCol.
+        let col_val = lookup(&col_name_vals, &col_name).unwrap();
+        row.push(col_val.clone());
       }
     }
+    table_view.add_row(row);
   }
   table_view
 }
