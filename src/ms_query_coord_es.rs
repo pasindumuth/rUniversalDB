@@ -228,6 +228,7 @@ impl FullMSCoordES {
       }
       proc::MSQueryStage::Update(_) => merge_table_views(results),
       proc::MSQueryStage::Insert(_) => merge_table_views(results),
+      proc::MSQueryStage::Delete(_) => merge_table_views(results),
     };
 
     let (trans_table_name, _) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
@@ -554,6 +555,28 @@ impl FullMSCoordES {
         let table_path = &insert_query.table;
         let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
         let tids = ctx.ctx(io_ctx).get_all_tablets(&table_path.source_ref, gen);
+        SendHelper::TableQuery(perform_query, tids)
+      }
+      proc::MSQueryStage::Delete(delete_query) => {
+        let perform_query = msg::PerformQuery {
+          root_query_path: root_query_path.clone(),
+          sender_path: sender_path.clone().into_ct(),
+          query_id: child_qid.clone(),
+          query: msg::GeneralQuery::DeleteQuery(msg::DeleteQuery {
+            timestamp: es.timestamp.clone(),
+            context: context.clone(),
+            sql_query: delete_query.clone(),
+            query_plan,
+          }),
+        };
+        let table_path = &delete_query.table;
+        let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
+        let tids = ctx.ctx(io_ctx).get_min_tablets(
+          &table_path.source_ref,
+          &table_path.to_read_source(),
+          gen,
+          &delete_query.selection,
+        );
         SendHelper::TableQuery(perform_query, tids)
       }
     };

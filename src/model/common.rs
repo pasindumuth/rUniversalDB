@@ -439,6 +439,12 @@ pub mod proc {
     pub values: Vec<Vec<Value>>,
   }
 
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct Delete {
+    pub table: SimpleSource,
+    pub selection: ValExpr,
+  }
+
   // GR
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -459,6 +465,7 @@ pub mod proc {
     SuperSimpleSelect(SuperSimpleSelect),
     Update(Update),
     Insert(Insert),
+    Delete(Delete),
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -587,6 +594,7 @@ pub mod iast {
     SuperSimpleSelect(SuperSimpleSelect),
     Update(Update),
     Insert(Insert),
+    Delete(Delete),
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -636,5 +644,11 @@ pub mod iast {
     pub columns: Vec<String>,
     /// The values to insert (where the inner `Vec` is a row)
     pub values: Vec<Vec<Value>>,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct Delete {
+    pub table: TableRef,
+    pub selection: ValExpr,
   }
 }

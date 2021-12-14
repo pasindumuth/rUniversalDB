@@ -329,6 +329,7 @@ pub enum GeneralQuery {
   SuperSimpleTableSelectQuery(SuperSimpleTableSelectQuery),
   UpdateQuery(UpdateQuery),
   InsertQuery(InsertQuery),
+  DeleteQuery(DeleteQuery),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -364,6 +365,14 @@ pub struct InsertQuery {
   pub timestamp: Timestamp,
   pub context: Context,
   pub sql_query: proc::Insert,
+  pub query_plan: QueryPlan,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DeleteQuery {
+  pub timestamp: Timestamp,
+  pub context: Context,
+  pub sql_query: proc::Delete,
   pub query_plan: QueryPlan,
 }
 
@@ -411,6 +420,8 @@ pub enum QueryPlanningError {
   /// Occurs if an Insert appears as a Subquery, if it does not write to every KeyCol,
   /// or if the VALUES clause does not correspond to the columns to insert to.
   InvalidInsert,
+  /// Occurs if a Delete appears as a Subquery.
+  InvalidDelete,
   /// Occurs if an Select has a mixure of aggregate columns and non-aggregate columns.
   InvalidSelect,
   /// Occurs if a `ColumnRef` has an `table_name`, but the reference table does not exist, or

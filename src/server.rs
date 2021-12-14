@@ -532,6 +532,42 @@ pub fn evaluate_update(
   Ok(evaluated_update)
 }
 
+#[derive(Debug, Default)]
+pub struct EvaluatedDelete {
+  pub selection: ColValN,
+}
+
+/// This evaluates a Delete completely. When a ColumnRef is encountered in the `expr`,
+/// it searches `col_names` and `col_vals` to get the value. In addition, `subquery_vals` should
+/// have a length equal to that of how many GRQuerys there are in the `expr`.
+pub fn evaluate_delete(
+  delete: &proc::Delete,
+  col_names: &Vec<proc::ColumnRef>,
+  col_vals: &Vec<ColValN>,
+  raw_subquery_vals: &Vec<TableView>,
+) -> Result<EvaluatedDelete, EvalError> {
+  // We map all ColNames to their ColValNs using the Context and subtable.
+  let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
+  for i in 0..col_names.len() {
+    col_map.insert(col_names.get(i).unwrap().clone(), col_vals.get(i).unwrap().clone());
+  }
+
+  // Next, we reduce the subquery values to single values.
+  let subquery_vals = extract_subquery_vals(raw_subquery_vals)?;
+
+  // Construct the Evaluated Select
+  let mut evaluated_select = EvaluatedDelete::default();
+  let mut next_subquery_idx = 0;
+  evaluated_select.selection = evaluate_c_expr(&construct_cexpr(
+    &delete.selection,
+    &col_map,
+    &subquery_vals,
+    &mut next_subquery_idx,
+  )?)?;
+
+  Ok(evaluated_select)
+}
+
 pub fn mk_eval_error(eval_error: EvalError) -> msg::QueryError {
   msg::QueryError::TypeError { msg: format!("{:?}", eval_error) }
 }

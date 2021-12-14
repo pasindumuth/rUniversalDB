@@ -64,14 +64,13 @@ pub fn convert_ast(raw_query: Vec<ast::Statement>) -> Result<iast::Query, String
     return Err(format!("A SQL Transaction with no stages is not supported."));
   }
 
-  let mut it = raw_query.into_iter().rev().enumerate();
-  let (_, final_stmt) = it.next().unwrap();
+  let mut it = raw_query.into_iter().enumerate();
+  let (_, final_stmt) = it.next_back().unwrap();
 
   // Add all prior stages as CTEs by setting their results to Transient Tables.
   let mut ctes = Vec::<(String, iast::Query)>::new();
   while let Some((idx, stmt)) = it.next() {
     ctes.push((format!("\\rtt{:?}", idx), convert_stage(stmt)?));
-    it.next();
   }
 
   // Add the final stage to the query
@@ -89,6 +88,9 @@ pub fn convert_stage(stmt: ast::Statement) -> Result<iast::Query, String> {
     }
     ast::Statement::Update { table_name, assignments, selection } => {
       Ok(iast::Query { ctes: vec![], body: convert_update(table_name, assignments, selection)? })
+    }
+    ast::Statement::Delete { table_name, selection, .. } => {
+      Ok(iast::Query { ctes: vec![], body: convert_delete(table_name, selection)? })
     }
     _ => Err(format!("Unsupported ast::Statement {:?}", stmt)),
   }
@@ -136,6 +138,7 @@ fn convert_query(query: ast::Query) -> Result<iast::Query, String> {
       ast::Statement::Update { table_name, assignments, selection } => {
         convert_update(table_name, assignments, selection)?
       }
+      ast::Statement::Delete { table_name, selection } => convert_delete(table_name, selection)?,
       _ => return Err(format!("Unsupported ast::Statement {:?}", stmt)),
     },
     _ => return Err(format!("Other stuff not supported")),
@@ -193,6 +196,20 @@ fn convert_update(
       }
       internal_assignments
     },
+    selection: if let Some(selection) = selection {
+      convert_expr(selection)?
+    } else {
+      iast::ValExpr::Value { val: iast::Value::Boolean(true) }
+    },
+  }))
+}
+
+fn convert_delete(
+  table_name: ast::ObjectName,
+  selection: Option<ast::Expr>,
+) -> Result<iast::QueryBody, String> {
+  Ok(iast::QueryBody::Delete(iast::Delete {
+    table: get_table_ref(table_name.0, None)?,
     selection: if let Some(selection) = selection {
       convert_expr(selection)?
     } else {

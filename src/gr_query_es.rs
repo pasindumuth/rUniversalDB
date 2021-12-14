@@ -1,6 +1,6 @@
 use crate::col_usage::{
-  collect_select_subqueries, collect_update_subqueries, node_external_trans_tables,
-  FrozenColUsageNode,
+  collect_delete_subqueries, collect_select_subqueries, collect_update_subqueries,
+  node_external_trans_tables, FrozenColUsageNode,
 };
 use crate::common::{
   lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, OrigP, QueryPlan, TMStatus,
@@ -144,6 +144,12 @@ impl SubqueryComputableSql for proc::SuperSimpleSelect {
 impl SubqueryComputableSql for proc::Update {
   fn collect_subqueries(&self) -> Vec<proc::GRQuery> {
     collect_update_subqueries(self)
+  }
+}
+
+impl SubqueryComputableSql for proc::Delete {
+  fn collect_subqueries(&self) -> Vec<proc::GRQuery> {
+    collect_delete_subqueries(self)
   }
 }
 

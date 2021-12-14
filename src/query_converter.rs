@@ -114,6 +114,10 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
       rename_trans_tables_val_expr_r(ctx, &mut update.selection);
     }
     iast::QueryBody::Insert(_) => {}
+    iast::QueryBody::Delete(delete) => {
+      // Rename the Where Clause
+      rename_trans_tables_val_expr_r(ctx, &mut delete.selection);
+    }
   }
 
   // Remove the TransTables defined by this Query from the ctx.
@@ -222,6 +226,18 @@ fn flatten_top_level_query_r(
       ));
       Ok(())
     }
+    iast::QueryBody::Delete(delete) => {
+      let ms_delete = proc::Delete {
+        table: SimpleSource {
+          source_ref: TablePath(delete.table.source_ref.clone()),
+          alias: delete.table.alias.clone(),
+        },
+        selection: flatten_val_expr_r(&delete.selection, counter)?,
+      };
+      trans_table_map
+        .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Delete(ms_delete)));
+      Ok(())
+    }
   }
 }
 
@@ -289,6 +305,9 @@ fn flatten_sub_query_r(
     }
     iast::QueryBody::Insert(_) => {
       Err(msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidInsert))
+    }
+    iast::QueryBody::Delete(_) => {
+      Err(msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidDelete))
     }
   }
 }

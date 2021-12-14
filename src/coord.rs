@@ -322,6 +322,7 @@ impl CoordContext {
               msg::GeneralQuery::SuperSimpleTableSelectQuery(_) => panic!(),
               msg::GeneralQuery::UpdateQuery(_) => panic!(),
               msg::GeneralQuery::InsertQuery(_) => panic!(),
+              msg::GeneralQuery::DeleteQuery(_) => panic!(),
             }
           }
           msg::CoordMessage::CancelQuery(cancel_query) => {

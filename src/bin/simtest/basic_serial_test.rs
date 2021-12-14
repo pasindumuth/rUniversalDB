@@ -34,6 +34,9 @@ pub fn test_all_basic_serial() {
   aliased_column_resolution_test();
   basic_add_column();
   drop_column();
+  basic_delete_test();
+  insert_delete_insert_test();
+  ghost_deleted_row_test();
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -986,4 +989,200 @@ fn drop_column() {
   }
 
   println!("Test 'drop_column' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  basic_delete_test
+// -----------------------------------------------------------------------------------------------
+
+/// Sees if a single Delete Query does indeed delete data.
+fn basic_delete_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+  populate_inventory_table_basic(&mut sim, &mut context);
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email, count)
+        VALUES (2, 'my_email_2', 35);
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Delete rows with a non-trivial expression and check that they all get deleted
+
+  {
+    let mut exp_result = TableView::new(vec![]);
+    context.send_query(
+      &mut sim,
+      " DELETE
+        FROM inventory
+        WHERE product_id % 2 = 0;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Delete it again and see if that succeeds
+
+  println!("Test 'basic_delete_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  insert_delete_insert_test
+// -----------------------------------------------------------------------------------------------
+
+/// Sees if a Transaction with an Insert a row, then Deletes it, and then tries Inserting
+/// it again, then it all works.
+fn insert_delete_insert_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+  populate_inventory_table_basic(&mut sim, &mut context);
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email, count)
+        VALUES (2, 'my_email_2', 35),
+               (3, 'my_email_3', 45),
+               (4, 'my_email_4', 55);
+  
+        DELETE
+        FROM inventory
+        WHERE product_id % 2 = 0;
+  
+        INSERT INTO inventory (product_id, email, count)
+        VALUES (2, 'my_email_2', 35);
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
+    exp_result.add_row(vec![Some(cvi(3)), Some(cvs("my_email_3")), Some(cvi(45))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  println!("Test 'insert_delete_insert_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  ghost_deleted_row_test
+// -----------------------------------------------------------------------------------------------
+
+/// Sees if a deleted row is re-inserted with some columns unspecified, they start off as
+/// NULL, instead of their prior value due to the delete.
+fn ghost_deleted_row_test() {
+  let (mut sim, mut context) = setup();
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut context);
+  populate_inventory_table_basic(&mut sim, &mut context);
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![]);
+    context.send_query(
+      &mut sim,
+      " DELETE
+        FROM inventory
+        WHERE product_id = 0;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
+    context.send_query(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email)
+        VALUES (0, 'my_email_0');
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), None]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
+    context.send_query(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  println!("Test 'ghost_deleted_row_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
 }

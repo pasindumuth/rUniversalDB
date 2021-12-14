@@ -408,8 +408,6 @@ impl MSTableInsertES {
           self.tier.clone() + 1,
         );
 
-        // TODO: test this logic once DELETE is implemented.
-
         let snapshot =
           storage_view.compute_presence_snapshot(&pending.row_region, &vec![], &self.timestamp);
 

@@ -1,5 +1,5 @@
 use crate::common::{lookup, TableSchema};
-use crate::model::common::proc::GeneralSourceRef;
+use crate::model::common::proc::{GeneralSourceRef, MSQueryStage};
 use crate::model::common::{
   iast, proc, ColName, Gen, TablePath, TierMap, Timestamp, TransTableName,
 };
@@ -253,6 +253,27 @@ impl<'a> ColUsagePlanner<'a> {
     ))
   }
 
+  /// Constructs a `FrozenColUsageNode` and the schema of the returned TransTable.
+  pub fn plan_delete(
+    &mut self,
+    trans_table_ctx: &mut BTreeMap<TransTableName, Vec<Option<ColName>>>,
+    delete: &proc::Delete,
+  ) -> Result<(Vec<Option<ColName>>, FrozenColUsageNode), ColUsageError> {
+    let mut projection = compute_delete_schema(delete);
+    let mut exprs = vec![delete.selection.clone()];
+    Ok((
+      projection,
+      self.compute_frozen_col_usage_node(
+        trans_table_ctx,
+        &proc::GeneralSource {
+          source_ref: proc::GeneralSourceRef::TablePath(delete.table.source_ref.clone()),
+          alias: delete.table.alias.clone(),
+        },
+        &exprs,
+      )?,
+    ))
+  }
+
   /// Construct a `FrozenColUsageNode` and the schema of the returned TransTable.
   pub fn plan_ms_query_stage(
     &mut self,
@@ -263,6 +284,7 @@ impl<'a> ColUsagePlanner<'a> {
       proc::MSQueryStage::SuperSimpleSelect(select) => self.plan_select(trans_table_ctx, select),
       proc::MSQueryStage::Update(update) => self.plan_update(trans_table_ctx, update),
       proc::MSQueryStage::Insert(insert) => self.plan_insert(trans_table_ctx, insert),
+      proc::MSQueryStage::Delete(delete) => self.plan_delete(trans_table_ctx, delete),
     }
   }
 
@@ -341,6 +363,10 @@ pub fn compute_insert_schema(insert: &proc::Insert) -> Vec<Option<ColName>> {
   insert.columns.iter().cloned().map(|col| Some(col.clone())).collect()
 }
 
+pub fn compute_delete_schema(_: &proc::Delete) -> Vec<Option<ColName>> {
+  vec![]
+}
+
 // -----------------------------------------------------------------------------------------------
 //  Collection functions
 // -----------------------------------------------------------------------------------------------
@@ -379,6 +405,13 @@ pub fn collect_update_subqueries(sql_query: &proc::Update) -> Vec<proc::GRQuery>
 /// This function collects and returns all GRQueries that belongs to a `SuperSimpleSelect`.
 pub fn collect_select_subqueries(sql_query: &proc::SuperSimpleSelect) -> Vec<proc::GRQuery> {
   return collect_expr_subqueries(&sql_query.selection);
+}
+
+/// This function collects and returns all GRQueries that belongs to a `Delete`.
+pub fn collect_delete_subqueries(sql_query: &proc::Delete) -> Vec<proc::GRQuery> {
+  let mut subqueries = Vec::<proc::GRQuery>::new();
+  collect_expr_subqueries_r(&sql_query.selection, &mut subqueries);
+  return subqueries;
 }
 
 // Computes the set of all GRQuerys that appear as immediate children of `expr`.
@@ -487,6 +520,7 @@ pub enum GeneralStage<'a> {
   SuperSimpleSelect(&'a proc::SuperSimpleSelect),
   Update(&'a proc::Update),
   Insert(&'a proc::Insert),
+  Delete(&'a proc::Delete),
 }
 
 fn iterate_stage_expr<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
@@ -540,6 +574,10 @@ pub fn iterate_stage_ms_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
       }
       proc::MSQueryStage::Insert(query) => {
         cb(GeneralStage::Insert(query));
+      }
+      proc::MSQueryStage::Delete(query) => {
+        cb(GeneralStage::Delete(query));
+        iterate_stage_expr(cb, &query.selection)
       }
     }
   }

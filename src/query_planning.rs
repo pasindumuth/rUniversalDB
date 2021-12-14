@@ -1,5 +1,6 @@
 use crate::col_usage::{iterate_stage_ms_query, GeneralStage};
 use crate::common::{lookup, TableSchema};
+use crate::model::common::proc::MSQueryStage;
 use crate::model::common::TablePath;
 use crate::model::common::{proc, ColName, Gen, TierMap, Timestamp, TransTableName};
 use crate::multiversion_map::MVM;
@@ -19,6 +20,9 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
         table_paths.insert(query.table.source_ref.clone());
       }
       GeneralStage::Insert(query) => {
+        table_paths.insert(query.table.source_ref.clone());
+      }
+      GeneralStage::Delete(query) => {
         table_paths.insert(query.table.source_ref.clone());
       }
     },
@@ -44,6 +48,9 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
       proc::MSQueryStage::Insert(insert) => {
         cur_tier_map.insert(insert.table.source_ref.clone(), 0);
       }
+      proc::MSQueryStage::Delete(delete) => {
+        cur_tier_map.insert(delete.table.source_ref.clone(), 0);
+      }
     }
   }
   for (trans_table_name, stage) in ms_query.trans_tables.iter().rev() {
@@ -55,6 +62,9 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
       }
       proc::MSQueryStage::Insert(insert) => {
         *cur_tier_map.get_mut(&insert.table.source_ref).unwrap() += 1;
+      }
+      proc::MSQueryStage::Delete(delete) => {
+        *cur_tier_map.get_mut(&delete.table.source_ref).unwrap() += 1;
       }
     }
   }
@@ -99,6 +109,7 @@ pub fn compute_extra_req_cols(ms_query: &proc::MSQuery) -> BTreeMap<TablePath, V
       GeneralStage::Insert(query) => {
         add_cols(&mut extra_req_cols, &query.table.source_ref, query.columns.clone());
       }
+      GeneralStage::Delete(_) => {}
     },
     ms_query,
   );
@@ -130,6 +141,10 @@ pub fn compute_query_plan_data(
         let gen = table_generation.static_read(&query.table.source_ref, timestamp).unwrap();
         table_location_map.insert(query.table.source_ref.clone(), gen.clone());
       }
+      GeneralStage::Delete(query) => {
+        let gen = table_generation.static_read(&query.table.source_ref, timestamp).unwrap();
+        table_location_map.insert(query.table.source_ref.clone(), gen.clone());
+      }
     },
     ms_query,
   );
@@ -155,12 +170,13 @@ pub fn perform_static_validations(
   db_schema: &BTreeMap<(TablePath, Gen), TableSchema>,
   timestamp: Timestamp,
 ) -> Result<(), KeyValidationError> {
-  // We do some validations of the Update queries:
-  //   1. We check that it is not trying to modify a Key Column.
   for (_, stage) in &ms_query.trans_tables {
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(query) => {
+        // We do some validations of the Update queries:
+        //   1. We check that it is not trying to modify a Key Column.
+
         let gen = table_generation.static_read(&query.table.source_ref, timestamp).unwrap();
         let schema = db_schema.get(&(query.table.source_ref.clone(), gen.clone())).unwrap();
         for (col_name, _) in &query.assignment {
@@ -169,18 +185,11 @@ pub fn perform_static_validations(
           }
         }
       }
-      proc::MSQueryStage::Insert(_) => {}
-    }
-  }
-
-  // We do some validations of the Insert queries:
-  //   1. We check that all Key Columns are present in `columns`
-  //   2. We check that every row in `values` has equal length to `columns`.
-  for (_, stage) in &ms_query.trans_tables {
-    match stage {
-      proc::MSQueryStage::SuperSimpleSelect(_) => {}
-      proc::MSQueryStage::Update(_) => {}
       proc::MSQueryStage::Insert(query) => {
+        // We do some validations of the Insert queries:
+        //   1. We check that all Key Columns are present in `columns`
+        //   2. We check that every row in `values` has equal length to `columns`.
+
         // The TablePath exists, from the above.
         let gen = table_generation.static_read(&query.table.source_ref, timestamp).unwrap();
         let schema = db_schema.get(&(query.table.source_ref.clone(), gen.clone())).unwrap();
@@ -197,6 +206,7 @@ pub fn perform_static_validations(
           }
         }
       }
+      proc::MSQueryStage::Delete(_) => {}
     }
   }
 

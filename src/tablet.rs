@@ -24,6 +24,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::model::message::TabletMessage;
+use crate::ms_table_delete_es::{MSDeleteExecutionS, MSTableDeleteAction, MSTableDeleteES};
 use crate::ms_table_insert_es::{MSTableInsertAction, MSTableInsertES, MSTableInsertExecutionS};
 use crate::ms_table_read_es::{MSReadExecutionS, MSTableReadAction, MSTableReadES};
 use crate::ms_table_write_es::{MSTableWriteAction, MSTableWriteES, MSWriteExecutionS};
@@ -231,6 +232,19 @@ impl MSTableInsertESWrapper {
 }
 
 #[derive(Debug)]
+struct MSTableDeleteESWrapper {
+  sender_path: CTQueryPath,
+  child_queries: Vec<QueryId>,
+  es: MSTableDeleteES,
+}
+
+impl MSTableDeleteESWrapper {
+  fn sender_gid(&self) -> PaxosGroupId {
+    self.sender_path.node_path.sid.to_gid()
+  }
+}
+
+#[derive(Debug)]
 pub struct GRQueryESWrapper {
   pub child_queries: Vec<QueryId>,
   pub es: GRQueryES,
@@ -256,6 +270,7 @@ pub struct Statuses {
   ms_table_read_ess: BTreeMap<QueryId, MSTableReadESWrapper>,
   ms_table_write_ess: BTreeMap<QueryId, MSTableWriteESWrapper>,
   ms_table_insert_ess: BTreeMap<QueryId, MSTableInsertESWrapper>,
+  ms_table_delete_ess: BTreeMap<QueryId, MSTableDeleteESWrapper>,
 
   // DDL
   ddl_es: DDLES,
@@ -1094,6 +1109,71 @@ impl TabletContext {
                   }
                 }
               }
+              msg::GeneralQuery::DeleteQuery(query) => {
+                // Here, we create an MSTableWriteES.
+                let root_query_path = perform_query.root_query_path;
+                match self.get_msquery_id(
+                  io_ctx,
+                  statuses,
+                  root_query_path.clone(),
+                  query.timestamp,
+                  &query.query_plan.query_leader_map,
+                ) {
+                  Ok(ms_query_id) => {
+                    // Lookup the MSQueryES and add the new Query into `pending_queries`.
+                    let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+                    ms_query_es.pending_queries.insert(perform_query.query_id.clone());
+                    let ms_query_path =
+                      TQueryPath { node_path: self.mk_node_path(), query_id: ms_query_id.clone() };
+
+                    // First, we look up the `tier` of this Table being
+                    // written, update the `tier_map`.
+                    let sql_query = query.sql_query;
+                    let mut query_plan = query.query_plan;
+                    let tier =
+                      query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
+                    *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
+
+                    // Create an MSWriteTableES in the QueryReplanning state, and add it to
+                    // the MSQueryES.
+                    let ms_delete = map_insert(
+                      &mut statuses.ms_table_delete_ess,
+                      &perform_query.query_id,
+                      MSTableDeleteESWrapper {
+                        sender_path: perform_query.sender_path.clone(),
+                        child_queries: vec![],
+                        es: MSTableDeleteES {
+                          root_query_path,
+                          timestamp: query.timestamp,
+                          tier,
+                          context: Rc::new(query.context),
+                          query_id: perform_query.query_id.clone(),
+                          sql_query,
+                          query_plan,
+                          ms_query_id,
+                          new_rms: vec![ms_query_path].into_iter().collect(),
+                          state: MSDeleteExecutionS::Start,
+                        },
+                      },
+                    );
+                    let action = ms_delete.es.start(self, io_ctx);
+                    self.handle_ms_delete_es_action(
+                      io_ctx,
+                      statuses,
+                      perform_query.query_id,
+                      action,
+                    );
+                  }
+                  Err(query_error) => {
+                    // The MSQueryES couldn't be constructed.
+                    self.ctx(io_ctx).send_query_error(
+                      perform_query.sender_path,
+                      perform_query.query_id,
+                      query_error,
+                    );
+                  }
+                }
+              }
             }
           }
           msg::TabletMessage::CancelQuery(cancel_query) => {
@@ -1163,6 +1243,13 @@ impl TabletContext {
           self.handle_ms_insert_es_action(io_ctx, statuses, query_id, action);
         }
 
+        let query_ids: Vec<QueryId> = statuses.ms_table_delete_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let ms_delete = statuses.ms_table_delete_ess.get_mut(&query_id).unwrap();
+          let action = ms_delete.es.gossip_data_changed(self, io_ctx);
+          self.handle_ms_delete_es_action(io_ctx, statuses, query_id, action);
+        }
+
         // Run Main Loop
         self.run_main_loop(io_ctx, statuses);
       }
@@ -1208,6 +1295,14 @@ impl TabletContext {
         for query_id in query_ids {
           let ms_insert = statuses.ms_table_insert_ess.get_mut(&query_id).unwrap();
           if ms_insert.sender_gid() == gid {
+            self.exit_and_clean_up(io_ctx, statuses, query_id);
+          }
+        }
+
+        let query_ids: Vec<QueryId> = statuses.ms_table_delete_ess.keys().cloned().collect();
+        for query_id in query_ids {
+          let ms_delete = statuses.ms_table_delete_ess.get_mut(&query_id).unwrap();
+          if ms_delete.sender_gid() == gid {
             self.exit_and_clean_up(io_ctx, statuses, query_id);
           }
         }
@@ -1298,6 +1393,7 @@ impl TabletContext {
           statuses.ms_table_read_ess.clear();
           statuses.ms_table_write_ess.clear();
           statuses.ms_table_insert_ess.clear();
+          statuses.ms_table_delete_ess.clear();
 
           // Wink away all unpersisted Region Isolation Algorithm data
           self.verifying_writes.clear();
@@ -1783,6 +1879,10 @@ impl TabletContext {
       // MSTableInsertES
       let action = ms_insert.es.local_locked_cols(self, io_ctx, locked_cols_qid);
       self.handle_ms_insert_es_action(io_ctx, statuses, query_id, action);
+    } else if let Some(ms_delete) = statuses.ms_table_delete_ess.get_mut(&query_id) {
+      // MSTableDeleteES
+      let action = ms_delete.es.local_locked_cols(self, io_ctx, locked_cols_qid);
+      self.handle_ms_delete_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       let action = ms_read.es.local_locked_cols(self, io_ctx, locked_cols_qid);
@@ -1811,6 +1911,10 @@ impl TabletContext {
       // MSTableInsertES
       let action = ms_insert.es.global_locked_cols(self, io_ctx, locked_cols_qid);
       self.handle_ms_insert_es_action(io_ctx, statuses, query_id, action);
+    } else if let Some(ms_delete) = statuses.ms_table_delete_ess.get_mut(&query_id) {
+      // MSTableDeleteES
+      let action = ms_delete.es.global_locked_cols(self, io_ctx, locked_cols_qid);
+      self.handle_ms_delete_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       let action = ms_read.es.global_locked_cols(self, io_ctx, locked_cols_qid);
@@ -1838,6 +1942,10 @@ impl TabletContext {
       // MSTableInsertES
       let action = ms_insert.es.table_dropped(self);
       self.handle_ms_insert_es_action(io_ctx, statuses, query_id, action);
+    } else if let Some(ms_delete) = statuses.ms_table_delete_ess.get_mut(&query_id) {
+      // MSTableDeleteES
+      let action = ms_delete.es.table_dropped(self);
+      self.handle_ms_delete_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       let action = ms_read.es.table_dropped(self);
@@ -1902,6 +2010,15 @@ impl TabletContext {
         protect_request.query_id,
       );
       self.handle_ms_insert_es_action(io_ctx, statuses, query_id, action);
+    } else if let Some(ms_delete) = statuses.ms_table_delete_ess.get_mut(&query_id) {
+      // MSTableDeleteES
+      let action = ms_delete.es.local_read_protected(
+        self,
+        io_ctx,
+        statuses.ms_query_ess.get_mut(&ms_delete.es.ms_query_id).unwrap(),
+        protect_request.query_id,
+      );
+      self.handle_ms_delete_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       let action = ms_read.es.local_read_protected(
@@ -2036,6 +2153,18 @@ impl TabletContext {
         result,
       );
       self.handle_ms_write_es_action(io_ctx, statuses, query_id, action);
+    } else if let Some(ms_delete) = statuses.ms_table_delete_ess.get_mut(&query_id) {
+      // MSTableDeleteES
+      remove_item(&mut ms_delete.child_queries, &subquery_id);
+      let action = ms_delete.es.handle_subquery_done(
+        self,
+        io_ctx,
+        statuses.ms_query_ess.get_mut(&ms_delete.es.ms_query_id).unwrap(),
+        subquery_id,
+        subquery_new_rms,
+        result,
+      );
+      self.handle_ms_delete_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       remove_item(&mut ms_read.child_queries, &subquery_id);
@@ -2076,6 +2205,11 @@ impl TabletContext {
       remove_item(&mut ms_write.child_queries, &subquery_id);
       let action = ms_write.es.handle_internal_query_error(self, io_ctx, query_error);
       self.handle_ms_write_es_action(io_ctx, statuses, query_id, action);
+    } else if let Some(ms_delete) = statuses.ms_table_delete_ess.get_mut(&query_id) {
+      // MSTableDeleteES
+      remove_item(&mut ms_delete.child_queries, &subquery_id);
+      let action = ms_delete.es.handle_internal_query_error(self, io_ctx, query_error);
+      self.handle_ms_delete_es_action(io_ctx, statuses, query_id, action);
     } else if let Some(ms_read) = statuses.ms_table_read_ess.get_mut(&query_id) {
       // MSTableReadES
       remove_item(&mut ms_read.child_queries, &subquery_id);
@@ -2303,6 +2437,36 @@ impl TabletContext {
           }),
         );
         self.exit_all(io_ctx, statuses, ms_write.child_queries);
+      } else if let Some(mut ms_insert) = statuses.ms_table_insert_ess.remove(&query_id) {
+        // MSTableWriteES
+        ms_insert.es.exit_and_clean_up(self, io_ctx);
+        let sender_path = ms_insert.sender_path;
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
+        self.ctx(io_ctx).send_to_ct(
+          sender_path.node_path,
+          CommonQuery::QueryAborted(msg::QueryAborted {
+            return_qid: sender_path.query_id,
+            responder_path,
+            payload: msg::AbortedData::QueryError(query_error.clone()),
+          }),
+        );
+        self.exit_all(io_ctx, statuses, ms_insert.child_queries);
+      } else if let Some(mut ms_delete) = statuses.ms_table_delete_ess.remove(&query_id) {
+        // MSTableDeleteES
+        ms_delete.es.exit_and_clean_up(self, io_ctx);
+        let sender_path = ms_delete.sender_path;
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
+        self.ctx(io_ctx).send_to_ct(
+          sender_path.node_path,
+          CommonQuery::QueryAborted(msg::QueryAborted {
+            return_qid: sender_path.query_id,
+            responder_path,
+            payload: msg::AbortedData::QueryError(query_error.clone()),
+          }),
+        );
+        self.exit_all(io_ctx, statuses, ms_delete.child_queries);
       }
     }
 
@@ -2395,6 +2559,57 @@ impl TabletContext {
         let ms_query_es = statuses.ms_query_ess.get_mut(&ms_insert.es.ms_query_id).unwrap();
         ms_query_es.pending_queries.remove(&query_id);
         let sender_path = ms_insert.sender_path;
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
+        self.ctx(io_ctx).send_to_ct(
+          sender_path.node_path,
+          CommonQuery::QueryAborted(msg::QueryAborted {
+            return_qid: sender_path.query_id,
+            responder_path,
+            payload: msg::AbortedData::QueryError(query_error.clone()),
+          }),
+        );
+      }
+    }
+  }
+
+  /// Handles the actions produced by an MSTableDeleteES.
+  fn handle_ms_delete_es_action<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: MSTableDeleteAction,
+  ) {
+    match action {
+      MSTableDeleteAction::Wait => {}
+      MSTableDeleteAction::SendSubqueries(gr_query_ess) => {
+        self.launch_subqueries(io_ctx, statuses, gr_query_ess);
+      }
+      MSTableDeleteAction::Success(success) => {
+        // Remove the MSDeleteESWrapper, removing it from the MSQueryES, and respond.
+        let ms_delete = statuses.ms_table_delete_ess.remove(&query_id).unwrap();
+        let ms_query_es = statuses.ms_query_ess.get_mut(&ms_delete.es.ms_query_id).unwrap();
+        ms_query_es.pending_queries.remove(&query_id);
+        let sender_path = ms_delete.sender_path;
+        let responder_path = self.mk_query_path(query_id).into_ct();
+        // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
+        self.ctx(io_ctx).send_to_ct(
+          sender_path.node_path,
+          CommonQuery::QuerySuccess(msg::QuerySuccess {
+            return_qid: sender_path.query_id,
+            responder_path,
+            result: success.result,
+            new_rms: success.new_rms,
+          }),
+        )
+      }
+      MSTableDeleteAction::QueryError(query_error) => {
+        // Remove the MSDeleteESWrapper, removing it from the MSQueryES, and respond.
+        let ms_delete = statuses.ms_table_delete_ess.remove(&query_id).unwrap();
+        let ms_query_es = statuses.ms_query_ess.get_mut(&ms_delete.es.ms_query_id).unwrap();
+        ms_query_es.pending_queries.remove(&query_id);
+        let sender_path = ms_delete.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
         self.ctx(io_ctx).send_to_ct(
@@ -2585,6 +2800,13 @@ impl TabletContext {
       ms_query_es.pending_queries.remove(&query_id);
       ms_insert.es.exit_and_clean_up(self, io_ctx);
       self.exit_all(io_ctx, statuses, ms_insert.child_queries);
+    }
+    // MSTableDeleteES
+    else if let Some(mut ms_delete) = statuses.ms_table_delete_ess.remove(&query_id) {
+      let ms_query_es = statuses.ms_query_ess.get_mut(&ms_delete.es.ms_query_id).unwrap();
+      ms_query_es.pending_queries.remove(&query_id);
+      ms_delete.es.exit_and_clean_up(self, io_ctx);
+      self.exit_all(io_ctx, statuses, ms_delete.child_queries);
     }
     // MSTableReadES
     else if let Some(mut ms_read) = statuses.ms_table_read_ess.remove(&query_id) {
