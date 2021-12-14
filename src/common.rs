@@ -382,7 +382,8 @@ pub enum WriteRegionType {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WriteRegion {
   pub row_region: Vec<KeyBound>,
-  pub write_type: WriteRegionType,
+  pub presence: bool,
+  pub val_col_region: Vec<ColName>,
 }
 
 // -----------------------------------------------------------------------------------------------

@@ -254,9 +254,8 @@ impl MSTableDeleteES {
     row_region = compress_row_region(row_region);
 
     // Compute the Write Region
-    // TODO: remove var rows
     let write_region =
-      WriteRegion { write_type: WriteRegionType::VarRows, row_region: row_region.clone() };
+      WriteRegion { row_region: row_region.clone(), presence: true, val_col_region: vec![] };
 
     // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
     // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.

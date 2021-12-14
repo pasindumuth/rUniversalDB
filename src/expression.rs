@@ -908,11 +908,10 @@ fn might_row_region_intersect(row_region1: &Vec<KeyBound>, row_region2: &Vec<Key
 /// `ReadRegion`. Returning false might be a false negative under rare circumstances.
 fn is_surely_isolated(write_region: &WriteRegion, read_region: &ReadRegion) -> bool {
   if might_row_region_intersect(&read_region.row_region, &write_region.row_region) {
-    match &write_region.write_type {
-      WriteRegionType::FixedRowsVarCols { val_col_region } => {
-        !does_col_regions_intersect(&read_region.val_col_region, &val_col_region)
-      }
-      WriteRegionType::VarRows => false,
+    if write_region.presence {
+      false
+    } else {
+      !does_col_regions_intersect(&read_region.val_col_region, &write_region.val_col_region)
     }
   } else {
     true

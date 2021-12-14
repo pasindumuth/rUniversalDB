@@ -241,8 +241,8 @@ impl MSTableInsertES {
   ) -> MSTableInsertAction {
     // By this point, we have done QueryVerification. Studying how the QueryPlan is made for
     // Insert queries, we see that by here, we will know for certain that all Key Columns
-    // are present in `columns`, and all other ColNames in `columns` will be present in the
-    // Table Schema.
+    // are present in `columns`, all other ColNames in `columns` will be present in the
+    // Table Schema, and that each row in `values` will have as many elements as `columns`.
 
     // Evaluate the Values
     let mut eval_values = Vec::<Vec<ColValN>>::new();
@@ -355,8 +355,15 @@ impl MSTableInsertES {
     }
 
     // Compute the WriteRegion
+    let mut val_col_region = Vec::<ColName>::new();
+    for col_name in self.sql_query.columns.iter() {
+      if lookup(&ctx.table_schema.key_cols, col_name).is_none() {
+        val_col_region.push(col_name.clone());
+      };
+    }
+
     let write_region =
-      WriteRegion { row_region: row_region.clone(), write_type: WriteRegionType::VarRows };
+      WriteRegion { row_region: row_region.clone(), presence: true, val_col_region };
 
     // Verify that we have Write Region Isolation with Subsequent Reads. We abort
     // if we do not, and we amend this MSQuery's VerifyingReadWriteRegions if we do.

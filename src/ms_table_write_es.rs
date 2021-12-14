@@ -255,10 +255,8 @@ impl MSTableWriteES {
 
     // Compute the Write Region
     let val_col_region = Vec::from_iter(val_col_region.into_iter());
-    let write_region = WriteRegion {
-      write_type: WriteRegionType::FixedRowsVarCols { val_col_region },
-      row_region: row_region.clone(),
-    };
+    let write_region =
+      WriteRegion { row_region: row_region.clone(), presence: false, val_col_region };
 
     // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
     // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
