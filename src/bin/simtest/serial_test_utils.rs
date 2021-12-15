@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 pub struct TestContext {
   next_request_idx: u32,
   /// The client that we always use.
-  sender_eid: EndpointId,
+  pub sender_eid: EndpointId,
   /// The master node that we always use.
   master_eid: EndpointId,
   /// The slave node that we always use.
@@ -56,16 +56,8 @@ impl TestContext {
     }
   }
 
-  /// Executes the `query` using `sim` with a time limit of `time_limit`. If the query
-  /// finishes, we check that it succeeded and that the resulting `TableView` is the same
-  /// as `expr_result`.
-  pub fn send_query(
-    &mut self,
-    sim: &mut Simulation,
-    query: &str,
-    time_limit: u32,
-    exp_result: TableView,
-  ) {
+  /// Enque `query` into `sim` and return the `RequestId` that was used for it.
+  pub fn send_query(&mut self, sim: &mut Simulation, query: &str) -> RequestId {
     let request_id = RequestId(format!("rid{:?}", self.next_request_idx));
     self.next_request_idx += 1;
     sim.add_msg(
@@ -79,7 +71,34 @@ impl TestContext {
       &self.sender_eid,
       &self.slave_eid,
     );
+    request_id
+  }
 
+  /// Send a Cancellation request for the given `RequestId`.
+  pub fn send_cancellation(&mut self, sim: &mut Simulation, request_id: RequestId) {
+    sim.add_msg(
+      msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+        msg::SlaveExternalReq::CancelExternalQuery(msg::CancelExternalQuery {
+          sender_eid: self.sender_eid.clone(),
+          request_id,
+        }),
+      )),
+      &self.sender_eid,
+      &self.slave_eid,
+    );
+  }
+
+  /// Executes the `query` using `sim` with a time limit of `time_limit`. If the query
+  /// finishes, we check that it succeeded and that the resulting `TableView` is the same
+  /// as `expr_result`.
+  pub fn execute_query(
+    &mut self,
+    sim: &mut Simulation,
+    query: &str,
+    time_limit: u32,
+    exp_result: TableView,
+  ) {
+    let request_id = self.send_query(sim, query);
     assert!(simulate_until_response(sim, &self.sender_eid, time_limit));
     let response = sim.get_responses(&self.sender_eid).iter().last().unwrap();
     match response {
@@ -94,7 +113,7 @@ impl TestContext {
 
 /// Simulations `sim` until an External response is collected at `eid`, or until
 /// `time_limit` milliseconds have passed.
-fn simulate_until_response(sim: &mut Simulation, eid: &EndpointId, time_limit: u32) -> bool {
+pub fn simulate_until_response(sim: &mut Simulation, eid: &EndpointId, time_limit: u32) -> bool {
   let mut duration = 0;
   let prev_num_responses = sim.get_responses(eid).len();
   while duration < time_limit {
@@ -108,6 +127,10 @@ fn simulate_until_response(sim: &mut Simulation, eid: &EndpointId, time_limit: u
 }
 
 pub fn setup() -> (Simulation, TestContext) {
+  setup_with_seed([0; 16])
+}
+
+pub fn setup_with_seed(seed: [u8; 16]) -> (Simulation, TestContext) {
   let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
     (mk_sid("s0"), vec![mk_slave_eid(&0)]),
@@ -119,7 +142,7 @@ pub fn setup() -> (Simulation, TestContext) {
   .into_iter()
   .collect();
 
-  let sim = Simulation::new([0; 16], 1, slave_address_config, master_address_config);
+  let sim = Simulation::new(seed, 1, slave_address_config, master_address_config);
   let context = TestContext::new();
   (sim, context)
 }
@@ -144,7 +167,7 @@ pub fn populate_inventory_table_basic(sim: &mut Simulation, context: &mut TestCo
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
-    context.send_query(
+    context.execute_query(
       sim,
       " INSERT INTO inventory (product_id, email, count)
         VALUES (0, 'my_email_0', 15),
@@ -176,7 +199,7 @@ pub fn populate_setup_user_table_basic(sim: &mut Simulation, context: &mut TestC
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
     exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);
-    context.send_query(
+    context.execute_query(
       sim,
       " INSERT INTO user (email, balance)
         VALUES ('my_email_0', 50),

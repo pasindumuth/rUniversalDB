@@ -33,20 +33,20 @@ pub fn test_all_advanced_serial() {
 // -----------------------------------------------------------------------------------------------
 
 fn subquery_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
-  setup_user_table(&mut sim, &mut context);
-  populate_setup_user_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
+  setup_user_table(&mut sim, &mut ctx);
+  populate_setup_user_table_basic(&mut sim, &mut ctx);
 
   // Test Multiple Subqueries
 
   {
     let mut exp_result = TableView::new(vec![cno("product_id")]);
     exp_result.add_row(vec![Some(cvi(0))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id
         FROM inventory AS inv
@@ -71,20 +71,20 @@ fn subquery_test() {
 // -----------------------------------------------------------------------------------------------
 
 fn trans_table_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
-  setup_user_table(&mut sim, &mut context);
-  populate_setup_user_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
+  setup_user_table(&mut sim, &mut ctx);
+  populate_setup_user_table_basic(&mut sim, &mut ctx);
 
   // Test TransTable Reads
 
   {
     let mut exp_result = TableView::new(vec![cno("email")]);
     exp_result.add_row(vec![Some(cvs("my_email_1"))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " WITH
           v1 AS (SELECT email, balance
@@ -109,7 +109,7 @@ fn trans_table_test() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(30))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " UPDATE user
         SET balance = balance + 20

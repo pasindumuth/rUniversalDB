@@ -517,7 +517,7 @@ impl QueryGenerator {
       table_schemas.insert(table_path, table_schema);
     }
 
-    // Construct a Query generation context
+    // Construct a Query generation ctx
     let mut ctx = QueryGenCtx {
       rand: &mut rand,
       timestamp,
@@ -619,7 +619,7 @@ impl QueryGenerator {
 fn verify_req_res(
   req_res_map: BTreeMap<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>,
 ) -> Option<(u32, u32, u32)> {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
   let mut sorted_success_res =
     BTreeMap::<Timestamp, (msg::PerformExternalQuery, msg::ExternalQuerySuccess)>::new();
   let total_queries = req_res_map.len() as u32;
@@ -633,12 +633,12 @@ fn verify_req_res(
     }
   }
 
-  setup_tables(&mut sim, &mut context);
+  setup_tables(&mut sim, &mut ctx);
   sim.remove_all_responses(); // Clear the DDL response.
 
   let successful_queries = sorted_success_res.len() as u32;
   for (_, (req, res)) in sorted_success_res {
-    context.send_query(&mut sim, req.query.as_str(), 10000, res.result);
+    ctx.execute_query(&mut sim, req.query.as_str(), 10000, res.result);
   }
 
   Some((*sim.true_timestamp() as u32, total_queries, successful_queries))
@@ -665,9 +665,9 @@ fn format_sql(query: &str) -> String {
 //  Setup Utils
 // -----------------------------------------------------------------------------------------------
 
-fn setup_tables(sim: &mut Simulation, context: &mut TestContext) {
+fn setup_tables(sim: &mut Simulation, ctx: &mut TestContext) {
   {
-    context.send_ddl_query(
+    ctx.send_ddl_query(
       sim,
       " CREATE TABLE table1 (
           k11 INT,
@@ -683,7 +683,7 @@ fn setup_tables(sim: &mut Simulation, context: &mut TestContext) {
   }
 
   {
-    context.send_ddl_query(
+    ctx.send_ddl_query(
       sim,
       " CREATE TABLE table2 (
           k21 INT PRIMARY KEY,
@@ -705,7 +705,7 @@ fn setup_tables(sim: &mut Simulation, context: &mut TestContext) {
     exp_result.add_row(vec![mki(2), mki(3), mki(4), mki(5), mki(6)]);
     exp_result.add_row(vec![mki(3), mki(4), mki(5), mki(6), mki(7)]);
     exp_result.add_row(vec![mki(4), mki(5), mki(6), mki(7), mki(8)]);
-    context.send_query(
+    ctx.execute_query(
       sim,
       " INSERT INTO table1 (k11, k12, v11, v12, v13)
         VALUES (0, 1, 2, 3, 4),
@@ -726,7 +726,7 @@ fn setup_tables(sim: &mut Simulation, context: &mut TestContext) {
     exp_result.add_row(vec![mki(2), mki(4), mki(5)]);
     exp_result.add_row(vec![mki(3), mki(5), mki(6)]);
     exp_result.add_row(vec![mki(4), mki(6), mki(7)]);
-    context.send_query(
+    ctx.execute_query(
       sim,
       " INSERT INTO table2 (k21, v21, v22)
         VALUES (0, 2, 3),
@@ -769,10 +769,10 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
 
   // We create 3 clients.
   let mut sim = Simulation::new(seed, 3, slave_address_config, master_address_config);
-  let mut context = TestContext::new();
+  let mut ctx = TestContext::new();
 
   // Setup Tables
-  setup_tables(&mut sim, &mut context);
+  setup_tables(&mut sim, &mut ctx);
   sim.remove_all_responses(); // Clear the DDL response.
 
   // Create the QueryGenerator

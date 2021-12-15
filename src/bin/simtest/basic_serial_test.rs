@@ -1,14 +1,17 @@
 use crate::serial_test_utils::{
   populate_inventory_table_basic, populate_setup_user_table_basic, setup, setup_inventory_table,
-  setup_user_table,
+  setup_user_table, setup_with_seed, simulate_until_response, TestContext,
 };
 use crate::simulation::Simulation;
+use rand::{RngCore, SeedableRng};
+use rand_xorshift::XorShiftRng;
 use runiversal::common::TableSchema;
 use runiversal::model::common::{
   ColName, ColType, EndpointId, Gen, PrimaryKey, RequestId, SlaveGroupId, TablePath, TableView,
   TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message as msg;
+use runiversal::model::message::NetworkMessage;
 use runiversal::simulation_utils::{mk_client_eid, mk_slave_eid};
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
@@ -37,6 +40,7 @@ pub fn test_all_basic_serial() {
   basic_delete_test();
   insert_delete_insert_test();
   ghost_deleted_row_test();
+  cancellation_test();
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -46,11 +50,11 @@ pub fn test_all_basic_serial() {
 /// This is a test that solely tests Transaction Processing. We take all PaxosGroups to just
 /// have one node. We only check for SQL semantics compatibility.
 fn simple_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Test Basic Queries
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
 
   // Test Simple Update-Select
 
@@ -58,7 +62,7 @@ fn simple_test() {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email
         FROM inventory;
@@ -71,7 +75,7 @@ fn simple_test() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " UPDATE inventory
         SET email = 'my_email_3'
@@ -86,7 +90,7 @@ fn simple_test() {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email
         FROM inventory;
@@ -101,7 +105,7 @@ fn simple_test() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5"))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " UPDATE inventory
         SET email = 'my_email_4'
@@ -120,7 +124,7 @@ fn simple_test() {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_4"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5"))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email
         FROM inventory;
@@ -135,7 +139,7 @@ fn simple_test() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(6)), Some(cvs("my_email_6"))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email)
         VALUES (6, 'my_email_6');
@@ -148,7 +152,7 @@ fn simple_test() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(6)), Some(cvs("my_email_6")), None]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count
         FROM inventory
@@ -163,7 +167,7 @@ fn simple_test() {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_4")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5")), Some(cvi(25))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count
         FROM inventory
@@ -182,16 +186,16 @@ fn simple_test() {
 // -----------------------------------------------------------------------------------------------
 
 fn subquery_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
 
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(25))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email, count)
         VALUES (0, 'my_email_0', 15),
@@ -202,14 +206,14 @@ fn subquery_test() {
     );
   }
 
-  setup_user_table(&mut sim, &mut context);
+  setup_user_table(&mut sim, &mut ctx);
 
   {
     let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(30))]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(50))]);
     exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(30))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO user (email, balance)
         VALUES ('my_email_0', 30),
@@ -226,7 +230,7 @@ fn subquery_test() {
   {
     let mut exp_result = TableView::new(vec![cno("balance")]);
     exp_result.add_row(vec![Some(cvi(30))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT balance
         FROM user
@@ -245,7 +249,7 @@ fn subquery_test() {
   {
     let mut exp_result = TableView::new(vec![cno("balance")]);
     exp_result.add_row(vec![Some(cvi(30))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT balance
         FROM user
@@ -264,7 +268,7 @@ fn subquery_test() {
   {
     let mut exp_result = TableView::new(vec![cno("balance")]);
     exp_result.add_row(vec![Some(cvi(30))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT balance
         FROM user
@@ -289,13 +293,13 @@ fn subquery_test() {
 // -----------------------------------------------------------------------------------------------
 
 fn trans_table_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
-  setup_user_table(&mut sim, &mut context);
-  populate_setup_user_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
+  setup_user_table(&mut sim, &mut ctx);
+  populate_setup_user_table_basic(&mut sim, &mut ctx);
 
   // Test TransTable Reads
 
@@ -303,7 +307,7 @@ fn trans_table_test() {
     let mut exp_result = TableView::new(vec![cno("email")]);
     exp_result.add_row(vec![Some(cvs("my_email_1"))]);
     exp_result.add_row(vec![Some(cvs("my_email_2"))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " WITH
           v1 AS (SELECT email, balance
@@ -325,13 +329,13 @@ fn trans_table_test() {
 // -----------------------------------------------------------------------------------------------
 
 fn select_projection_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
-  setup_user_table(&mut sim, &mut context);
-  populate_setup_user_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
+  setup_user_table(&mut sim, &mut ctx);
+  populate_setup_user_table_basic(&mut sim, &mut ctx);
 
   // Test advanced expression in the SELECT projection.
 
@@ -339,7 +343,7 @@ fn select_projection_test() {
     let mut exp_result = TableView::new(vec![cno("e"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
     exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT email AS e, balance
         FROM  user
@@ -352,7 +356,7 @@ fn select_projection_test() {
     let mut exp_result = TableView::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(120))]);
     exp_result.add_row(vec![Some(cvi(140))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT balance * 2
         FROM  user
@@ -365,7 +369,7 @@ fn select_projection_test() {
     let mut exp_result = TableView::new(vec![cno("b")]);
     exp_result.add_row(vec![Some(cvi(120))]);
     exp_result.add_row(vec![Some(cvi(140))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " WITH
           v1 AS (SELECT balance * 2 AS b
@@ -387,10 +391,10 @@ fn select_projection_test() {
 // -----------------------------------------------------------------------------------------------
 
 fn insert_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
 
   // Fully Insert with NULL
 
@@ -398,7 +402,7 @@ fn insert_test() {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), None]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email, count)
         VALUES (0, 'my_email_0', 15),
@@ -415,7 +419,7 @@ fn insert_test() {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2"))]);
     exp_result.add_row(vec![Some(cvi(3)), None]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email)
         VALUES (2, 'my_email_2'),
@@ -434,12 +438,12 @@ fn insert_test() {
 // -----------------------------------------------------------------------------------------------
 
 fn multi_key_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
 
   {
-    context.send_ddl_query(
+    ctx.send_ddl_query(
       &mut sim,
       " CREATE TABLE table1 (
           k1 INT,
@@ -464,7 +468,7 @@ fn multi_key_test() {
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(2)), Some(cvi(0)), Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvi(0)), Some(cvi(0)), Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvi(1)), Some(cvi(0)), Some(cvi(0))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO table1 (k1, k2, v1, v2)
         VALUES (0, 0, 0, 0),
@@ -490,7 +494,7 @@ fn multi_key_test() {
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(2)), Some(cvi(0))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT k1, k2, v1
         FROM table1
@@ -509,7 +513,7 @@ fn multi_key_test() {
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(2))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(2)), Some(cvi(2))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " UPDATE table1
         SET v1 = k1 + 1
@@ -526,7 +530,7 @@ fn multi_key_test() {
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(2))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(2)), Some(cvi(2))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT k1, k2, v1
         FROM table1
@@ -545,20 +549,20 @@ fn multi_key_test() {
 // -----------------------------------------------------------------------------------------------
 
 fn multi_stage_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
-  setup_user_table(&mut sim, &mut context);
-  populate_setup_user_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
+  setup_user_table(&mut sim, &mut ctx);
+  populate_setup_user_table_basic(&mut sim, &mut ctx);
 
   // Multi-Stage Transactions with TransTables
 
   {
     let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(80))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " UPDATE user
         SET balance = balance + 20
@@ -575,7 +579,7 @@ fn multi_stage_test() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(30))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " UPDATE user
         SET balance = balance + 20
@@ -604,17 +608,17 @@ fn multi_stage_test() {
 // -----------------------------------------------------------------------------------------------
 
 fn aggregation_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(3)), Some(cvs("my_email_3")), None]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email, count)
         VALUES (2, 'my_email_2', 25),
@@ -630,7 +634,7 @@ fn aggregation_test() {
   {
     let mut exp_result = TableView::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(65))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT SUM(count)
         FROM inventory;
@@ -643,7 +647,7 @@ fn aggregation_test() {
   {
     let mut exp_result = TableView::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(3))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT COUNT(count)
         FROM inventory;
@@ -658,7 +662,7 @@ fn aggregation_test() {
   {
     let mut exp_result = TableView::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(40))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT SUM(DISTINCT count)
         FROM inventory;
@@ -676,7 +680,7 @@ fn aggregation_test() {
     exp_result.add_row(vec![Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(25))]);
     exp_result.add_row(vec![None]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT count
         FROM inventory;
@@ -691,7 +695,7 @@ fn aggregation_test() {
     exp_result.add_row(vec![Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(25))]);
     exp_result.add_row(vec![None]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT DISTINCT count
         FROM inventory;
@@ -709,10 +713,10 @@ fn aggregation_test() {
 // -----------------------------------------------------------------------------------------------
 
 fn aliased_column_resolution_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
 
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
@@ -720,7 +724,7 @@ fn aliased_column_resolution_test() {
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(3)), Some(cvs("my_email_3")), None]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email, count)
         VALUES (0, 'my_email_0', 15),
@@ -740,7 +744,7 @@ fn aliased_column_resolution_test() {
     exp_result.add_row(vec![Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(2))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id
         FROM inventory AS outer
@@ -760,7 +764,7 @@ fn aliased_column_resolution_test() {
     exp_result.add_row(vec![Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(2))]);
     exp_result.add_row(vec![Some(cvi(3))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id
         FROM inventory AS outer
@@ -780,7 +784,7 @@ fn aliased_column_resolution_test() {
     exp_result.add_row(vec![Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(2))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id
         FROM inventory AS outer
@@ -802,16 +806,16 @@ fn aliased_column_resolution_test() {
 // -----------------------------------------------------------------------------------------------
 
 fn basic_add_column() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
 
   // Add Column and Write to it
 
   {
-    context.send_ddl_query(
+    ctx.send_ddl_query(
       &mut sim,
       " ALTER TABLE inventory
         ADD COLUMN price INT;
@@ -825,7 +829,7 @@ fn basic_add_column() {
       TableView::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15)), None]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25)), None]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count, price
         FROM inventory;
@@ -838,7 +842,7 @@ fn basic_add_column() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("price")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(100))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " UPDATE inventory
         SET price = 100
@@ -853,7 +857,7 @@ fn basic_add_column() {
     let mut exp_result =
       TableView::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35)), Some(cvi(200))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email, count, price)
         VALUES (2, 'my_email_2', 35, 200);
@@ -869,7 +873,7 @@ fn basic_add_column() {
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15)), Some(cvi(100))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25)), None]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35)), Some(cvi(200))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count, price
         FROM inventory;
@@ -887,11 +891,11 @@ fn basic_add_column() {
 // -----------------------------------------------------------------------------------------------
 
 fn drop_column() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
 
   // See if deleting a column and adding it back results in SELECTs now reading null
   // for that column (rather than a non-null value that was previously there).
@@ -899,7 +903,7 @@ fn drop_column() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email, count)
         VALUES (2, 'my_email_2', 35);
@@ -914,7 +918,7 @@ fn drop_column() {
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count
         FROM inventory;
@@ -926,7 +930,7 @@ fn drop_column() {
 
   // Drop the column and add it back
   {
-    context.send_ddl_query(
+    ctx.send_ddl_query(
       &mut sim,
       " ALTER TABLE inventory
         DROP COLUMN count;
@@ -934,7 +938,7 @@ fn drop_column() {
       10000,
     );
 
-    context.send_ddl_query(
+    ctx.send_ddl_query(
       &mut sim,
       " ALTER TABLE inventory
         ADD COLUMN count INT;
@@ -948,7 +952,7 @@ fn drop_column() {
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), None]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), None]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), None]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count
         FROM inventory;
@@ -962,7 +966,7 @@ fn drop_column() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(16))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " UPDATE inventory
         SET count = 16
@@ -978,7 +982,7 @@ fn drop_column() {
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(16))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), None]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), None]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count
         FROM inventory;
@@ -997,16 +1001,16 @@ fn drop_column() {
 
 /// Sees if a single Delete Query does indeed delete data.
 fn basic_delete_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email, count)
         VALUES (2, 'my_email_2', 35);
@@ -1021,7 +1025,7 @@ fn basic_delete_test() {
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count
         FROM inventory;
@@ -1035,7 +1039,7 @@ fn basic_delete_test() {
 
   {
     let mut exp_result = TableView::new(vec![]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " DELETE
         FROM inventory
@@ -1049,7 +1053,7 @@ fn basic_delete_test() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count
         FROM inventory;
@@ -1071,16 +1075,16 @@ fn basic_delete_test() {
 /// Sees if a Transaction with an Insert a row, then Deletes it, and then tries Inserting
 /// it again, then it all works.
 fn insert_delete_insert_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email, count)
         VALUES (2, 'my_email_2', 35),
@@ -1104,7 +1108,7 @@ fn insert_delete_insert_test() {
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
     exp_result.add_row(vec![Some(cvi(3)), Some(cvs("my_email_3")), Some(cvi(45))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count
         FROM inventory;
@@ -1124,17 +1128,17 @@ fn insert_delete_insert_test() {
 /// Sees if a deleted row is re-inserted with some columns unspecified, they start off as
 /// NULL, instead of their prior value due to the delete.
 fn ghost_deleted_row_test() {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut context);
-  populate_inventory_table_basic(&mut sim, &mut context);
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count
         FROM inventory;
@@ -1146,7 +1150,7 @@ fn ghost_deleted_row_test() {
 
   {
     let mut exp_result = TableView::new(vec![]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " DELETE
         FROM inventory
@@ -1160,7 +1164,7 @@ fn ghost_deleted_row_test() {
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email)
         VALUES (0, 'my_email_0');
@@ -1174,7 +1178,7 @@ fn ghost_deleted_row_test() {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), None]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
-    context.send_query(
+    ctx.execute_query(
       &mut sim,
       " SELECT product_id, email, count
         FROM inventory;
@@ -1185,4 +1189,192 @@ fn ghost_deleted_row_test() {
   }
 
   println!("Test 'ghost_deleted_row_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  cancellation_test
+// -----------------------------------------------------------------------------------------------
+
+fn cancellation_test() {
+  let mut rand = XorShiftRng::from_seed([0; 16]);
+  let mut test_time_taken = 0;
+
+  // We repeat this loop to get a good balance between successful
+  // and unsuccessful cancellations.
+  let mut total_count = 0;
+  let mut cancelled_count = 0;
+  while total_count < 10 && cancelled_count < 4 && total_count - cancelled_count < 4 {
+    let mut seed = [0; 16];
+    rand.fill_bytes(&mut seed);
+    let (mut sim, mut ctx) = setup_with_seed(seed);
+
+    // Setup Tables
+    setup_inventory_table(&mut sim, &mut ctx);
+    populate_inventory_table_basic(&mut sim, &mut ctx);
+    setup_user_table(&mut sim, &mut ctx);
+    populate_setup_user_table_basic(&mut sim, &mut ctx);
+
+    // Send the query and simulate
+    let query = "
+      INSERT INTO inventory (product_id, email, count)
+      VALUES (2, 'my_email_2', 35);
+
+      UPDATE user
+      SET balance = balance + 2 * (
+        SELECT sum(count)
+        FROM inventory AS inv
+        WHERE inv.email = user.email)
+      WHERE email = 'my_email_1' OR email = 'my_email_2';
+
+      DELETE
+      FROM inventory
+      WHERE product_id = 2;
+    ";
+
+    // This is called when `payload` is expected to be the response to the above query.
+    fn check_success(
+      sim: &mut Simulation,
+      ctx: &mut TestContext,
+      payload: &msg::ExternalQuerySuccess,
+      request_id: RequestId,
+    ) {
+      assert_eq!(payload.request_id, request_id);
+
+      // Check that the TableView in the response is what we expect.
+      let mut exp_result = TableView::new(vec![]);
+      assert_eq!(payload.result, exp_result);
+
+      // Check that final data in the system is what we expect.
+      {
+        let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+        exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
+        exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
+        ctx.execute_query(
+          sim,
+          " SELECT product_id, email, count
+            FROM inventory;
+          ",
+          10000,
+          exp_result,
+        );
+      }
+
+      {
+        let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
+        exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
+        exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(110))]);
+        exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(140))]);
+        ctx.execute_query(
+          sim,
+          " SELECT email, balance
+            FROM user;
+          ",
+          10000,
+          exp_result,
+        );
+      }
+    }
+
+    let request_id = ctx.send_query(&mut sim, query);
+
+    // Simulate. If we respond early, then check that the output is what we expect.
+    let mut cancel_succeeded = false;
+    if simulate_until_response(&mut sim, &ctx.sender_eid, 15) {
+      let response = sim.get_responses(&ctx.sender_eid).iter().last().unwrap();
+      match response.clone() {
+        msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
+          check_success(&mut sim, &mut ctx, &payload, request_id.clone());
+        }
+        _ => panic!(),
+      }
+    } else {
+      // Otherwise, send a cancellation and simulate until the end.
+      ctx.send_cancellation(&mut sim, request_id.clone());
+      assert!(simulate_until_response(&mut sim, &ctx.sender_eid, 10000));
+      let response = sim.get_responses(&ctx.sender_eid).iter().last().unwrap();
+      match response.clone() {
+        msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
+          // Here, the original query responded before the cancellation could.
+          check_success(&mut sim, &mut ctx, &payload, request_id.clone());
+        }
+        msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(payload)) => {
+          assert_eq!(payload.request_id, request_id.clone());
+          if payload.payload == msg::ExternalAbortedData::CancelDenied {
+            // In case the cancellation failed, finish the original query, expecting success.
+            assert!(simulate_until_response(&mut sim, &ctx.sender_eid, 10000));
+            let response = sim.get_responses(&ctx.sender_eid).iter().last().unwrap();
+            match response.clone() {
+              msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
+                payload,
+              )) => {
+                check_success(&mut sim, &mut ctx, &payload, request_id.clone());
+              }
+              _ => panic!(),
+            }
+          } else {
+            // Otherwise, mark the cancellation as successful.
+            assert_eq!(payload.payload, msg::ExternalAbortedData::CancelConfirmed);
+            cancel_succeeded = true;
+          }
+        }
+        _ => panic!("Incorrect Response: {:#?}", response),
+      }
+    }
+
+    // Simulate more for a cooldown time and verify that all resources get cleaned up.
+    const TP_COOLDOWN_MS: u32 = 500;
+    let mut duration = 0;
+    while duration < TP_COOLDOWN_MS {
+      sim.simulate1ms();
+      duration += 1;
+    }
+    sim.check_resources_clean();
+
+    // If the Query had been successfull cancelled, we verify that the data in the system
+    // is what we exact. We do this after cooldown to know that this is the stead state.
+    if cancel_succeeded {
+      {
+        let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+        exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
+        exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
+        ctx.execute_query(
+          &mut sim,
+          " SELECT product_id, email, count
+            FROM inventory;
+          ",
+          10000,
+          exp_result,
+        );
+      }
+
+      {
+        let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
+        exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
+        exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
+        exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);
+        ctx.execute_query(
+          &mut sim,
+          " SELECT email, balance
+            FROM user;
+          ",
+          10000,
+          exp_result,
+        );
+      }
+
+      cancelled_count += 1;
+    }
+
+    // Track the test execution time.
+    test_time_taken += sim.true_timestamp();
+    total_count += 1;
+  }
+
+  // Check that we encoutered healthy balance of cancelled and non-cancelled. (If not, we
+  // should tune the above such that we do).
+  if cancelled_count < 4 && total_count - cancelled_count < 4 {
+    panic!();
+  }
+
+  println!("Test 'cancellation_test' Passed! Time taken: {:?}ms", test_time_taken)
 }

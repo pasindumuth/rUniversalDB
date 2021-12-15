@@ -32,6 +32,7 @@ fn main() {
   println!("\n");
   println!("Basic Parallel Tests:");
   test_all_basic_parallel();
+  println!("\n");
   println!("Advanced Parallel Tests:");
   test_all_advanced_parallel();
 }

@@ -1,12 +1,14 @@
-use crate::model::common::{PrimaryKey, TabletKeyRange};
-use crate::tablet::check_range_inclusion;
+use crate::finish_query_rm_es::FinishQueryRMES;
+use crate::model::common::{PrimaryKey, QueryId, TabletKeyRange};
+use crate::tablet::{check_range_inclusion, TabletState, DDLES};
 use crate::test_utils::{cvb, cvi, cvs};
+use std::collections::BTreeMap;
 
 #[test]
 fn test_key_comparison() {
-  assert!(
+  assert_eq!(
+    PrimaryKey { cols: vec![cvi(2), cvs("a"), cvb(false)] },
     PrimaryKey { cols: vec![cvi(2), cvs("a"), cvb(false)] }
-      == PrimaryKey { cols: vec![cvi(2), cvs("a"), cvb(false)] }
   );
 
   assert!(
@@ -23,4 +25,82 @@ fn test_key_comparison() {
     PrimaryKey { cols: vec![cvi(2), cvs("a"), cvb(false)] }
       < PrimaryKey { cols: vec![cvi(2), cvs("a"), cvb(true)] }
   );
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Consistency Testing
+// -----------------------------------------------------------------------------------------------
+
+/// Asserts various consistency properties in the `TabletState`.
+pub fn assert_tablet_consistency(tablet: &TabletState) {
+  let statuses = &tablet.statuses;
+
+  // Verify for every MSQueryES, every ES in `pending_queries` exist.
+  for (query_id, ms_query_es) in &statuses.ms_query_ess {
+    for child_qid in &ms_query_es.pending_queries {
+      if let Some(wrapper) = statuses.ms_table_read_ess.get(child_qid) {
+        assert_eq!(&wrapper.es.ms_query_id, query_id);
+      } else if let Some(wrapper) = statuses.ms_table_write_ess.get(child_qid) {
+        assert_eq!(&wrapper.es.ms_query_id, query_id);
+      } else if let Some(wrapper) = statuses.ms_table_insert_ess.get(child_qid) {
+        assert_eq!(&wrapper.es.ms_query_id, query_id);
+      } else if let Some(wrapper) = statuses.ms_table_delete_ess.get(child_qid) {
+        assert_eq!(&wrapper.es.ms_query_id, query_id);
+      } else {
+        panic!();
+      }
+    }
+  }
+
+  // Verify that for every MSTable*ES, a valid MSQueryES exists.
+  for (query_id, wrapper) in &statuses.ms_table_read_ess {
+    if let Some(ms_query_es) = statuses.ms_query_ess.get(&wrapper.es.ms_query_id) {
+      assert!(ms_query_es.pending_queries.contains(query_id));
+    } else {
+      panic!()
+    }
+  }
+  for (query_id, wrapper) in &statuses.ms_table_write_ess {
+    if let Some(ms_query_es) = statuses.ms_query_ess.get(&wrapper.es.ms_query_id) {
+      assert!(ms_query_es.pending_queries.contains(query_id));
+    } else {
+      panic!()
+    }
+  }
+  for (query_id, wrapper) in &statuses.ms_table_insert_ess {
+    if let Some(ms_query_es) = statuses.ms_query_ess.get(&wrapper.es.ms_query_id) {
+      assert!(ms_query_es.pending_queries.contains(query_id));
+    } else {
+      panic!()
+    }
+  }
+  for (query_id, wrapper) in &statuses.ms_table_delete_ess {
+    if let Some(ms_query_es) = statuses.ms_query_ess.get(&wrapper.es.ms_query_id) {
+      assert!(ms_query_es.pending_queries.contains(query_id));
+    } else {
+      panic!()
+    }
+  }
+}
+
+pub fn assert_tablet_clean(tablet: &TabletState) {
+  let statuses = &tablet.statuses;
+
+  for (_, es) in &statuses.finish_query_ess {
+    if let FinishQueryRMES::Paxos2PCRMExecOuter(_) = es {
+      panic!()
+    }
+  }
+
+  assert!(statuses.gr_query_ess.is_empty());
+  assert!(statuses.table_read_ess.is_empty());
+  assert!(statuses.trans_table_read_ess.is_empty());
+  assert!(statuses.tm_statuss.is_empty());
+  assert!(statuses.ms_query_ess.is_empty());
+  assert!(statuses.ms_table_read_ess.is_empty());
+  assert!(statuses.ms_table_write_ess.is_empty());
+  assert!(statuses.ms_table_insert_ess.is_empty());
+  assert!(statuses.ms_table_delete_ess.is_empty());
+
+  assert!(matches!(statuses.ddl_es, DDLES::None));
 }

@@ -37,6 +37,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter};
 use std::iter::FromIterator;
 
+#[path = "./master_test.rs"]
+pub mod master_test;
+
 // -----------------------------------------------------------------------------------------------
 //  MasterPLm
 // -----------------------------------------------------------------------------------------------
@@ -240,16 +243,16 @@ pub struct FullDBSchema<'a> {
 
 #[derive(Debug, Default)]
 pub struct Statuses {
-  create_table_tm_ess: BTreeMap<QueryId, CreateTableTMES>,
-  alter_table_tm_ess: BTreeMap<QueryId, AlterTableTMES>,
-  drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
-  planning_ess: BTreeMap<QueryId, MasterQueryPlanningES>,
+  pub create_table_tm_ess: BTreeMap<QueryId, CreateTableTMES>,
+  pub alter_table_tm_ess: BTreeMap<QueryId, AlterTableTMES>,
+  pub drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
+  pub planning_ess: BTreeMap<QueryId, MasterQueryPlanningES>,
 }
 
 #[derive(Debug)]
 pub struct MasterState {
   pub ctx: MasterContext,
-  statuses: Statuses,
+  pub statuses: Statuses,
 }
 
 pub struct MasterContext {

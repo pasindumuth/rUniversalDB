@@ -109,7 +109,7 @@ fn mk_inventory_select(r: &mut XorShiftRng) -> String {
 fn verify_req_res(
   req_res_map: BTreeMap<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>,
 ) -> Option<(u32, u32, u32)> {
-  let (mut sim, mut context) = setup();
+  let (mut sim, mut ctx) = setup();
   let mut sorted_success_res =
     BTreeMap::<Timestamp, (msg::PerformExternalQuery, msg::ExternalQuerySuccess)>::new();
   let total_queries = req_res_map.len() as u32;
@@ -124,7 +124,7 @@ fn verify_req_res(
   }
 
   {
-    context.send_ddl_query(
+    ctx.send_ddl_query(
       &mut sim,
       " CREATE TABLE inventory (
           product_id INT PRIMARY KEY,
@@ -138,7 +138,7 @@ fn verify_req_res(
 
   let successful_queries = sorted_success_res.len() as u32;
   for (_, (req, res)) in sorted_success_res {
-    context.send_query(&mut sim, req.query.as_str(), 10000, res.result);
+    ctx.execute_query(&mut sim, req.query.as_str(), 10000, res.result);
   }
 
   Some((*sim.true_timestamp() as u32, total_queries, successful_queries))
@@ -172,12 +172,12 @@ pub fn basic_parallel_test(seed: [u8; 16]) {
 
   // We create 3 clients.
   let mut sim = Simulation::new(seed, 3, slave_address_config, master_address_config);
-  let mut context = TestContext::new();
+  let mut ctx = TestContext::new();
 
   // Setup Tables
 
   {
-    context.send_ddl_query(
+    ctx.send_ddl_query(
       &mut sim,
       " CREATE TABLE inventory (
           product_id INT PRIMARY KEY,

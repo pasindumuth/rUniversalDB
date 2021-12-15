@@ -49,3 +49,13 @@ fn external_request_id_map_consistency(coord: &CoordState) {
     }
   }
 }
+
+pub fn assert_coord_clean(coord: &CoordState) {
+  let statuses = &coord.statuses;
+
+  assert!(statuses.finish_query_tm_ess.is_empty());
+  assert!(statuses.ms_coord_ess.is_empty());
+  assert!(statuses.gr_query_ess.is_empty());
+  assert!(statuses.trans_table_read_ess.is_empty());
+  assert!(statuses.tm_statuss.is_empty());
+}

@@ -3,8 +3,9 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::{
   mk_cid, BasicIOCtx, CoreIOCtx, GossipData, MasterIOCtx, RangeEnds, SlaveIOCtx,
 };
-use runiversal::coord::coord_test::assert_coord_consistency;
+use runiversal::coord::coord_test::{assert_coord_clean, assert_coord_consistency};
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
+use runiversal::master::master_test::assert_master_clean;
 use runiversal::master::{
   FullDBSchema, FullMasterInput, MasterContext, MasterState, MasterTimerInput,
 };
@@ -16,9 +17,11 @@ use runiversal::model::message as msg;
 use runiversal::model::message::NetworkMessage;
 use runiversal::multiversion_map::MVM;
 use runiversal::simulation_utils::{add_msg, mk_client_eid};
+use runiversal::slave::slave_test::assert_slave_clean;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
 };
+use runiversal::tablet::tablet_test::{assert_tablet_clean, assert_tablet_consistency};
 use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Debug, Formatter};
@@ -650,6 +653,26 @@ impl Simulation {
     for (_, slave_data) in &self.slave_data {
       for (_, coord) in &slave_data.coord_states {
         assert_coord_consistency(coord);
+      }
+      for (_, tablet) in &slave_data.tablet_states {
+        assert_tablet_consistency(tablet);
+      }
+    }
+  }
+
+  /// Checks that all nodes in the system are in their steady state after some
+  /// time without any new requests.
+  pub fn check_resources_clean(&mut self) {
+    for (_, master_data) in &self.master_data {
+      assert_master_clean(&master_data.master_state);
+    }
+    for (_, slave_data) in &self.slave_data {
+      assert_slave_clean(&slave_data.slave_state);
+      for (_, coord) in &slave_data.coord_states {
+        assert_coord_clean(coord);
+      }
+      for (_, tablet) in &slave_data.tablet_states {
+        assert_tablet_clean(tablet);
       }
     }
   }
