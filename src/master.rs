@@ -1,7 +1,9 @@
 use crate::alter_table_tm_es::{
   AlterTablePayloadTypes, AlterTableTMES, AlterTableTMInner, ResponseData,
 };
-use crate::common::{lookup_pos, map_insert, mk_qid, mk_tid, GossipData, MasterIOCtx, TableSchema};
+use crate::common::{
+  lookup_pos, map_insert, mk_qid, mk_tid, GossipData, MasterIOCtx, MasterTraceMessage, TableSchema,
+};
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
 use crate::drop_table_tm_es::{DropTablePayloadTypes, DropTableTMES, DropTableTMInner};
@@ -20,7 +22,7 @@ use crate::model::message::{
 };
 use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
+use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use crate::server::{contains_col_latest, MasterServerContext, ServerContextBase};
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
@@ -348,6 +350,7 @@ impl MasterContext {
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     master_address_config: Vec<EndpointId>,
     leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+    paxos_config: PaxosConfig,
   ) -> MasterContext {
     let all_gids = leader_map.keys().cloned().collect();
     MasterContext {
@@ -363,7 +366,7 @@ impl MasterContext {
       network_driver: NetworkDriver::new(all_gids),
       external_request_id_map: Default::default(),
       master_bundle: MasterBundle::default(),
-      paxos_driver: PaxosDriver::new(master_address_config),
+      paxos_driver: PaxosDriver::new(master_address_config, paxos_config),
     }
   }
 
@@ -458,6 +461,9 @@ impl MasterContext {
                 statuses,
                 MasterForwardMsg::LeaderChanged(leader_changed.clone()),
               );
+
+              // Trace for testing
+              io_ctx.trace(MasterTraceMessage::LeaderChanged(leader_changed.lid));
             }
           }
         }

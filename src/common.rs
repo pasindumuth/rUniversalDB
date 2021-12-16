@@ -34,6 +34,10 @@ pub trait BasicIOCtx<NetworkMessageT = msg::NetworkMessage> {
 //  SlaveIOCtx
 // -----------------------------------------------------------------------------------------------
 
+pub enum SlaveTraceMessage {
+  LeaderChanged(LeadershipId),
+}
+
 pub trait SlaveIOCtx: BasicIOCtx {
   // Tablet
   fn create_tablet(&mut self, helper: TabletCreateHelper);
@@ -47,6 +51,9 @@ pub trait SlaveIOCtx: BasicIOCtx {
 
   // Timer
   fn defer(&mut self, defer_time: Timestamp, timer_input: SlaveTimerInput);
+
+  // Tracer
+  fn trace(&mut self, trace_msg: SlaveTraceMessage);
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -62,9 +69,16 @@ pub trait CoreIOCtx: BasicIOCtx {
 //  MasterIOCtx
 // -----------------------------------------------------------------------------------------------
 
+pub enum MasterTraceMessage {
+  LeaderChanged(LeadershipId),
+}
+
 pub trait MasterIOCtx: BasicIOCtx {
   // Timer
   fn defer(&mut self, defer_time: Timestamp, timer_input: MasterTimerInput);
+
+  // Tracer
+  fn trace(&mut self, trace_msg: MasterTraceMessage);
 }
 
 // -----------------------------------------------------------------------------------------------

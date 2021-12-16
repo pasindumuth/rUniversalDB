@@ -10,6 +10,7 @@ use runiversal::model::common::{
 };
 use runiversal::model::message as msg;
 use runiversal::model::message::ExternalAbortedData;
+use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::mk_slave_eid;
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid};
 use sqlformat;
@@ -768,7 +769,8 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
   .collect();
 
   // We create 3 clients.
-  let mut sim = Simulation::new(seed, 3, slave_address_config, master_address_config);
+  let mut sim =
+    Simulation::new(seed, 3, slave_address_config, master_address_config, PaxosConfig::prod());
   let mut ctx = TestContext::new();
 
   // Setup Tables

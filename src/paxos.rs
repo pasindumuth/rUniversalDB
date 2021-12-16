@@ -59,14 +59,38 @@ pub struct PaxosInstance<BundleT> {
 //  Constants
 // -----------------------------------------------------------------------------------------------
 
-const HEARTBEAT_THRESHOLD: u32 = 5;
+#[derive(Debug, Clone)]
+pub struct PaxosConfig {
+  pub heartbeat_threshold: u32,
+  pub heartbeat_period_ms: u128,
+  pub next_index_period_ms: u128,
+  pub retry_defer_time_ms: u128,
+  pub proposal_increment: u32,
+}
 
-// These time values below are in milliseconds.
-const HEARTBEAT_PRIOD_MS: u128 = 1000;
-const NEXT_INDEX_PERIOD_MS: u128 = 1000;
-const RETRY_DEFER_TIME_MS: u128 = 1000;
+impl PaxosConfig {
+  /// Default config values to use in production
+  pub fn prod() -> PaxosConfig {
+    PaxosConfig {
+      heartbeat_threshold: 5,
+      heartbeat_period_ms: 1000,
+      next_index_period_ms: 1000,
+      retry_defer_time_ms: 1000,
+      proposal_increment: 1000,
+    }
+  }
 
-const PROPOSAL_INCREMENT: u32 = 1000;
+  /// Default config values to use in production
+  pub fn test() -> PaxosConfig {
+    PaxosConfig {
+      heartbeat_threshold: 3,
+      heartbeat_period_ms: 5,
+      next_index_period_ms: 5,
+      retry_defer_time_ms: 5,
+      proposal_increment: 1000,
+    }
+  }
+}
 
 // -----------------------------------------------------------------------------------------------
 //  PaxosContextBase
@@ -109,6 +133,7 @@ pub fn majority<T>(vec: &Vec<T>) -> usize {
 pub struct PaxosDriver<BundleT> {
   /// Metadata
   paxos_nodes: Vec<EndpointId>,
+  paxos_config: PaxosConfig,
 
   /// PaxosInstance state
 
@@ -134,7 +159,7 @@ pub struct PaxosDriver<BundleT> {
 
 impl<BundleT: Clone> PaxosDriver<BundleT> {
   /// Constructs a `PaxosDriver` for a Slave that is part of the initial system bootstrap.
-  pub fn new(paxos_nodes: Vec<EndpointId>) -> PaxosDriver<BundleT> {
+  pub fn new(paxos_nodes: Vec<EndpointId>, paxos_config: PaxosConfig) -> PaxosDriver<BundleT> {
     let mut remote_next_indices = BTreeMap::<EndpointId, PLIndex>::new();
     for node in &paxos_nodes {
       remote_next_indices.insert(node.clone(), 0);
@@ -142,6 +167,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     let leader_eid = paxos_nodes[0].clone();
     PaxosDriver {
       paxos_nodes,
+      paxos_config,
       remote_next_indices,
       next_index: 0,
       paxos_instances: Default::default(),
@@ -215,7 +241,9 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     match message {
       PaxosDriverMessage::MultiPaxosMessage(multi) => {
         if let msg::PaxosMessage::Prepare(_) = multi.paxos_message {
-          if multi.sender_eid != self.leader.eid && self.leader_heartbeat <= HEARTBEAT_THRESHOLD {
+          if multi.sender_eid != self.leader.eid
+            && self.leader_heartbeat <= self.paxos_config.heartbeat_threshold
+          {
             // If we get a `Prepare` message from a non-leader, and the leader still seems
             // to be alive, we drop the message. This is just a simple technique we use to reduce
             // the rate of spurious leadership changes.
@@ -502,7 +530,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
       self.next_insert = Some((uuid.clone(), bundle.clone()));
 
       // Schedule a retry in `RETRY_DEFER_TIME` ms.
-      ctx.defer(RETRY_DEFER_TIME_MS, PaxosTimerEvent::RetryInsert(uuid));
+      ctx.defer(self.paxos_config.retry_defer_time_ms, PaxosTimerEvent::RetryInsert(uuid));
 
       // Propose the bundle at the next index.
       self.propose_next_index(ctx, PLEntry::Bundle(bundle));
@@ -532,7 +560,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
 
     // Compute next proposal number.
     let latest_rnd = paxos_instance.proposer_state.latest_crnd;
-    let next_rnd = (ctx.rand().next_u32() % PROPOSAL_INCREMENT) + latest_rnd;
+    let next_rnd = (ctx.rand().next_u32() % self.paxos_config.proposal_increment) + latest_rnd;
 
     // Update the ProposerState
     paxos_instance
@@ -586,7 +614,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
         // inserted in the meanwhile.
 
         // Schedule another retry in `RETRY_DEFER_TIME` ms.
-        ctx.defer(RETRY_DEFER_TIME_MS, PaxosTimerEvent::RetryInsert(uuid));
+        ctx.defer(self.paxos_config.retry_defer_time_ms, PaxosTimerEvent::RetryInsert(uuid));
 
         // Propose the bundle at the next index.
         self.propose_next_index(ctx, PLEntry::Bundle(cur_bundle.clone()));
@@ -620,7 +648,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     } else {
       // Increment Heartbeat counter
       self.leader_heartbeat += 1;
-      if self.leader_heartbeat > HEARTBEAT_THRESHOLD {
+      if self.leader_heartbeat > self.paxos_config.heartbeat_threshold {
         // This node tries proposing itself as the leader.
         let gen = self.leader.gen.next();
         let eid = ctx.this_eid().clone();
@@ -632,7 +660,7 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     }
 
     // Schedule another `LeaderHeartbeat`
-    ctx.defer(HEARTBEAT_PRIOD_MS, PaxosTimerEvent::LeaderHeartbeat);
+    ctx.defer(self.paxos_config.heartbeat_period_ms, PaxosTimerEvent::LeaderHeartbeat);
   }
 
   fn next_index_timer<PaxosContextBaseT: PaxosContextBase<BundleT>>(
@@ -651,6 +679,6 @@ impl<BundleT: Clone> PaxosDriver<BundleT> {
     }
 
     // Schedule another `NextIndex`
-    ctx.defer(NEXT_INDEX_PERIOD_MS, PaxosTimerEvent::NextIndex);
+    ctx.defer(self.paxos_config.next_index_period_ms, PaxosTimerEvent::NextIndex);
   }
 }

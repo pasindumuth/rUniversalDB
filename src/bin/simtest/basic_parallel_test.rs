@@ -5,6 +5,7 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::mk_rid;
 use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId, Timestamp};
 use runiversal::model::message as msg;
+use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::mk_slave_eid;
 use runiversal::test_utils::{mk_eid, mk_sid};
 use std::collections::BTreeMap;
@@ -171,7 +172,8 @@ pub fn basic_parallel_test(seed: [u8; 16]) {
   .collect();
 
   // We create 3 clients.
-  let mut sim = Simulation::new(seed, 3, slave_address_config, master_address_config);
+  let mut sim =
+    Simulation::new(seed, 3, slave_address_config, master_address_config, PaxosConfig::prod());
   let mut ctx = TestContext::new();
 
   // Setup Tables

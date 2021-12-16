@@ -1,6 +1,7 @@
 use crate::simulation::Simulation;
 use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId, TableView};
 use runiversal::model::message as msg;
+use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::mk_slave_eid;
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid};
 use std::collections::BTreeMap;
@@ -142,7 +143,8 @@ pub fn setup_with_seed(seed: [u8; 16]) -> (Simulation, TestContext) {
   .into_iter()
   .collect();
 
-  let sim = Simulation::new(seed, 1, slave_address_config, master_address_config);
+  let sim =
+    Simulation::new(seed, 1, slave_address_config, master_address_config, PaxosConfig::prod());
   let context = TestContext::new();
   (sim, context)
 }

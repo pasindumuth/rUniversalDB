@@ -1,4 +1,6 @@
-use crate::common::{BasicIOCtx, GossipData, RemoteLeaderChangedPLm, SlaveIOCtx};
+use crate::common::{
+  BasicIOCtx, GossipData, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage,
+};
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::CreateTableRMES;
 use crate::create_table_tm_es::CreateTablePayloadTypes;
@@ -8,7 +10,7 @@ use crate::model::common::{
 use crate::model::common::{EndpointId, QueryId};
 use crate::model::message as msg;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
+use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use crate::server::{MainSlaveServerContext, ServerContextBase};
 use crate::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
 use crate::stmpaxos2pc_tm as paxos2pc;
@@ -274,6 +276,7 @@ impl SlaveContext {
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
     leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+    paxos_config: PaxosConfig,
   ) -> SlaveContext {
     let all_gids = leader_map.keys().cloned().collect();
     let paxos_nodes = gossip.slave_address_config.get(&this_sid).unwrap().clone();
@@ -287,7 +290,7 @@ impl SlaveContext {
       network_driver: NetworkDriver::new(all_gids),
       slave_bundle: Default::default(),
       tablet_bundles: Default::default(),
-      paxos_driver: PaxosDriver::new(paxos_nodes),
+      paxos_driver: PaxosDriver::new(paxos_nodes, paxos_config),
     }
   }
 
@@ -434,6 +437,9 @@ impl SlaveContext {
                 statuses,
                 SlaveForwardMsg::LeaderChanged(leader_changed.clone()),
               );
+
+              // Trace for testing
+              io_ctx.trace(SlaveTraceMessage::LeaderChanged(leader_changed.lid));
             }
           }
         }

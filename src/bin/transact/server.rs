@@ -2,6 +2,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
   btree_multimap_insert, mk_cid, mk_sid, BasicIOCtx, CoreIOCtx, GossipData, SlaveIOCtx,
+  SlaveTraceMessage,
 };
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::model::common::{
@@ -10,6 +11,7 @@ use runiversal::model::common::{
 };
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
+use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
 };
@@ -143,6 +145,8 @@ impl SlaveIOCtx for ProdSlaveIOCtx {
       tasks.insert(timestamp.clone(), vec![timer_input]);
     }
   }
+
+  fn trace(&mut self, _: SlaveTraceMessage) {}
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -272,7 +276,8 @@ pub fn start_server(
     tasks: Arc::new(Mutex::new(Default::default())),
   };
   io_ctx.start();
-  let slave_context = SlaveContext::new(coord_positions, this_sid, this_eid, gossip, leader_map);
+  let slave_context =
+    SlaveContext::new(coord_positions, this_sid, this_eid, gossip, leader_map, PaxosConfig::prod());
   let mut slave = SlaveState::new(slave_context);
   loop {
     // Receive data from the `to_server_receiver` and update the SlaveState accordingly.

@@ -1,7 +1,8 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  mk_cid, BasicIOCtx, CoreIOCtx, GossipData, MasterIOCtx, RangeEnds, SlaveIOCtx,
+  mk_cid, BasicIOCtx, CoreIOCtx, GossipData, MasterIOCtx, MasterTraceMessage, RangeEnds,
+  SlaveIOCtx, SlaveTraceMessage,
 };
 use runiversal::coord::coord_test::{assert_coord_clean, assert_coord_consistency};
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
@@ -14,8 +15,8 @@ use runiversal::model::common::{
   SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use runiversal::model::message as msg;
-use runiversal::model::message::NetworkMessage;
 use runiversal::multiversion_map::MVM;
+use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::{add_msg, mk_client_eid};
 use runiversal::slave::slave_test::assert_slave_clean;
 use runiversal::slave::{
@@ -56,6 +57,9 @@ pub struct TestSlaveIOCtx<'a> {
 
   /// Deferred timer tasks
   tasks: &'a mut BTreeMap<Timestamp, Vec<SlaveTimerInput>>,
+
+  /// Collection of trace messages
+  trace_msgs: &'a mut VecDeque<SlaveTraceMessage>,
 }
 
 impl<'a> BasicIOCtx for TestSlaveIOCtx<'a> {
@@ -69,7 +73,7 @@ impl<'a> BasicIOCtx for TestSlaveIOCtx<'a> {
     self.current_time
   }
 
-  fn send(&mut self, eid: &EndpointId, msg: NetworkMessage) {
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
 }
@@ -126,6 +130,10 @@ impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
       self.tasks.insert(deferred_time, vec![timer_input]);
     }
   }
+
+  fn trace(&mut self, trace_msg: SlaveTraceMessage) {
+    self.trace_msgs.push_back(trace_msg);
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -157,7 +165,7 @@ impl<'a> BasicIOCtx for TestCoreIOCtx<'a> {
     self.current_time
   }
 
-  fn send(&mut self, eid: &EndpointId, msg: NetworkMessage) {
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
 }
@@ -184,6 +192,9 @@ pub struct TestMasterIOCtx<'a> {
 
   /// Deferred timer tasks
   tasks: &'a mut BTreeMap<Timestamp, Vec<MasterTimerInput>>,
+
+  /// Collection of trace messages
+  trace_msgs: &'a mut VecDeque<MasterTraceMessage>,
 }
 
 impl<'a> BasicIOCtx for TestMasterIOCtx<'a> {
@@ -197,7 +208,7 @@ impl<'a> BasicIOCtx for TestMasterIOCtx<'a> {
     self.current_time
   }
 
-  fn send(&mut self, eid: &EndpointId, msg: NetworkMessage) {
+  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
 }
@@ -210,6 +221,10 @@ impl<'a> MasterIOCtx for TestMasterIOCtx<'a> {
     } else {
       self.tasks.insert(deferred_time, vec![timer_input]);
     }
+  }
+
+  fn trace(&mut self, trace_msg: MasterTraceMessage) {
+    self.trace_msgs.push_back(trace_msg);
   }
 }
 
@@ -266,6 +281,12 @@ pub struct Simulation {
   /// Meta
   next_int: i32,
   true_timestamp: u128,
+
+  /// Inferred LeaderMap. This will evolve continuously (there will be no jumps in
+  /// LeadershipId; the `gen` will increases one by one).
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  /// If this is set, the `IsLeader` messages disseminated from this Leadership will be blocked.
+  pub blocked_leadership: Option<LeadershipId>,
 }
 
 impl Simulation {
@@ -276,6 +297,7 @@ impl Simulation {
     num_clients: i32,
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     master_address_config: Vec<EndpointId>,
+    paxos_config: PaxosConfig,
   ) -> Simulation {
     let mut sim = Simulation {
       rand: XorShiftRng::from_seed(seed),
@@ -288,6 +310,8 @@ impl Simulation {
       next_int: Default::default(),
       true_timestamp: Default::default(),
       client_msgs_received: Default::default(),
+      leader_map: Default::default(),
+      blocked_leadership: None,
     };
 
     // Setup eids
@@ -321,13 +345,12 @@ impl Simulation {
     };
 
     // Construct LeaderMap
-    let mut leader_map = BTreeMap::<PaxosGroupId, LeadershipId>::new();
-    leader_map.insert(
+    sim.leader_map.insert(
       PaxosGroupId::Master,
       LeadershipId { gen: Gen(0), eid: master_address_config[0].clone() },
     );
     for (sid, eids) in &slave_address_config {
-      leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
+      sim.leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
     }
 
     // Construct MasterState
@@ -336,7 +359,8 @@ impl Simulation {
         eid.clone(),
         slave_address_config.clone(),
         master_address_config.clone(),
-        leader_map.clone(),
+        sim.leader_map.clone(),
+        paxos_config.clone(),
       ));
       sim.master_data.insert(eid.clone(), MasterData { master_state, tasks: Default::default() });
     }
@@ -354,7 +378,7 @@ impl Simulation {
             cid.clone(),
             eid.clone(),
             Arc::new(gossip.clone()),
-            leader_map.clone(),
+            sim.leader_map.clone(),
           ));
 
           coord_states.insert(cid, coord_state);
@@ -366,7 +390,8 @@ impl Simulation {
           sid.clone(),
           eid.clone(),
           Arc::new(gossip.clone()),
-          leader_map.clone(),
+          sim.leader_map.clone(),
+          paxos_config.clone(),
         ));
         sim.slave_data.insert(
           eid.clone(),
@@ -394,7 +419,7 @@ impl Simulation {
     for (_, slave_data) in &mut sim.slave_data {
       let current_time = sim.true_timestamp;
       let this_eid = slave_data.slave_state.ctx.this_eid.clone();
-      let mut slave_back_messages = VecDeque::<SlaveBackMessage>::new();
+      let mut trace_msgs = VecDeque::<SlaveTraceMessage>::new();
       let mut io_ctx = TestSlaveIOCtx {
         rand: &mut sim.rand,
         current_time, // TODO: simulate clock skew
@@ -403,14 +428,17 @@ impl Simulation {
         this_sid: &slave_data.slave_state.ctx.this_sid.clone(),
         this_eid: &this_eid,
         tablet_states: &mut slave_data.tablet_states,
-        slave_back_messages: &mut slave_back_messages,
+        slave_back_messages: &mut slave_data.slave_back_messages,
         coord_states: &mut slave_data.coord_states,
         tasks: &mut slave_data.tasks,
+        trace_msgs: &mut trace_msgs,
       };
 
       slave_data.slave_state.bootstrap(&mut io_ctx);
+      assert!(trace_msgs.is_empty());
     }
 
+    let mut trace_msgs = VecDeque::<MasterTraceMessage>::new();
     for (_, master_data) in &mut sim.master_data {
       let current_time = sim.true_timestamp;
       let this_eid = master_data.master_state.ctx.this_eid.clone();
@@ -421,9 +449,11 @@ impl Simulation {
         nonempty_queues: &mut sim.nonempty_queues,
         this_eid: &this_eid,
         tasks: &mut master_data.tasks,
+        trace_msgs: &mut trace_msgs,
       };
 
       master_data.master_state.bootstrap(&mut io_ctx);
+      assert!(trace_msgs.is_empty());
     }
 
     return sim;
@@ -472,7 +502,17 @@ impl Simulation {
     add_msg(&mut self.queues, &mut self.nonempty_queues, msg, from_eid, to_eid);
   }
 
-  /// Poll a message between two nodes in the network.
+  /// Peek a message in the queue from one node to another
+  pub fn peek_msg(
+    &self,
+    from_eid: &EndpointId,
+    to_eid: &EndpointId,
+  ) -> Option<&msg::NetworkMessage> {
+    let queue = self.queues.get(from_eid).unwrap().get(to_eid).unwrap();
+    queue.front()
+  }
+
+  /// Poll a message in the queue from one node to another
   pub fn poll_msg(
     &mut self,
     from_eid: &EndpointId,
@@ -503,6 +543,7 @@ impl Simulation {
   ) {
     let master_data = self.master_data.get_mut(&to_eid).unwrap();
     let current_time = self.true_timestamp;
+    let mut trace_msgs = VecDeque::<MasterTraceMessage>::new();
     let mut io_ctx = TestMasterIOCtx {
       rand: &mut self.rand,
       current_time, // TODO: simulate clock skew
@@ -510,31 +551,60 @@ impl Simulation {
       nonempty_queues: &mut self.nonempty_queues,
       this_eid: to_eid,
       tasks: &mut master_data.tasks,
+      trace_msgs: &mut trace_msgs,
     };
 
     // Deliver the network message to the Master.
     master_data.master_state.handle_input(&mut io_ctx, FullMasterInput::MasterMessage(msg));
+
+    // Update the `leader_map` if a new leader was traced.
+    for trace_msg in trace_msgs {
+      match trace_msg {
+        MasterTraceMessage::LeaderChanged(lid) => {
+          let cur_lid = self.leader_map.get_mut(&PaxosGroupId::Master).unwrap();
+          if cur_lid.gen < lid.gen {
+            *cur_lid = lid;
+          }
+        }
+      }
+    }
   }
 
   /// Same as above, except for a Slave.
   pub fn run_slave_message(&mut self, _: &EndpointId, to_eid: &EndpointId, msg: msg::SlaveMessage) {
     let slave_data = self.slave_data.get_mut(&to_eid).unwrap();
+    let sid = slave_data.slave_state.ctx.this_sid.clone();
     let current_time = self.true_timestamp;
+    let mut trace_msgs = VecDeque::<SlaveTraceMessage>::new();
     let mut io_ctx = TestSlaveIOCtx {
       rand: &mut self.rand,
       current_time, // TODO: simulate clock skew
       queues: &mut self.queues,
       nonempty_queues: &mut self.nonempty_queues,
-      this_sid: &slave_data.slave_state.ctx.this_sid.clone(),
+      this_sid: &sid,
       this_eid: to_eid,
       tablet_states: &mut slave_data.tablet_states,
       slave_back_messages: &mut slave_data.slave_back_messages,
       coord_states: &mut slave_data.coord_states,
       tasks: &mut slave_data.tasks,
+      trace_msgs: &mut trace_msgs,
     };
 
     // Deliver the network message to the Slave.
     slave_data.slave_state.handle_input(&mut io_ctx, FullSlaveInput::SlaveMessage(msg));
+
+    // Update the `leader_map` if a new leader was traced.
+    let gid = sid.to_gid();
+    for trace_msg in trace_msgs {
+      match trace_msg {
+        SlaveTraceMessage::LeaderChanged(lid) => {
+          let cur_lid = self.leader_map.get_mut(&gid).unwrap();
+          if cur_lid.gen < lid.gen {
+            *cur_lid = lid;
+          }
+        }
+      }
+    }
   }
 
   /// The endpoints provided must exist. This function polls a message from
@@ -542,6 +612,30 @@ impl Simulation {
   /// a client, the message is added to `client_msgs_received`, and if it's
   /// a slave, the slave processes the message.
   pub fn deliver_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) {
+    // First, check whether this queue is blocked due to `blocked_leadership`, returning if so.
+    if let Some(lid) = &self.blocked_leadership {
+      if let Some(front_msg) = self.peek_msg(from_eid, to_eid) {
+        match front_msg {
+          msg::NetworkMessage::Slave(msg::SlaveMessage::PaxosDriverMessage(
+            msg::PaxosDriverMessage::IsLeader(is_leader),
+          )) => {
+            if lid == &is_leader.lid {
+              return;
+            }
+          }
+          msg::NetworkMessage::Master(msg::MasterMessage::PaxosDriverMessage(
+            msg::PaxosDriverMessage::IsLeader(is_leader),
+          )) => {
+            if lid == &is_leader.lid {
+              return;
+            }
+          }
+          _ => {}
+        }
+      }
+    }
+
+    // Otherwise, deliver the message
     if let Some(msg) = self.poll_msg(from_eid, to_eid) {
       if self.master_data.contains_key(to_eid) {
         if let msg::NetworkMessage::Master(master_msg) = msg {
@@ -567,6 +661,7 @@ impl Simulation {
   pub fn run_master_timer_events(&mut self) {
     for (eid, master_data) in &mut self.master_data {
       let current_time = self.true_timestamp;
+      let mut trace_msgs = VecDeque::<MasterTraceMessage>::new();
       let mut io_ctx = TestMasterIOCtx {
         rand: &mut self.rand,
         current_time, // TODO: simulate clock skew
@@ -574,6 +669,7 @@ impl Simulation {
         nonempty_queues: &mut self.nonempty_queues,
         this_eid: eid,
         tasks: &mut master_data.tasks,
+        trace_msgs: &mut trace_msgs,
       };
 
       // Send all MasterBackMessages and MasterTimerInputs.
@@ -592,6 +688,7 @@ impl Simulation {
         }
 
         // This means there are no more left.
+        assert!(trace_msgs.is_empty());
         break;
       }
     }
@@ -601,6 +698,7 @@ impl Simulation {
   pub fn run_slave_timer_events(&mut self) {
     for (eid, slave_data) in &mut self.slave_data {
       let current_time = self.true_timestamp;
+      let mut trace_msgs = VecDeque::<SlaveTraceMessage>::new();
       let mut io_ctx = TestSlaveIOCtx {
         rand: &mut self.rand,
         current_time, // TODO: simulate clock skew
@@ -612,6 +710,7 @@ impl Simulation {
         slave_back_messages: &mut slave_data.slave_back_messages,
         coord_states: &mut slave_data.coord_states,
         tasks: &mut slave_data.tasks,
+        trace_msgs: &mut trace_msgs,
       };
 
       // Send all SlaveBackMessages and SlaveTimerInputs.
@@ -637,6 +736,7 @@ impl Simulation {
         }
 
         // This means there are no more left.
+        assert!(trace_msgs.is_empty());
         break;
       }
     }

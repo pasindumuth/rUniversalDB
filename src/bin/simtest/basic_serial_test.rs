@@ -7,12 +7,13 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::TableSchema;
 use runiversal::model::common::{
-  ColName, ColType, EndpointId, Gen, PrimaryKey, RequestId, SlaveGroupId, TablePath, TableView,
-  TabletGroupId, TabletKeyRange,
+  ColName, ColType, EndpointId, Gen, PaxosGroupIdTrait, PrimaryKey, RequestId, SlaveGroupId,
+  TablePath, TableView, TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message as msg;
 use runiversal::model::message::NetworkMessage;
-use runiversal::simulation_utils::{mk_client_eid, mk_slave_eid};
+use runiversal::paxos::PaxosConfig;
+use runiversal::simulation_utils::{mk_client_eid, mk_master_eid, mk_slave_eid};
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
 
@@ -41,6 +42,7 @@ pub fn test_all_basic_serial() {
   insert_delete_insert_test();
   ghost_deleted_row_test();
   cancellation_test();
+  paxos_leader_change_test();
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1377,4 +1379,60 @@ fn cancellation_test() {
   }
 
   println!("Test 'cancellation_test' Passed! Time taken: {:?}ms", test_time_taken)
+}
+
+// -----------------------------------------------------------------------------------------------
+//  paxos_leader_change_test
+// -----------------------------------------------------------------------------------------------
+
+fn paxos_leader_change_test() {
+  // Create one Slave Paxos Group to test Leader change logic with.
+  const NUM_PAXOS_GROUPS: u32 = 1;
+  const NUM_PAXOS_NODES: u32 = 5;
+  let mut master_address_config = Vec::<EndpointId>::new();
+  for i in 0..NUM_PAXOS_NODES {
+    master_address_config.push(mk_master_eid(&i));
+  }
+  let mut slave_address_config = BTreeMap::<SlaveGroupId, Vec<EndpointId>>::new();
+  for i in 0..NUM_PAXOS_GROUPS {
+    let mut eids = Vec::<EndpointId>::new();
+    for j in 0..NUM_PAXOS_NODES {
+      eids.push(mk_slave_eid(&(i * NUM_PAXOS_NODES + j)));
+    }
+    slave_address_config.insert(SlaveGroupId(format!("s{}", i)), eids);
+  }
+
+  let mut sim = Simulation::new(
+    [0; 16],
+    1,
+    slave_address_config.clone(),
+    master_address_config.clone(),
+    PaxosConfig::test(),
+  );
+
+  // Warmup the simulation
+  sim.simulate_n_ms(100);
+
+  // Block the current leader of the SlaveGroup
+  let (sid, _) = slave_address_config.first_key_value().unwrap();
+  let lid = sim.leader_map.get(&sid.to_gid()).unwrap().clone();
+  sim.blocked_leadership = Some(lid.clone());
+
+  // Simulate until the Leadership changes
+  let mut leader_did_change = false;
+  for _ in 0..1000 {
+    sim.simulate1ms();
+    let cur_lid = sim.leader_map.get(&sid.to_gid()).unwrap().clone();
+    if cur_lid.gen > lid.gen {
+      leader_did_change = true;
+      sim.blocked_leadership = None;
+      break;
+    }
+  }
+
+  if leader_did_change {
+    println!("Test 'paxos_leader_change_test' Passed! Time taken: {:?}ms", sim.true_timestamp());
+  } else {
+    panic!();
+  }
 }

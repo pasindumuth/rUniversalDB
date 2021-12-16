@@ -3,7 +3,7 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::RangeEnds;
 use runiversal::model::common::{EndpointId, Timestamp};
 use runiversal::model::message as msg;
-use runiversal::paxos::{PaxosContextBase, PaxosDriver, PaxosTimerEvent};
+use runiversal::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use runiversal::simulation_utils::{add_msg, mk_paxos_eid};
 use std::cmp::min;
 use std::collections::{BTreeMap, VecDeque};
@@ -159,7 +159,7 @@ impl Simulation {
       sim.paxos_data.insert(
         eid.clone(),
         PaxosNodeData {
-          paxos_driver: PaxosDriver::new(eids.clone()),
+          paxos_driver: PaxosDriver::new(eids.clone(), PaxosConfig::prod()),
           tasks: Default::default(),
           paxos_log: Default::default(),
         },
