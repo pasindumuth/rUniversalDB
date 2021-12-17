@@ -318,7 +318,7 @@ impl Simulation {
     let slave_eids: Vec<EndpointId> =
       slave_address_config.values().cloned().into_iter().flatten().collect();
     let client_eids: Vec<EndpointId> =
-      RangeEnds::rvec(0, num_clients as u32).iter().map(mk_client_eid).collect();
+      RangeEnds::rvec(0, num_clients as u32).iter().map(|i| mk_client_eid(*i)).collect();
     let all_eids: Vec<EndpointId> = vec![]
       .into_iter()
       .chain(slave_eids.iter().cloned())

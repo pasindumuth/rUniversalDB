@@ -136,7 +136,7 @@ impl Simulation {
   /// we create as many tablets as there are `TabletGroupId` for that slave.
   pub fn new(
     seed: [u8; 16],
-    num_clients: i32,
+    num_clients: u32,
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
   ) -> Simulation {
     let mut sim = Simulation {
@@ -159,7 +159,7 @@ impl Simulation {
     let slave_eids: Vec<EndpointId> =
       slave_address_config.values().cloned().into_iter().flatten().collect();
     let client_eids: Vec<EndpointId> =
-      RangeEnds::rvec(0, num_clients).iter().map(|i| mk_client_eid(&(*i as u32))).collect();
+      RangeEnds::rvec(0, num_clients).iter().map(|i| mk_client_eid(*i)).collect();
     let all_eids: Vec<EndpointId> = vec![]
       .into_iter()
       .chain(slave_eids.iter().cloned())

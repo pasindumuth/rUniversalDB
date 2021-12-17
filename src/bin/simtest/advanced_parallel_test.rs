@@ -483,12 +483,6 @@ enum QueryType {
   TPQuery,
 }
 
-enum TPQueryType {
-  Insert,
-  Update,
-  CTEQuery,
-}
-
 impl QueryGenerator {
   fn new() -> QueryGenerator {
     QueryGenerator { table_counter: 0, column_counter: Default::default() }
@@ -759,11 +753,11 @@ pub fn test_all_advanced_parallel() {
 pub fn advanced_parallel_test(seed: [u8; 16]) {
   let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
-    (mk_sid("s0"), vec![mk_slave_eid(&0)]),
-    (mk_sid("s1"), vec![mk_slave_eid(&1)]),
-    (mk_sid("s2"), vec![mk_slave_eid(&2)]),
-    (mk_sid("s3"), vec![mk_slave_eid(&3)]),
-    (mk_sid("s4"), vec![mk_slave_eid(&4)]),
+    (mk_sid("s0"), vec![mk_slave_eid(0)]),
+    (mk_sid("s1"), vec![mk_slave_eid(1)]),
+    (mk_sid("s2"), vec![mk_slave_eid(2)]),
+    (mk_sid("s3"), vec![mk_slave_eid(3)]),
+    (mk_sid("s4"), vec![mk_slave_eid(4)]),
   ]
   .into_iter()
   .collect();
@@ -809,7 +803,7 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
 
     // Send the request and simulate
     let slave_idx = sim.rand.next_u32() % client_eids.len() as u32;
-    let slave_eid = mk_slave_eid(&slave_idx);
+    let slave_eid = mk_slave_eid(slave_idx);
     sim.add_msg(
       msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
         msg::SlaveExternalReq::PerformExternalQuery(perform),

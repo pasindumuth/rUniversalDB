@@ -97,12 +97,12 @@ pub fn test_single(test_num: u32, seed: [u8; 16]) {
   for i in 0..NUM_PAXOS_GROUPS {
     let mut eids = Vec::<EndpointId>::new();
     for j in 0..NUM_PAXOS_NODES {
-      eids.push(mk_slave_eid(&(i * NUM_PAXOS_NODES + j)));
+      eids.push(mk_slave_eid(i * NUM_PAXOS_NODES + j));
     }
     slave_address_config.insert(SlaveGroupId(format!("s{}", i)), eids);
   }
 
-  let client_eid = mk_client_eid(&0);
+  let client_eid = mk_client_eid(0);
   let mut sim = Simulation::new(seed, 1, slave_address_config.clone());
 
   // Run the simulation to warm it up. Activity here consists of Leadership changes,

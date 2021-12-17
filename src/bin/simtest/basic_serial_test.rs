@@ -13,7 +13,7 @@ use runiversal::model::common::{
 use runiversal::model::message as msg;
 use runiversal::model::message::NetworkMessage;
 use runiversal::paxos::PaxosConfig;
-use runiversal::simulation_utils::{mk_client_eid, mk_master_eid, mk_slave_eid};
+use runiversal::simulation_utils::{mk_master_eid, mk_slave_eid};
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
 
@@ -1391,13 +1391,13 @@ fn paxos_leader_change_test() {
   const NUM_PAXOS_NODES: u32 = 5;
   let mut master_address_config = Vec::<EndpointId>::new();
   for i in 0..NUM_PAXOS_NODES {
-    master_address_config.push(mk_master_eid(&i));
+    master_address_config.push(mk_master_eid(i));
   }
   let mut slave_address_config = BTreeMap::<SlaveGroupId, Vec<EndpointId>>::new();
   for i in 0..NUM_PAXOS_GROUPS {
     let mut eids = Vec::<EndpointId>::new();
     for j in 0..NUM_PAXOS_NODES {
-      eids.push(mk_slave_eid(&(i * NUM_PAXOS_NODES + j)));
+      eids.push(mk_slave_eid(i * NUM_PAXOS_NODES + j));
     }
     slave_address_config.insert(SlaveGroupId(format!("s{}", i)), eids);
   }

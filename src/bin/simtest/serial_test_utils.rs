@@ -134,11 +134,11 @@ pub fn setup() -> (Simulation, TestContext) {
 pub fn setup_with_seed(seed: [u8; 16]) -> (Simulation, TestContext) {
   let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
-    (mk_sid("s0"), vec![mk_slave_eid(&0)]),
-    (mk_sid("s1"), vec![mk_slave_eid(&1)]),
-    (mk_sid("s2"), vec![mk_slave_eid(&2)]),
-    (mk_sid("s3"), vec![mk_slave_eid(&3)]),
-    (mk_sid("s4"), vec![mk_slave_eid(&4)]),
+    (mk_sid("s0"), vec![mk_slave_eid(0)]),
+    (mk_sid("s1"), vec![mk_slave_eid(1)]),
+    (mk_sid("s2"), vec![mk_slave_eid(2)]),
+    (mk_sid("s3"), vec![mk_slave_eid(3)]),
+    (mk_sid("s4"), vec![mk_slave_eid(4)]),
   ]
   .into_iter()
   .collect();

@@ -9,7 +9,6 @@ use runiversal::model::common::{
   TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message as msg;
-use runiversal::simulation_utils::{mk_client_eid, mk_slave_eid};
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
 

@@ -145,7 +145,7 @@ impl Simulation {
 
     // PaxosNode EndpointIds
     let eids: Vec<EndpointId> =
-      RangeEnds::rvec(0, num_paxos_data as i32).iter().map(mk_paxos_eid).collect();
+      RangeEnds::rvec(0, num_paxos_data as u32).iter().map(|i| mk_paxos_eid(*i)).collect();
     for from_eid in &eids {
       sim.queues.insert(from_eid.clone(), Default::default());
       for to_eid in &eids {
@@ -171,7 +171,7 @@ impl Simulation {
 
   /// Starts the Async insertion cycles of Paxos.
   fn initialize_paxos_nodes(mut sim: Simulation) -> Simulation {
-    let leader_eid = mk_paxos_eid(&0);
+    let leader_eid = mk_paxos_eid(0);
     for (eid, paxos_data) in &mut sim.paxos_data {
       let current_time = sim.true_timestamp;
       let mut ctx = PaxosContext {
