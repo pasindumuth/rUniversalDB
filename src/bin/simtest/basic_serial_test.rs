@@ -1445,7 +1445,6 @@ fn paxos_basic_serial_test() {
   let mut failed = 0;
   'outer: for i in 0..10 {
     println!("    iteration {:?}", i);
-
     let mut seed = [0; 16];
     rand.fill_bytes(&mut seed);
     let mut sim = mk_general_sim(seed, 5, 5);
@@ -1480,11 +1479,9 @@ fn paxos_basic_serial_test() {
 
     // Choose a random Slave to be the target of the Leadership change
     let sids: Vec<SlaveGroupId> = sim.slave_address_config().keys().cloned().collect();
-    // TODO: this works
-    // let target_change_sid = sids.get(rand.next_u32() as usize % sids.len()).unwrap().clone();
-    let target_change_sid = sids.get(0).unwrap().clone();
+    let target_change_sid = sids.get(rand.next_u32() as usize % sids.len()).unwrap().clone();
 
-    // Simulate for at-most 10000 seconds, giving up if we do not get a response in time.
+    // Simulate for at-most 10000ms, giving up if we do not get a response in time.
     for _ in 0..10000 {
       // Progress the LeaderChangeState
       match &cur_leader_state {

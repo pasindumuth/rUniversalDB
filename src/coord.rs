@@ -407,16 +407,24 @@ impl CoordContext {
             if let Some(cur_lid) = tm_status.leaderships.get(&sid) {
               if cur_lid < &lid {
                 // The new Leadership of a remote slave has changed beyond what the TMStatus
-                // had contacted, so that RM will surely not respond. Thus we abort this
-                // whole TMStatus and inform the GRQueryES so that it can retry the stage.
-                let gr_query_id = tm_status.orig_p.query_id.clone();
+                // had contacted, so that RM will surely not respond. Thus we abort this whole
+                // TMStatus and inform the MSCoordES/GRQueryES so that it can retry the stage.
+                let orig_qid = tm_status.orig_p.query_id.clone();
                 self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
 
                 // Inform the GRQueryES
-                let gr_query = statuses.gr_query_ess.get_mut(&query_id).unwrap();
-                remove_item(&mut gr_query.child_queries, &query_id);
-                let action = gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx(io_ctx));
-                self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
+                if let Some(gr_query) = statuses.gr_query_ess.get_mut(&orig_qid) {
+                  remove_item(&mut gr_query.child_queries, &query_id);
+                  let action =
+                    gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx(io_ctx));
+                  self.handle_gr_query_es_action(io_ctx, statuses, orig_qid, action);
+                }
+                // Inform the MSCoordES
+                else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&orig_qid) {
+                  remove_item(&mut ms_coord.child_queries, &query_id);
+                  let action = ms_coord.es.handle_tm_remote_leadership_changed(self, io_ctx);
+                  self.handle_ms_coord_es_action(io_ctx, statuses, orig_qid, action);
+                }
               }
             }
           }

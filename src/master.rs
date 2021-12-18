@@ -435,8 +435,8 @@ impl MasterContext {
               );
 
               // Dispatch any messages that were buffered in the NetworkDriver.
-              // Note: we must do this after RemoteLeaderChanges. Also note that there will
-              // be no payloads in the NetworkBuffer if this nodes is a Follower.
+              // Note: we must do this after RemoteLeaderChanges have been executed. Also note
+              // that there will be no payloads in the NetworkBuffer if this nodes is a Follower.
               for remote_change in master_bundle.remote_leader_changes {
                 if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
                   // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
@@ -863,6 +863,10 @@ impl MasterContext {
           // Wink away all MasterQueryPlanningESs.
           statuses.planning_ess.clear();
         } else {
+          // TODO: should we be running the main loop here?
+          // Run Main Loop
+          self.run_main_loop(io_ctx, statuses);
+
           // This node is the new Leader
           self.broadcast_leadership(io_ctx); // Broadcast RemoteLeaderChanged
           self.paxos_driver.insert_bundle(

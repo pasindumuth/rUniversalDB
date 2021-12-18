@@ -312,8 +312,8 @@ impl SlaveContext {
             self.handle_input(io_ctx, statuses, SlaveForwardMsg::SlaveBundle(bundle.plms));
 
             // Dispatch any messages that were buffered in the NetworkDriver.
-            // Note: we must do this after RemoteLeaderChanges. Also note that there will
-            // be no payloads in the NetworkBuffer if this nodes is a Follower.
+            // Note: we must do this after RemoteLeaderChanges have been executed. Also note
+            // that there will be no payloads in the NetworkBuffer if this nodes is a Follower.
             for remote_change in bundle.remote_leader_changes {
               if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
                 // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s

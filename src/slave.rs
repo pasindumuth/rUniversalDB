@@ -395,9 +395,14 @@ impl SlaveContext {
                 io_ctx.tablet_forward(&tid, forward_msg);
               }
 
+              // Forward to Slave Backend
+              for forward_msg in slave_forward_msgs {
+                self.handle_input(io_ctx, statuses, forward_msg);
+              }
+
               // Dispatch any messages that were buffered in the NetworkDriver.
-              // Note: we must do this after RemoteLeaderChanges. Also note that there will
-              // be no payloads in the NetworkBuffer if this nodes is a Follower.
+              // Note: we must do this after RemoteLeaderChanges have been executed. Also note
+              // that there will be no payloads in the NetworkBuffer if this nodes is a Follower.
               for remote_change in slave_bundle.remote_leader_changes {
                 if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
                   // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
@@ -406,14 +411,13 @@ impl SlaveContext {
                     .network_driver
                     .deliver_blocked_messages(remote_change.gid, remote_change.lid);
                   for payload in payloads {
-                    slave_forward_msgs.push(SlaveForwardMsg::SlaveRemotePayload(payload))
+                    self.handle_input(
+                      io_ctx,
+                      statuses,
+                      SlaveForwardMsg::SlaveRemotePayload(payload),
+                    );
                   }
                 }
-              }
-
-              // Forward to Slave Backend
-              for forward_msg in slave_forward_msgs {
-                self.handle_input(io_ctx, statuses, forward_msg);
               }
             }
             msg::PLEntry::LeaderChanged(leader_changed) => {

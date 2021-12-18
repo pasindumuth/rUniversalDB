@@ -1321,7 +1321,7 @@ impl TabletContext {
                 self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
 
                 // Inform the GRQueryES
-                let gr_query = statuses.gr_query_ess.get_mut(&query_id).unwrap();
+                let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
                 remove_item(&mut gr_query.child_queries, &query_id);
                 let action = gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx(io_ctx));
                 self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
@@ -1405,6 +1405,10 @@ impl TabletContext {
           self.waiting_locked_cols.clear();
           self.inserting_locked_cols.clear();
         } else {
+          // TODO: should we be running the main loop here?
+          // Run Main Loop
+          self.run_main_loop(io_ctx, statuses);
+
           // If this node becomes the Leader, then we continue the insert cycle.
           io_ctx.slave_forward(SlaveBackMessage::TabletBundleInsertion(TabletBundleInsertion {
             tid: self.this_tid.clone(),
