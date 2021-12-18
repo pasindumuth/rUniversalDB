@@ -7,8 +7,8 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::TableSchema;
 use runiversal::model::common::{
-  ColName, ColType, EndpointId, Gen, PaxosGroupIdTrait, PrimaryKey, RequestId, SlaveGroupId,
-  TablePath, TableView, TabletGroupId, TabletKeyRange,
+  ColName, ColType, EndpointId, Gen, LeadershipId, PaxosGroupIdTrait, PrimaryKey, RequestId,
+  SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message as msg;
 use runiversal::model::message::NetworkMessage;
@@ -43,6 +43,7 @@ pub fn test_all_basic_serial() {
   ghost_deleted_row_test();
   cancellation_test();
   paxos_leader_change_test();
+  paxos_basic_serial_test();
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1385,36 +1386,39 @@ fn cancellation_test() {
 //  paxos_leader_change_test
 // -----------------------------------------------------------------------------------------------
 
-fn paxos_leader_change_test() {
+fn mk_general_sim(seed: [u8; 16], num_paxos_groups: u32, num_paxos_nodes: u32) -> Simulation {
   // Create one Slave Paxos Group to test Leader change logic with.
-  const NUM_PAXOS_GROUPS: u32 = 1;
-  const NUM_PAXOS_NODES: u32 = 5;
   let mut master_address_config = Vec::<EndpointId>::new();
-  for i in 0..NUM_PAXOS_NODES {
+  for i in 0..num_paxos_nodes {
     master_address_config.push(mk_master_eid(i));
   }
   let mut slave_address_config = BTreeMap::<SlaveGroupId, Vec<EndpointId>>::new();
-  for i in 0..NUM_PAXOS_GROUPS {
+  for i in 0..num_paxos_groups {
     let mut eids = Vec::<EndpointId>::new();
-    for j in 0..NUM_PAXOS_NODES {
-      eids.push(mk_slave_eid(i * NUM_PAXOS_NODES + j));
+    for j in 0..num_paxos_nodes {
+      eids.push(mk_slave_eid(i * num_paxos_nodes + j));
     }
     slave_address_config.insert(SlaveGroupId(format!("s{}", i)), eids);
   }
 
-  let mut sim = Simulation::new(
-    [0; 16],
+  Simulation::new(
+    seed,
     1,
     slave_address_config.clone(),
     master_address_config.clone(),
     PaxosConfig::test(),
-  );
+  )
+}
+
+fn paxos_leader_change_test() {
+  // Create one Slave Paxos Group to test Leader change logic with.
+  let mut sim = mk_general_sim([0; 16], 1, 5);
 
   // Warmup the simulation
   sim.simulate_n_ms(100);
 
   // Block the current leader of the SlaveGroup
-  let (sid, _) = slave_address_config.first_key_value().unwrap();
+  let sid = sim.slave_address_config().first_key_value().unwrap().0.clone();
   let lid = sim.leader_map.get(&sid.to_gid()).unwrap().clone();
   sim.blocked_leadership = Some(lid.clone());
 
@@ -1435,4 +1439,134 @@ fn paxos_leader_change_test() {
   } else {
     panic!();
   }
+}
+
+fn paxos_basic_serial_test() {
+  let mut rand = XorShiftRng::from_seed([0; 16]);
+  let mut test_time_taken = 0;
+
+  // Simulate 10 iterations, where each iteration uses a new initial seed and also
+  // changes the Leadership of some random node a little bit later than the last.
+  let mut successful = 0;
+  let mut failed = 0;
+  'outer: for i in 0..1 {
+    let mut seed = [0; 16];
+    rand.fill_bytes(&mut seed);
+    let mut sim = mk_general_sim(seed, 5, 5);
+    let mut ctx = TestContext::new();
+
+    // Test Simple Update-Select
+    setup_inventory_table(&mut sim, &mut ctx);
+    populate_inventory_table_basic(&mut sim, &mut ctx);
+
+    // Send the query and simulate
+    let query = "
+      UPDATE inventory
+      SET email = 'my_email_3'
+      WHERE product_id = 1;
+    ";
+
+    let request_id = ctx.send_query(&mut sim, query);
+
+    enum LeaderChangeState {
+      PreLeaderChanged,
+      LeaderChanging(LeadershipId),
+      PostLeaderChanged,
+    }
+
+    let mut cur_leader_state = LeaderChangeState::PreLeaderChanged;
+
+    // We increment this time a little bit every iteration to simulation the Leadership
+    // change happening in different stages of the Transaction.
+    let target_change_timestamp: u128 = i * 10;
+
+    // Choose a random Slave to be the target of the Leadership change
+    let sids: Vec<SlaveGroupId> = sim.slave_address_config().keys().cloned().collect();
+    let target_change_sid = sids.get(rand.next_u32() as usize % sids.len()).unwrap().clone();
+
+    // Simulate for at-most 10000 seconds, giving up if we do not get a response in time.
+    for _ in 0..10000 {
+      // Progress the LeaderChangeState
+      match &cur_leader_state {
+        LeaderChangeState::PreLeaderChanged => {
+          if sim.true_timestamp() >= &target_change_timestamp {
+            // Start changing the Leadership of `target_change_sid`
+            let lid = sim.leader_map.get(&target_change_sid.to_gid()).unwrap().clone();
+            sim.blocked_leadership = Some(lid.clone());
+            cur_leader_state = LeaderChangeState::LeaderChanging(lid);
+          }
+        }
+        LeaderChangeState::LeaderChanging(lid) => {
+          let cur_lid = sim.leader_map.get(&target_change_sid.to_gid()).unwrap().clone();
+          if cur_lid.gen > lid.gen {
+            // Clear `blocked_leadership` to reduce excessive network blocking.
+            sim.blocked_leadership = None;
+            cur_leader_state = LeaderChangeState::PostLeaderChanged;
+          }
+        }
+        LeaderChangeState::PostLeaderChanged => {}
+      }
+
+      // Simulate 1ms
+      let response_count = sim.get_responses(&ctx.sender_eid).len();
+      sim.simulate1ms();
+
+      // If we get a response, act accordingly
+      if response_count < sim.get_responses(&ctx.sender_eid).len() {
+        // Cooldown and check for cleanup
+        const TP_COOLDOWN_MS: u32 = 500;
+        let mut duration = 0;
+        while duration < TP_COOLDOWN_MS {
+          sim.simulate1ms();
+          duration += 1;
+        }
+        sim.check_resources_clean();
+
+        // Get the response and validate it
+        let response = sim.get_responses(&ctx.sender_eid).iter().last().unwrap();
+        match response.clone() {
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
+            assert_eq!(payload.request_id, request_id.clone());
+            // Verify the result is what we expect
+            let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+            exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
+            assert_eq!(payload.result, exp_result);
+
+            // Do a Select query and verify it matches what we expect the final data to be.
+            let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+            exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
+            exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
+            ctx.execute_query(
+              &mut sim,
+              " SELECT product_id, email
+                FROM inventory;
+              ",
+              10000,
+              exp_result,
+            );
+
+            successful += 1;
+          }
+          msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(abort)) => {
+            assert_eq!(abort.request_id, request_id.clone());
+            assert_eq!(abort.payload, msg::ExternalAbortedData::NodeDied);
+            failed += 1;
+          }
+          _ => panic!(),
+        };
+
+        test_time_taken += sim.true_timestamp();
+        continue 'outer;
+      }
+    }
+
+    panic!();
+  }
+
+  // Check that we encoutered healthy balance of successful and failed queries.
+  if successful < 4 && failed < 4 {
+    panic!();
+  }
+
+  println!("Test 'paxos_basic_serial_test' Passed! Time taken: {:?}ms", test_time_taken);
 }

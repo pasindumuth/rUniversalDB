@@ -504,7 +504,7 @@ impl QueryGenerator {
     let mut rand = XorShiftRng::from_seed(seed);
 
     // Extract all current TableSchemas
-    let (_, full_db_schema) = sim.full_db_schema();
+    let full_db_schema = sim.full_db_schema();
     let cur_tables = full_db_schema.table_generation.static_snapshot_read(timestamp);
     let mut table_schemas = BTreeMap::<TablePath, &TableSchema>::new();
     for (table_path, gen) in cur_tables {

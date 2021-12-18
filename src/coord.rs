@@ -459,6 +459,8 @@ impl CoordContext {
             }
           }
 
+          self.external_request_id_map.clear();
+
           // Wink away all TM ESs.
           statuses.gr_query_ess.clear();
           statuses.trans_table_read_ess.clear();

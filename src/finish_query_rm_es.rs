@@ -90,7 +90,7 @@ impl Paxos2PCRMInner<FinishQueryPayloadTypes> for FinishQueryRMInner {
   }
 
   fn prepared_plm_inserted<IO: BasicIOCtx>(&mut self, ctx: &mut TabletContext, _: &mut IO) {
-    ctx.inserting_prepared_writes.remove(&self.timestamp).unwrap();
+    ctx.inserting_prepared_writes.remove(&self.timestamp);
     ctx.prepared_writes.insert(self.timestamp.clone(), self.region_lock.clone());
   }
 

@@ -367,11 +367,14 @@ impl Simulation {
 
     // Construct SlaveState
     for (sid, eids) in &slave_address_config {
+      // Every Slave in a PaxosGroup should use the same CoordGroupIds, since Paxos2PC needs it.
+      let mut coord_ids = Vec::<CoordGroupId>::new();
+      for _ in 0..NUM_COORDS {
+        coord_ids.push(mk_cid(&mut sim.rand));
+      }
       for eid in eids {
         let mut coord_states = BTreeMap::<CoordGroupId, CoordState>::new();
-        for _ in 0..NUM_COORDS {
-          let cid = mk_cid(&mut sim.rand);
-
+        for cid in &coord_ids {
           // Create the Coord
           let coord_state = CoordState::new(CoordContext::new(
             sid.clone(),
@@ -381,12 +384,12 @@ impl Simulation {
             sim.leader_map.clone(),
           ));
 
-          coord_states.insert(cid, coord_state);
+          coord_states.insert(cid.clone(), coord_state);
         }
 
         // Create Slave
         let slave_state = SlaveState::new(SlaveContext::new(
-          coord_states.keys().cloned().collect(),
+          coord_ids.clone(),
           sid.clone(),
           eid.clone(),
           Arc::new(gossip.clone()),
@@ -487,10 +490,14 @@ impl Simulation {
 
   /// This returns the `FullDBSchema` of some random Master node. This might not be
   /// the most recent Leader. Thus, this is only an approximate of the latest `FullDBSchema`.
-  pub fn full_db_schema(&mut self) -> (&mut XorShiftRng, FullDBSchema) {
+  pub fn full_db_schema(&mut self) -> FullDBSchema {
     let master_eid = self.master_address_config.get(0).unwrap();
     let master_data = self.master_data.get(master_eid).unwrap();
-    (&mut self.rand, master_data.master_state.ctx.full_db_schema())
+    master_data.master_state.ctx.full_db_schema()
+  }
+
+  pub fn slave_address_config(&self) -> &BTreeMap<SlaveGroupId, Vec<EndpointId>> {
+    &self.slave_address_config
   }
 
   // -----------------------------------------------------------------------------------------------

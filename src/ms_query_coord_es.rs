@@ -127,11 +127,6 @@ pub enum MSQueryCoordAction {
 //  Implementation
 // -----------------------------------------------------------------------------------------------
 
-pub enum SendHelper {
-  TableQuery(msg::PerformQuery, Vec<TabletGroupId>),
-  TransTableQuery(msg::PerformQuery, TransTableLocationPrefix),
-}
-
 impl FullMSCoordES {
   /// Start the FullMSCoordES
   pub fn start<IO: CoreIOCtx>(
@@ -462,6 +457,11 @@ impl FullMSCoordES {
     let sender_path = ctx.mk_query_path(tm_qid.clone());
     // The `root_query_path` pointing to this MSCoordES.
     let root_query_path = ctx.mk_query_path(es.query_id.clone());
+
+    pub enum SendHelper {
+      TableQuery(msg::PerformQuery, Vec<TabletGroupId>),
+      TransTableQuery(msg::PerformQuery, TransTableLocationPrefix),
+    }
 
     // Send out the PerformQuery.
     let helper = match ms_query_stage {
