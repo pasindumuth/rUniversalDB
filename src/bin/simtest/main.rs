@@ -22,6 +22,7 @@ mod basic_parallel_test;
 mod basic_serial_test;
 mod serial_test_utils;
 mod simulation;
+mod stats;
 
 fn main() {
   println!("Basic Serial Tests:");
@@ -33,6 +34,7 @@ fn main() {
   println!("Basic Parallel Tests:");
   test_all_basic_parallel();
   println!("\n");
+  // TODO: this test grinds to a halt when we use the many-messages delivery scheme.
   println!("Advanced Parallel Tests:");
   test_all_advanced_parallel();
 }

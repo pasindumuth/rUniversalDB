@@ -1,3 +1,4 @@
+use crate::stats::Stats;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
@@ -282,6 +283,7 @@ pub struct Simulation {
   /// Meta
   next_int: i32,
   true_timestamp: u128,
+  stats: Stats,
 
   /// Inferred LeaderMap. This will evolve continuously (there will be no jumps in
   /// LeadershipId; the `gen` will increases one by one).
@@ -311,6 +313,7 @@ impl Simulation {
       next_int: Default::default(),
       true_timestamp: Default::default(),
       client_msgs_received: Default::default(),
+      stats: Stats::default(),
       leader_map: Default::default(),
       blocked_leadership: None,
     };
@@ -644,6 +647,7 @@ impl Simulation {
 
     // Otherwise, deliver the message
     if let Some(msg) = self.poll_msg(from_eid, to_eid) {
+      self.stats.record(&msg);
       if self.master_data.contains_key(to_eid) {
         if let msg::NetworkMessage::Master(master_msg) = msg {
           self.run_master_message(from_eid, to_eid, master_msg)
