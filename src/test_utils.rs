@@ -41,3 +41,36 @@ pub fn mk_tab(table_path: &str) -> TablePath {
 pub fn mk_ttab(table_path: &str) -> TransTableName {
   TransTableName(table_path.to_string())
 }
+
+// -----------------------------------------------------------------------------------------------
+//  Check Context
+// -----------------------------------------------------------------------------------------------
+
+/// This is a utility for effectively accumulating the AND result of many boolean expressions.
+/// If `check` is called even once with `false` after construction, we remember this fact
+/// in `cum_bool`. We do not simply use a `&mut bool` because sometimes, we want to panic
+/// if the AND expression would evaluate to false (and we want to do it early).
+pub struct CheckCtx {
+  should_assert: bool,
+  cum_bool: bool,
+}
+
+impl CheckCtx {
+  pub fn new(should_assert: bool) -> CheckCtx {
+    CheckCtx { should_assert, cum_bool: true }
+  }
+
+  pub fn check(&mut self, boolean: bool) {
+    if !boolean {
+      if self.should_assert {
+        panic!();
+      } else {
+        self.cum_bool = false;
+      }
+    }
+  }
+
+  pub fn get_result(&self) -> bool {
+    self.cum_bool
+  }
+}

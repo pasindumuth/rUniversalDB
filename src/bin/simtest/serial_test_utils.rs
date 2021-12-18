@@ -112,7 +112,7 @@ impl TestContext {
   }
 }
 
-/// Simulations `sim` until an External response is collected at `eid`, or until
+/// Simulates `sim` until an External response is collected at `eid`, or until
 /// `time_limit` milliseconds have passed.
 pub fn simulate_until_response(sim: &mut Simulation, eid: &EndpointId, time_limit: u32) -> bool {
   let mut duration = 0;
@@ -121,6 +121,23 @@ pub fn simulate_until_response(sim: &mut Simulation, eid: &EndpointId, time_limi
     sim.simulate1ms();
     duration += 1;
     if sim.get_responses(eid).len() > prev_num_responses {
+      return true;
+    }
+  }
+  false
+}
+
+/// Simulates `sim` until all of them are in their steady state, or until
+/// `time_limit` milliseconds have passed.
+///
+/// NOTE: If this fails, to find out where, switch the argument in `check_resources_clean`
+/// from `false` to `true`.
+pub fn simulate_until_clean(sim: &mut Simulation, time_limit: u32) -> bool {
+  let mut duration = 0;
+  while duration < time_limit {
+    sim.simulate1ms();
+    duration += 1;
+    if sim.check_resources_clean(false) {
       return true;
     }
   }

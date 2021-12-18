@@ -1,7 +1,7 @@
 use crate::finish_query_rm_es::FinishQueryRMES;
 use crate::model::common::{PrimaryKey, QueryId, TabletKeyRange};
 use crate::tablet::{check_range_inclusion, TabletState, DDLES};
-use crate::test_utils::{cvb, cvi, cvs};
+use crate::test_utils::{cvb, cvi, cvs, CheckCtx};
 use std::collections::BTreeMap;
 
 #[test]
@@ -83,24 +83,24 @@ pub fn assert_tablet_consistency(tablet: &TabletState) {
   }
 }
 
-pub fn assert_tablet_clean(tablet: &TabletState) {
+pub fn check_tablet_clean(tablet: &TabletState, check_ctx: &mut CheckCtx) {
   let statuses = &tablet.statuses;
 
   for (_, es) in &statuses.finish_query_ess {
     if let FinishQueryRMES::Paxos2PCRMExecOuter(_) = es {
-      panic!()
+      check_ctx.check(false);
     }
   }
 
-  assert!(statuses.gr_query_ess.is_empty());
-  assert!(statuses.table_read_ess.is_empty());
-  assert!(statuses.trans_table_read_ess.is_empty());
-  assert!(statuses.tm_statuss.is_empty());
-  assert!(statuses.ms_query_ess.is_empty());
-  assert!(statuses.ms_table_read_ess.is_empty());
-  assert!(statuses.ms_table_write_ess.is_empty());
-  assert!(statuses.ms_table_insert_ess.is_empty());
-  assert!(statuses.ms_table_delete_ess.is_empty());
+  check_ctx.check(statuses.gr_query_ess.is_empty());
+  check_ctx.check(statuses.table_read_ess.is_empty());
+  check_ctx.check(statuses.trans_table_read_ess.is_empty());
+  check_ctx.check(statuses.tm_statuss.is_empty());
+  check_ctx.check(statuses.ms_query_ess.is_empty());
+  check_ctx.check(statuses.ms_table_read_ess.is_empty());
+  check_ctx.check(statuses.ms_table_write_ess.is_empty());
+  check_ctx.check(statuses.ms_table_insert_ess.is_empty());
+  check_ctx.check(statuses.ms_table_delete_ess.is_empty());
 
-  assert!(matches!(statuses.ddl_es, DDLES::None));
+  check_ctx.check(matches!(statuses.ddl_es, DDLES::None));
 }

@@ -4,9 +4,9 @@ use runiversal::common::{
   mk_cid, BasicIOCtx, CoreIOCtx, GossipData, MasterIOCtx, MasterTraceMessage, RangeEnds,
   SlaveIOCtx, SlaveTraceMessage,
 };
-use runiversal::coord::coord_test::{assert_coord_clean, assert_coord_consistency};
+use runiversal::coord::coord_test::{assert_coord_consistency, check_coord_clean};
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
-use runiversal::master::master_test::assert_master_clean;
+use runiversal::master::master_test::check_master_clean;
 use runiversal::master::{
   FullDBSchema, FullMasterInput, MasterContext, MasterState, MasterTimerInput,
 };
@@ -18,12 +18,13 @@ use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::{add_msg, mk_client_eid};
-use runiversal::slave::slave_test::assert_slave_clean;
+use runiversal::slave::slave_test::check_slave_clean;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
 };
-use runiversal::tablet::tablet_test::{assert_tablet_clean, assert_tablet_consistency};
+use runiversal::tablet::tablet_test::{assert_tablet_consistency, check_tablet_clean};
 use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
+use runiversal::test_utils::CheckCtx;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -527,13 +528,12 @@ impl Simulation {
   ) -> Option<msg::NetworkMessage> {
     let queue = self.queues.get_mut(from_eid).unwrap().get_mut(to_eid).unwrap();
     if queue.len() == 1 {
-      if let Some(index) = self
+      let index = self
         .nonempty_queues
         .iter()
         .position(|(from_eid2, to_eid2)| from_eid2 == from_eid && to_eid2 == to_eid)
-      {
-        self.nonempty_queues.remove(index);
-      }
+        .unwrap();
+      self.nonempty_queues.remove(index);
     }
     queue.pop_front()
   }
@@ -769,27 +769,39 @@ impl Simulation {
 
   /// Checks that all nodes in the system are in their steady state after some
   /// time without any new requests.
-  pub fn check_resources_clean(&mut self) {
+  pub fn check_resources_clean(&mut self, should_assert: bool) -> bool {
+    let mut check_ctx = CheckCtx::new(should_assert);
     for (_, master_data) in &self.master_data {
-      assert_master_clean(&master_data.master_state);
+      check_master_clean(&master_data.master_state, &mut check_ctx);
     }
     for (_, slave_data) in &self.slave_data {
-      assert_slave_clean(&slave_data.slave_state);
+      check_slave_clean(&slave_data.slave_state, &mut check_ctx);
       for (_, coord) in &slave_data.coord_states {
-        assert_coord_clean(coord);
+        check_coord_clean(coord, &mut check_ctx);
       }
       for (_, tablet) in &slave_data.tablet_states {
-        assert_tablet_clean(tablet);
+        check_tablet_clean(tablet, &mut check_ctx);
       }
     }
+    check_ctx.get_result()
   }
 
   /// This function simply increments the `true_time` by 1ms and delivers 1ms worth of
   /// messages. For simplicity, we assume that this means that every non-empty queue
-  /// of messages delivers about one message in this time.
+  /// of messages delivers about as many messages are in that queue at a time, assuming all queues
+  /// have about the same number of messages.
+  ///
+  /// Analysis:
+  ///   - We wish to deliver messages sensibly as a real system would.
+  ///   - A very large number of messages are RemoteLeaderChanged gossip messages, which
+  ///     results in every leader sending every other node (not just leaders) a message.
   pub fn simulate1ms(&mut self) {
     self.true_timestamp += 1;
-    let num_msgs_to_deliver = self.nonempty_queues.len();
+    let mut num_msgs_to_deliver = 0;
+    for (from_eid, to_eid) in &self.nonempty_queues {
+      let num_msgs = self.queues.get(from_eid).unwrap().get(to_eid).unwrap().len();
+      num_msgs_to_deliver += num_msgs;
+    }
     for _ in 0..num_msgs_to_deliver {
       let r = self.rand.next_u32() as usize % self.nonempty_queues.len();
       let (from_eid, to_eid) = self.nonempty_queues.get(r).unwrap().clone();

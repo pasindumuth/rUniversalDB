@@ -1,6 +1,6 @@
 use crate::serial_test_utils::{
   populate_inventory_table_basic, populate_setup_user_table_basic, setup, setup_inventory_table,
-  setup_user_table, setup_with_seed, simulate_until_response, TestContext,
+  setup_user_table, setup_with_seed, simulate_until_clean, simulate_until_response, TestContext,
 };
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
@@ -1325,13 +1325,7 @@ fn cancellation_test() {
     }
 
     // Simulate more for a cooldown time and verify that all resources get cleaned up.
-    const TP_COOLDOWN_MS: u32 = 500;
-    let mut duration = 0;
-    while duration < TP_COOLDOWN_MS {
-      sim.simulate1ms();
-      duration += 1;
-    }
-    sim.check_resources_clean();
+    assert!(simulate_until_clean(&mut sim, 10000));
 
     // If the Query had been successfull cancelled, we verify that the data in the system
     // is what we exact. We do this after cooldown to know that this is the stead state.
@@ -1449,7 +1443,9 @@ fn paxos_basic_serial_test() {
   // changes the Leadership of some random node a little bit later than the last.
   let mut successful = 0;
   let mut failed = 0;
-  'outer: for i in 0..1 {
+  'outer: for i in 0..10 {
+    println!("    iteration {:?}", i);
+
     let mut seed = [0; 16];
     rand.fill_bytes(&mut seed);
     let mut sim = mk_general_sim(seed, 5, 5);
@@ -1478,11 +1474,15 @@ fn paxos_basic_serial_test() {
 
     // We increment this time a little bit every iteration to simulation the Leadership
     // change happening in different stages of the Transaction.
-    let target_change_timestamp: u128 = i * 10;
+    // TODO: assert that true time is small enough for all runs such that this increment
+    //  covers all cases.
+    let target_change_timestamp: u128 = i * 5;
 
     // Choose a random Slave to be the target of the Leadership change
     let sids: Vec<SlaveGroupId> = sim.slave_address_config().keys().cloned().collect();
-    let target_change_sid = sids.get(rand.next_u32() as usize % sids.len()).unwrap().clone();
+    // TODO: this works
+    // let target_change_sid = sids.get(rand.next_u32() as usize % sids.len()).unwrap().clone();
+    let target_change_sid = sids.get(0).unwrap().clone();
 
     // Simulate for at-most 10000 seconds, giving up if we do not get a response in time.
     for _ in 0..10000 {
@@ -1513,14 +1513,13 @@ fn paxos_basic_serial_test() {
 
       // If we get a response, act accordingly
       if response_count < sim.get_responses(&ctx.sender_eid).len() {
+        // Ensure we are not blocking any queues by this point
+        // TODO: pull this blocking behavior into sim. If we forget to unset this, it
+        //  destroys liveness.
+        sim.blocked_leadership = None;
+
         // Cooldown and check for cleanup
-        const TP_COOLDOWN_MS: u32 = 500;
-        let mut duration = 0;
-        while duration < TP_COOLDOWN_MS {
-          sim.simulate1ms();
-          duration += 1;
-        }
-        sim.check_resources_clean();
+        assert!(simulate_until_clean(&mut sim, 10000));
 
         // Get the response and validate it
         let response = sim.get_responses(&ctx.sender_eid).iter().last().unwrap();
@@ -1564,7 +1563,7 @@ fn paxos_basic_serial_test() {
   }
 
   // Check that we encoutered healthy balance of successful and failed queries.
-  if successful < 4 && failed < 4 {
+  if failed < 1 {
     panic!();
   }
 

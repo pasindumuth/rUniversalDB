@@ -85,7 +85,7 @@ impl PaxosConfig {
     PaxosConfig {
       heartbeat_threshold: 3,
       heartbeat_period_ms: 5,
-      next_index_period_ms: 5,
+      next_index_period_ms: 10,
       retry_defer_time_ms: 5,
       proposal_increment: 1000,
     }
@@ -157,7 +157,7 @@ pub struct PaxosDriver<BundleT> {
   next_insert: Option<(UUID, BundleT)>,
 }
 
-impl<BundleT: Clone> PaxosDriver<BundleT> {
+impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
   /// Constructs a `PaxosDriver` for a Slave that is part of the initial system bootstrap.
   pub fn new(paxos_nodes: Vec<EndpointId>, paxos_config: PaxosConfig) -> PaxosDriver<BundleT> {
     let mut remote_next_indices = BTreeMap::<EndpointId, PLIndex>::new();
