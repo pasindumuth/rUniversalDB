@@ -26,6 +26,14 @@ mod serial_test_utils;
 mod simulation;
 mod stats;
 
+/**
+ * Debugging Tips:
+ *  - We thread a global RNG through all test cases. However, in every test case, we try to
+ *    use it for nothing more than creating a new RNG by creating a random seed. The reason
+ *    for this is so that if a failure happens, we can just print the seed and then quickly
+ *    reproduce by using that seed directly to run the test case.
+ */
+
 fn main() {
   let mut rand = XorShiftRng::from_seed([0; 16]);
   println!("Basic Serial Tests:");

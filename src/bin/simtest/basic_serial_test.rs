@@ -1,6 +1,6 @@
 use crate::serial_test_utils::{
   populate_inventory_table_basic, populate_setup_user_table_basic, setup_inventory_table,
-  setup_user_table, setup_with_seed, simulate_until_clean, simulate_until_response, TestContext,
+  setup_user_table, setup_with_seed, simulate_until_clean, TestContext,
 };
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
@@ -1279,8 +1279,8 @@ fn cancellation_test(rand: &mut XorShiftRng) {
 
     // Simulate. If we respond early, then check that the output is what we expect.
     let mut cancel_succeeded = false;
-    if simulate_until_response(&mut sim, &ctx.sender_eid, 15) {
-      let response = sim.get_responses(&ctx.sender_eid).iter().last().unwrap();
+    if ctx.simulate_until_response(&mut sim, 15) {
+      let response = ctx.next_response(&mut sim);
       match response.clone() {
         msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
           check_success(&mut sim, &mut ctx, &payload, request_id.clone());
@@ -1290,21 +1290,29 @@ fn cancellation_test(rand: &mut XorShiftRng) {
     } else {
       // Otherwise, send a cancellation and simulate until the end.
       ctx.send_cancellation(&mut sim, request_id.clone());
-      assert!(simulate_until_response(&mut sim, &ctx.sender_eid, 10000));
-      let response = sim.get_responses(&ctx.sender_eid).iter().last().unwrap();
+      assert!(ctx.simulate_until_response(&mut sim, 10000));
+      let response = ctx.next_response(&mut sim);
       match response.clone() {
         msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
-          // Here, the original query responded before the cancellation could. Flush out the
-          // cancellation response and then check the final state.
-          assert!(simulate_until_response(&mut sim, &ctx.sender_eid, 10000));
+          // Here, the original query responded before the cancellation could. First, flush
+          // out the cancellation response, and check that it is as expected.
+          assert!(ctx.simulate_until_response(&mut sim, 10000));
+          match ctx.next_response(&mut sim) {
+            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(payload)) => {
+              assert_eq!(payload.payload, msg::ExternalAbortedData::CancelNonExistantRequestId);
+            }
+            _ => panic!(),
+          }
+
+          // Then check the final state.
           check_success(&mut sim, &mut ctx, &payload, request_id.clone());
         }
         msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(payload)) => {
           assert_eq!(payload.request_id, request_id.clone());
           if payload.payload == msg::ExternalAbortedData::CancelDenied {
             // In case the cancellation failed, finish the original query, expecting success.
-            assert!(simulate_until_response(&mut sim, &ctx.sender_eid, 10000));
-            let response = sim.get_responses(&ctx.sender_eid).iter().last().unwrap();
+            assert!(ctx.simulate_until_response(&mut sim, 10000));
+            let response = ctx.next_response(&mut sim);
             match response.clone() {
               msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
                 payload,
@@ -1468,8 +1476,11 @@ fn paxos_basic_serial_test(rand: &mut XorShiftRng) {
       (i * (EXPECTED_TIME_PER_ITERATION / NUM_ITERATIONS / 2)) as u128;
 
     // Choose a random Slave to be the target of the Leadership change
-    let sids: Vec<SlaveGroupId> = sim.slave_address_config().keys().cloned().collect();
-    let target_change_sid = sids.get(rand.next_u32() as usize % sids.len()).unwrap().clone();
+    let mut sids: Vec<SlaveGroupId> = sim.slave_address_config().keys().cloned().collect();
+    // TODO: avoid needing to remove the s0 Slave (which we to avoid the
+    //  coordinator node dying, making it difficult to execute queries).
+    sids.remove(0);
+    let target_change_sid = sids.get(sim.rand.next_u32() as usize % sids.len()).unwrap().clone();
 
     let mut change_state = Some((target_change_sid, target_change_timestamp));
 
@@ -1497,7 +1508,7 @@ fn paxos_basic_serial_test(rand: &mut XorShiftRng) {
         assert!(simulate_until_clean(&mut sim, 10000));
 
         // Get the response and validate it
-        let response = sim.get_responses(&ctx.sender_eid).iter().last().unwrap();
+        let response = ctx.next_response(&mut sim);
         match response.clone() {
           msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
             assert_eq!(payload.request_id, request_id.clone());

@@ -1439,6 +1439,7 @@ impl TabletContext {
 
     // Otherwise, we need to create one. First check whether the Timestamp is available or not.
     if self.verifying_writes.contains_key(&timestamp)
+      || self.inserting_prepared_writes.contains_key(&timestamp)
       || self.prepared_writes.contains_key(&timestamp)
       || self.committed_writes.contains_key(&timestamp)
     {

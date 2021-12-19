@@ -846,7 +846,9 @@ pub fn advanced_parallel_test(rand: &mut XorShiftRng) {
   }
 
   // Verify the responses are correct
-  if let Some((true_time, total_queries, successful_queries)) = verify_req_res(rand, req_res_map) {
+  if let Some((true_time, total_queries, successful_queries)) =
+    verify_req_res(&mut sim.rand, req_res_map)
+  {
     println!(
       "Test 'test_all_advanced_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}",

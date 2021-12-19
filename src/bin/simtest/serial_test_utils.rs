@@ -18,6 +18,9 @@ pub struct TestContext {
   master_eid: EndpointId,
   /// The slave node that we always use.
   slave_eid: EndpointId,
+
+  /// The index that the next response sent back to `sender_eid` should take.
+  next_response_idx: usize,
 }
 
 impl TestContext {
@@ -27,6 +30,7 @@ impl TestContext {
       sender_eid: mk_eid("ce0"),
       master_eid: mk_eid("me0"),
       slave_eid: mk_eid("se0"),
+      next_response_idx: 0,
     }
   }
 
@@ -47,8 +51,8 @@ impl TestContext {
       &self.master_eid,
     );
 
-    assert!(simulate_until_response(sim, &self.sender_eid, time_limit));
-    let response = sim.get_responses(&self.sender_eid).iter().last().unwrap();
+    assert!(self.simulate_until_response(sim, time_limit));
+    let response = self.next_response(sim);
     match response {
       msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(payload)) => {
         assert_eq!(payload.request_id, request_id)
@@ -100,8 +104,8 @@ impl TestContext {
     exp_result: TableView,
   ) {
     let request_id = self.send_query(sim, query);
-    assert!(simulate_until_response(sim, &self.sender_eid, time_limit));
-    let response = sim.get_responses(&self.sender_eid).iter().last().unwrap();
+    assert!(self.simulate_until_response(sim, time_limit));
+    let response = self.next_response(sim);
     match response {
       msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
         assert_eq!(payload.request_id, request_id);
@@ -110,21 +114,41 @@ impl TestContext {
       _ => panic!("Incorrect Response: {:#?}", response),
     }
   }
-}
 
-/// Simulates `sim` until an External response is collected at `eid`, or until
-/// `time_limit` milliseconds have passed.
-pub fn simulate_until_response(sim: &mut Simulation, eid: &EndpointId, time_limit: u32) -> bool {
-  let mut duration = 0;
-  let prev_num_responses = sim.get_responses(eid).len();
-  while duration < time_limit {
-    sim.simulate1ms();
-    duration += 1;
-    if sim.get_responses(eid).len() > prev_num_responses {
-      return true;
+  /// Simulates `sim` until an External response is collected at `eid`, or until
+  /// `time_limit` milliseconds have passed. This returns true exactly when there
+  /// is a new message that can be read with `next_response`.
+  pub fn simulate_until_response(&mut self, sim: &mut Simulation, time_limit: u32) -> bool {
+    let prev_num_responses = sim.get_responses(&self.sender_eid).len();
+    if self.next_response_idx < prev_num_responses {
+      // This means that the next response is already here (e.g. due to the last
+      // millisecond returned 2 responses).
+      true
+    } else if self.next_response_idx == prev_num_responses {
+      let mut duration = 0;
+      while duration < time_limit {
+        sim.simulate1ms();
+        duration += 1;
+        if sim.get_responses(&self.sender_eid).len() > self.next_response_idx {
+          return true;
+        }
+      }
+      false
+    } else {
+      panic!()
     }
   }
-  false
+
+  /// Gets the response pointed to by `next_response_idx`, panicing if such a response
+  /// does not exist. Make sure that a call to `simulate_until_response` returns true
+  /// to ensure this does not happen.
+  ///
+  /// Note: that this is not idempotent.
+  pub fn next_response<'a>(&mut self, sim: &'a mut Simulation) -> &'a msg::NetworkMessage {
+    let response = sim.get_responses(&self.sender_eid).get(self.next_response_idx).unwrap();
+    self.next_response_idx += 1;
+    response
+  }
 }
 
 /// Simulates `sim` until all of them are in their steady state, or until
