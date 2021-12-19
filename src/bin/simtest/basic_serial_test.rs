@@ -1414,7 +1414,7 @@ fn paxos_leader_change_test() {
   // Block the current leader of the SlaveGroup
   let sid = sim.slave_address_config().first_key_value().unwrap().0.clone();
   let lid = sim.leader_map.get(&sid.to_gid()).unwrap().clone();
-  sim.blocked_leadership = Some(lid.clone());
+  sim.start_leadership_change(sid.to_gid());
 
   // Simulate until the Leadership changes
   let mut leader_did_change = false;
@@ -1423,7 +1423,6 @@ fn paxos_leader_change_test() {
     let cur_lid = sim.leader_map.get(&sid.to_gid()).unwrap().clone();
     if cur_lid.gen > lid.gen {
       leader_did_change = true;
-      sim.blocked_leadership = None;
       break;
     }
   }
@@ -1439,11 +1438,15 @@ fn paxos_basic_serial_test() {
   let mut rand = XorShiftRng::from_seed([0; 16]);
   let mut test_time_taken = 0;
 
+  const EXPECTED_TOTAL_TIME: u32 = 1000;
+  const NUM_ITERATIONS: u32 = 10;
+  const EXPECTED_TIME_PER_ITERATION: u32 = EXPECTED_TOTAL_TIME / NUM_ITERATIONS;
+
   // Simulate 10 iterations, where each iteration uses a new initial seed and also
   // changes the Leadership of some random node a little bit later than the last.
   let mut successful = 0;
   let mut failed = 0;
-  'outer: for i in 0..10 {
+  'outer: for i in 0..NUM_ITERATIONS {
     println!("    iteration {:?}", i);
     let mut seed = [0; 16];
     rand.fill_bytes(&mut seed);
@@ -1463,45 +1466,27 @@ fn paxos_basic_serial_test() {
 
     let request_id = ctx.send_query(&mut sim, query);
 
-    enum LeaderChangeState {
-      PreLeaderChanged,
-      LeaderChanging(LeadershipId),
-      PostLeaderChanged,
-    }
-
-    let mut cur_leader_state = LeaderChangeState::PreLeaderChanged;
-
-    // We increment this time a little bit every iteration to simulation the Leadership
-    // change happening in different stages of the Transaction.
-    // TODO: assert that true time is small enough for all runs such that this increment
-    //  covers all cases.
-    let target_change_timestamp: u128 = i * 5;
+    // Here, we try to distribute `target_change_timestamp` uniformly across a single
+    // execution, incrementing a little every iteration. We divide by 2 to bias the
+    // leadership change closer to the front.
+    let target_change_timestamp: u128 =
+      (i * (EXPECTED_TIME_PER_ITERATION / NUM_ITERATIONS / 2)) as u128;
 
     // Choose a random Slave to be the target of the Leadership change
     let sids: Vec<SlaveGroupId> = sim.slave_address_config().keys().cloned().collect();
     let target_change_sid = sids.get(rand.next_u32() as usize % sids.len()).unwrap().clone();
 
+    let mut change_state = Some((target_change_sid, target_change_timestamp));
+
     // Simulate for at-most 10000ms, giving up if we do not get a response in time.
     for _ in 0..10000 {
       // Progress the LeaderChangeState
-      match &cur_leader_state {
-        LeaderChangeState::PreLeaderChanged => {
-          if sim.true_timestamp() >= &target_change_timestamp {
-            // Start changing the Leadership of `target_change_sid`
-            let lid = sim.leader_map.get(&target_change_sid.to_gid()).unwrap().clone();
-            sim.blocked_leadership = Some(lid.clone());
-            cur_leader_state = LeaderChangeState::LeaderChanging(lid);
-          }
+      if let Some((sid, timestamp)) = &change_state {
+        if sim.true_timestamp() >= &timestamp {
+          // Start changing the Leadership of `sid`
+          sim.start_leadership_change(sid.to_gid());
+          change_state = None;
         }
-        LeaderChangeState::LeaderChanging(lid) => {
-          let cur_lid = sim.leader_map.get(&target_change_sid.to_gid()).unwrap().clone();
-          if cur_lid.gen > lid.gen {
-            // Clear `blocked_leadership` to reduce excessive network blocking.
-            sim.blocked_leadership = None;
-            cur_leader_state = LeaderChangeState::PostLeaderChanged;
-          }
-        }
-        LeaderChangeState::PostLeaderChanged => {}
       }
 
       // Simulate 1ms
@@ -1510,10 +1495,8 @@ fn paxos_basic_serial_test() {
 
       // If we get a response, act accordingly
       if response_count < sim.get_responses(&ctx.sender_eid).len() {
-        // Ensure we are not blocking any queues by this point
-        // TODO: pull this blocking behavior into sim. If we forget to unset this, it
-        //  destroys liveness.
-        sim.blocked_leadership = None;
+        // Ensure we are not blocking any queues by this point so SELECT below will succeed.
+        sim.stop_leadership_change();
 
         // Cooldown and check for cleanup
         assert!(simulate_until_clean(&mut sim, 10000));
@@ -1564,5 +1547,7 @@ fn paxos_basic_serial_test() {
     panic!();
   }
 
+  // Ensure the test occurred in a sensible amount of time.
+  assert!(test_time_taken < 1000);
   println!("Test 'paxos_basic_serial_test' Passed! Time taken: {:?}ms", test_time_taken);
 }

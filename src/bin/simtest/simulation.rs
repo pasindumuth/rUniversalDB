@@ -289,7 +289,7 @@ pub struct Simulation {
   /// LeadershipId; the `gen` will increases one by one).
   pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
   /// If this is set, the `IsLeader` messages disseminated from this Leadership will be blocked.
-  pub blocked_leadership: Option<LeadershipId>,
+  blocked_leadership: Option<(PaxosGroupId, LeadershipId)>,
 }
 
 impl Simulation {
@@ -505,6 +505,28 @@ impl Simulation {
   }
 
   // -----------------------------------------------------------------------------------------------
+  //  Network Control
+  // -----------------------------------------------------------------------------------------------
+
+  /// Start forcibly changing the Leadership of `gid`.
+  pub fn start_leadership_change(&mut self, gid: PaxosGroupId) {
+    let lid = self.leader_map.get(&gid).unwrap().clone();
+    self.blocked_leadership = Some((gid, lid.clone()));
+  }
+
+  /// Stop trying to forcibly change the Leadership of `blocked_leadership`. If it already
+  /// happened, this effectively does nothing (since `blocked_leadership` will have been
+  /// cleared). Returns `false` if this function did nothing, `true` otherwise.
+  pub fn stop_leadership_change(&mut self) -> bool {
+    if self.blocked_leadership.is_none() {
+      false
+    } else {
+      self.blocked_leadership = None;
+      true
+    }
+  }
+
+  // -----------------------------------------------------------------------------------------------
   //  Simulation Methods
   // -----------------------------------------------------------------------------------------------
 
@@ -575,6 +597,15 @@ impl Simulation {
           if cur_lid.gen < lid.gen {
             *cur_lid = lid;
           }
+
+          // Clear blocked_leadership if at node is no longer the Leader.
+          if let Some((blocked_gid, blocked_lid)) = &self.blocked_leadership {
+            if blocked_gid == &PaxosGroupId::Master {
+              if blocked_lid.gen < cur_lid.gen {
+                self.blocked_leadership = None
+              }
+            }
+          }
         }
       }
     }
@@ -611,6 +642,15 @@ impl Simulation {
           let cur_lid = self.leader_map.get_mut(&gid).unwrap();
           if cur_lid.gen < lid.gen {
             *cur_lid = lid;
+
+            // Clear blocked_leadership if at node is no longer the Leader.
+            if let Some((blocked_gid, blocked_lid)) = &self.blocked_leadership {
+              if blocked_gid == &gid {
+                if blocked_lid.gen < cur_lid.gen {
+                  self.blocked_leadership = None
+                }
+              }
+            }
           }
         }
       }
@@ -623,7 +663,7 @@ impl Simulation {
   /// a slave, the slave processes the message.
   pub fn deliver_msg(&mut self, from_eid: &EndpointId, to_eid: &EndpointId) {
     // First, check whether this queue is blocked due to `blocked_leadership`, returning if so.
-    if let Some(lid) = &self.blocked_leadership {
+    if let Some((_, lid)) = &self.blocked_leadership {
       if let Some(front_msg) = self.peek_msg(from_eid, to_eid) {
         match front_msg {
           msg::NetworkMessage::Slave(msg::SlaveMessage::PaxosDriverMessage(
