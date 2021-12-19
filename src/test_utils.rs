@@ -1,6 +1,8 @@
 use crate::model::common::{
   ColName, ColVal, EndpointId, SlaveGroupId, TablePath, TabletGroupId, TransTableName,
 };
+use rand::RngCore;
+use rand_xorshift::XorShiftRng;
 
 pub fn cn(s: &str) -> ColName {
   ColName(s.to_string())
@@ -40,6 +42,16 @@ pub fn mk_tab(table_path: &str) -> TablePath {
 
 pub fn mk_ttab(table_path: &str) -> TransTableName {
   TransTableName(table_path.to_string())
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Random
+// -----------------------------------------------------------------------------------------------
+
+pub fn mk_seed(rand: &mut XorShiftRng) -> [u8; 16] {
+  let mut seed = [0; 16];
+  rand.fill_bytes(&mut seed);
+  seed
 }
 
 // -----------------------------------------------------------------------------------------------

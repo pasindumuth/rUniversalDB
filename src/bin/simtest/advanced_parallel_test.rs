@@ -1,4 +1,4 @@
-use crate::serial_test_utils::{setup, TestContext};
+use crate::serial_test_utils::{setup_with_seed, TestContext};
 use crate::simulation::Simulation;
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
@@ -12,7 +12,7 @@ use runiversal::model::message as msg;
 use runiversal::model::message::ExternalAbortedData;
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::mk_slave_eid;
-use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid};
+use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_seed, mk_sid};
 use sqlformat;
 use std::collections::BTreeMap;
 
@@ -499,9 +499,7 @@ impl QueryGenerator {
     let timestamp = *sim.true_timestamp();
 
     // Create a new RNG for query generation
-    let mut seed = [0; 16];
-    sim.rand.fill_bytes(&mut seed);
-    let mut rand = XorShiftRng::from_seed(seed);
+    let mut rand = XorShiftRng::from_seed(mk_seed(&mut sim.rand));
 
     // Extract all current TableSchemas
     let full_db_schema = sim.full_db_schema();
@@ -612,9 +610,10 @@ impl QueryGenerator {
 /// Replay the requests that succeeded in timestamp order serially, and very that
 /// the results are the same.
 fn verify_req_res(
+  rand: &mut XorShiftRng,
   req_res_map: BTreeMap<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>,
 ) -> Option<(u32, u32, u32)> {
-  let (mut sim, mut ctx) = setup();
+  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
   let mut sorted_success_res =
     BTreeMap::<Timestamp, (msg::PerformExternalQuery, msg::ExternalQuerySuccess)>::new();
   let total_queries = req_res_map.len() as u32;
@@ -740,17 +739,14 @@ fn setup_tables(sim: &mut Simulation, ctx: &mut TestContext) {
 //  test_all_advanced_parallel
 // -----------------------------------------------------------------------------------------------
 
-pub fn test_all_advanced_parallel() {
-  let mut orig_rand = XorShiftRng::from_seed([0; 16]);
+pub fn test_all_advanced_parallel(rand: &mut XorShiftRng) {
   for i in 0..10 {
-    let mut seed = [0; 16];
-    orig_rand.fill_bytes(&mut seed);
     println!("Running round {:?}", i);
-    advanced_parallel_test(seed);
+    advanced_parallel_test(rand);
   }
 }
 
-pub fn advanced_parallel_test(seed: [u8; 16]) {
+pub fn advanced_parallel_test(rand: &mut XorShiftRng) {
   let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
     (mk_sid("s0"), vec![mk_slave_eid(0)]),
@@ -763,8 +759,14 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
   .collect();
 
   // We create 3 clients.
-  let mut sim =
-    Simulation::new(seed, 3, slave_address_config, master_address_config, PaxosConfig::prod());
+  let mut sim = Simulation::new(
+    mk_seed(rand),
+    3,
+    slave_address_config,
+    master_address_config,
+    PaxosConfig::prod(),
+  );
+
   let mut ctx = TestContext::new();
 
   // Setup Tables
@@ -844,7 +846,7 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
   }
 
   // Verify the responses are correct
-  if let Some((true_time, total_queries, successful_queries)) = verify_req_res(req_res_map) {
+  if let Some((true_time, total_queries, successful_queries)) = verify_req_res(rand, req_res_map) {
     println!(
       "Test 'test_all_advanced_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}",

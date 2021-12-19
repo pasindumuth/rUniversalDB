@@ -16,6 +16,7 @@ use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
 };
 use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
+use runiversal::test_utils::mk_seed;
 use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -236,9 +237,7 @@ pub fn start_server(
     coord_positions.push(coord_group_id.clone());
     // Create the seed for the Tablet's RNG. We use the Slave's
     // RNG to create a random seed.
-    let mut seed = [0; 16];
-    rand.fill_bytes(&mut seed);
-    let rand = XorShiftRng::from_seed(seed);
+    let rand = XorShiftRng::from_seed(mk_seed(&mut rand));
 
     // Create mpsc queue for Slave-Coord communication.
     let (to_coord_sender, to_coord_receiver) = mpsc::channel();

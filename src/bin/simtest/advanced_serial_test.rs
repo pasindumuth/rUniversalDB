@@ -1,15 +1,16 @@
 use crate::serial_test_utils::{
-  populate_inventory_table_basic, populate_setup_user_table_basic, setup, setup_inventory_table,
-  setup_user_table,
+  populate_inventory_table_basic, populate_setup_user_table_basic, setup_inventory_table,
+  setup_user_table, setup_with_seed,
 };
 use crate::simulation::Simulation;
+use rand_xorshift::XorShiftRng;
 use runiversal::common::TableSchema;
 use runiversal::model::common::{
   ColName, ColType, EndpointId, Gen, PrimaryKey, RequestId, SlaveGroupId, TablePath, TableView,
   TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message as msg;
-use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid, mk_tab, mk_tid};
+use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_seed, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
 
 /**
@@ -22,17 +23,17 @@ use std::collections::BTreeMap;
 //  test_all_advanced_serial
 // -----------------------------------------------------------------------------------------------
 
-pub fn test_all_advanced_serial() {
-  subquery_test();
-  trans_table_test();
+pub fn test_all_advanced_serial(rand: &mut XorShiftRng) {
+  subquery_test(rand);
+  trans_table_test(rand);
 }
 
 // -----------------------------------------------------------------------------------------------
 //  subquery_test
 // -----------------------------------------------------------------------------------------------
 
-fn subquery_test() {
-  let (mut sim, mut ctx) = setup();
+fn subquery_test(rand: &mut XorShiftRng) {
+  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -69,8 +70,8 @@ fn subquery_test() {
 //  trans_table_test
 // -----------------------------------------------------------------------------------------------
 
-fn trans_table_test() {
-  let (mut sim, mut ctx) = setup();
+fn trans_table_test(rand: &mut XorShiftRng) {
+  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
