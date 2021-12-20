@@ -24,16 +24,16 @@ use std::collections::BTreeMap;
 // -----------------------------------------------------------------------------------------------
 
 pub fn test_all_advanced_serial(rand: &mut XorShiftRng) {
-  subquery_test(rand);
-  trans_table_test(rand);
+  subquery_test(mk_seed(rand));
+  trans_table_test(mk_seed(rand));
 }
 
 // -----------------------------------------------------------------------------------------------
 //  subquery_test
 // -----------------------------------------------------------------------------------------------
 
-fn subquery_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn subquery_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -70,8 +70,8 @@ fn subquery_test(rand: &mut XorShiftRng) {
 //  trans_table_test
 // -----------------------------------------------------------------------------------------------
 
-fn trans_table_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn trans_table_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);

@@ -27,23 +27,23 @@ use std::collections::BTreeMap;
 // -----------------------------------------------------------------------------------------------
 
 pub fn test_all_basic_serial(rand: &mut XorShiftRng) {
-  simple_test(rand);
-  subquery_test(rand);
-  trans_table_test(rand);
-  select_projection_test(rand);
-  insert_test(rand);
-  multi_key_test(rand);
-  multi_stage_test(rand);
-  aggregation_test(rand);
-  aliased_column_resolution_test(rand);
-  basic_add_column(rand);
-  drop_column(rand);
-  basic_delete_test(rand);
-  insert_delete_insert_test(rand);
-  ghost_deleted_row_test(rand);
-  cancellation_test(rand);
-  paxos_leader_change_test(rand);
-  paxos_basic_serial_test(rand);
+  simple_test(mk_seed(rand));
+  subquery_test(mk_seed(rand));
+  trans_table_test(mk_seed(rand));
+  select_projection_test(mk_seed(rand));
+  insert_test(mk_seed(rand));
+  multi_key_test(mk_seed(rand));
+  multi_stage_test(mk_seed(rand));
+  aggregation_test(mk_seed(rand));
+  aliased_column_resolution_test(mk_seed(rand));
+  basic_add_column(mk_seed(rand));
+  drop_column(mk_seed(rand));
+  basic_delete_test(mk_seed(rand));
+  insert_delete_insert_test(mk_seed(rand));
+  ghost_deleted_row_test(mk_seed(rand));
+  cancellation_test(mk_seed(rand));
+  paxos_leader_change_test(mk_seed(rand));
+  paxos_basic_serial_test(mk_seed(rand));
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -52,8 +52,8 @@ pub fn test_all_basic_serial(rand: &mut XorShiftRng) {
 
 /// This is a test that solely tests Transaction Processing. We take all PaxosGroups to just
 /// have one node. We only check for SQL semantics compatibility.
-fn simple_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn simple_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Test Basic Queries
   setup_inventory_table(&mut sim, &mut ctx);
@@ -188,8 +188,8 @@ fn simple_test(rand: &mut XorShiftRng) {
 //  subquery_test
 // -----------------------------------------------------------------------------------------------
 
-fn subquery_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn subquery_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -295,8 +295,8 @@ fn subquery_test(rand: &mut XorShiftRng) {
 //  trans_table_test
 // -----------------------------------------------------------------------------------------------
 
-fn trans_table_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn trans_table_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -331,8 +331,8 @@ fn trans_table_test(rand: &mut XorShiftRng) {
 //  select_projection_test
 // -----------------------------------------------------------------------------------------------
 
-fn select_projection_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn select_projection_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -393,8 +393,8 @@ fn select_projection_test(rand: &mut XorShiftRng) {
 //  insert_test
 // -----------------------------------------------------------------------------------------------
 
-fn insert_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn insert_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -440,8 +440,8 @@ fn insert_test(rand: &mut XorShiftRng) {
 //  multi_key_test
 // -----------------------------------------------------------------------------------------------
 
-fn multi_key_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn multi_key_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
 
@@ -551,8 +551,8 @@ fn multi_key_test(rand: &mut XorShiftRng) {
 //  multi_stage_test
 // -----------------------------------------------------------------------------------------------
 
-fn multi_stage_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn multi_stage_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -610,8 +610,8 @@ fn multi_stage_test(rand: &mut XorShiftRng) {
 //  aggregation_test
 // -----------------------------------------------------------------------------------------------
 
-fn aggregation_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn aggregation_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -715,8 +715,8 @@ fn aggregation_test(rand: &mut XorShiftRng) {
 //  aliased_column_resolution_test
 // -----------------------------------------------------------------------------------------------
 
-fn aliased_column_resolution_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn aliased_column_resolution_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -808,8 +808,8 @@ fn aliased_column_resolution_test(rand: &mut XorShiftRng) {
 //  basic_add_column
 // -----------------------------------------------------------------------------------------------
 
-fn basic_add_column(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn basic_add_column(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -893,8 +893,8 @@ fn basic_add_column(rand: &mut XorShiftRng) {
 //  drop_column
 // -----------------------------------------------------------------------------------------------
 
-fn drop_column(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn drop_column(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -1003,8 +1003,8 @@ fn drop_column(rand: &mut XorShiftRng) {
 // -----------------------------------------------------------------------------------------------
 
 /// Sees if a single Delete Query does indeed delete data.
-fn basic_delete_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn basic_delete_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -1077,8 +1077,8 @@ fn basic_delete_test(rand: &mut XorShiftRng) {
 
 /// Sees if a Transaction with an Insert a row, then Deletes it, and then tries Inserting
 /// it again, then it all works.
-fn insert_delete_insert_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn insert_delete_insert_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -1130,8 +1130,8 @@ fn insert_delete_insert_test(rand: &mut XorShiftRng) {
 
 /// Sees if a deleted row is re-inserted with some columns unspecified, they start off as
 /// NULL, instead of their prior value due to the delete.
-fn ghost_deleted_row_test(rand: &mut XorShiftRng) {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+fn ghost_deleted_row_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup_with_seed(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -1198,7 +1198,7 @@ fn ghost_deleted_row_test(rand: &mut XorShiftRng) {
 //  cancellation_test
 // -----------------------------------------------------------------------------------------------
 
-fn cancellation_test(rand: &mut XorShiftRng) {
+fn cancellation_test(seed: [u8; 16]) {
   let mut test_time_taken = 0;
 
   // We repeat this loop to get a good balance between successful
@@ -1206,7 +1206,7 @@ fn cancellation_test(rand: &mut XorShiftRng) {
   let mut total_count = 0;
   let mut cancelled_count = 0;
   while total_count < 10 && cancelled_count < 4 && total_count - cancelled_count < 4 {
-    let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+    let (mut sim, mut ctx) = setup_with_seed(seed);
 
     // Setup Tables
     setup_inventory_table(&mut sim, &mut ctx);
@@ -1416,9 +1416,9 @@ pub fn mk_general_sim(
   )
 }
 
-fn paxos_leader_change_test(rand: &mut XorShiftRng) {
+fn paxos_leader_change_test(seed: [u8; 16]) {
   // Create one Slave Paxos Group to test Leader change logic with.
-  let mut sim = mk_general_sim(mk_seed(rand), 1, 1, 5);
+  let mut sim = mk_general_sim(seed, 1, 1, 5);
 
   // Warmup the simulation
   sim.simulate_n_ms(100);
@@ -1446,7 +1446,7 @@ fn paxos_leader_change_test(rand: &mut XorShiftRng) {
   }
 }
 
-fn paxos_basic_serial_test(rand: &mut XorShiftRng) {
+fn paxos_basic_serial_test(seed: [u8; 16]) {
   let mut test_time_taken = 0;
 
   const EXPECTED_TOTAL_TIME: u32 = 1000;
@@ -1459,7 +1459,7 @@ fn paxos_basic_serial_test(rand: &mut XorShiftRng) {
   let mut failed = 0;
   'outer: for i in 0..NUM_ITERATIONS {
     println!("    iteration {:?}", i);
-    let mut sim = mk_general_sim(mk_seed(rand), 1, 5, 5);
+    let mut sim = mk_general_sim(seed, 1, 5, 5);
     let mut ctx = TestContext::new();
 
     // Test Simple Update-Select

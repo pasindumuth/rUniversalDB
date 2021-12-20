@@ -4,13 +4,17 @@ use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::mk_rid;
+use runiversal::model::common::iast;
 use runiversal::model::common::{
   EndpointId, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, RequestId, SlaveGroupId, Timestamp,
 };
 use runiversal::model::message as msg;
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::mk_slave_eid;
+use runiversal::sql_parser::convert_ast;
 use runiversal::test_utils::{mk_eid, mk_seed, mk_sid};
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser;
 use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
@@ -71,6 +75,39 @@ fn mk_inventory_update(r: &mut XorShiftRng) -> String {
   }
 }
 
+fn mk_inventory_delete(r: &mut XorShiftRng) -> String {
+  let query_type = r.next_u32() % 3;
+  if query_type == 0 {
+    format!(
+      " DELETE
+        FROM inventory
+        WHERE count >= {};
+      ",
+      r.next_u32() % 100
+    )
+  } else if query_type == 1 {
+    format!(
+      " DELETE
+        FROM inventory
+        WHERE count >= {} AND count < {};
+      ",
+      r.next_u32() % 50,
+      r.next_u32() % 50 + 50
+    )
+  } else if query_type == 2 {
+    format!(
+      " DELETE
+        FROM inventory
+        WHERE product_id >= {} AND product_id < {};
+      ",
+      r.next_u32() % 50,
+      r.next_u32() % 50 + 50
+    )
+  } else {
+    panic!()
+  }
+}
+
 fn mk_inventory_select(r: &mut XorShiftRng) -> String {
   let query_type = r.next_u32() % 3;
   if query_type == 0 {
@@ -108,13 +145,23 @@ fn mk_inventory_select(r: &mut XorShiftRng) -> String {
 //  Utils
 // -----------------------------------------------------------------------------------------------
 
+/// Results of `verify_req_res`, which contains extra statistics useful for checking
+/// non-triviality of the test.
+struct VerifyResult {
+  replay_duration: u32,
+  total_queries: u32,
+  successful_queries: u32,
+  num_selects: u32,
+  average_select_rows: f32,
+}
+
 /// Replay the requests that succeeded in timestamp order serially, and very that
 /// the results are the same.
 fn verify_req_res(
   rand: &mut XorShiftRng,
   req_res_map: BTreeMap<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>,
-) -> Option<(u32, u32, u32)> {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+) -> Option<VerifyResult> {
+  // Sort the request-responses and filter out failures.
   let mut sorted_success_res =
     BTreeMap::<Timestamp, (msg::PerformExternalQuery, msg::ExternalQuerySuccess)>::new();
   let total_queries = req_res_map.len() as u32;
@@ -128,6 +175,24 @@ fn verify_req_res(
     }
   }
 
+  // Compute various statistics
+  let mut num_selects = 0;
+  let mut row_sum = 0;
+  for (_, (req, res)) in &sorted_success_res {
+    let parsed_ast = Parser::parse_sql(&GenericDialect {}, &req.query).unwrap();
+    let ast = convert_ast(parsed_ast).unwrap();
+    match ast.body {
+      iast::QueryBody::SuperSimpleSelect(_) => {
+        num_selects += 1;
+        row_sum += res.result.rows.len();
+      }
+      _ => {}
+    }
+  }
+  let average_select_rows = row_sum as f32 / num_selects as f32;
+
+  // Run the Replay
+  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
   {
     ctx.send_ddl_query(
       &mut sim,
@@ -146,22 +211,35 @@ fn verify_req_res(
     ctx.execute_query(&mut sim, req.query.as_str(), 10000, res.result);
   }
 
-  Some((*sim.true_timestamp() as u32, total_queries, successful_queries))
+  Some(VerifyResult {
+    replay_duration: *sim.true_timestamp() as u32,
+    total_queries,
+    successful_queries,
+    num_selects,
+    average_select_rows,
+  })
 }
 
 // -----------------------------------------------------------------------------------------------
 //  test_all_paxos_parallel
 // -----------------------------------------------------------------------------------------------
 
-pub fn test_all_paxos_parallel(rand: &mut XorShiftRng) {
+pub fn test_all_basic_parallel(rand: &mut XorShiftRng) {
   for i in 0..50 {
     println!("Running round {:?}", i);
-    paxos_parallel_test(rand);
+    parallel_test(mk_seed(rand), 1);
   }
 }
 
-pub fn paxos_parallel_test(rand: &mut XorShiftRng) {
-  let mut sim = mk_general_sim(mk_seed(rand), 3, 5, 5);
+pub fn test_all_paxos_parallel(rand: &mut XorShiftRng) {
+  for i in 0..50 {
+    println!("Running round {:?}", i);
+    parallel_test(mk_seed(rand), 5);
+  }
+}
+
+pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
+  let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes);
   let mut ctx = TestContext::new();
 
   // Setup Tables
@@ -198,13 +276,27 @@ pub fn paxos_parallel_test(rand: &mut XorShiftRng) {
     BTreeMap::<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>::new();
 
   const SIM_DURATION: u128 = 1000; // The duration that we run the simulation
-  while sim.true_timestamp() < &SIM_DURATION {
-    // Generate a random query
-    let query_type = sim.rand.next_u32() % 3;
-    let query = match query_type {
-      0 => mk_inventory_insert(&mut sim.rand),
-      1 => mk_inventory_update(&mut sim.rand),
-      _ => mk_inventory_select(&mut sim.rand),
+  for iteration in 0.. {
+    if sim.true_timestamp() >= &SIM_DURATION {
+      break;
+    }
+
+    // Generate a Query
+    let query = if iteration < 3 {
+      // For the first few iterations, we always choose Insert.
+      mk_inventory_insert(&mut sim.rand)
+    } else {
+      // Otherwise, we randomly generate any type of query chosen using a hard-coded distribution.
+      let i = sim.rand.next_u32() % 100;
+      if i < 18 {
+        mk_inventory_insert(&mut sim.rand)
+      } else if i < 53 {
+        mk_inventory_update(&mut sim.rand)
+      } else if i < 88 {
+        mk_inventory_select(&mut sim.rand)
+      } else {
+        mk_inventory_delete(&mut sim.rand)
+      }
     };
 
     // Construct a request and populate `req_map`
@@ -233,19 +325,14 @@ pub fn paxos_parallel_test(rand: &mut XorShiftRng) {
       &cur_lid.eid,
     );
 
-    // TODO: pass in seeds into the test cases instead of the whole rand to avoid
-    //  the possibility of using it more than once (which makes the test not-reproducible
-    //  with just a seed value).
-    // TODO: count the number of Leadership changes and report it. (Just iterate through
-    //  leader_map and take the sum of the gens). Also, report the average number of rows
-    //  returned by SELECT and UPDATE queries (not inserts since those are trivial).
-    // TODO: Also do DELETE queries data.
-
     // Potentially start a Leadership change in a node by randomly choosing a PaxosGroupId.
-    if !sim.is_leadership_changing() {
-      if sim.rand.next_u32() % 5 == 0 {
-        let gid = gids.get(sim.rand.next_u32() as usize % gids.len()).unwrap();
-        sim.start_leadership_change(gid.clone());
+    // Note: that we only do this if the PaxosGroups have more than 1 element.
+    if num_paxos_nodes > 1 {
+      if !sim.is_leadership_changing() {
+        if sim.rand.next_u32() % 5 == 0 {
+          let gid = gids.get(sim.rand.next_u32() as usize % gids.len()).unwrap();
+          sim.start_leadership_change(gid.clone());
+        }
       }
     }
 
@@ -313,9 +400,7 @@ pub fn paxos_parallel_test(rand: &mut XorShiftRng) {
   assert!(simulate_until_clean(&mut sim, 10000));
 
   // Verify the responses are correct
-  if let Some((true_time, total_queries, successful_queries)) =
-    verify_req_res(&mut sim.rand, req_res_map)
-  {
+  if let Some(res) = verify_req_res(&mut sim.rand, req_res_map) {
     // Count the number of Leadership changes.
     let mut num_leadership_changes = 0;
     for (_, lid) in &sim.leader_map {
@@ -324,8 +409,14 @@ pub fn paxos_parallel_test(rand: &mut XorShiftRng) {
 
     println!(
       "Test 'test_all_paxos_parallel' Passed! Replay time taken: {:?}ms.
-       Total Queries: {:?}, Succeeded: {:?}, Leadership Changes: {:?}",
-      true_time, total_queries, successful_queries, num_leadership_changes
+       Total Queries: {:?}, Succeeded: {:?}, Leadership Changes: {:?}, 
+       # Selects: {:?}, Avg. Selected Rows: {:?}",
+      res.replay_duration,
+      res.total_queries,
+      res.successful_queries,
+      num_leadership_changes,
+      res.num_selects,
+      res.average_select_rows
     );
   } else {
     println!("Skipped Test 'test_all_paxos_parallel' due to Timestamp Conflict");

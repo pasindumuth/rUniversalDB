@@ -742,11 +742,11 @@ fn setup_tables(sim: &mut Simulation, ctx: &mut TestContext) {
 pub fn test_all_advanced_parallel(rand: &mut XorShiftRng) {
   for i in 0..10 {
     println!("Running round {:?}", i);
-    advanced_parallel_test(rand);
+    advanced_parallel_test(mk_seed(rand));
   }
 }
 
-pub fn advanced_parallel_test(rand: &mut XorShiftRng) {
+pub fn advanced_parallel_test(seed: [u8; 16]) {
   let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
     (mk_sid("s0"), vec![mk_slave_eid(0)]),
@@ -759,13 +759,8 @@ pub fn advanced_parallel_test(rand: &mut XorShiftRng) {
   .collect();
 
   // We create 3 clients.
-  let mut sim = Simulation::new(
-    mk_seed(rand),
-    3,
-    slave_address_config,
-    master_address_config,
-    PaxosConfig::prod(),
-  );
+  let mut sim =
+    Simulation::new(seed, 3, slave_address_config, master_address_config, PaxosConfig::prod());
 
   let mut ctx = TestContext::new();
 
