@@ -1,5 +1,5 @@
 use crate::serial_test_utils::{
-  populate_inventory_table_basic, populate_setup_user_table_basic, setup, setup_inventory_table,
+  populate_inventory_table_basic, populate_user_table_basic, setup, setup_inventory_table,
   setup_user_table, simulate_until_clean, TestContext,
 };
 use crate::simulation::Simulation;
@@ -41,6 +41,7 @@ pub fn test_all_basic_serial(rand: &mut XorShiftRng) {
   basic_delete_test(mk_seed(rand));
   insert_delete_insert_test(mk_seed(rand));
   ghost_deleted_row_test(mk_seed(rand));
+  drop_table_test(mk_seed(rand));
   cancellation_test(mk_seed(rand));
   paxos_leader_change_test(mk_seed(rand));
   paxos_basic_serial_test(mk_seed(rand));
@@ -302,7 +303,7 @@ fn trans_table_test(seed: [u8; 16]) {
   setup_inventory_table(&mut sim, &mut ctx);
   populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
-  populate_setup_user_table_basic(&mut sim, &mut ctx);
+  populate_user_table_basic(&mut sim, &mut ctx);
 
   // Test TransTable Reads
 
@@ -338,7 +339,7 @@ fn select_projection_test(seed: [u8; 16]) {
   setup_inventory_table(&mut sim, &mut ctx);
   populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
-  populate_setup_user_table_basic(&mut sim, &mut ctx);
+  populate_user_table_basic(&mut sim, &mut ctx);
 
   // Test advanced expression in the SELECT projection.
 
@@ -558,7 +559,7 @@ fn multi_stage_test(seed: [u8; 16]) {
   setup_inventory_table(&mut sim, &mut ctx);
   populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
-  populate_setup_user_table_basic(&mut sim, &mut ctx);
+  populate_user_table_basic(&mut sim, &mut ctx);
 
   // Multi-Stage Transactions with TransTables
 
@@ -1195,6 +1196,105 @@ fn ghost_deleted_row_test(seed: [u8; 16]) {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  drop_table
+// -----------------------------------------------------------------------------------------------
+
+fn drop_table_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup(seed);
+
+  // Create a Tables
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
+  setup_user_table(&mut sim, &mut ctx);
+  populate_user_table_basic(&mut sim, &mut ctx);
+
+  {
+    let mut exp_result = TableView::new(vec![None]);
+    exp_result.add_row(vec![Some(cvi(2))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT count(product_id)
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![None]);
+    exp_result.add_row(vec![Some(cvi(3))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT count(email)
+        FROM user;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Drop 'inventory'
+
+  {
+    ctx.send_ddl_query(
+      &mut sim,
+      " DROP TABLE inventory;
+      ",
+      10000,
+    );
+  }
+
+  // Create 'inventory' again and verify it is empty
+  setup_inventory_table(&mut sim, &mut ctx);
+
+  {
+    let mut exp_result = TableView::new(vec![None]);
+    exp_result.add_row(vec![Some(cvi(0))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT count(product_id)
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  {
+    let mut exp_result = TableView::new(vec![None]);
+    exp_result.add_row(vec![Some(cvi(3))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT count(email)
+        FROM user;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Add data to 'inventory'
+
+  populate_inventory_table_basic(&mut sim, &mut ctx);
+
+  {
+    let mut exp_result = TableView::new(vec![None]);
+    exp_result.add_row(vec![Some(cvi(2))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT count(product_id)
+        FROM inventory;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  println!("Test 'drop_table_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+}
+
+// -----------------------------------------------------------------------------------------------
 //  cancellation_test
 // -----------------------------------------------------------------------------------------------
 
@@ -1212,7 +1312,7 @@ fn cancellation_test(seed: [u8; 16]) {
     setup_inventory_table(&mut sim, &mut ctx);
     populate_inventory_table_basic(&mut sim, &mut ctx);
     setup_user_table(&mut sim, &mut ctx);
-    populate_setup_user_table_basic(&mut sim, &mut ctx);
+    populate_user_table_basic(&mut sim, &mut ctx);
 
     // Send the query and simulate
     let query = "

@@ -1,5 +1,5 @@
 use crate::serial_test_utils::{
-  populate_inventory_table_basic, populate_setup_user_table_basic, setup, setup_inventory_table,
+  populate_inventory_table_basic, populate_user_table_basic, setup, setup_inventory_table,
   setup_user_table,
 };
 use crate::simulation::Simulation;
@@ -39,7 +39,7 @@ fn subquery_test(seed: [u8; 16]) {
   setup_inventory_table(&mut sim, &mut ctx);
   populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
-  populate_setup_user_table_basic(&mut sim, &mut ctx);
+  populate_user_table_basic(&mut sim, &mut ctx);
 
   // Test Multiple Subqueries
 
@@ -77,7 +77,7 @@ fn trans_table_test(seed: [u8; 16]) {
   setup_inventory_table(&mut sim, &mut ctx);
   populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
-  populate_setup_user_table_basic(&mut sim, &mut ctx);
+  populate_user_table_basic(&mut sim, &mut ctx);
 
   // Test TransTable Reads
 

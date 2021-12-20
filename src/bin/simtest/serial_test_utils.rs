@@ -232,7 +232,7 @@ pub fn setup_user_table(sim: &mut Simulation, context: &mut TestContext) {
   }
 }
 
-pub fn populate_setup_user_table_basic(sim: &mut Simulation, context: &mut TestContext) {
+pub fn populate_user_table_basic(sim: &mut Simulation, context: &mut TestContext) {
   {
     let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);

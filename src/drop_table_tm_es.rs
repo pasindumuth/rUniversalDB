@@ -199,6 +199,9 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     let mut timestamp = committed_plm.payload.timestamp_hint;
     timestamp = max(timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
 
+    // The the RMs before dropping
+    let rms = get_rms::<IO>(ctx, &self.table_path);
+
     // Apply the Drop
     ctx.gen.inc();
     ctx.table_generation.write(&self.table_path, None, timestamp);
@@ -225,7 +228,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
 
     // Return Commit messages
     let mut commits = BTreeMap::<TNodePath, DropTableCommit>::new();
-    for rm in get_rms::<IO>(ctx, &self.table_path) {
+    for rm in rms {
       commits.insert(rm.clone(), DropTableCommit { timestamp });
     }
     commits
