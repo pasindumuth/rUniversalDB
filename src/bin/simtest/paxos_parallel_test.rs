@@ -1,9 +1,12 @@
+use crate::basic_serial_test::mk_general_sim;
 use crate::serial_test_utils::{setup_with_seed, simulate_until_clean, TestContext};
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::mk_rid;
-use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId, Timestamp};
+use runiversal::model::common::{
+  EndpointId, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, RequestId, SlaveGroupId, Timestamp,
+};
 use runiversal::model::message as msg;
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::mk_slave_eid;
@@ -147,38 +150,18 @@ fn verify_req_res(
 }
 
 // -----------------------------------------------------------------------------------------------
-//  test_all_basic_parallel
+//  test_all_paxos_parallel
 // -----------------------------------------------------------------------------------------------
 
-pub fn test_all_basic_parallel(rand: &mut XorShiftRng) {
+pub fn test_all_paxos_parallel(rand: &mut XorShiftRng) {
   for i in 0..50 {
     println!("Running round {:?}", i);
-    basic_parallel_test(rand);
+    paxos_parallel_test(rand);
   }
 }
 
-pub fn basic_parallel_test(rand: &mut XorShiftRng) {
-  let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
-  let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
-    (mk_sid("s0"), vec![mk_slave_eid(0)]),
-    (mk_sid("s1"), vec![mk_slave_eid(1)]),
-    (mk_sid("s2"), vec![mk_slave_eid(2)]),
-    (mk_sid("s3"), vec![mk_slave_eid(3)]),
-    (mk_sid("s4"), vec![mk_slave_eid(4)]),
-  ]
-  .into_iter()
-  .collect();
-  let sids: Vec<_> = slave_address_config.keys().cloned().collect();
-
-  // We create 3 clients.
-  let mut sim = Simulation::new(
-    mk_seed(rand),
-    3,
-    slave_address_config,
-    master_address_config,
-    PaxosConfig::prod(),
-  );
-
+pub fn paxos_parallel_test(rand: &mut XorShiftRng) {
+  let mut sim = mk_general_sim(mk_seed(rand), 3, 5, 5);
   let mut ctx = TestContext::new();
 
   // Setup Tables
@@ -200,11 +183,17 @@ pub fn basic_parallel_test(rand: &mut XorShiftRng) {
 
   // Run the simulation
   let client_eids: Vec<_> = sim.get_all_responses().keys().cloned().collect();
+  let sids: Vec<_> = sim.slave_address_config().keys().cloned().collect();
+  let gids: Vec<_> = sim.leader_map.keys().cloned().collect();
+
+  // These 2 are kept in sync, where the set of RequestIds in each map are always the same.
+  let mut req_lid_map = BTreeMap::<RequestId, (PaxosGroupId, LeadershipId)>::new();
   let mut req_map = BTreeMap::<EndpointId, BTreeMap<RequestId, msg::PerformExternalQuery>>::new();
   for eid in &client_eids {
     req_map.insert(eid.clone(), BTreeMap::new());
   }
 
+  // Elements from the above are moved here as responses arrive
   let mut req_res_map =
     BTreeMap::<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>::new();
 
@@ -228,20 +217,40 @@ pub fn basic_parallel_test(rand: &mut XorShiftRng) {
       request_id: request_id.clone(),
       query: query.to_string(),
     };
-    req_map.get_mut(client_eid).unwrap().insert(request_id, perform.clone());
+    req_map.get_mut(client_eid).unwrap().insert(request_id.clone(), perform.clone());
 
-    // Send the request and simulate
-    let slave_idx = sim.rand.next_u32() % sids.len() as u32;
-    let slave_eid = mk_slave_eid(slave_idx);
+    // Choose a SlaveGroupId, record its leadership, and then send the `query` to it.
+    let slave_idx = sim.rand.next_u32() as usize % sids.len();
+    let sid = sids.get(slave_idx).unwrap();
+    let gid = sid.to_gid();
+    let cur_lid = sim.leader_map.get(&gid).unwrap().clone();
+    req_lid_map.insert(request_id, (gid, cur_lid.clone()));
     sim.add_msg(
       msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
         msg::SlaveExternalReq::PerformExternalQuery(perform),
       )),
       client_eid,
-      &slave_eid,
+      &cur_lid.eid,
     );
 
-    let sim_duration = sim.rand.next_u32() % 50; // simulation for at-most 50 ms at a time
+    // TODO: pass in seeds into the test cases instead of the whole rand to avoid
+    //  the possibility of using it more than once (which makes the test not-reproducible
+    //  with just a seed value).
+    // TODO: count the number of Leadership changes and report it. (Just iterate through
+    //  leader_map and take the sum of the gens). Also, report the average number of rows
+    //  returned by SELECT and UPDATE queries (not inserts since those are trivial).
+    // TODO: Also do DELETE queries data.
+
+    // Potentially start a Leadership change in a node by randomly choosing a PaxosGroupId.
+    if !sim.is_leadership_changing() {
+      if sim.rand.next_u32() % 5 == 0 {
+        let gid = gids.get(sim.rand.next_u32() as usize % gids.len()).unwrap();
+        sim.start_leadership_change(gid.clone());
+      }
+    }
+
+    // Simulate for at-most 50 ms at a time
+    let sim_duration = sim.rand.next_u32() % 50;
     sim.simulate_n_ms(sim_duration);
 
     // Move any new responses to to `req_res_map`.
@@ -255,7 +264,47 @@ pub fn basic_parallel_test(rand: &mut XorShiftRng) {
         };
 
         let req = req_map.get_mut(&eid).unwrap().remove(request_id).unwrap();
+        req_lid_map.remove(request_id);
         req_res_map.insert(request_id.clone(), (req, external));
+      }
+    }
+  }
+
+  // Iterate for some time limit to receiving responses
+  const RESPONSE_TIME_LIMIT: u128 = 10000;
+  let start_time = *sim.true_timestamp();
+  while *sim.true_timestamp() < start_time + RESPONSE_TIME_LIMIT {
+    // Next, we see if all unresponded requests have an old Leadership or not.
+    let mut all_old = true;
+    for (_, (gid, lid)) in &req_lid_map {
+      let cur_lid = sim.leader_map.get(&gid).unwrap();
+      if cur_lid.gen >= lid.gen {
+        all_old = false;
+        break;
+      }
+    }
+
+    // Break out if we are done.
+    if all_old {
+      break;
+    } else {
+      // Otherwise, simulate for 50ms.
+      sim.simulate_n_ms(50);
+
+      // Move any new responses to to `req_res_map`.
+      for (eid, responses) in sim.remove_all_responses() {
+        for res in responses {
+          let external = cast!(msg::NetworkMessage::External, res).unwrap();
+          let request_id = match &external {
+            msg::ExternalMessage::ExternalQuerySuccess(success) => &success.request_id,
+            msg::ExternalMessage::ExternalQueryAborted(aborted) => &aborted.request_id,
+            _ => panic!(),
+          };
+
+          let req = req_map.get_mut(&eid).unwrap().remove(request_id).unwrap();
+          req_lid_map.remove(request_id);
+          req_res_map.insert(request_id.clone(), (req, external));
+        }
       }
     }
   }
@@ -267,12 +316,18 @@ pub fn basic_parallel_test(rand: &mut XorShiftRng) {
   if let Some((true_time, total_queries, successful_queries)) =
     verify_req_res(&mut sim.rand, req_res_map)
   {
+    // Count the number of Leadership changes.
+    let mut num_leadership_changes = 0;
+    for (_, lid) in &sim.leader_map {
+      num_leadership_changes += lid.gen.0;
+    }
+
     println!(
-      "Test 'test_all_basic_parallel' Passed! Replay time taken: {:?}ms.
-       Total Queries: {:?}, Succeeded: {:?}",
-      true_time, total_queries, successful_queries
+      "Test 'test_all_paxos_parallel' Passed! Replay time taken: {:?}ms.
+       Total Queries: {:?}, Succeeded: {:?}, Leadership Changes: {:?}",
+      true_time, total_queries, successful_queries, num_leadership_changes
     );
   } else {
-    println!("Skipped Test 'test_all_basic_parallel' due to Timestamp Conflict");
+    println!("Skipped Test 'test_all_paxos_parallel' due to Timestamp Conflict");
   }
 }

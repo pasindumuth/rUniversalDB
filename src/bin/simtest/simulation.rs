@@ -297,7 +297,7 @@ impl Simulation {
   /// we create as many tablets as there are `TabletGroupId` for that slave.
   pub fn new(
     seed: [u8; 16],
-    num_clients: i32,
+    num_clients: u32,
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     master_address_config: Vec<EndpointId>,
     paxos_config: PaxosConfig,
@@ -514,6 +514,11 @@ impl Simulation {
     self.blocked_leadership = Some((gid, lid.clone()));
   }
 
+  /// Check if the `Simulation` was set to try and change the Leadership.
+  pub fn is_leadership_changing(&self) -> bool {
+    self.blocked_leadership.is_some()
+  }
+
   /// Stop trying to forcibly change the Leadership of `blocked_leadership`. If it already
   /// happened, this effectively does nothing (since `blocked_leadership` will have been
   /// cleared). Returns `false` if this function did nothing, `true` otherwise.
@@ -596,13 +601,13 @@ impl Simulation {
           let cur_lid = self.leader_map.get_mut(&PaxosGroupId::Master).unwrap();
           if cur_lid.gen < lid.gen {
             *cur_lid = lid;
-          }
 
-          // Clear blocked_leadership if at node is no longer the Leader.
-          if let Some((blocked_gid, blocked_lid)) = &self.blocked_leadership {
-            if blocked_gid == &PaxosGroupId::Master {
-              if blocked_lid.gen < cur_lid.gen {
-                self.blocked_leadership = None
+            // Clear blocked_leadership if at node is no longer the Leader.
+            if let Some((blocked_gid, blocked_lid)) = &self.blocked_leadership {
+              if blocked_gid == &PaxosGroupId::Master {
+                if blocked_lid.gen < cur_lid.gen {
+                  self.blocked_leadership = None
+                }
               }
             }
           }

@@ -793,7 +793,7 @@ pub fn advanced_parallel_test(rand: &mut XorShiftRng) {
 
     // Construct a request and populate `req_map`
     let request_id = mk_rid(&mut sim.rand);
-    let client_idx = (sim.rand.next_u32() % client_eids.len() as u32) as usize;
+    let client_idx = sim.rand.next_u32() as usize % client_eids.len();
     let client_eid = client_eids.get(client_idx).unwrap();
 
     let perform = msg::PerformExternalQuery {

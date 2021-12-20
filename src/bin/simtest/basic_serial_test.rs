@@ -1387,7 +1387,12 @@ fn cancellation_test(rand: &mut XorShiftRng) {
 //  paxos_leader_change_test
 // -----------------------------------------------------------------------------------------------
 
-fn mk_general_sim(seed: [u8; 16], num_paxos_groups: u32, num_paxos_nodes: u32) -> Simulation {
+pub fn mk_general_sim(
+  seed: [u8; 16],
+  num_clients: u32,
+  num_paxos_groups: u32,
+  num_paxos_nodes: u32,
+) -> Simulation {
   // Create one Slave Paxos Group to test Leader change logic with.
   let mut master_address_config = Vec::<EndpointId>::new();
   for i in 0..num_paxos_nodes {
@@ -1404,7 +1409,7 @@ fn mk_general_sim(seed: [u8; 16], num_paxos_groups: u32, num_paxos_nodes: u32) -
 
   Simulation::new(
     seed,
-    1,
+    num_clients,
     slave_address_config.clone(),
     master_address_config.clone(),
     PaxosConfig::test(),
@@ -1413,7 +1418,7 @@ fn mk_general_sim(seed: [u8; 16], num_paxos_groups: u32, num_paxos_nodes: u32) -
 
 fn paxos_leader_change_test(rand: &mut XorShiftRng) {
   // Create one Slave Paxos Group to test Leader change logic with.
-  let mut sim = mk_general_sim(mk_seed(rand), 1, 5);
+  let mut sim = mk_general_sim(mk_seed(rand), 1, 1, 5);
 
   // Warmup the simulation
   sim.simulate_n_ms(100);
@@ -1454,7 +1459,7 @@ fn paxos_basic_serial_test(rand: &mut XorShiftRng) {
   let mut failed = 0;
   'outer: for i in 0..NUM_ITERATIONS {
     println!("    iteration {:?}", i);
-    let mut sim = mk_general_sim(mk_seed(rand), 5, 5);
+    let mut sim = mk_general_sim(mk_seed(rand), 1, 5, 5);
     let mut ctx = TestContext::new();
 
     // Test Simple Update-Select
