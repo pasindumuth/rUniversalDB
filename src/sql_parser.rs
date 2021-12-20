@@ -153,15 +153,11 @@ fn convert_insert(
 ) -> Result<iast::QueryBody, String> {
   if let ast::SetExpr::Values(values) = source.body {
     // Construct values
-    let mut i_values = Vec::<Vec<iast::Value>>::new();
+    let mut i_values = Vec::<Vec<iast::ValExpr>>::new();
     for row in values.0 {
-      let mut i_row = Vec::<iast::Value>::new();
+      let mut i_row = Vec::<iast::ValExpr>::new();
       for elem in row {
-        if let iast::ValExpr::Value { val } = convert_expr(elem)? {
-          i_row.push(val);
-        } else {
-          return Err(format!("Only literal are supported in the VALUES clause."));
-        }
+        i_row.push(convert_expr(elem)?);
       }
       i_values.push(i_row);
     }

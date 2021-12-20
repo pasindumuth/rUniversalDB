@@ -168,7 +168,7 @@ pub fn simulate_until_clean(sim: &mut Simulation, time_limit: u32) -> bool {
   false
 }
 
-pub fn setup_with_seed(seed: [u8; 16]) -> (Simulation, TestContext) {
+pub fn setup(seed: [u8; 16]) -> (Simulation, TestContext) {
   let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
   let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
     (mk_sid("s0"), vec![mk_slave_eid(0)]),

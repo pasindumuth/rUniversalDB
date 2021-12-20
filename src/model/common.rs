@@ -436,7 +436,7 @@ pub mod proc {
     /// The columns to insert to
     pub columns: Vec<ColName>,
     /// The values to insert (where the inner `Vec` is a row)
-    pub values: Vec<Vec<Value>>,
+    pub values: Vec<Vec<ValExpr>>,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -643,7 +643,7 @@ pub mod iast {
     /// The columns to insert to
     pub columns: Vec<String>,
     /// The values to insert (where the inner `Vec` is a row)
-    pub values: Vec<Vec<Value>>,
+    pub values: Vec<Vec<ValExpr>>,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

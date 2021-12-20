@@ -1,4 +1,4 @@
-use crate::serial_test_utils::{setup_with_seed, TestContext};
+use crate::serial_test_utils::{setup, TestContext};
 use crate::simulation::Simulation;
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
@@ -613,7 +613,7 @@ fn verify_req_res(
   rand: &mut XorShiftRng,
   req_res_map: BTreeMap<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>,
 ) -> Option<(u32, u32, u32)> {
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+  let (mut sim, mut ctx) = setup(mk_seed(rand));
   let mut sorted_success_res =
     BTreeMap::<Timestamp, (msg::PerformExternalQuery, msg::ExternalQuerySuccess)>::new();
   let total_queries = req_res_map.len() as u32;

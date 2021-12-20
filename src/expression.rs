@@ -42,6 +42,8 @@ pub enum EvalError {
   InvalidBoolExpr,
   /// Invalid Boolean Expression leaf
   TypeError,
+  /// The `ValExpr` is not a Simple ValExpr.
+  InvalidSimpleExpr,
 }
 
 /// This is the expression type we use to Compute a value (hence why it is called CExpr).
@@ -114,6 +116,24 @@ pub fn construct_cexpr(
     }
   };
   Ok(c_expr)
+}
+
+/// Construct a `CExpr` for Simple `ValExpr`s, which are `ValExpr`s where there
+/// are no `ColumnRef`s or subqueries.
+pub fn construct_simple_cexpr(sql_expr: &proc::ValExpr) -> Result<CExpr, EvalError> {
+  match sql_expr {
+    ValExpr::ColumnRef(_) => Err(EvalError::InvalidSimpleExpr),
+    ValExpr::UnaryExpr { op, expr } => {
+      Ok(CExpr::UnaryExpr { op: op.clone(), expr: Box::new(construct_simple_cexpr(expr.deref())?) })
+    }
+    ValExpr::BinaryExpr { op, left, right } => Ok(CExpr::BinaryExpr {
+      op: op.clone(),
+      left: Box::new(construct_simple_cexpr(left.deref())?),
+      right: Box::new(construct_simple_cexpr(right.deref())?),
+    }),
+    ValExpr::Value { val } => Ok(CExpr::Value { val: construct_colvaln(val.clone())? }),
+    ValExpr::Subquery { .. } => Err(EvalError::InvalidSimpleExpr),
+  }
 }
 
 /// Common function for evaluating a unary expression with fully-evaluated insides.

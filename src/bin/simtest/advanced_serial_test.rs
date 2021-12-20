@@ -1,6 +1,6 @@
 use crate::serial_test_utils::{
-  populate_inventory_table_basic, populate_setup_user_table_basic, setup_inventory_table,
-  setup_user_table, setup_with_seed,
+  populate_inventory_table_basic, populate_setup_user_table_basic, setup, setup_inventory_table,
+  setup_user_table,
 };
 use crate::simulation::Simulation;
 use rand_xorshift::XorShiftRng;
@@ -33,7 +33,7 @@ pub fn test_all_advanced_serial(rand: &mut XorShiftRng) {
 // -----------------------------------------------------------------------------------------------
 
 fn subquery_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -71,7 +71,7 @@ fn subquery_test(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn trans_table_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);

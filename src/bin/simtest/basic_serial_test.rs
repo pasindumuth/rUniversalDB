@@ -1,6 +1,6 @@
 use crate::serial_test_utils::{
-  populate_inventory_table_basic, populate_setup_user_table_basic, setup_inventory_table,
-  setup_user_table, setup_with_seed, simulate_until_clean, TestContext,
+  populate_inventory_table_basic, populate_setup_user_table_basic, setup, setup_inventory_table,
+  setup_user_table, simulate_until_clean, TestContext,
 };
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
@@ -53,7 +53,7 @@ pub fn test_all_basic_serial(rand: &mut XorShiftRng) {
 /// This is a test that solely tests Transaction Processing. We take all PaxosGroups to just
 /// have one node. We only check for SQL semantics compatibility.
 fn simple_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Test Basic Queries
   setup_inventory_table(&mut sim, &mut ctx);
@@ -189,7 +189,7 @@ fn simple_test(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn subquery_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -296,7 +296,7 @@ fn subquery_test(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn trans_table_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -332,7 +332,7 @@ fn trans_table_test(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn select_projection_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -394,7 +394,7 @@ fn select_projection_test(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn insert_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -420,12 +420,12 @@ fn insert_test(seed: [u8; 16]) {
 
   {
     let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
-    exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2"))]);
+    exp_result.add_row(vec![Some(cvi(-1)), Some(cvs("my_email_2"))]);
     exp_result.add_row(vec![Some(cvi(3)), None]);
     ctx.execute_query(
       &mut sim,
       " INSERT INTO inventory (product_id, email)
-        VALUES (2, 'my_email_2'),
+        VALUES (-1, 'my_email_2'),
                (3, NULL);
       ",
       10000,
@@ -441,7 +441,7 @@ fn insert_test(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn multi_key_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
 
@@ -552,7 +552,7 @@ fn multi_key_test(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn multi_stage_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -611,7 +611,7 @@ fn multi_stage_test(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn aggregation_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -716,7 +716,7 @@ fn aggregation_test(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn aliased_column_resolution_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -809,7 +809,7 @@ fn aliased_column_resolution_test(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn basic_add_column(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -894,7 +894,7 @@ fn basic_add_column(seed: [u8; 16]) {
 // -----------------------------------------------------------------------------------------------
 
 fn drop_column(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -1004,7 +1004,7 @@ fn drop_column(seed: [u8; 16]) {
 
 /// Sees if a single Delete Query does indeed delete data.
 fn basic_delete_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -1078,7 +1078,7 @@ fn basic_delete_test(seed: [u8; 16]) {
 /// Sees if a Transaction with an Insert a row, then Deletes it, and then tries Inserting
 /// it again, then it all works.
 fn insert_delete_insert_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -1131,7 +1131,7 @@ fn insert_delete_insert_test(seed: [u8; 16]) {
 /// Sees if a deleted row is re-inserted with some columns unspecified, they start off as
 /// NULL, instead of their prior value due to the delete.
 fn ghost_deleted_row_test(seed: [u8; 16]) {
-  let (mut sim, mut ctx) = setup_with_seed(seed);
+  let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
   setup_inventory_table(&mut sim, &mut ctx);
@@ -1206,7 +1206,7 @@ fn cancellation_test(seed: [u8; 16]) {
   let mut total_count = 0;
   let mut cancelled_count = 0;
   while total_count < 10 && cancelled_count < 4 && total_count - cancelled_count < 4 {
-    let (mut sim, mut ctx) = setup_with_seed(seed);
+    let (mut sim, mut ctx) = setup(seed);
 
     // Setup Tables
     setup_inventory_table(&mut sim, &mut ctx);

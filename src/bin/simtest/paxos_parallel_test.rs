@@ -1,5 +1,5 @@
 use crate::basic_serial_test::mk_general_sim;
-use crate::serial_test_utils::{setup_with_seed, simulate_until_clean, TestContext};
+use crate::serial_test_utils::{setup, simulate_until_clean, TestContext};
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -21,15 +21,28 @@ use std::collections::BTreeMap;
 //  Query Generation Utils
 // -----------------------------------------------------------------------------------------------
 
+fn mk_uint(r: &mut XorShiftRng, abs: u32) -> u32 {
+  r.next_u32() % abs
+}
+
+fn mk_int(r: &mut XorShiftRng, abs: u32) -> i32 {
+  let val = (r.next_u32() % abs) as i32;
+  if r.next_u32() % 2 == 0 {
+    -val
+  } else {
+    val
+  }
+}
+
 fn mk_inventory_insert(r: &mut XorShiftRng) -> String {
   let mut values = Vec::<String>::new();
   let num_vals = r.next_u32() % 5;
   for _ in 0..num_vals {
     values.push(format!(
       "({}, 'my_email_{}', {})",
-      r.next_u32() % 100,
-      r.next_u32() % 100,
-      r.next_u32() % 100
+      mk_int(r, 100),
+      mk_uint(r, 100),
+      mk_int(r, 100)
     ));
   }
 
@@ -49,8 +62,8 @@ fn mk_inventory_update(r: &mut XorShiftRng) -> String {
         SET count = count + {}
         WHERE product_id >= {};
       ",
-      r.next_u32() % 5,
-      r.next_u32() % 100
+      mk_uint(r, 5),
+      mk_int(r, 100)
     )
   } else if query_type == 1 {
     format!(
@@ -58,8 +71,8 @@ fn mk_inventory_update(r: &mut XorShiftRng) -> String {
         SET count = count - {}
         WHERE product_id >= {};
       ",
-      r.next_u32() % 5,
-      r.next_u32() % 100
+      mk_uint(r, 5),
+      mk_int(r, 100)
     )
   } else if query_type == 2 {
     format!(
@@ -67,8 +80,8 @@ fn mk_inventory_update(r: &mut XorShiftRng) -> String {
         SET email = 'my_email_{}'
         WHERE count >= {};
       ",
-      r.next_u32() % 100,
-      r.next_u32() % 100
+      mk_uint(r, 100),
+      mk_int(r, 100)
     )
   } else {
     panic!()
@@ -83,7 +96,7 @@ fn mk_inventory_delete(r: &mut XorShiftRng) -> String {
         FROM inventory
         WHERE count >= {};
       ",
-      r.next_u32() % 100
+      mk_int(r, 100)
     )
   } else if query_type == 1 {
     format!(
@@ -91,8 +104,8 @@ fn mk_inventory_delete(r: &mut XorShiftRng) -> String {
         FROM inventory
         WHERE count >= {} AND count < {};
       ",
-      r.next_u32() % 50,
-      r.next_u32() % 50 + 50
+      mk_int(r, 50),
+      mk_int(r, 50) + 100
     )
   } else if query_type == 2 {
     format!(
@@ -100,8 +113,8 @@ fn mk_inventory_delete(r: &mut XorShiftRng) -> String {
         FROM inventory
         WHERE product_id >= {} AND product_id < {};
       ",
-      r.next_u32() % 50,
-      r.next_u32() % 50 + 50
+      mk_int(r, 50),
+      mk_int(r, 50) + 100
     )
   } else {
     panic!()
@@ -116,7 +129,7 @@ fn mk_inventory_select(r: &mut XorShiftRng) -> String {
         FROM inventory
         WHERE count >= {};
       ",
-      r.next_u32() % 100
+      mk_int(r, 100)
     )
   } else if query_type == 1 {
     format!(
@@ -124,8 +137,8 @@ fn mk_inventory_select(r: &mut XorShiftRng) -> String {
         FROM inventory
         WHERE count >= {} AND count < {};
       ",
-      r.next_u32() % 50,
-      r.next_u32() % 50 + 50
+      mk_int(r, 50),
+      mk_int(r, 50) + 100
     )
   } else if query_type == 2 {
     format!(
@@ -133,8 +146,8 @@ fn mk_inventory_select(r: &mut XorShiftRng) -> String {
         FROM inventory
         WHERE product_id >= {} AND product_id < {};
       ",
-      r.next_u32() % 50,
-      r.next_u32() % 50 + 50
+      mk_int(r, 50),
+      mk_int(r, 50) + 100
     )
   } else {
     panic!()
@@ -192,7 +205,7 @@ fn verify_req_res(
   let average_select_rows = row_sum as f32 / num_selects as f32;
 
   // Run the Replay
-  let (mut sim, mut ctx) = setup_with_seed(mk_seed(rand));
+  let (mut sim, mut ctx) = setup(mk_seed(rand));
   {
     ctx.send_ddl_query(
       &mut sim,

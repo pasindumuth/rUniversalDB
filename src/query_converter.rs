@@ -213,17 +213,24 @@ fn flatten_top_level_query_r(
       Ok(())
     }
     iast::QueryBody::Insert(insert) => {
-      trans_table_map.push((
-        TransTableName(assignment_name.clone()),
-        proc::MSQueryStage::Insert(proc::Insert {
-          table: SimpleSource {
-            source_ref: TablePath(insert.table.source_ref.clone()),
-            alias: insert.table.alias.clone(),
-          },
-          columns: insert.columns.iter().map(|x| ColName(x.clone())).collect(),
-          values: insert.values.clone(),
-        }),
-      ));
+      let mut ms_insert = proc::Insert {
+        table: SimpleSource {
+          source_ref: TablePath(insert.table.source_ref.clone()),
+          alias: insert.table.alias.clone(),
+        },
+        columns: insert.columns.iter().map(|x| ColName(x.clone())).collect(),
+        values: Vec::new(),
+      };
+      for row in &insert.values {
+        let mut p_row = Vec::<proc::ValExpr>::new();
+        for val_expr in row {
+          p_row.push(flatten_val_expr_r(val_expr, counter)?);
+        }
+        ms_insert.values.push(p_row);
+      }
+
+      trans_table_map
+        .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Insert(ms_insert)));
       Ok(())
     }
     iast::QueryBody::Delete(delete) => {

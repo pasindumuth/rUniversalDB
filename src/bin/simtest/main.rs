@@ -47,8 +47,8 @@ fn main() {
   println!("\n");
   println!("Paxos Parallel Tests:");
   test_all_paxos_parallel(&mut rand);
-  println!("\n");
   // TODO: this test grinds to a halt when we use the many-messages delivery scheme.
+  // println!("\n");
   // println!("Advanced Parallel Tests:");
   // test_all_advanced_parallel(&mut rand);
 }

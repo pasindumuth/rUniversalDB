@@ -240,6 +240,14 @@ impl<'a> ColUsagePlanner<'a> {
     insert: &proc::Insert,
   ) -> Result<(Vec<Option<ColName>>, FrozenColUsageNode), ColUsageError> {
     let projection = compute_insert_schema(insert);
+
+    let mut exprs = Vec::new();
+    for row in &insert.values {
+      for expr in row {
+        exprs.push(expr.clone());
+      }
+    }
+
     Ok((
       projection,
       self.compute_frozen_col_usage_node(
@@ -248,7 +256,7 @@ impl<'a> ColUsagePlanner<'a> {
           source_ref: proc::GeneralSourceRef::TablePath(insert.table.source_ref.clone()),
           alias: insert.table.alias.clone(),
         },
-        &Vec::new(), // No expressions
+        &exprs,
       )?,
     ))
   }

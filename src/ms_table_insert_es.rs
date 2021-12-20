@@ -4,7 +4,8 @@ use crate::common::{
   QueryPlan, ReadRegion, SingleBound, WriteRegion, WriteRegionType,
 };
 use crate::expression::{
-  compress_row_region, construct_colvaln, evaluate_c_expr, is_true, EvalError,
+  compress_row_region, construct_colvaln, construct_simple_cexpr, evaluate_c_expr, is_true, CExpr,
+  EvalError,
 };
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
@@ -248,8 +249,12 @@ impl MSTableInsertES {
     let mut eval_values = Vec::<Vec<ColValN>>::new();
     for row in &self.sql_query.values {
       let mut eval_row = Vec::<ColValN>::new();
-      for value in row {
-        match construct_colvaln(value.clone()) {
+      for val_expr in row {
+        match (|| {
+          // For now, Insert queries only support Simple ValExprs as a value (i.e. no subqueries).
+          let c_expr = construct_simple_cexpr(val_expr)?;
+          evaluate_c_expr(&c_expr)
+        })() {
           Ok(val) => eval_row.push(val),
           Err(eval_error) => {
             self.state = MSTableInsertExecutionS::Done;
