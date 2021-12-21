@@ -3,7 +3,7 @@ use crate::simulation::Simulation;
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_rid, TableSchema};
+use runiversal::common::{mk_rid, read_index, TableSchema};
 use runiversal::master::FullDBSchema;
 use runiversal::model::common::{
   ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TableView, Timestamp,
@@ -19,15 +19,6 @@ use std::collections::BTreeMap;
 // -----------------------------------------------------------------------------------------------
 //  QueryGenCtx
 // -----------------------------------------------------------------------------------------------
-
-/// Gets the key at the given index
-fn read_index<K: Ord, V>(map: &BTreeMap<K, V>, idx: usize) -> Option<(&K, &V)> {
-  let mut it = map.iter();
-  for _ in 0..idx {
-    it.next();
-  }
-  it.next()
-}
 
 struct QueryGenCtx<'a> {
   rand: &'a mut XorShiftRng,

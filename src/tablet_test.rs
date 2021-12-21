@@ -101,6 +101,10 @@ pub fn check_tablet_clean(tablet: &TabletState, check_ctx: &mut CheckCtx) {
   check_ctx.check(statuses.ms_table_write_ess.is_empty());
   check_ctx.check(statuses.ms_table_insert_ess.is_empty());
   check_ctx.check(statuses.ms_table_delete_ess.is_empty());
-
-  check_ctx.check(matches!(statuses.ddl_es, DDLES::None));
+  check_ctx.check(match &statuses.ddl_es {
+    DDLES::None => true,
+    DDLES::Alter(_) => false,
+    DDLES::Drop(_) => false,
+    DDLES::Dropped(_) => true,
+  });
 }

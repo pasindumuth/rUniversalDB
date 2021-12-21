@@ -165,6 +165,15 @@ pub fn btree_multimap_remove<K: Ord, V: Ord>(
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct UUID(String);
 
+/// Gets the key at the given index
+pub fn read_index<K: Ord, V>(map: &BTreeMap<K, V>, idx: usize) -> Option<(&K, &V)> {
+  let mut it = map.iter();
+  for _ in 0..idx {
+    it.next();
+  }
+  it.next()
+}
+
 // -----------------------------------------------------------------------------------------------
 //  Table Schema
 // -----------------------------------------------------------------------------------------------

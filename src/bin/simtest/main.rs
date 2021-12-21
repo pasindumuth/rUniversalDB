@@ -1,8 +1,10 @@
 #![feature(map_first_last)]
+#![feature(map_into_keys_values)]
 
 use crate::advanced_parallel_test::test_all_advanced_parallel;
 use crate::advanced_serial_test::test_all_advanced_serial;
 use crate::basic_serial_test::test_all_basic_serial;
+use crate::ddl_parallel_test::test_all_ddl_parallel;
 use crate::paxos_parallel_test::{test_all_basic_parallel, test_all_paxos_parallel};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -21,6 +23,7 @@ macro_rules! cast {
 mod advanced_parallel_test;
 mod advanced_serial_test;
 mod basic_serial_test;
+mod ddl_parallel_test;
 mod paxos_parallel_test;
 mod serial_test_utils;
 mod simulation;
@@ -47,6 +50,9 @@ fn main() {
   println!("\n");
   println!("Paxos Parallel Tests:");
   test_all_paxos_parallel(&mut rand);
+  println!("\n");
+  println!("DDL Parallel Tests:");
+  test_all_ddl_parallel(&mut rand);
   // TODO: this test grinds to a halt when we use the many-messages delivery scheme.
   // println!("\n");
   // println!("Advanced Parallel Tests:");
