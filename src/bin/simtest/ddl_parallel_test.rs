@@ -431,20 +431,33 @@ struct VerifyResult {
 fn verify_req_res(
   rand: &mut XorShiftRng,
   req_res_map: BTreeMap<RequestId, (Request, msg::ExternalMessage)>,
+  req_success_map: BTreeMap<RequestId, Timestamp>,
 ) -> Option<VerifyResult> {
-  // Sort the request-responses and filter out failures.
+  // Sort the request-responses, filter out failures, but compensate for failure due to
+  // a NodeDied whose requests succeed anyways by looking up the Timestamp in `req_success_map`.
   enum SuccessPair {
-    Query(msg::PerformExternalQuery, msg::ExternalQuerySuccess),
-    DDLQuery(msg::PerformExternalDDLQuery, msg::ExternalDDLQuerySuccess),
+    Query(msg::PerformExternalQuery, Option<msg::ExternalQuerySuccess>),
+    DDLQuery(msg::PerformExternalDDLQuery, Option<msg::ExternalDDLQuerySuccess>),
   }
   let mut sorted_success_res = BTreeMap::<Timestamp, SuccessPair>::new();
   let total_queries = req_res_map.len() as u32;
-  for (_, (req, res)) in req_res_map {
+  for (rid, (req, res)) in req_res_map {
     match (req, res) {
-      (Request::Query(_), msg::ExternalMessage::ExternalQueryAborted(_)) => {}
+      (Request::Query(req), msg::ExternalMessage::ExternalQueryAborted(abort)) => {
+        if abort.payload == msg::ExternalAbortedData::NodeDied {
+          // Recall that the query could still have succeeded, so we check `req_success_map`.
+          if let Some(timestamp) = req_success_map.get(&rid) {
+            if !sorted_success_res.insert(*timestamp, SuccessPair::Query(req, None)).is_none() {
+              // Here, two responses had the same timestamp. We cannot replay this, so we
+              // simply skip this test.
+              return None;
+            }
+          }
+        }
+      }
       (Request::Query(req), msg::ExternalMessage::ExternalQuerySuccess(success)) => {
         if !sorted_success_res
-          .insert(success.timestamp.clone(), SuccessPair::Query(req, success))
+          .insert(success.timestamp.clone(), SuccessPair::Query(req, Some(success)))
           .is_none()
         {
           // Here, two responses had the same timestamp. We cannot replay this, so we
@@ -452,10 +465,21 @@ fn verify_req_res(
           return None;
         }
       }
-      (Request::DDLQuery(_), msg::ExternalMessage::ExternalDDLQueryAborted(_)) => {}
+      (Request::DDLQuery(req), msg::ExternalMessage::ExternalDDLQueryAborted(abort)) => {
+        if abort.payload == msg::ExternalDDLQueryAbortData::NodeDied {
+          // Recall that the query could still have succeeded, so we check `req_success_map`.
+          if let Some(timestamp) = req_success_map.get(&rid) {
+            if !sorted_success_res.insert(*timestamp, SuccessPair::DDLQuery(req, None)).is_none() {
+              // Here, two responses had the same timestamp. We cannot replay this, so we
+              // simply skip this test.
+              return None;
+            }
+          }
+        }
+      }
       (Request::DDLQuery(req), msg::ExternalMessage::ExternalDDLQuerySuccess(success)) => {
         if !sorted_success_res
-          .insert(success.timestamp.clone(), SuccessPair::DDLQuery(req, success))
+          .insert(success.timestamp.clone(), SuccessPair::DDLQuery(req, Some(success)))
           .is_none()
         {
           // Here, two responses had the same timestamp. We cannot replay this, so we
@@ -471,7 +495,7 @@ fn verify_req_res(
   let mut num_selects = 0;
   let mut row_sum = 0;
   for (_, pair) in &sorted_success_res {
-    if let SuccessPair::Query(req, res) = pair {
+    if let SuccessPair::Query(req, Some(res)) = pair {
       // Here, the `req` is expected to be a DML or DQL (not DDL).
       let parsed_ast = Parser::parse_sql(&GenericDialect {}, &req.query).unwrap();
       let ast = convert_ast(parsed_ast).unwrap();
@@ -493,7 +517,11 @@ fn verify_req_res(
   for (_, pair) in sorted_success_res {
     match pair {
       SuccessPair::Query(req, res) => {
-        ctx.execute_query(&mut sim, req.query.as_str(), 10000, res.result);
+        if let Some(res) = res {
+          ctx.execute_query(&mut sim, req.query.as_str(), 10000, res.result);
+        } else {
+          ctx.execute_query_simple(&mut sim, req.query.as_str(), 10000);
+        }
       }
       SuccessPair::DDLQuery(req, _) => {
         ctx.send_ddl_query(&mut sim, req.query.as_str(), 10000);
@@ -741,7 +769,8 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
   assert!(simulate_until_clean(&mut sim, 10000));
 
   // Verify the responses are correct
-  if let Some(res) = verify_req_res(&mut sim.rand, req_res_map) {
+  let success_reqs = sim.get_success_reqs();
+  if let Some(res) = verify_req_res(&mut sim.rand, req_res_map, success_reqs) {
     // Count the number of Leadership changes.
     let mut num_leadership_changes = 0;
     for (_, lid) in &sim.leader_map {

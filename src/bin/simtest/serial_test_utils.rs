@@ -115,6 +115,19 @@ impl TestContext {
     }
   }
 
+  /// Same as above, except we do not check the returned resulting `TableView`.
+  pub fn execute_query_simple(&mut self, sim: &mut Simulation, query: &str, time_limit: u32) {
+    let request_id = self.send_query(sim, query);
+    assert!(self.simulate_until_response(sim, time_limit));
+    let response = self.next_response(sim);
+    match response {
+      msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
+        assert_eq!(payload.request_id, request_id);
+      }
+      _ => panic!("Incorrect Response: {:#?}", response),
+    }
+  }
+
   /// Simulates `sim` until an External response is collected at `eid`, or until
   /// `time_limit` milliseconds have passed. This returns true exactly when there
   /// is a new message that can be read with `next_response`.

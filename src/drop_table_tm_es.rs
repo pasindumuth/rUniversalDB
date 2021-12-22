@@ -1,5 +1,5 @@
 use crate::alter_table_tm_es::{get_rms, maybe_respond_dead, ResponseData};
-use crate::common::BasicIOCtx;
+use crate::common::{BasicIOCtx, GeneralTraceMessage};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{TNodePath, TablePath, Timestamp};
 use crate::model::message as msg;
@@ -209,6 +209,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     // Potentially respond to the External if we are the leader.
     if ctx.is_leader() {
       if let Some(response_data) = &self.response_data {
+        // This means this is the original Leader that got the query.
         ctx.external_request_id_map.remove(&response_data.request_id);
         io_ctx.send(
           &response_data.sender_eid,
@@ -220,6 +221,13 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
           )),
         );
         self.response_data = None;
+      } else {
+        // This means the query succeeded but this is a backup. Thus, we
+        // record the success in a trace message.
+        io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
+          committed_plm.query_id.clone(),
+          timestamp,
+        ));
       }
     }
 

@@ -2,7 +2,8 @@ use crate::alter_table_tm_es::{
   AlterTablePayloadTypes, AlterTableTMES, AlterTableTMInner, ResponseData,
 };
 use crate::common::{
-  lookup_pos, map_insert, mk_qid, mk_tid, GossipData, MasterIOCtx, MasterTraceMessage, TableSchema,
+  lookup_pos, map_insert, mk_qid, mk_tid, GeneralTraceMessage, GossipData, MasterIOCtx,
+  MasterTraceMessage, TableSchema,
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
@@ -234,6 +235,7 @@ impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
 //  Reflection
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct FullDBSchema<'a> {
   pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
   pub table_generation: &'a MVM<TablePath, Gen>,
@@ -603,7 +605,14 @@ impl MasterContext {
                 let query_id = mk_qid(io_ctx.rand());
                 let sender_eid = external_query.sender_eid;
                 let request_id = external_query.request_id;
+
+                // Update the QueryId that's stored in the `external_request_id_map` and trace it.
                 self.external_request_id_map.insert(request_id.clone(), query_id.clone());
+                io_ctx.general_trace(GeneralTraceMessage::RequestIdQueryId(
+                  request_id.clone(),
+                  query_id.clone(),
+                ));
+
                 match ddl_query {
                   DDLQuery::Create(create_table) => {
                     // Generate random shards

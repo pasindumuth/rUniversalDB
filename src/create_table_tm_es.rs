@@ -1,5 +1,5 @@
 use crate::alter_table_tm_es::{maybe_respond_dead, ResponseData};
-use crate::common::{BasicIOCtx, TableSchema};
+use crate::common::{BasicIOCtx, GeneralTraceMessage, TableSchema};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
   ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
@@ -362,10 +362,11 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
       // This means that the closed_plm is a result of a committing the CreateTable.
       let commit_timestamp = self.apply_create(ctx, io_ctx, timestamp_hint);
 
+      // Potentially respond to the External if we are the leader.
+      // Note: Recall we will already have responded if the CreateTable had failed.
       if ctx.is_leader() {
-        // Respond to the External.
-        // Note: Recall we will already have responded if the CreateTable had failed.
         if let Some(response_data) = &self.response_data {
+          // This means this is the original Leader that got the query.
           ctx.external_request_id_map.remove(&response_data.request_id);
           io_ctx.send(
             &response_data.sender_eid,
@@ -377,6 +378,13 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
             )),
           );
           self.response_data = None;
+        } else {
+          // This means the query succeeded but this is a backup. Thus, we
+          // record the success in a trace message.
+          io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
+            closed_plm.query_id.clone(),
+            commit_timestamp,
+          ));
         }
       }
 

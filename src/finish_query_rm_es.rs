@@ -1,4 +1,4 @@
-use crate::common::BasicIOCtx;
+use crate::common::{BasicIOCtx, GeneralTraceMessage};
 use crate::finish_query_tm_es::{
   FinishQueryPayloadTypes, FinishQueryPrepare, FinishQueryRMAborted, FinishQueryRMCommitted,
   FinishQueryRMPrepared,
@@ -102,10 +102,21 @@ impl Paxos2PCRMInner<FinishQueryPayloadTypes> for FinishQueryRMInner {
     FinishQueryRMCommitted {}
   }
 
-  fn committed_plm_inserted<IO: BasicIOCtx>(&mut self, ctx: &mut TabletContext, _: &mut IO) {
+  fn committed_plm_inserted<IO: BasicIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+    query_id: &QueryId,
+  ) {
     commit_to_storage(&mut ctx.storage, &self.timestamp, self.update_view.clone());
     let region_lock = ctx.prepared_writes.remove(&self.timestamp).unwrap();
     ctx.committed_writes.insert(self.timestamp.clone(), region_lock);
+
+    // Trace the commit
+    io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
+      query_id.clone(),
+      self.timestamp.clone(),
+    ));
   }
 
   fn mk_aborted_plm<IO: BasicIOCtx>(

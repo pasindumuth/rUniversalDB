@@ -21,6 +21,15 @@ use std::hash::Hash;
 //  Basic
 // -----------------------------------------------------------------------------------------------
 
+/// These messages are primarily for testing purposes.
+pub enum GeneralTraceMessage {
+  /// This should be called every time a `external_request_id_map` is updated.
+  RequestIdQueryId(RequestId, QueryId),
+  /// This should be called every time a Query or DDLQuery is committed. There can
+  /// be duplicates of this message.
+  CommittedQueryId(QueryId, Timestamp),
+}
+
 pub trait BasicIOCtx<NetworkMessageT = msg::NetworkMessage> {
   type RngCoreT: RngCore + Debug;
 
@@ -28,6 +37,9 @@ pub trait BasicIOCtx<NetworkMessageT = msg::NetworkMessage> {
   fn rand(&mut self) -> &mut Self::RngCoreT;
   fn now(&mut self) -> Timestamp;
   fn send(&mut self, eid: &EndpointId, msg: NetworkMessageT);
+
+  // Tracer
+  fn general_trace(&mut self, trace_msg: GeneralTraceMessage);
 }
 
 // -----------------------------------------------------------------------------------------------

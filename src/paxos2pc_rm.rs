@@ -64,6 +64,7 @@ pub trait Paxos2PCRMInner<T: PayloadTypes>: Sized {
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
+    query_id: &QueryId,
   );
 
   /// Called if one of the RMs returned Aborted.
@@ -309,7 +310,7 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
     match self {
       Paxos2PCRMOuter::Paxos2PCRMExecOuter(es) => match &es.state {
         State::Follower | State::InsertingCommitted => {
-          es.inner.committed_plm_inserted(ctx, io_ctx);
+          es.inner.committed_plm_inserted(ctx, io_ctx, &es.query_id);
           *self = Paxos2PCRMOuter::Committed;
         }
         _ => {}

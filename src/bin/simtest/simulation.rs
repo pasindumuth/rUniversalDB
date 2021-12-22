@@ -2,8 +2,8 @@ use crate::stats::Stats;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  mk_cid, BasicIOCtx, CoreIOCtx, GossipData, MasterIOCtx, MasterTraceMessage, RangeEnds,
-  SlaveIOCtx, SlaveTraceMessage,
+  mk_cid, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData, MasterIOCtx, MasterTraceMessage,
+  RangeEnds, SlaveIOCtx, SlaveTraceMessage,
 };
 use runiversal::coord::coord_test::{assert_coord_consistency, check_coord_clean};
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
@@ -12,7 +12,7 @@ use runiversal::master::{
   FullDBSchema, FullMasterInput, MasterContext, MasterState, MasterTimerInput,
 };
 use runiversal::model::common::{
-  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, RequestId,
+  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId,
   SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
 };
 use runiversal::model::message as msg;
@@ -61,6 +61,7 @@ pub struct TestSlaveIOCtx<'a> {
   tasks: &'a mut BTreeMap<Timestamp, Vec<SlaveTimerInput>>,
 
   /// Collection of trace messages
+  success_tracer: &'a mut RequestSuccessTracer,
   trace_msgs: &'a mut VecDeque<SlaveTraceMessage>,
 }
 
@@ -78,6 +79,10 @@ impl<'a> BasicIOCtx for TestSlaveIOCtx<'a> {
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
+
+  fn general_trace(&mut self, _: GeneralTraceMessage) {
+    unimplemented!()
+  }
 }
 
 impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
@@ -94,6 +99,7 @@ impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
       queues: self.queues,
       nonempty_queues: self.nonempty_queues,
       this_eid: self.this_eid,
+      success_tracer: self.success_tracer,
       slave_back_messages: self.slave_back_messages,
     };
     tablet.handle_input(&mut io_ctx, forward_msg);
@@ -115,6 +121,7 @@ impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
       queues: self.queues,
       nonempty_queues: self.nonempty_queues,
       this_eid: self.this_eid,
+      success_tracer: self.success_tracer,
       slave_back_messages: self.slave_back_messages,
     };
     coord.handle_input(&mut io_ctx, forward_msg);
@@ -153,6 +160,7 @@ pub struct TestCoreIOCtx<'a> {
   this_eid: &'a EndpointId,
 
   // Tablet
+  success_tracer: &'a mut RequestSuccessTracer,
   slave_back_messages: &'a mut VecDeque<SlaveBackMessage>,
 }
 
@@ -169,6 +177,10 @@ impl<'a> BasicIOCtx for TestCoreIOCtx<'a> {
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
+  }
+
+  fn general_trace(&mut self, trace_msg: GeneralTraceMessage) {
+    self.success_tracer.process(trace_msg);
   }
 }
 
@@ -196,6 +208,7 @@ pub struct TestMasterIOCtx<'a> {
   tasks: &'a mut BTreeMap<Timestamp, Vec<MasterTimerInput>>,
 
   /// Collection of trace messages
+  success_tracer: &'a mut RequestSuccessTracer,
   trace_msgs: &'a mut VecDeque<MasterTraceMessage>,
 }
 
@@ -213,6 +226,10 @@ impl<'a> BasicIOCtx for TestMasterIOCtx<'a> {
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
+
+  fn general_trace(&mut self, trace_msg: GeneralTraceMessage) {
+    self.success_tracer.process(trace_msg);
+  }
 }
 
 impl<'a> MasterIOCtx for TestMasterIOCtx<'a> {
@@ -227,6 +244,56 @@ impl<'a> MasterIOCtx for TestMasterIOCtx<'a> {
 
   fn trace(&mut self, trace_msg: MasterTraceMessage) {
     self.trace_msgs.push_back(trace_msg);
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Tracing
+// -----------------------------------------------------------------------------------------------
+
+/// This is used to keep track of which `RequestId`s were successful. This is useful
+/// for Requests that respond to the External with a `NodeDied` message, does not give
+/// information whether the query completed successfully or not.
+#[derive(Debug)]
+struct RequestSuccessTracer {
+  rid_qid_map: BTreeMap<RequestId, QueryId>,
+  qid_rid_map: BTreeMap<QueryId, RequestId>,
+  successful_reqs: BTreeMap<RequestId, Timestamp>,
+}
+
+impl RequestSuccessTracer {
+  fn new() -> RequestSuccessTracer {
+    RequestSuccessTracer {
+      rid_qid_map: Default::default(),
+      qid_rid_map: Default::default(),
+      successful_reqs: Default::default(),
+    }
+  }
+
+  fn process(&mut self, trace_msg: GeneralTraceMessage) {
+    match trace_msg {
+      GeneralTraceMessage::RequestIdQueryId(rid, qid) => {
+        // First, potentially remove an existing entry if it exists.
+        if let Some(prev_qid) = self.rid_qid_map.remove(&rid) {
+          assert_eq!(rid, self.qid_rid_map.remove(&prev_qid).unwrap());
+        }
+
+        // Add in the new entry
+        self.rid_qid_map.insert(rid.clone(), qid.clone());
+        self.qid_rid_map.insert(qid.clone(), rid.clone());
+      }
+      GeneralTraceMessage::CommittedQueryId(qid, timestamp) => {
+        // Add this `qid` to `successful_reqs`. We do not remove it since other RMs can
+        // also trace this message.
+        let rid = self.qid_rid_map.get(&qid).unwrap();
+        if let Some(cur_timestamp) = self.successful_reqs.get(&rid) {
+          // If a success is already recorded, we check that the timestamps align.
+          assert_eq!(&timestamp, cur_timestamp);
+        } else {
+          self.successful_reqs.insert(rid.clone(), timestamp);
+        }
+      }
+    }
   }
 }
 
@@ -285,6 +352,9 @@ pub struct Simulation {
   true_timestamp: u128,
   stats: Stats,
 
+  /// Tracer
+  success_tracer: RequestSuccessTracer,
+
   /// Inferred LeaderMap. This will evolve continuously (there will be no jumps in
   /// LeadershipId; the `gen` will increases one by one).
   pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
@@ -314,6 +384,7 @@ impl Simulation {
       true_timestamp: Default::default(),
       client_msgs_received: Default::default(),
       stats: Stats::default(),
+      success_tracer: RequestSuccessTracer::new(),
       leader_map: Default::default(),
       blocked_leadership: None,
     };
@@ -438,6 +509,7 @@ impl Simulation {
         slave_back_messages: &mut slave_data.slave_back_messages,
         coord_states: &mut slave_data.coord_states,
         tasks: &mut slave_data.tasks,
+        success_tracer: &mut sim.success_tracer,
         trace_msgs: &mut trace_msgs,
       };
 
@@ -456,6 +528,7 @@ impl Simulation {
         nonempty_queues: &mut sim.nonempty_queues,
         this_eid: &this_eid,
         tasks: &mut master_data.tasks,
+        success_tracer: &mut sim.success_tracer,
         trace_msgs: &mut trace_msgs,
       };
 
@@ -502,6 +575,10 @@ impl Simulation {
 
   pub fn slave_address_config(&self) -> &BTreeMap<SlaveGroupId, Vec<EndpointId>> {
     &self.slave_address_config
+  }
+
+  pub fn get_success_reqs(&self) -> BTreeMap<RequestId, Timestamp> {
+    self.success_tracer.successful_reqs.clone()
   }
 
   // -----------------------------------------------------------------------------------------------
@@ -588,6 +665,7 @@ impl Simulation {
       nonempty_queues: &mut self.nonempty_queues,
       this_eid: to_eid,
       tasks: &mut master_data.tasks,
+      success_tracer: &mut self.success_tracer,
       trace_msgs: &mut trace_msgs,
     };
 
@@ -633,6 +711,7 @@ impl Simulation {
       slave_back_messages: &mut slave_data.slave_back_messages,
       coord_states: &mut slave_data.coord_states,
       tasks: &mut slave_data.tasks,
+      success_tracer: &mut self.success_tracer,
       trace_msgs: &mut trace_msgs,
     };
 
@@ -725,6 +804,7 @@ impl Simulation {
         nonempty_queues: &mut self.nonempty_queues,
         this_eid: eid,
         tasks: &mut master_data.tasks,
+        success_tracer: &mut self.success_tracer,
         trace_msgs: &mut trace_msgs,
       };
 
@@ -766,6 +846,7 @@ impl Simulation {
         slave_back_messages: &mut slave_data.slave_back_messages,
         coord_states: &mut slave_data.coord_states,
         tasks: &mut slave_data.tasks,
+        success_tracer: &mut self.success_tracer,
         trace_msgs: &mut trace_msgs,
       };
 

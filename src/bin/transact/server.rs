@@ -1,8 +1,8 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  btree_multimap_insert, mk_cid, mk_sid, BasicIOCtx, CoreIOCtx, GossipData, SlaveIOCtx,
-  SlaveTraceMessage,
+  btree_multimap_insert, mk_cid, mk_sid, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData,
+  SlaveIOCtx, SlaveTraceMessage,
 };
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::model::common::{
@@ -90,6 +90,8 @@ impl BasicIOCtx for ProdSlaveIOCtx {
     let sender = net_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
   }
+
+  fn general_trace(&mut self, _: GeneralTraceMessage) {}
 }
 
 impl SlaveIOCtx for ProdSlaveIOCtx {
@@ -179,6 +181,8 @@ impl BasicIOCtx for ProdCoreIOCtx {
     let sender = net_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
   }
+
+  fn general_trace(&mut self, _: GeneralTraceMessage) {}
 }
 
 impl CoreIOCtx for ProdCoreIOCtx {

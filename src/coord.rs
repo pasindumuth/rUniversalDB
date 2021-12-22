@@ -1,5 +1,6 @@
 use crate::common::{
-  map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx, GossipData, OrigP, TMStatus,
+  map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx, GeneralTraceMessage, GossipData,
+  OrigP, TMStatus,
 };
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::finish_query_tm_es::{
@@ -183,7 +184,14 @@ impl CoordContext {
               Ok(ms_query) => {
                 let query_id = mk_qid(io_ctx.rand());
                 let request_id = &external_query.request_id;
+
+                // Update the `external_request_id_map` and trace it.
                 self.external_request_id_map.insert(request_id.clone(), query_id.clone());
+                io_ctx.general_trace(GeneralTraceMessage::RequestIdQueryId(
+                  request_id.clone(),
+                  query_id.clone(),
+                ));
+
                 let ms_coord = map_insert(
                   &mut statuses.ms_coord_ess,
                   &query_id,
@@ -783,8 +791,12 @@ impl CoordContext {
         });
         let ms_coord = map_insert(&mut statuses.ms_coord_ess, &query_id, ms_coord);
 
-        // Update the QueryId that's stored in the request map.
+        // Update the QueryId that's stored in the `external_request_id_map` and trace it.
         *self.external_request_id_map.get_mut(&ms_coord.request_id).unwrap() = query_id.clone();
+        io_ctx.general_trace(GeneralTraceMessage::RequestIdQueryId(
+          ms_coord.request_id.clone(),
+          query_id.clone(),
+        ));
 
         // Start executing the new MSCoordES.
         let action = ms_coord.es.start(self, io_ctx);
@@ -840,8 +852,12 @@ impl CoordContext {
               },
             );
 
-            // Update the QueryId that's stored in the request map.
+            // Update the QueryId that's stored in the `external_request_id_map` and trace it.
             *self.external_request_id_map.get_mut(&ms_coord.request_id).unwrap() = query_id.clone();
+            io_ctx.general_trace(GeneralTraceMessage::RequestIdQueryId(
+              ms_coord.request_id.clone(),
+              query_id.clone(),
+            ));
 
             // Start executing the new MSCoordES.
             let action = ms_coord.es.start(self, io_ctx);
