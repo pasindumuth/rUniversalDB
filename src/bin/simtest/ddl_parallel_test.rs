@@ -543,7 +543,7 @@ fn verify_req_res(
 // -----------------------------------------------------------------------------------------------
 
 pub fn test_all_ddl_parallel(rand: &mut XorShiftRng) {
-  for i in 0..50 {
+  for i in 0..100 {
     println!("Running round {:?}", i);
     parallel_test(mk_seed(rand), 5);
   }
@@ -551,9 +551,9 @@ pub fn test_all_ddl_parallel(rand: &mut XorShiftRng) {
 
 // TODO: extend Timestamp with random bits so we can extend the simulation duration
 //  without too many more conflicts.
-// TODO: Fix InvalidQueryPlan panic logic.
 
 pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
+  println!("seed: {:?}", seed);
   let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes);
 
   // Run the simulation
@@ -766,7 +766,9 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
   }
 
   // Simulate more for a cooldown time and verify that all resources get cleaned up.
-  assert!(simulate_until_clean(&mut sim, 10000));
+  if !simulate_until_clean(&mut sim, 10000) {
+    sim.check_resources_clean(true); // Fail, pointing to where the leak is.
+  }
 
   // Verify the responses are correct
   let success_reqs = sim.get_success_reqs();

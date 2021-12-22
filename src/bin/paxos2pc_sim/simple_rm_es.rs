@@ -5,6 +5,7 @@ use crate::simple_tm_es::{
 use crate::slave::SlaveContext;
 use rand::RngCore;
 use runiversal::common::BasicIOCtx;
+use runiversal::model::common::QueryId;
 use runiversal::paxos2pc_rm::{Paxos2PCRMInner, Paxos2PCRMOuter};
 use runiversal::paxos2pc_tm::{PayloadTypes, RMCommittedPLm};
 
@@ -74,6 +75,7 @@ impl Paxos2PCRMInner<SimplePayloadTypes> for SimpleRMInner {
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
+    _: &QueryId,
   ) {
   }
 

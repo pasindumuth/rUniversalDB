@@ -264,16 +264,16 @@ impl FullMSCoordES {
       }
       msg::AbortedData::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
       | msg::AbortedData::QueryError(msg::QueryError::DeadlockSafetyAbortion)
-      | msg::AbortedData::QueryError(msg::QueryError::TimestampConflict) => {
+      | msg::AbortedData::QueryError(msg::QueryError::TimestampConflict)
+      // TODO: Verify this code in the below case.
+      | msg::AbortedData::QueryError(msg::QueryError::InvalidQueryPlan)
+      | msg::AbortedData::QueryError(msg::QueryError::InvalidLeadershipId)=> {
         // This implies a recoverable failure, so we ECU and return accordingly.
         self.exit_and_clean_up(ctx, io_ctx);
         MSQueryCoordAction::NonFatalFailure
       }
       // Recall that LateralErrors should never make it back to the MSCoordES.
       msg::AbortedData::QueryError(msg::QueryError::LateralError) => panic!(),
-      // TODO: do these
-      msg::AbortedData::QueryError(msg::QueryError::InvalidQueryPlan) => panic!(),
-      msg::AbortedData::QueryError(msg::QueryError::InvalidLeadershipId) => panic!(),
     }
   }
 

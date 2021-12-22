@@ -2,7 +2,7 @@ use crate::message as msg;
 use crate::slave::{FullSlaveInput, SlaveBundle, SlaveContext, SlaveState, SlaveTimerInput};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{BasicIOCtx, RangeEnds};
+use runiversal::common::{BasicIOCtx, GeneralTraceMessage, RangeEnds};
 use runiversal::model::common::{
   EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, Timestamp,
 };
@@ -53,6 +53,10 @@ impl<'a> BasicIOCtx<msg::NetworkMessage> for SlaveIOCtx<'a> {
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
+  }
+
+  fn general_trace(&mut self, _: GeneralTraceMessage) {
+    unimplemented!()
   }
 }
 
