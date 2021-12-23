@@ -298,14 +298,17 @@ impl Default for DDLES {
 impl Paxos2PCContainer<AlterTableRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut AlterTableRMES> {
     if let DDLES::Alter(es) = self {
-      // Recall that our DDL Coordination scheme requires the previous the previous DDL
+      // Recall that our DDL Coordination scheme requires the previous DDL
       // STMPaxos2PC to be totally done before the next, so we should never get
       // mismatching QueryId's here.
       debug_assert_eq!(&es.query_id, query_id);
       Some(es)
     } else {
       // Similarly, if there is no AlterTable, there should not be a DropTable here either.
-      debug_assert!(matches!(self, DDLES::None));
+      match self {
+        DDLES::None => (),
+        _ => debug_assert!(false),
+      }
       None
     }
   }
@@ -318,14 +321,17 @@ impl Paxos2PCContainer<AlterTableRMES> for DDLES {
 impl Paxos2PCContainer<DropTableRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut DropTableRMES> {
     if let DDLES::Drop(es) = self {
-      // Recall that our DDL Coordination scheme requires the previous the previous DDL
+      // Recall that our DDL Coordination scheme requires the previous DDL
       // STMPaxos2PC to be totally done before the next, so we should never get
       // mismatching QueryId's here.
       debug_assert_eq!(&es.query_id, query_id);
       Some(es)
     } else {
-      // Similarly, if there is no DropTable, there should not be a AlterTable here either.
-      debug_assert!(matches!(self, DDLES::None));
+      // Similarly, if there is no running DropTable, there should not be a AlterTable here either.
+      match self {
+        DDLES::None | DDLES::Dropped(_) => (),
+        _ => debug_assert!(false),
+      }
       None
     }
   }
