@@ -2,7 +2,7 @@ use crate::alter_table_tm_es::{
   AlterTableClosed, AlterTableCommit, AlterTablePayloadTypes, AlterTablePrepare,
   AlterTablePrepared, AlterTableRMAborted, AlterTableRMCommitted, AlterTableRMPrepared,
 };
-use crate::common::BasicIOCtx;
+use crate::common::{mk_t, BasicIOCtx};
 use crate::model::common::{proc, Timestamp};
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
@@ -33,10 +33,10 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     timestamp = max(timestamp, ctx.table_schema.val_cols.get_lat(col_name));
     for (_, req) in ctx.waiting_locked_cols.iter().chain(ctx.inserting_locked_cols.iter()) {
       if req.cols.contains(col_name) {
-        timestamp = max(timestamp, req.timestamp);
+        timestamp = max(timestamp, req.timestamp.clone());
       }
     }
-    timestamp += 1;
+    timestamp = timestamp.add(mk_t(1));
 
     AlterTableRMInner { alter_op: payload.alter_op, prepared_timestamp: timestamp }
   }
@@ -58,7 +58,10 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     _: &mut TabletContext,
     _: &mut IO,
   ) -> AlterTableRMPrepared {
-    AlterTableRMPrepared { alter_op: self.alter_op.clone(), timestamp: self.prepared_timestamp }
+    AlterTableRMPrepared {
+      alter_op: self.alter_op.clone(),
+      timestamp: self.prepared_timestamp.clone(),
+    }
   }
 
   fn prepared_plm_inserted<IO: BasicIOCtx>(
@@ -66,7 +69,7 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     _: &mut TabletContext,
     _: &mut IO,
   ) -> AlterTablePrepared {
-    AlterTablePrepared { timestamp: self.prepared_timestamp }
+    AlterTablePrepared { timestamp: self.prepared_timestamp.clone() }
   }
 
   fn mk_committed_plm<IO: BasicIOCtx>(
@@ -75,7 +78,7 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     _: &mut IO,
     commit: &AlterTableCommit,
   ) -> AlterTableRMCommitted {
-    AlterTableRMCommitted { timestamp: commit.timestamp }
+    AlterTableRMCommitted { timestamp: commit.timestamp.clone() }
   }
 
   /// Apply the `alter_op` to this Tablet's `table_schema`.
@@ -88,7 +91,7 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     ctx.table_schema.val_cols.write(
       &self.alter_op.col_name,
       self.alter_op.maybe_col_type.clone(),
-      committed_plm.payload.timestamp,
+      committed_plm.payload.timestamp.clone(),
     );
   }
 

@@ -1,8 +1,8 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  btree_multimap_insert, mk_cid, mk_sid, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData,
-  SlaveIOCtx, SlaveTraceMessage,
+  btree_multimap_insert, mk_cid, mk_sid, mk_t, BasicIOCtx, CoreIOCtx, GeneralTraceMessage,
+  GossipData, SlaveIOCtx, SlaveTraceMessage,
 };
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::model::common::{
@@ -59,7 +59,7 @@ impl ProdSlaveIOCtx {
       thread::sleep(increment);
 
       // Poll all tasks from `tasks` prior to the current time, and push them to the Slave.
-      let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+      let now = mk_t(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
       let mut tasks = tasks.lock().unwrap();
       while let Some((next_timestamp, _)) = tasks.first_key_value() {
         if next_timestamp <= &now {
@@ -81,8 +81,8 @@ impl BasicIOCtx for ProdSlaveIOCtx {
     &mut self.rand
   }
 
-  fn now(&mut self) -> u128 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
+  fn now(&mut self) -> Timestamp {
+    mk_t(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis())
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
@@ -139,8 +139,8 @@ impl SlaveIOCtx for ProdSlaveIOCtx {
     self.coord_map.keys().cloned().collect()
   }
 
-  fn defer(&mut self, defer_time: u128, timer_input: SlaveTimerInput) {
-    let timestamp = self.now() + defer_time;
+  fn defer(&mut self, defer_time: Timestamp, timer_input: SlaveTimerInput) {
+    let timestamp = self.now().add(defer_time);
     let mut tasks = self.tasks.lock().unwrap();
     if let Some(timer_inputs) = tasks.get_mut(&timestamp) {
       timer_inputs.push(timer_input);
@@ -172,8 +172,8 @@ impl BasicIOCtx for ProdCoreIOCtx {
     &mut self.rand
   }
 
-  fn now(&mut self) -> u128 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
+  fn now(&mut self) -> Timestamp {
+    mk_t(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis())
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {

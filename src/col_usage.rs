@@ -93,7 +93,7 @@ pub enum ColUsageError {
 pub struct ColUsagePlanner<'a> {
   pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
   pub table_generation: &'a MVM<TablePath, Gen>,
-  pub timestamp: Timestamp,
+  pub timestamp: &'a Timestamp,
 }
 
 impl<'a> ColUsagePlanner<'a> {
@@ -141,7 +141,7 @@ impl<'a> ColUsagePlanner<'a> {
         }
         GeneralSourceRef::TablePath(table_path) => {
           // The Query converter will have made sure that all TablePaths actually exist.
-          let gen = self.table_generation.static_read(table_path, self.timestamp).unwrap();
+          let gen = self.table_generation.static_read(table_path, &self.timestamp).unwrap();
           let table_schema = self.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
           contains_col(&table_schema, col_name, &self.timestamp)
         }
@@ -209,7 +209,7 @@ impl<'a> ColUsagePlanner<'a> {
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<Option<ColName>>>,
     update: &proc::Update,
   ) -> Result<(Vec<Option<ColName>>, FrozenColUsageNode), ColUsageError> {
-    let gen = self.table_generation.static_read(&update.table.source_ref, self.timestamp).unwrap();
+    let gen = self.table_generation.static_read(&update.table.source_ref, &self.timestamp).unwrap();
     let table_schema =
       &self.db_schema.get(&(update.table.source_ref.clone(), gen.clone())).unwrap();
     let mut projection = compute_update_schema(update, table_schema);
@@ -598,6 +598,7 @@ pub fn iterate_stage_ms_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
 #[cfg(test)]
 mod test {
   use super::*;
+  use crate::common::mk_t;
   use crate::model::common::ColType;
   use crate::test_utils::{cn, cno, mk_tab, mk_ttab};
   use std::collections::BTreeMap;
@@ -605,9 +606,9 @@ mod test {
   #[test]
   fn basic_test() {
     let mut table_generation: MVM<TablePath, Gen> = MVM::new();
-    table_generation.write(&mk_tab("t1"), Some(Gen(0)), 1);
-    table_generation.write(&mk_tab("t2"), Some(Gen(0)), 1);
-    table_generation.write(&mk_tab("t3"), Some(Gen(0)), 1);
+    table_generation.write(&mk_tab("t1"), Some(Gen(0)), mk_t(1));
+    table_generation.write(&mk_tab("t2"), Some(Gen(0)), mk_t(1));
+    table_generation.write(&mk_tab("t3"), Some(Gen(0)), mk_t(1));
 
     let db_schema: BTreeMap<(TablePath, Gen), TableSchema> = vec![
       (
@@ -702,8 +703,11 @@ mod test {
       returning: mk_ttab("tt1"),
     };
 
-    let mut planner =
-      ColUsagePlanner { db_schema: &db_schema, table_generation: &table_generation, timestamp: 1 };
+    let mut planner = ColUsagePlanner {
+      db_schema: &db_schema,
+      table_generation: &table_generation,
+      timestamp: &mk_t(1),
+    };
     let col_usage_nodes = planner.plan_ms_query(&ms_query).unwrap();
 
     let exp_col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))> = vec![

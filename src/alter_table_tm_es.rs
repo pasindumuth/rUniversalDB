@@ -1,4 +1,4 @@
-use crate::common::{BasicIOCtx, GeneralTraceMessage};
+use crate::common::{mk_t, BasicIOCtx, GeneralTraceMessage};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
   proc, EndpointId, RequestId, TNodePath, TSubNodePath, TablePath, Timestamp,
@@ -201,7 +201,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
   ) -> AlterTableTMCommitted {
     let mut timestamp_hint = io_ctx.now();
     for (_, prepared) in prepared {
-      timestamp_hint = max(timestamp_hint, prepared.timestamp);
+      timestamp_hint = max(timestamp_hint, prepared.timestamp.clone());
     }
     AlterTableTMCommitted { timestamp_hint }
   }
@@ -218,17 +218,17 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     let table_schema = ctx.db_schema.get_mut(&(self.table_path.clone(), gen.clone())).unwrap();
 
     // Compute the timestamp to commit at
-    let mut timestamp = committed_plm.payload.timestamp_hint;
-    timestamp = max(timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
-    timestamp = max(timestamp, table_schema.val_cols.get_lat(&self.alter_op.col_name) + 1);
+    let mut timestamp = committed_plm.payload.timestamp_hint.clone();
+    timestamp = max(timestamp, ctx.table_generation.get_lat(&self.table_path).add(mk_t(1)));
+    timestamp = max(timestamp, table_schema.val_cols.get_lat(&self.alter_op.col_name).add(mk_t(1)));
 
     // Apply the AlterOp
     ctx.gen.inc();
-    ctx.table_generation.update_lat(&self.table_path, timestamp);
+    ctx.table_generation.update_lat(&self.table_path, timestamp.clone());
     table_schema.val_cols.write(
       &self.alter_op.col_name,
       self.alter_op.maybe_col_type.clone(),
-      timestamp,
+      timestamp.clone(),
     );
 
     // Potentially respond to the External if we are the leader.
@@ -241,7 +241,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
           msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
             msg::ExternalDDLQuerySuccess {
               request_id: response_data.request_id.clone(),
-              timestamp,
+              timestamp: timestamp.clone(),
             },
           )),
         );
@@ -251,7 +251,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
         // record the success in a trace message.
         io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
           committed_plm.query_id.clone(),
-          timestamp,
+          timestamp.clone(),
         ));
       }
     }
@@ -262,7 +262,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     // Return Commit messages
     let mut commits = BTreeMap::<TNodePath, AlterTableCommit>::new();
     for rm in get_rms::<IO>(ctx, &self.table_path) {
-      commits.insert(rm.clone(), AlterTableCommit { timestamp });
+      commits.insert(rm.clone(), AlterTableCommit { timestamp: timestamp.clone() });
     }
     commits
   }

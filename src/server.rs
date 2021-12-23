@@ -584,7 +584,7 @@ pub fn strong_contains_col(
   timestamp: &Timestamp,
 ) -> bool {
   lookup_pos(&table_schema.key_cols, col).is_some()
-    || table_schema.val_cols.strong_static_read(col, *timestamp).is_some()
+    || table_schema.val_cols.strong_static_read(col, timestamp).is_some()
 }
 
 /// Computes whether `col` is in `table_schema` at `timestamp`. Here, the `col` need not be
@@ -592,7 +592,7 @@ pub fn strong_contains_col(
 /// of any sort.
 pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
   lookup_pos(&table_schema.key_cols, col).is_some()
-    || table_schema.val_cols.static_read(col, *timestamp).is_some()
+    || table_schema.val_cols.static_read(col, timestamp).is_some()
 }
 
 /// Computes whether `col` is in `table_schema` at the latest time which `col` had been modified

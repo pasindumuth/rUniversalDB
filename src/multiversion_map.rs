@@ -1,3 +1,4 @@
+use crate::common::mk_t;
 use crate::model::common::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
@@ -21,7 +22,7 @@ where
   pub fn init(init_vals: BTreeMap<K, V>) -> MVM<K, V> {
     let mut map = BTreeMap::<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>::new();
     for (key, value) in init_vals {
-      map.insert(key, (0, vec![(0, Some(value))]));
+      map.insert(key, (mk_t(0), vec![(mk_t(0), Some(value))]));
     }
     MVM { map }
   }
@@ -31,38 +32,38 @@ where
   pub fn write(&mut self, key: &K, value: Option<V>, timestamp: Timestamp) {
     if let Some((lat, versions)) = self.map.get_mut(key) {
       assert!(*lat < timestamp);
-      *lat = timestamp;
+      *lat = timestamp.clone();
       versions.push((timestamp, value));
     } else {
       // Recall that mathematically, every key imaginable is in the MVM with no versions
       // and a LAT of 0. Thus, we cannot do an MVM write to a timestamp of 0.
-      assert!(0 < timestamp);
-      self.map.insert(key.clone(), (timestamp, vec![(timestamp, value)]));
+      assert!(mk_t(0) < timestamp);
+      self.map.insert(key.clone(), (timestamp.clone(), vec![(timestamp, value)]));
     }
   }
 
-  pub fn read(&mut self, key: &K, timestamp: Timestamp) -> Option<V> {
+  pub fn read(&mut self, key: &K, timestamp: &Timestamp) -> Option<V> {
     if let Some((lat, versions)) = self.map.get_mut(key) {
-      *lat = max(*lat, timestamp);
+      *lat = max(lat.clone(), timestamp.clone());
       find_prior_value(versions, timestamp).cloned()
     } else {
-      self.map.insert(key.clone(), (timestamp, vec![]));
+      self.map.insert(key.clone(), (timestamp.clone(), vec![]));
       None
     }
   }
 
   pub fn update_lat(&mut self, key: &K, timestamp: Timestamp) {
     if let Some((lat, _)) = self.map.get_mut(key) {
-      *lat = max(*lat, timestamp);
+      *lat = max(lat.clone(), timestamp);
     } else {
       self.map.insert(key.clone(), (timestamp, vec![]));
     }
   }
 
   /// Reads the version prior to the timestamp. Asserts that the `lat` is high enough.
-  pub fn strong_static_read(&self, key: &K, timestamp: Timestamp) -> Option<&V> {
+  pub fn strong_static_read(&self, key: &K, timestamp: &Timestamp) -> Option<&V> {
     if let Some((lat, versions)) = self.map.get(key) {
-      assert!(&timestamp <= lat);
+      assert!(timestamp <= lat);
       find_prior_value(versions, timestamp)
     } else {
       None
@@ -96,7 +97,7 @@ where
 
   /// Reads the prior value at the timestamp. This does not mutate the `lat` if the read
   /// happens with a future timestamp. Thus, the values read are not idempotent.
-  pub fn static_read(&self, key: &K, timestamp: Timestamp) -> Option<&V> {
+  pub fn static_read(&self, key: &K, timestamp: &Timestamp) -> Option<&V> {
     let (_, value) = self.static_read_version(key, timestamp)?;
     value.as_ref()
   }
@@ -106,7 +107,7 @@ where
   pub fn static_read_version(
     &self,
     key: &K,
-    timestamp: Timestamp,
+    timestamp: &Timestamp,
   ) -> Option<&(Timestamp, Option<V>)> {
     if let Some((_, versions)) = self.map.get(key) {
       find_prior_version(versions, timestamp)
@@ -117,7 +118,7 @@ where
 
   /// Returns the values for all keys that are present at the given
   /// `timestamp`. This is done statically, so no lats are updated.
-  pub fn static_snapshot_read(&self, timestamp: Timestamp) -> BTreeMap<K, V> {
+  pub fn static_snapshot_read(&self, timestamp: &Timestamp) -> BTreeMap<K, V> {
     let mut snapshot = BTreeMap::new();
     for (key, (_, versions)) in &self.map {
       if let Some(value) = find_prior_value(versions, timestamp) {
@@ -130,34 +131,37 @@ where
   /// Recall that abstractly, all keys are mapped to `(0, [])`
   pub fn get_lat(&self, key: &K) -> Timestamp {
     if let Some((lat, _)) = self.map.get(key) {
-      *lat
+      lat.clone()
     } else {
-      0
+      mk_t(0)
     }
   }
 
   /// Get the highest LAT of any key-value pair in the MVM.
   pub fn get_latest_lat(&self) -> Timestamp {
-    let mut latest_lat = 0;
+    let mut latest_lat = mk_t(0);
     for (_, (lat, _)) in &self.map {
-      latest_lat = max(latest_lat, *lat);
+      latest_lat = max(latest_lat, lat.clone());
     }
     latest_lat
   }
 }
 
-fn find_prior_value<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> Option<&V> {
+fn find_prior_value<'a, V>(
+  versions: &'a Vec<(Timestamp, Option<V>)>,
+  timestamp: &Timestamp,
+) -> Option<&'a V> {
   let (_, value) = find_prior_version(versions, timestamp)?;
   value.as_ref()
 }
 
-fn find_prior_version<V>(
-  versions: &Vec<(Timestamp, Option<V>)>,
-  timestamp: Timestamp,
-) -> Option<&(Timestamp, Option<V>)> {
+fn find_prior_version<'a, V>(
+  versions: &'a Vec<(Timestamp, Option<V>)>,
+  timestamp: &Timestamp,
+) -> Option<&'a (Timestamp, Option<V>)> {
   for version in versions.iter().rev() {
     let (t, _) = version;
-    if *t <= timestamp {
+    if t <= timestamp {
       return Some(version);
     }
   }
@@ -166,6 +170,8 @@ fn find_prior_version<V>(
 
 #[cfg(test)]
 mod tests {
+  use crate::common::mk_t;
+  use crate::model::common::Timestamp;
   use crate::multiversion_map::MVM;
 
   #[test]
@@ -175,14 +181,14 @@ mod tests {
     let v1 = String::from("v1");
     let v2 = String::from("v2");
     let v3 = String::from("v3");
-    assert_eq!(mvm.read(&k, 1), None);
-    mvm.write(&k, Some(v1.clone()), 2);
-    mvm.write(&k, Some(v2.clone()), 4);
-    assert_eq!(mvm.read(&k, 3), Some(v1));
-    assert_eq!(mvm.read(&k, 5), Some(v2));
-    mvm.write(&k, Some(v3.clone()), 6);
-    assert_eq!(mvm.read(&k, 6), Some(v3));
-    mvm.write(&k, None, 7);
-    assert_eq!(mvm.read(&k, 7), None);
+    assert_eq!(mvm.read(&k, &mk_t(1)), None);
+    mvm.write(&k, Some(v1.clone()), mk_t(2));
+    mvm.write(&k, Some(v2.clone()), mk_t(4));
+    assert_eq!(mvm.read(&k, &mk_t(3)), Some(v1));
+    assert_eq!(mvm.read(&k, &mk_t(5)), Some(v2));
+    mvm.write(&k, Some(v3.clone()), mk_t(6));
+    assert_eq!(mvm.read(&k, &mk_t(6)), Some(v3));
+    mvm.write(&k, None, mk_t(7));
+    assert_eq!(mvm.read(&k, &mk_t(7)), None);
   }
 }

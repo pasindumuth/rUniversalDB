@@ -2,8 +2,8 @@ use crate::stats::Stats;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  mk_cid, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData, MasterIOCtx, MasterTraceMessage,
-  RangeEnds, SlaveIOCtx, SlaveTraceMessage,
+  mk_cid, mk_t, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData, MasterIOCtx,
+  MasterTraceMessage, RangeEnds, SlaveIOCtx, SlaveTraceMessage,
 };
 use runiversal::coord::coord_test::{assert_coord_consistency, check_coord_clean};
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
@@ -40,7 +40,7 @@ use std::sync::Arc;
 pub struct TestSlaveIOCtx<'a> {
   // Basic
   rand: &'a mut XorShiftRng,
-  current_time: u128,
+  current_time: Timestamp,
   queues: &'a mut BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
   nonempty_queues: &'a mut Vec<(EndpointId, EndpointId)>,
 
@@ -72,8 +72,8 @@ impl<'a> BasicIOCtx for TestSlaveIOCtx<'a> {
     &mut self.rand
   }
 
-  fn now(&mut self) -> u128 {
-    self.current_time
+  fn now(&mut self) -> Timestamp {
+    self.current_time.clone()
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
@@ -95,7 +95,7 @@ impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
     let tablet = self.tablet_states.get_mut(tid).unwrap();
     let mut io_ctx = TestCoreIOCtx {
       rand: self.rand,
-      current_time: self.current_time,
+      current_time: self.current_time.clone(),
       queues: self.queues,
       nonempty_queues: self.nonempty_queues,
       this_eid: self.this_eid,
@@ -117,7 +117,7 @@ impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
     let coord = self.coord_states.get_mut(cid).unwrap();
     let mut io_ctx = TestCoreIOCtx {
       rand: self.rand,
-      current_time: self.current_time,
+      current_time: self.current_time.clone(),
       queues: self.queues,
       nonempty_queues: self.nonempty_queues,
       this_eid: self.this_eid,
@@ -131,8 +131,8 @@ impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
     self.coord_states.keys().cloned().collect()
   }
 
-  fn defer(&mut self, defer_time: u128, timer_input: SlaveTimerInput) {
-    let deferred_time = self.current_time + defer_time;
+  fn defer(&mut self, defer_time: Timestamp, timer_input: SlaveTimerInput) {
+    let deferred_time = self.now().add(defer_time);
     if let Some(timer_inputs) = self.tasks.get_mut(&deferred_time) {
       timer_inputs.push(timer_input);
     } else {
@@ -152,7 +152,7 @@ impl<'a> SlaveIOCtx for TestSlaveIOCtx<'a> {
 pub struct TestCoreIOCtx<'a> {
   // Basic
   rand: &'a mut XorShiftRng,
-  current_time: u128,
+  current_time: Timestamp,
   queues: &'a mut BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
   nonempty_queues: &'a mut Vec<(EndpointId, EndpointId)>,
 
@@ -171,8 +171,8 @@ impl<'a> BasicIOCtx for TestCoreIOCtx<'a> {
     &mut self.rand
   }
 
-  fn now(&mut self) -> u128 {
-    self.current_time
+  fn now(&mut self) -> Timestamp {
+    self.current_time.clone()
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
@@ -197,7 +197,7 @@ impl<'a> CoreIOCtx for TestCoreIOCtx<'a> {
 pub struct TestMasterIOCtx<'a> {
   // Basic
   rand: &'a mut XorShiftRng,
-  current_time: u128,
+  current_time: Timestamp,
   queues: &'a mut BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
   nonempty_queues: &'a mut Vec<(EndpointId, EndpointId)>,
 
@@ -219,8 +219,8 @@ impl<'a> BasicIOCtx for TestMasterIOCtx<'a> {
     &mut self.rand
   }
 
-  fn now(&mut self) -> u128 {
-    self.current_time
+  fn now(&mut self) -> Timestamp {
+    self.current_time.clone()
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
@@ -233,8 +233,8 @@ impl<'a> BasicIOCtx for TestMasterIOCtx<'a> {
 }
 
 impl<'a> MasterIOCtx for TestMasterIOCtx<'a> {
-  fn defer(&mut self, defer_time: u128, timer_input: MasterTimerInput) {
-    let deferred_time = self.current_time + defer_time;
+  fn defer(&mut self, defer_time: Timestamp, timer_input: MasterTimerInput) {
+    let deferred_time = self.now().add(defer_time);
     if let Some(timer_inputs) = self.tasks.get_mut(&deferred_time) {
       timer_inputs.push(timer_input);
     } else {
@@ -349,7 +349,7 @@ pub struct Simulation {
 
   /// Meta
   next_int: i32,
-  true_timestamp: u128,
+  true_timestamp: Timestamp,
   stats: Stats,
 
   /// Tracer
@@ -381,7 +381,7 @@ impl Simulation {
       slave_address_config: slave_address_config.clone(),
       master_address_config: master_address_config.clone(),
       next_int: Default::default(),
-      true_timestamp: Default::default(),
+      true_timestamp: mk_t(0),
       client_msgs_received: Default::default(),
       stats: Stats::default(),
       success_tracer: RequestSuccessTracer::new(),
@@ -491,11 +491,11 @@ impl Simulation {
 
     // Metadata
     sim.next_int = 0;
-    sim.true_timestamp = 0;
+    sim.true_timestamp = mk_t(0);
 
     // Bootstrap the nodes
     for (_, slave_data) in &mut sim.slave_data {
-      let current_time = sim.true_timestamp;
+      let current_time = sim.true_timestamp.clone();
       let this_eid = slave_data.slave_state.ctx.this_eid.clone();
       let mut trace_msgs = VecDeque::<SlaveTraceMessage>::new();
       let mut io_ctx = TestSlaveIOCtx {
@@ -519,7 +519,7 @@ impl Simulation {
 
     let mut trace_msgs = VecDeque::<MasterTraceMessage>::new();
     for (_, master_data) in &mut sim.master_data {
-      let current_time = sim.true_timestamp;
+      let current_time = sim.true_timestamp.clone();
       let this_eid = master_data.master_state.ctx.this_eid.clone();
       let mut io_ctx = TestMasterIOCtx {
         rand: &mut sim.rand,
@@ -656,7 +656,7 @@ impl Simulation {
     msg: msg::MasterMessage,
   ) {
     let master_data = self.master_data.get_mut(&to_eid).unwrap();
-    let current_time = self.true_timestamp;
+    let current_time = self.true_timestamp.clone();
     let mut trace_msgs = VecDeque::<MasterTraceMessage>::new();
     let mut io_ctx = TestMasterIOCtx {
       rand: &mut self.rand,
@@ -698,7 +698,7 @@ impl Simulation {
   pub fn run_slave_message(&mut self, _: &EndpointId, to_eid: &EndpointId, msg: msg::SlaveMessage) {
     let slave_data = self.slave_data.get_mut(&to_eid).unwrap();
     let sid = slave_data.slave_state.ctx.this_sid.clone();
-    let current_time = self.true_timestamp;
+    let current_time = self.true_timestamp.clone();
     let mut trace_msgs = VecDeque::<SlaveTraceMessage>::new();
     let mut io_ctx = TestSlaveIOCtx {
       rand: &mut self.rand,
@@ -795,11 +795,11 @@ impl Simulation {
   /// Execute the timer events up to the current `true_timestamp` for the Master.
   pub fn run_master_timer_events(&mut self) {
     for (eid, master_data) in &mut self.master_data {
-      let current_time = self.true_timestamp;
+      let current_time = self.true_timestamp.clone();
       let mut trace_msgs = VecDeque::<MasterTraceMessage>::new();
       let mut io_ctx = TestMasterIOCtx {
         rand: &mut self.rand,
-        current_time, // TODO: simulate clock skew
+        current_time: current_time.clone(), // TODO: simulate clock skew
         queues: &mut self.queues,
         nonempty_queues: &mut self.nonempty_queues,
         this_eid: eid,
@@ -833,11 +833,11 @@ impl Simulation {
   /// Execute the timer events up to the current `true_timestamp` for the Slave.
   pub fn run_slave_timer_events(&mut self) {
     for (eid, slave_data) in &mut self.slave_data {
-      let current_time = self.true_timestamp;
+      let current_time = self.true_timestamp.clone();
       let mut trace_msgs = VecDeque::<SlaveTraceMessage>::new();
       let mut io_ctx = TestSlaveIOCtx {
         rand: &mut self.rand,
-        current_time, // TODO: simulate clock skew
+        current_time: current_time.clone(), // TODO: simulate clock skew
         queues: &mut self.queues,
         nonempty_queues: &mut self.nonempty_queues,
         this_sid: &slave_data.slave_state.ctx.this_sid.clone(),
@@ -926,7 +926,7 @@ impl Simulation {
   ///   - A very large number of messages are RemoteLeaderChanged gossip messages, which
   ///     results in every leader sending every other node (not just leaders) a message.
   pub fn simulate1ms(&mut self) {
-    self.true_timestamp += 1;
+    self.true_timestamp = self.true_timestamp.add(mk_t(1));
     let mut num_msgs_to_deliver = 0;
     for (from_eid, to_eid) in &self.nonempty_queues {
       let num_msgs = self.queues.get(from_eid).unwrap().get(to_eid).unwrap().len();
@@ -948,6 +948,7 @@ impl Simulation {
     }
   }
 
+  // TODO: delete this:
   pub fn mk_request_id(&mut self) -> RequestId {
     let request_id = RequestId(self.next_int.to_string());
     self.next_int += 1;

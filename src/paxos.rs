@@ -1,4 +1,4 @@
-use crate::common::{mk_uuid, UUID};
+use crate::common::{mk_t, mk_uuid, UUID};
 use crate::model::common::{EndpointId, Gen, LeadershipId, Timestamp};
 use crate::model::message as msg;
 use crate::model::message::{
@@ -62,9 +62,9 @@ pub struct PaxosInstance<BundleT> {
 #[derive(Debug, Clone)]
 pub struct PaxosConfig {
   pub heartbeat_threshold: u32,
-  pub heartbeat_period_ms: u128,
-  pub next_index_period_ms: u128,
-  pub retry_defer_time_ms: u128,
+  pub heartbeat_period_ms: Timestamp,
+  pub next_index_period_ms: Timestamp,
+  pub retry_defer_time_ms: Timestamp,
   pub proposal_increment: u32,
 }
 
@@ -73,9 +73,9 @@ impl PaxosConfig {
   pub fn prod() -> PaxosConfig {
     PaxosConfig {
       heartbeat_threshold: 5,
-      heartbeat_period_ms: 1000,
-      next_index_period_ms: 1000,
-      retry_defer_time_ms: 1000,
+      heartbeat_period_ms: mk_t(1000),
+      next_index_period_ms: mk_t(1000),
+      retry_defer_time_ms: mk_t(1000),
       proposal_increment: 1000,
     }
   }
@@ -84,9 +84,9 @@ impl PaxosConfig {
   pub fn test() -> PaxosConfig {
     PaxosConfig {
       heartbeat_threshold: 3,
-      heartbeat_period_ms: 5,
-      next_index_period_ms: 10,
-      retry_defer_time_ms: 5,
+      heartbeat_period_ms: mk_t(5),
+      next_index_period_ms: mk_t(10),
+      retry_defer_time_ms: mk_t(5),
       proposal_increment: 1000,
     }
   }
@@ -530,7 +530,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
       self.next_insert = Some((uuid.clone(), bundle.clone()));
 
       // Schedule a retry in `RETRY_DEFER_TIME` ms.
-      ctx.defer(self.paxos_config.retry_defer_time_ms, PaxosTimerEvent::RetryInsert(uuid));
+      ctx.defer(self.paxos_config.retry_defer_time_ms.clone(), PaxosTimerEvent::RetryInsert(uuid));
 
       // Propose the bundle at the next index.
       self.propose_next_index(ctx, PLEntry::Bundle(bundle));
@@ -614,7 +614,8 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
         // inserted in the meanwhile.
 
         // Schedule another retry in `RETRY_DEFER_TIME` ms.
-        ctx.defer(self.paxos_config.retry_defer_time_ms, PaxosTimerEvent::RetryInsert(uuid));
+        ctx
+          .defer(self.paxos_config.retry_defer_time_ms.clone(), PaxosTimerEvent::RetryInsert(uuid));
 
         // Propose the bundle at the next index.
         self.propose_next_index(ctx, PLEntry::Bundle(cur_bundle.clone()));
@@ -660,7 +661,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
     }
 
     // Schedule another `LeaderHeartbeat`
-    ctx.defer(self.paxos_config.heartbeat_period_ms, PaxosTimerEvent::LeaderHeartbeat);
+    ctx.defer(self.paxos_config.heartbeat_period_ms.clone(), PaxosTimerEvent::LeaderHeartbeat);
   }
 
   fn next_index_timer<PaxosContextBaseT: PaxosContextBase<BundleT>>(
@@ -679,6 +680,6 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
     }
 
     // Schedule another `NextIndex`
-    ctx.defer(self.paxos_config.next_index_period_ms, PaxosTimerEvent::NextIndex);
+    ctx.defer(self.paxos_config.next_index_period_ms.clone(), PaxosTimerEvent::NextIndex);
   }
 }

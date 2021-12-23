@@ -396,7 +396,7 @@ impl FullMSCoordES {
         es.all_rms.iter().cloned().collect(),
         es.sql_query.clone(),
         table_view.clone(),
-        es.timestamp,
+        es.timestamp.clone(),
       )
     }
   }
@@ -724,7 +724,7 @@ impl QueryPlanningES {
 
     // First, we see if all TablePaths are in the GossipData
     for table_path in collect_table_paths(&self.sql_query) {
-      if ctx.gossip.table_generation.static_read(&table_path, self.timestamp).is_none() {
+      if ctx.gossip.table_generation.static_read(&table_path, &self.timestamp).is_none() {
         // We must go to MasterQueryPlanning.
         return self.perform_master_query_planning(ctx, io_ctx);
       }
@@ -735,7 +735,7 @@ impl QueryPlanningES {
       &self.sql_query,
       &ctx.gossip.table_generation,
       &ctx.gossip.db_schema,
-      self.timestamp,
+      &self.timestamp,
     ) {
       Ok(_) => {}
       Err(KeyValidationError::InvalidUpdate) => {
@@ -754,7 +754,7 @@ impl QueryPlanningES {
     for (table_path, col_names) in compute_extra_req_cols(&self.sql_query) {
       for col_name in col_names {
         // The TablePath exists, from the above.
-        let gen = ctx.gossip.table_generation.static_read(&table_path, self.timestamp).unwrap();
+        let gen = ctx.gossip.table_generation.static_read(&table_path, &self.timestamp).unwrap();
         let schema = ctx.gossip.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
         if !contains_col(schema, &col_name, &self.timestamp) {
           // We must go to MasterQueryPlanning.
@@ -767,7 +767,7 @@ impl QueryPlanningES {
     let mut planner = ColUsagePlanner {
       db_schema: &ctx.gossip.db_schema,
       table_generation: &ctx.gossip.table_generation,
-      timestamp: self.timestamp.clone(),
+      timestamp: &self.timestamp,
     };
 
     let col_usage_nodes = match planner.plan_ms_query(&self.sql_query) {
@@ -780,7 +780,7 @@ impl QueryPlanningES {
     // If we get here, the QueryPlan is valid, so we return it and go to Done.
     let all_tier_maps = compute_all_tier_maps(&self.sql_query);
     let (table_location_map, extra_req_cols) =
-      compute_query_plan_data(&self.sql_query, &ctx.gossip.table_generation, self.timestamp);
+      compute_query_plan_data(&self.sql_query, &ctx.gossip.table_generation, &self.timestamp);
     self.state = QueryPlanningS::Done;
     QueryPlanningAction::Success(CoordQueryPlan {
       all_tier_maps,
@@ -849,7 +849,7 @@ impl QueryPlanningES {
         // we check if all TablePaths are in the GossipData, waiting if not. This is only needed
         // so that we can actually contact those nodes.
         for table_path in collect_table_paths(&self.sql_query) {
-          if ctx.gossip.table_generation.static_read(&table_path, self.timestamp).is_none() {
+          if ctx.gossip.table_generation.static_read(&table_path, &self.timestamp).is_none() {
             // We send a MasterGossipRequest and go to GossipDataWaiting.
             let sender_path = ctx.this_sid.clone();
             ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
@@ -882,7 +882,7 @@ impl QueryPlanningES {
       // for any GossipData update whatsoever (not just the one resulting from the
       // MasterGossipRequest we sent out).
       for table_path in collect_table_paths(&self.sql_query) {
-        if ctx.gossip.table_generation.static_read(&table_path, self.timestamp).is_none() {
+        if ctx.gossip.table_generation.static_read(&table_path, &self.timestamp).is_none() {
           // We stay in GossipDataWaiting.
           return QueryPlanningAction::Wait;
         }

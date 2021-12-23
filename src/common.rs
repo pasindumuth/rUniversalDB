@@ -207,7 +207,7 @@ impl TableSchema {
     for (col_name, col_type) in val_cols {
       // We start at Timestamp 1 because 0 is already used, where every key in
       // existance maps to None.
-      mvm.write(&col_name, Some(col_type), 1);
+      mvm.write(&col_name, Some(col_type), mk_t(1));
     }
     TableSchema { key_cols, val_cols: mvm }
   }
@@ -340,6 +340,10 @@ pub fn merge_table_views(
 
 pub fn to_table_path(source: &proc::GeneralSource) -> &TablePath {
   cast!(proc::GeneralSourceRef::TablePath, &source.source_ref).unwrap()
+}
+
+pub fn mk_t(timestamp: u128) -> Timestamp {
+  Timestamp(timestamp, vec![])
 }
 
 // -----------------------------------------------------------------------------------------------

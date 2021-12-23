@@ -65,7 +65,15 @@ pub struct TabletKeyRange {
 
 /// A simple Timestamp type.
 /// Note: We avoid defining a new type so we can use the arithmetic operators easily
-pub type Timestamp = u128;
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Timestamp(pub u128, pub Vec<u8>);
+
+impl Timestamp {
+  pub fn add(&self, other: Timestamp) -> Timestamp {
+    // TODO: do addition. Extend both vecs so they align, then do addition from grade school.
+    Timestamp(self.0 + other.0, vec![])
+  }
+}
 
 /// A Type used to represent a generation.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]

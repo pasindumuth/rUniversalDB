@@ -113,7 +113,7 @@ impl MSTableWriteES {
       // Since the `key_cols` are static, no query plan should have one of
       // these as an External Column.
       assert!(lookup(&ctx.table_schema.key_cols, &col).is_none());
-      if ctx.table_schema.val_cols.static_read(&col, self.timestamp).is_some() {
+      if ctx.table_schema.val_cols.static_read(&col, &self.timestamp).is_some() {
         return false;
       }
     }
@@ -507,7 +507,7 @@ impl MSTableWriteES {
             // Note that we only do this if `col_val` is non-NULL.
             if let Some(val) = &col_val {
               let col_type =
-                ctx.table_schema.val_cols.static_read(&col_name, self.timestamp).unwrap();
+                ctx.table_schema.val_cols.static_read(&col_name, &self.timestamp).unwrap();
               let does_match = match (val, col_type) {
                 (ColVal::Bool(_), ColType::Bool) => true,
                 (ColVal::Int(_), ColType::Int) => true,

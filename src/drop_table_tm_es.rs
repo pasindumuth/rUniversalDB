@@ -1,5 +1,5 @@
 use crate::alter_table_tm_es::{get_rms, maybe_respond_dead, ResponseData};
-use crate::common::{BasicIOCtx, GeneralTraceMessage};
+use crate::common::{mk_t, BasicIOCtx, GeneralTraceMessage};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{TNodePath, TablePath, Timestamp};
 use crate::model::message as msg;
@@ -182,7 +182,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
   ) -> DropTableTMCommitted {
     let mut timestamp_hint = io_ctx.now();
     for (_, prepared) in prepared {
-      timestamp_hint = max(timestamp_hint, prepared.timestamp);
+      timestamp_hint = max(timestamp_hint, prepared.timestamp.clone());
     }
     DropTableTMCommitted { timestamp_hint }
   }
@@ -196,15 +196,15 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     committed_plm: &TMCommittedPLm<DropTablePayloadTypes>,
   ) -> BTreeMap<TNodePath, DropTableCommit> {
     // Compute the resolved timestamp
-    let mut timestamp = committed_plm.payload.timestamp_hint;
-    timestamp = max(timestamp, ctx.table_generation.get_lat(&self.table_path) + 1);
+    let mut timestamp = committed_plm.payload.timestamp_hint.clone();
+    timestamp = max(timestamp, ctx.table_generation.get_lat(&self.table_path).add(mk_t(1)));
 
     // The the RMs before dropping
     let rms = get_rms::<IO>(ctx, &self.table_path);
 
     // Apply the Drop
     ctx.gen.inc();
-    ctx.table_generation.write(&self.table_path, None, timestamp);
+    ctx.table_generation.write(&self.table_path, None, timestamp.clone());
 
     // Potentially respond to the External if we are the leader.
     if ctx.is_leader() {
@@ -216,7 +216,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
           msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
             msg::ExternalDDLQuerySuccess {
               request_id: response_data.request_id.clone(),
-              timestamp,
+              timestamp: timestamp.clone(),
             },
           )),
         );
@@ -226,7 +226,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
         // record the success in a trace message.
         io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
           committed_plm.query_id.clone(),
-          timestamp,
+          timestamp.clone(),
         ));
       }
     }
@@ -237,7 +237,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     // Return Commit messages
     let mut commits = BTreeMap::<TNodePath, DropTableCommit>::new();
     for rm in rms {
-      commits.insert(rm.clone(), DropTableCommit { timestamp });
+      commits.insert(rm.clone(), DropTableCommit { timestamp: timestamp.clone() });
     }
     commits
   }

@@ -2,7 +2,7 @@ use crate::message as msg;
 use crate::slave::{FullSlaveInput, SlaveBundle, SlaveContext, SlaveState, SlaveTimerInput};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{BasicIOCtx, GeneralTraceMessage, RangeEnds};
+use runiversal::common::{mk_t, BasicIOCtx, GeneralTraceMessage, RangeEnds};
 use runiversal::model::common::{
   EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, Timestamp,
 };
@@ -19,12 +19,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub trait ISlaveIOCtx: BasicIOCtx<msg::NetworkMessage> {
   fn insert_bundle(&mut self, bundle: SlaveBundle);
 
-  fn defer(&mut self, defer_time: u128, timer_input: SlaveTimerInput);
+  fn defer(&mut self, defer_time: Timestamp, timer_input: SlaveTimerInput);
 }
 
 pub struct SlaveIOCtx<'a> {
   rand: &'a mut XorShiftRng,
-  current_time: u128,
+  current_time: Timestamp,
   queues: &'a mut BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<msg::NetworkMessage>>>,
   nonempty_queues: &'a mut Vec<(EndpointId, EndpointId)>,
 
@@ -47,8 +47,8 @@ impl<'a> BasicIOCtx<msg::NetworkMessage> for SlaveIOCtx<'a> {
     &mut self.rand
   }
 
-  fn now(&mut self) -> u128 {
-    self.current_time
+  fn now(&mut self) -> Timestamp {
+    self.current_time.clone()
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
@@ -68,8 +68,8 @@ impl<'a> ISlaveIOCtx for SlaveIOCtx<'a> {
     }
   }
 
-  fn defer(&mut self, defer_time: u128, timer_input: SlaveTimerInput) {
-    let deferred_time = self.current_time + defer_time;
+  fn defer(&mut self, defer_time: Timestamp, timer_input: SlaveTimerInput) {
+    let deferred_time = self.now().add(defer_time);
     if let Some(timer_inputs) = self.tasks.get_mut(&deferred_time) {
       timer_inputs.push(timer_input);
     } else {
@@ -129,7 +129,7 @@ pub struct Simulation {
   pub global_pls: BTreeMap<SlaveGroupId, Vec<msg::PLEntry<SlaveBundle>>>,
 
   /// Meta
-  true_timestamp: u128,
+  true_timestamp: Timestamp,
 
   // Configurables
   pub sim_params: SimConfig,
@@ -155,7 +155,7 @@ impl Simulation {
       insert_queues: Default::default(),
       leader_map: Default::default(),
       global_pls: Default::default(),
-      true_timestamp: Default::default(),
+      true_timestamp: mk_t(0),
       sim_params: SimConfig { pl_entry_delivery_prob: 70, global_pl_insertion_prob: 25 },
     };
 
@@ -228,7 +228,7 @@ impl Simulation {
     for (this_eid, slave_data) in &mut sim.slave_data {
       let mut io_ctx = SlaveIOCtx {
         rand: &mut sim.rand,
-        current_time: sim.true_timestamp, // TODO: simulate clock skew
+        current_time: sim.true_timestamp.clone(), // TODO: simulate clock skew
         queues: &mut sim.queues,
         nonempty_queues: &mut sim.nonempty_queues,
         this_sid: &slave_data.slave_state.context.this_sid.clone(),
@@ -242,7 +242,6 @@ impl Simulation {
     }
 
     // Metadata
-    sim.true_timestamp = 0;
     return sim;
   }
 
@@ -280,10 +279,10 @@ impl Simulation {
   pub fn deliver_slave_input(&mut self, to_eid: &EndpointId, input: FullSlaveInput) {
     let slave_data = self.slave_data.get_mut(&to_eid).unwrap();
 
-    let current_time = self.true_timestamp;
+    let current_time = self.true_timestamp.clone();
     let mut io_ctx = SlaveIOCtx {
       rand: &mut self.rand,
-      current_time, // TODO: simulate clock skew
+      current_time: current_time.clone(), // TODO: simulate clock skew
       queues: &mut self.queues,
       nonempty_queues: &mut self.nonempty_queues,
       this_sid: &slave_data.slave_state.context.this_sid.clone(),
@@ -417,7 +416,7 @@ impl Simulation {
   /// messages. For simplicity, we assume that this means that every non-empty queue
   /// of messages delivers about one message in this time.
   pub fn simulate1ms(&mut self) {
-    self.true_timestamp += 1;
+    self.true_timestamp = self.true_timestamp.add(mk_t(1));
     let num_msgs_to_deliver = self.nonempty_queues.len();
     for _ in 0..num_msgs_to_deliver {
       let r = self.rand.next_u32() as usize % self.nonempty_queues.len();

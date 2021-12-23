@@ -721,7 +721,7 @@ impl TabletContext {
                 // Increase TableSchema LATs
                 for col_name in &locked_cols.cols {
                   if lookup(&self.table_schema.key_cols, col_name).is_none() {
-                    self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp);
+                    self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
                   }
                 }
 
@@ -801,7 +801,7 @@ impl TabletContext {
                 // Increase TableSchema LATs
                 for col_name in &locked_cols.cols {
                   if lookup(&self.table_schema.key_cols, col_name).is_none() {
-                    self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp);
+                    self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
                   }
                 }
               }
@@ -896,7 +896,7 @@ impl TabletContext {
                     io_ctx,
                     statuses,
                     root_query_path.clone(),
-                    query.timestamp,
+                    query.timestamp.clone(),
                     &query.query_plan.query_leader_map,
                   ) {
                     Ok(ms_query_id) => {
@@ -985,7 +985,7 @@ impl TabletContext {
                   io_ctx,
                   statuses,
                   root_query_path.clone(),
-                  query.timestamp,
+                  query.timestamp.clone(),
                   &query.query_plan.query_leader_map,
                 ) {
                   Ok(ms_query_id) => {
@@ -1057,7 +1057,7 @@ impl TabletContext {
                   io_ctx,
                   statuses,
                   root_query_path.clone(),
-                  query.timestamp,
+                  query.timestamp.clone(),
                   &query.query_plan.query_leader_map,
                 ) {
                   Ok(ms_query_id) => {
@@ -1122,7 +1122,7 @@ impl TabletContext {
                   io_ctx,
                   statuses,
                   root_query_path.clone(),
-                  query.timestamp,
+                  query.timestamp.clone(),
                   &query.query_plan.query_leader_map,
                 ) {
                   Ok(ms_query_id) => {
@@ -1734,13 +1734,13 @@ impl TabletContext {
     // single container similar to `verifying_writes`. This should be optimized later.
     let mut all_cur_writes = BTreeMap::<Timestamp, VerifyingReadWriteRegion>::new();
     for (cur_timestamp, verifying_write) in &self.verifying_writes {
-      all_cur_writes.insert(*cur_timestamp, verifying_write.clone());
+      all_cur_writes.insert(cur_timestamp.clone(), verifying_write.clone());
     }
     let write_it = self.inserting_prepared_writes.iter().chain(self.prepared_writes.iter());
     for (cur_timestamp, prepared_write) in write_it {
       assert!(all_cur_writes
         .insert(
-          *cur_timestamp,
+          cur_timestamp.clone(),
           VerifyingReadWriteRegion {
             orig_p: prepared_write.orig_p.clone(),
             m_waiting_read_protected: Default::default(),
@@ -1759,7 +1759,7 @@ impl TabletContext {
       let bound = (Bound::Unbounded, Bound::Excluded(first_write_timestamp));
       for (timestamp, set) in self.waiting_read_protected.range(bound) {
         let protect_request = set.first().unwrap().clone();
-        self.grant_local_read_protected(io_ctx, statuses, *timestamp, protect_request);
+        self.grant_local_read_protected(io_ctx, statuses, timestamp.clone(), protect_request);
         return true;
       }
 
@@ -1768,7 +1768,7 @@ impl TabletContext {
         self.grant_m_local_read_protected(
           io_ctx,
           statuses,
-          *first_write_timestamp,
+          first_write_timestamp.clone(),
           protect_request.clone(),
         );
         return true;
@@ -1791,7 +1791,7 @@ impl TabletContext {
             self.grant_m_local_read_protected(
               io_ctx,
               statuses,
-              *cur_timestamp,
+              cur_timestamp.clone(),
               protect_request.clone(),
             );
             return true;
@@ -1806,7 +1806,7 @@ impl TabletContext {
               self.grant_local_read_protected(
                 io_ctx,
                 statuses,
-                *timestamp,
+                timestamp.clone(),
                 protect_request.clone(),
               );
               return true;
@@ -1826,7 +1826,12 @@ impl TabletContext {
       for (timestamp, set) in self.waiting_read_protected.range(bound) {
         for protect_request in set {
           if is_surely_isolated_multiwrite(&cum_write_regions, &protect_request.read_region) {
-            self.grant_local_read_protected(io_ctx, statuses, *timestamp, protect_request.clone());
+            self.grant_local_read_protected(
+              io_ctx,
+              statuses,
+              timestamp.clone(),
+              protect_request.clone(),
+            );
             return true;
           }
         }
@@ -1834,7 +1839,12 @@ impl TabletContext {
     } else {
       for (timestamp, set) in &self.waiting_read_protected {
         for protect_request in set {
-          self.grant_local_read_protected(io_ctx, statuses, *timestamp, protect_request.clone());
+          self.grant_local_read_protected(
+            io_ctx,
+            statuses,
+            timestamp.clone(),
+            protect_request.clone(),
+          );
           return true;
         }
       }
@@ -1852,7 +1862,7 @@ impl TabletContext {
               io_ctx,
               statuses,
               verifying_write.orig_p.clone(),
-              *timestamp,
+              timestamp.clone(),
             );
             return true;
           }
@@ -2271,9 +2281,9 @@ impl TabletContext {
       STMPaxos2PCRMAction::Wait => {}
       STMPaxos2PCRMAction::Exit => {
         let es = cast!(DDLES::Drop, &statuses.ddl_es).unwrap();
-        if let Some(committed_timestamp) = es.inner.committed_timestamp {
+        if let Some(committed_timestamp) = &es.inner.committed_timestamp {
           // The ES Committed, and so we should mark this Tablet as dropped.
-          statuses.ddl_es = DDLES::Dropped(committed_timestamp);
+          statuses.ddl_es = DDLES::Dropped(committed_timestamp.clone());
         } else {
           // The ES Aborted, so we just reset it to `None`.
           statuses.ddl_es = DDLES::None;

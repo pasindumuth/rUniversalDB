@@ -115,7 +115,7 @@ impl MSTableReadES {
       // Since the `key_cols` are static, no query plan should have one of
       // these as an External Column.
       assert!(lookup(&ctx.table_schema.key_cols, &col).is_none());
-      if ctx.table_schema.val_cols.static_read(&col, self.timestamp).is_some() {
+      if ctx.table_schema.val_cols.static_read(&col, &self.timestamp).is_some() {
         return false;
       }
     }

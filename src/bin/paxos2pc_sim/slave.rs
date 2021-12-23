@@ -8,7 +8,7 @@ use crate::stm_simple_tm_es::{
   STMSimpleAborted, STMSimplePayloadTypes, STMSimpleTMES, STMSimpleTMInner,
 };
 use rand::RngCore;
-use runiversal::common::{BasicIOCtx, RemoteLeaderChangedPLm};
+use runiversal::common::{mk_t, BasicIOCtx, RemoteLeaderChangedPLm};
 use runiversal::model::common::{EndpointId, PaxosGroupIdTrait, QueryId};
 use runiversal::model::common::{LeadershipId, PaxosGroupId, SlaveGroupId};
 use runiversal::network_driver::{NetworkDriver, NetworkDriverContext};
@@ -231,7 +231,7 @@ impl SlaveState {
 
   pub fn initialize<IO: ISlaveIOCtx>(&mut self, io_ctx: &mut IO) {
     // Start the RemoteLeaderChange dispatch cycle
-    io_ctx.defer(REMOTE_LEADER_CHANGED_PERIOD, SlaveTimerInput::RemoteLeaderChanged);
+    io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD), SlaveTimerInput::RemoteLeaderChanged);
     if self.context.is_leader() {
       // Start the bundle insertion cycle for this PaxosGroup.
       io_ctx.insert_bundle(SlaveBundle::default());
@@ -545,7 +545,7 @@ impl SlaveContext {
             }
 
             // Do this again 5 ms later.
-            io_ctx.defer(REMOTE_LEADER_CHANGED_PERIOD, SlaveTimerInput::RemoteLeaderChanged);
+            io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD), SlaveTimerInput::RemoteLeaderChanged);
           }
         }
       }

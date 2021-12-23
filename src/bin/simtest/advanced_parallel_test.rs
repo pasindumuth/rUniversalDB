@@ -3,7 +3,7 @@ use crate::simulation::Simulation;
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_rid, read_index, TableSchema};
+use runiversal::common::{mk_rid, mk_t, read_index, TableSchema};
 use runiversal::master::FullDBSchema;
 use runiversal::model::common::{
   ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TableView, Timestamp,
@@ -41,7 +41,7 @@ impl<'a> QueryGenCtx<'a> {
     let (source, key_cols, mut val_cols): (String, Vec<ColName>, Vec<Option<ColName>>) = {
       let (source, schema) = read_index(self.table_schemas, source_idx).unwrap();
       let key_cols: Vec<ColName> = schema.key_cols.iter().map(|(c, _)| c).cloned().collect();
-      let val_col_map = schema.val_cols.static_snapshot_read(self.timestamp);
+      let val_col_map = schema.val_cols.static_snapshot_read(&self.timestamp);
       let val_cols: Vec<Option<ColName>> = val_col_map.keys().map(|c| Some(c.clone())).collect();
       (source.0.clone(), key_cols, val_cols)
     };
@@ -259,7 +259,7 @@ impl<'a> QueryGenCtx<'a> {
         let (source, schema) =
           read_index(self.table_schemas, source_idx - self.trans_table_schemas.len()).unwrap();
         let key_cols: Vec<ColName> = schema.key_cols.iter().map(|(c, _)| c).cloned().collect();
-        let val_col_map = schema.val_cols.static_snapshot_read(self.timestamp);
+        let val_col_map = schema.val_cols.static_snapshot_read(&self.timestamp);
         let val_cols: Vec<Option<ColName>> = val_col_map.keys().map(|c| Some(c.clone())).collect();
         (source.0.clone(), key_cols, val_cols)
       };
@@ -385,7 +385,7 @@ impl<'a> QueryGenCtx<'a> {
     let (source, key_cols, mut val_cols): (String, Vec<ColName>, Vec<Option<ColName>>) = {
       let (source, schema) = read_index(self.table_schemas, source_idx).unwrap();
       let key_cols: Vec<ColName> = schema.key_cols.iter().map(|(c, _)| c).cloned().collect();
-      let val_col_map = schema.val_cols.static_snapshot_read(self.timestamp);
+      let val_col_map = schema.val_cols.static_snapshot_read(&self.timestamp);
       let val_cols: Vec<Option<ColName>> = val_col_map.keys().map(|c| Some(c.clone())).collect();
       (source.0.clone(), key_cols, val_cols)
     };
@@ -487,14 +487,14 @@ impl QueryGenerator {
 
   /// Create a TP Query.
   fn mk_tp_query(&mut self, sim: &mut Simulation) -> Option<String> {
-    let timestamp = *sim.true_timestamp();
+    let timestamp = sim.true_timestamp().clone();
 
     // Create a new RNG for query generation
     let mut rand = XorShiftRng::from_seed(mk_seed(&mut sim.rand));
 
     // Extract all current TableSchemas
     let full_db_schema = sim.full_db_schema();
-    let cur_tables = full_db_schema.table_generation.static_snapshot_read(timestamp);
+    let cur_tables = full_db_schema.table_generation.static_snapshot_read(&timestamp);
     let mut table_schemas = BTreeMap::<TablePath, &TableSchema>::new();
     for (table_path, gen) in cur_tables {
       let table_schema = full_db_schema.db_schema.get(&(table_path.clone(), gen)).unwrap();
@@ -603,7 +603,7 @@ impl QueryGenerator {
 fn verify_req_res(
   rand: &mut XorShiftRng,
   req_res_map: BTreeMap<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>,
-) -> Option<(u32, u32, u32)> {
+) -> Option<(Timestamp, u32, u32)> {
   let (mut sim, mut ctx) = setup(mk_seed(rand));
   let mut sorted_success_res =
     BTreeMap::<Timestamp, (msg::PerformExternalQuery, msg::ExternalQuerySuccess)>::new();
@@ -626,7 +626,7 @@ fn verify_req_res(
     ctx.execute_query(&mut sim, req.query.as_str(), 10000, res.result);
   }
 
-  Some((*sim.true_timestamp() as u32, total_queries, successful_queries))
+  Some((sim.true_timestamp().clone(), total_queries, successful_queries))
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -773,7 +773,8 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
     BTreeMap::<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>::new();
 
   const SIM_DURATION: u128 = 1000; // The duration that we run the simulation
-  while sim.true_timestamp() < &SIM_DURATION {
+  let sim_duration = mk_t(SIM_DURATION);
+  while sim.true_timestamp() < &sim_duration {
     // Generate a random query
     let query = query_generator.mk_tp_query(&mut sim).unwrap();
 
@@ -838,7 +839,7 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
     println!(
       "Test 'test_all_advanced_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}",
-      true_time, total_queries, successful_queries
+      true_time.0, total_queries, successful_queries
     );
   } else {
     println!("Skipped Test 'test_all_advanced_parallel' due to Timestamp Conflict");

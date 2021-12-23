@@ -66,7 +66,7 @@ pub fn master_query_planning(
     &planning_msg.ms_query,
     &ctx.table_generation,
     &ctx.db_schema,
-    planning_msg.timestamp,
+    &planning_msg.timestamp,
   ) {
     Ok(_) => {}
     Err(KeyValidationError::InvalidUpdate) => {
@@ -82,7 +82,7 @@ pub fn master_query_planning(
   for (table_path, col_names) in compute_extra_req_cols(&planning_msg.ms_query) {
     for col_name in col_names {
       // The TablePath exists, from the above.
-      let gen = ctx.table_generation.static_read(&table_path, planning_msg.timestamp).unwrap();
+      let gen = ctx.table_generation.static_read(&table_path, &planning_msg.timestamp).unwrap();
       let schema = ctx.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
       if lookup(&schema.key_cols, &col_name).is_none() {
         if schema.val_cols.get_lat(&col_name) < planning_msg.timestamp {
@@ -90,7 +90,7 @@ pub fn master_query_planning(
           // we (more strongly) realize that we can send back a `RequiredColumnDNE`.
           helper = PreReqColHelper::InsufficientLat;
         } else {
-          if schema.val_cols.static_read(&col_name, planning_msg.timestamp).is_none() {
+          if schema.val_cols.static_read(&col_name, &planning_msg.timestamp).is_none() {
             // Here, we know for sure this `col_name` does not exist. We break out and
             // respond immediately.
             return respond_error(msg::QueryPlanningError::RequiredColumnDNE(vec![col_name]));
@@ -112,7 +112,7 @@ pub fn master_query_planning(
   let mut planner = ColUsagePlanner {
     db_schema: &ctx.db_schema,
     table_generation: &ctx.table_generation,
-    timestamp: planning_msg.timestamp,
+    timestamp: &planning_msg.timestamp,
   };
 
   // TODO: I believe this is broken. Doing weak static reads and resulting in an error does
@@ -132,7 +132,7 @@ pub fn master_query_planning(
   };
 
   // Check that the LATs are high enough.
-  if !check_nodes_lats(ctx, &col_usage_nodes, planning_msg.timestamp) {
+  if !check_nodes_lats(ctx, &col_usage_nodes, &planning_msg.timestamp) {
     // If the LAT is not high enough, we need to create an ES to persist a read.
     return MasterQueryPlanningAction::Wait;
   }
@@ -140,7 +140,7 @@ pub fn master_query_planning(
   // Finally we construct a MasterQueryPlan and respond to the sender.
   let all_tier_maps = compute_all_tier_maps(&planning_msg.ms_query);
   let (table_location_map, extra_req_cols) =
-    compute_query_plan_data(&planning_msg.ms_query, &ctx.table_generation, planning_msg.timestamp);
+    compute_query_plan_data(&planning_msg.ms_query, &ctx.table_generation, &planning_msg.timestamp);
   return MasterQueryPlanningAction::Respond(msg::MasteryQueryPlanningResult::MasterQueryPlan(
     msg::MasterQueryPlan { all_tier_maps, table_location_map, extra_req_cols, col_usage_nodes },
   ));
@@ -149,7 +149,7 @@ pub fn master_query_planning(
 /// Checks if the LATs of all `ColName`s in `safe_present_cols` and `external_cols` are higher
 /// that `timestamp` for all `FrozenColUsageNode`s under `node`, where that node refers to a
 /// Table (as opposed to a TransTable).
-fn check_node_lats(ctx: &MasterContext, node: &FrozenColUsageNode, timestamp: Timestamp) -> bool {
+fn check_node_lats(ctx: &MasterContext, node: &FrozenColUsageNode, timestamp: &Timestamp) -> bool {
   match &node.source.source_ref {
     proc::GeneralSourceRef::TablePath(table_path) => {
       let gen = ctx.table_generation.static_read(table_path, timestamp).unwrap();
@@ -158,7 +158,7 @@ fn check_node_lats(ctx: &MasterContext, node: &FrozenColUsageNode, timestamp: Ti
       let free_external_cols = free_external_cols(&node.external_cols);
       for col_name in node.safe_present_cols.iter().chain(free_external_cols.iter()) {
         if lookup(&schema.key_cols, col_name).is_none() {
-          if schema.val_cols.get_lat(col_name) < timestamp {
+          if &schema.val_cols.get_lat(col_name) < timestamp {
             return false;
           }
         }
@@ -181,7 +181,7 @@ fn check_node_lats(ctx: &MasterContext, node: &FrozenColUsageNode, timestamp: Ti
 fn check_nodes_lats(
   ctx: &MasterContext,
   nodes: &Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
-  timestamp: Timestamp,
+  timestamp: &Timestamp,
 ) -> bool {
   for (_, (_, node)) in nodes {
     if !check_node_lats(ctx, node, timestamp) {
@@ -202,7 +202,7 @@ pub fn master_query_planning_post(
 ) -> msg::MasteryQueryPlanningResult {
   let table_paths = collect_table_paths(&planning_plm.ms_query);
   for table_path in &table_paths {
-    if ctx.table_generation.read(table_path, planning_plm.timestamp).is_none() {
+    if ctx.table_generation.read(table_path, &planning_plm.timestamp).is_none() {
       // If the TablePath does not exist, we respond accordingly.
       return msg::MasteryQueryPlanningResult::QueryPlanningError(
         msg::QueryPlanningError::TablesDNE(vec![table_path.clone()]),
@@ -215,7 +215,7 @@ pub fn master_query_planning_post(
     &planning_plm.ms_query,
     &ctx.table_generation,
     &ctx.db_schema,
-    planning_plm.timestamp,
+    &planning_plm.timestamp,
   ) {
     Ok(_) => {}
     Err(KeyValidationError::InvalidUpdate) => {
@@ -235,10 +235,10 @@ pub fn master_query_planning_post(
   for (table_path, col_names) in compute_extra_req_cols(&planning_plm.ms_query) {
     for col_name in col_names {
       // The TablePath exists, from the above.
-      let gen = ctx.table_generation.static_read(&table_path, planning_plm.timestamp).unwrap();
+      let gen = ctx.table_generation.static_read(&table_path, &planning_plm.timestamp).unwrap();
       let schema = ctx.db_schema.get_mut(&(table_path.clone(), gen.clone())).unwrap();
       if lookup(&schema.key_cols, &col_name).is_none() {
-        if schema.val_cols.read(&col_name, planning_plm.timestamp).is_none() {
+        if schema.val_cols.read(&col_name, &planning_plm.timestamp).is_none() {
           // Here, we know for sure this `col_name` does not exist, and will never since we
           // just increased the LAT. Thus, we respond with it to the sender.
           return msg::MasteryQueryPlanningResult::QueryPlanningError(
@@ -253,7 +253,7 @@ pub fn master_query_planning_post(
   let mut planner = ColUsagePlanner {
     db_schema: &ctx.db_schema,
     table_generation: &ctx.table_generation,
-    timestamp: planning_plm.timestamp,
+    timestamp: &planning_plm.timestamp,
   };
 
   let col_usage_nodes = match planner.plan_ms_query(&planning_plm.ms_query) {
@@ -267,12 +267,12 @@ pub fn master_query_planning_post(
   };
 
   // Check that the LATs are high enough.
-  increase_nodes_lats(ctx, &col_usage_nodes, planning_plm.timestamp);
+  increase_nodes_lats(ctx, &col_usage_nodes, &planning_plm.timestamp);
 
   // Finally we construct a MasterQueryPlan and respond to the sender.
   let all_tier_maps = compute_all_tier_maps(&planning_plm.ms_query);
   let (table_location_map, extra_req_cols) =
-    compute_query_plan_data(&planning_plm.ms_query, &ctx.table_generation, planning_plm.timestamp);
+    compute_query_plan_data(&planning_plm.ms_query, &ctx.table_generation, &planning_plm.timestamp);
   return msg::MasteryQueryPlanningResult::MasterQueryPlan(msg::MasterQueryPlan {
     all_tier_maps,
     table_location_map,
@@ -284,7 +284,7 @@ pub fn master_query_planning_post(
 /// Checks if the LATs of all `ColName`s in `safe_present_cols` and `external_cols` are higher
 /// that `timestamp` for all `FrozenColUsageNode`s under `node`, where that node refers to a
 /// Table (as opposed to a TransTable).
-fn increase_node_lats(ctx: &mut MasterContext, node: &FrozenColUsageNode, timestamp: Timestamp) {
+fn increase_node_lats(ctx: &mut MasterContext, node: &FrozenColUsageNode, timestamp: &Timestamp) {
   match &node.source.source_ref {
     proc::GeneralSourceRef::TablePath(table_path) => {
       let gen = ctx.table_generation.static_read(table_path, timestamp).unwrap();
@@ -293,7 +293,7 @@ fn increase_node_lats(ctx: &mut MasterContext, node: &FrozenColUsageNode, timest
       let free_external_cols = free_external_cols(&node.external_cols);
       for col_name in node.safe_present_cols.iter().chain(free_external_cols.iter()) {
         if lookup(&schema.key_cols, col_name).is_none() {
-          schema.val_cols.update_lat(col_name, timestamp);
+          schema.val_cols.update_lat(col_name, timestamp.clone());
         }
       }
       // Check children
@@ -311,7 +311,7 @@ fn increase_node_lats(ctx: &mut MasterContext, node: &FrozenColUsageNode, timest
 fn increase_nodes_lats(
   ctx: &mut MasterContext,
   nodes: &Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
-  timestamp: Timestamp,
+  timestamp: &Timestamp,
 ) {
   for (_, (_, node)) in nodes {
     increase_node_lats(ctx, node, timestamp);

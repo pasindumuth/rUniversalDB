@@ -1,5 +1,5 @@
 use crate::alter_table_tm_es::{maybe_respond_dead, ResponseData};
-use crate::common::{BasicIOCtx, GeneralTraceMessage, TableSchema};
+use crate::common::{mk_t, BasicIOCtx, GeneralTraceMessage, TableSchema};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
   ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
@@ -189,18 +189,19 @@ impl CreateTableTMInner {
     _: &mut IO,
     timestamp_hint: Timestamp,
   ) -> Timestamp {
-    let commit_timestamp = max(timestamp_hint, ctx.table_generation.get_lat(&self.table_path) + 1);
+    let commit_timestamp =
+      max(timestamp_hint, ctx.table_generation.get_lat(&self.table_path).add(mk_t(1)));
     let gen = self.compute_gen(ctx);
 
     // Update `table_generation`
-    ctx.table_generation.write(&self.table_path, Some(gen.clone()), commit_timestamp);
+    ctx.table_generation.write(&self.table_path, Some(gen.clone()), commit_timestamp.clone());
 
     // Update `db_schema`
     let table_path_gen = (self.table_path.clone(), gen.clone());
     debug_assert!(!ctx.db_schema.contains_key(&table_path_gen));
     let mut val_cols = MVM::new();
     for (col_name, col_type) in &self.val_cols {
-      val_cols.write(col_name, Some(col_type.clone()), commit_timestamp);
+      val_cols.write(col_name, Some(col_type.clone()), commit_timestamp.clone());
     }
     let table_schema = TableSchema { key_cols: self.key_cols.clone(), val_cols };
     ctx.db_schema.insert(table_path_gen.clone(), table_schema);
@@ -358,9 +359,9 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
     io_ctx: &mut IO,
     closed_plm: &TMClosedPLm<CreateTablePayloadTypes>,
   ) {
-    if let Some(timestamp_hint) = closed_plm.payload.timestamp_hint {
+    if let Some(timestamp_hint) = &closed_plm.payload.timestamp_hint {
       // This means that the closed_plm is a result of a committing the CreateTable.
-      let commit_timestamp = self.apply_create(ctx, io_ctx, timestamp_hint);
+      let commit_timestamp = self.apply_create(ctx, io_ctx, timestamp_hint.clone());
 
       // Potentially respond to the External if we are the leader.
       // Note: Recall we will already have responded if the CreateTable had failed.

@@ -2,7 +2,7 @@ use crate::alter_table_tm_es::{
   AlterTablePayloadTypes, AlterTableTMES, AlterTableTMInner, ResponseData,
 };
 use crate::common::{
-  lookup_pos, map_insert, mk_qid, mk_tid, GeneralTraceMessage, GossipData, MasterIOCtx,
+  lookup_pos, map_insert, mk_qid, mk_t, mk_tid, GeneralTraceMessage, GossipData, MasterIOCtx,
   MasterTraceMessage, TableSchema,
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
@@ -15,7 +15,7 @@ use crate::master_query_planning_es::{
 use crate::model::common::{
   proc, ColName, ColType, ColVal, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
   PrimaryKey, QueryId, RequestId, SlaveGroupId, TNodePath, TablePath, TabletGroupId,
-  TabletKeyRange,
+  TabletKeyRange, Timestamp,
 };
 use crate::model::message as msg;
 use crate::model::message::{
@@ -108,7 +108,7 @@ impl<'a, IO: MasterIOCtx> PaxosContextBase<MasterBundle> for MasterPaxosContext<
       .send(eid, msg::NetworkMessage::Master(msg::MasterMessage::PaxosDriverMessage(message)));
   }
 
-  fn defer(&mut self, defer_time: u128, timer_event: PaxosTimerEvent) {
+  fn defer(&mut self, defer_time: Timestamp, timer_event: PaxosTimerEvent) {
     self.io_ctx.defer(defer_time, MasterTimerInput::PaxosTimerEvent(timer_event));
   }
 }
@@ -494,7 +494,7 @@ impl MasterContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx.defer(REMOTE_LEADER_CHANGED_PERIOD, MasterTimerInput::RemoteLeaderChanged);
+          io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD), MasterTimerInput::RemoteLeaderChanged);
         }
       },
       MasterForwardMsg::MasterBundle(bundle) => {

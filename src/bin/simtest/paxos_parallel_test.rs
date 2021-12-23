@@ -3,7 +3,7 @@ use crate::serial_test_utils::{setup, simulate_until_clean, TestContext};
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::mk_rid;
+use runiversal::common::{mk_rid, mk_t};
 use runiversal::model::common::iast;
 use runiversal::model::common::{
   EndpointId, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, RequestId, SlaveGroupId, Timestamp,
@@ -161,7 +161,7 @@ fn mk_inventory_select(r: &mut XorShiftRng) -> String {
 /// Results of `verify_req_res`, which contains extra statistics useful for checking
 /// non-triviality of the test.
 struct VerifyResult {
-  replay_duration: u32,
+  replay_duration: Timestamp,
   total_queries: u32,
   successful_queries: u32,
   num_selects: u32,
@@ -225,7 +225,7 @@ fn verify_req_res(
   }
 
   Some(VerifyResult {
-    replay_duration: *sim.true_timestamp() as u32,
+    replay_duration: sim.true_timestamp().clone(),
     total_queries,
     successful_queries,
     num_selects,
@@ -289,8 +289,10 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
     BTreeMap::<RequestId, (msg::PerformExternalQuery, msg::ExternalMessage)>::new();
 
   const SIM_DURATION: u128 = 1000; // The duration that we run the simulation
+  let sim_duration = mk_t(SIM_DURATION);
   for iteration in 0.. {
-    if sim.true_timestamp() >= &SIM_DURATION {
+    let timestamp = sim.true_timestamp();
+    if timestamp >= &sim_duration {
       break;
     }
 
@@ -372,8 +374,8 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
 
   // Iterate for some time limit to receiving responses
   const RESPONSE_TIME_LIMIT: u128 = 10000;
-  let start_time = *sim.true_timestamp();
-  while *sim.true_timestamp() < start_time + RESPONSE_TIME_LIMIT {
+  let end_time = sim.true_timestamp().add(mk_t(RESPONSE_TIME_LIMIT));
+  while sim.true_timestamp() < &end_time {
     // Next, we see if all unresponded requests have an old Leadership or not.
     let mut all_old = true;
     for (_, (gid, lid)) in &req_lid_map {
@@ -424,7 +426,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
       "Test 'test_all_paxos_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}, Leadership Changes: {:?}, 
        # Selects: {:?}, Avg. Selected Rows: {:?}",
-      res.replay_duration,
+      res.replay_duration.0,
       res.total_queries,
       res.successful_queries,
       num_leadership_changes,

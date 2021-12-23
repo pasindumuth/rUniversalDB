@@ -31,42 +31,18 @@ pub type PresenceSnapshot = BTreeMap<PrimaryKey, Vec<(ColName, ColValN)>>;
 /// A constant that indicates that a row is present.
 pub const PRESENCE_VALN: ColValN = Some(ColVal::Int(0));
 
-/// Finds the version at the given `timestamp`.
-pub fn find_version<V>(versions: &Vec<(Timestamp, Option<V>)>, timestamp: Timestamp) -> &Option<V> {
-  for (t, value) in versions.iter().rev() {
-    if *t <= timestamp {
-      return value;
-    }
-  }
-  return &None;
-}
-
 /// Finds the Non-Strict Prior Version in `versions` at `timestamp`.
-pub fn find_version2<V>(
-  versions: &Vec<(Timestamp, Option<V>)>,
-  timestamp: Timestamp,
-) -> Option<&(Timestamp, Option<V>)> {
+pub fn find_version<'a, V>(
+  versions: &'a Vec<(Timestamp, Option<V>)>,
+  timestamp: &Timestamp,
+) -> Option<&'a (Timestamp, Option<V>)> {
   for version in versions.iter().rev() {
     let (t, _) = version;
-    if *t <= timestamp {
+    if t <= timestamp {
       return Some(version);
     }
   }
   return None;
-}
-
-/// Reads the version prior to the timestamp. This doesn't mutate
-/// the lat if the read happens with a future timestamp.
-pub fn static_read<'a>(
-  mvt: &'a GenericMVTable,
-  key: &(PrimaryKey, Option<ColName>),
-  timestamp: Timestamp,
-) -> &'a ColValN {
-  if let Some(versions) = mvt.get(key) {
-    find_version(versions, timestamp)
-  } else {
-    &None
-  }
 }
 
 /// The RangeBound used to do range queries in Generic(MV)Table
@@ -123,7 +99,7 @@ pub trait StorageView {
           // unless there is already an entry that shadows this one.
           let storage_key = (pkey.clone(), ci.clone());
           if !all_prior_versions.contains_key(&storage_key) {
-            if let Some(version) = find_version2(versions, *timestamp) {
+            if let Some(version) = find_version(versions, timestamp) {
               all_prior_versions.insert(storage_key, version.clone());
             }
           }
@@ -281,7 +257,7 @@ impl<'a> StorageView for MSStorageView<'a> {
             KeyBoundInclusionResult::Included => {
               let storage_key = (pkey.clone(), ci.clone());
               if !all_prior_versions.contains_key(&storage_key) {
-                all_prior_versions.insert(storage_key, (*timestamp, val.clone()));
+                all_prior_versions.insert(storage_key, (timestamp.clone(), val.clone()));
               }
             }
             KeyBoundInclusionResult::Done => break,
@@ -340,7 +316,7 @@ pub fn commit_to_storage(
     if let Some(versions) = storage.get_mut(&key) {
       add_version(versions, timestamp.clone(), value);
     } else {
-      storage.insert(key, vec![(*timestamp, value)]);
+      storage.insert(key, vec![(timestamp.clone(), value)]);
     }
   }
 }
@@ -489,7 +465,7 @@ fn prior_versions_to_presence_snapshot(
   // Assert the precondition
   debug_assert!((|| {
     for col in val_cols {
-      if table_schema.val_cols.static_read(col, *timestamp).is_none() {
+      if table_schema.val_cols.static_read(col, timestamp).is_none() {
         return false;
       }
     }
@@ -500,15 +476,15 @@ fn prior_versions_to_presence_snapshot(
   let mut present_key_timestamps = BTreeMap::<PrimaryKey, Timestamp>::new();
   for ((pkey, ci), (timestamp, val)) in &all_prior_versions {
     if ci.is_none() && val == &PRESENCE_VALN {
-      present_key_timestamps.insert(pkey.clone(), *timestamp);
+      present_key_timestamps.insert(pkey.clone(), timestamp.clone());
     }
   }
 
   // Compute the timestamps that the `val_cols` were added at.
   let mut col_timestamps = BTreeMap::<ColName, Timestamp>::new();
   for col in val_cols {
-    let (timestamp, _) = table_schema.val_cols.static_read_version(col, *timestamp).unwrap();
-    col_timestamps.insert(col.clone(), *timestamp);
+    let (timestamp, _) = table_schema.val_cols.static_read_version(col, timestamp).unwrap();
+    col_timestamps.insert(col.clone(), timestamp.clone());
   }
 
   // Compute the Presence Snapshot

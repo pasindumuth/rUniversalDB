@@ -16,7 +16,7 @@ use crate::model::message as msg;
 use crate::server::{
   contains_col, evaluate_update, mk_eval_error, ContextConstructor, ServerContextBase,
 };
-use crate::storage::{static_read, GenericTable, MSStorageView, StorageView, PRESENCE_VALN};
+use crate::storage::{GenericTable, MSStorageView, StorageView, PRESENCE_VALN};
 use crate::tablet::{
   compute_subqueries, ColumnsLocking, Executing, MSQueryES, RequestedReadProtected,
   SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryPending, TabletContext,
@@ -119,7 +119,7 @@ impl MSTableInsertES {
       // Since the `key_cols` are static, no query plan should have one of
       // these as an External Column.
       assert!(lookup(&ctx.table_schema.key_cols, &col).is_none());
-      if ctx.table_schema.val_cols.static_read(&col, self.timestamp).is_some() {
+      if ctx.table_schema.val_cols.static_read(&col, &self.timestamp).is_some() {
         return false;
       }
     }
@@ -271,7 +271,7 @@ impl MSTableInsertES {
         col_type
       } else {
         // The `col_name` must be a ValCol that is already locked at this timestamp.
-        ctx.table_schema.val_cols.static_read(col_name, self.timestamp).unwrap()
+        ctx.table_schema.val_cols.static_read(col_name, &self.timestamp).unwrap()
       };
 
       for row in &eval_values {

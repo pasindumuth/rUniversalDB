@@ -1,4 +1,4 @@
-use crate::common::BasicIOCtx;
+use crate::common::{mk_t, BasicIOCtx};
 use crate::drop_table_tm_es::{
   DropTableClosed, DropTableCommit, DropTablePayloadTypes, DropTablePrepare, DropTablePrepared,
   DropTableRMAborted, DropTableRMCommitted, DropTableRMPrepared,
@@ -34,9 +34,9 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
     let mut timestamp = io_ctx.now();
     timestamp = max(timestamp, ctx.table_schema.val_cols.get_latest_lat());
     for (_, req) in ctx.waiting_locked_cols.iter().chain(ctx.inserting_locked_cols.iter()) {
-      timestamp = max(timestamp, req.timestamp);
+      timestamp = max(timestamp, req.timestamp.clone());
     }
-    timestamp += 1;
+    timestamp = timestamp.add(mk_t(1));
 
     DropTableRMInner { prepared_timestamp: timestamp, committed_timestamp: None }
   }
@@ -58,7 +58,7 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
     _: &mut TabletContext,
     _: &mut IO,
   ) -> DropTableRMPrepared {
-    DropTableRMPrepared { timestamp: self.prepared_timestamp }
+    DropTableRMPrepared { timestamp: self.prepared_timestamp.clone() }
   }
 
   fn prepared_plm_inserted<IO: BasicIOCtx>(
@@ -66,7 +66,7 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
     _: &mut TabletContext,
     _: &mut IO,
   ) -> DropTablePrepared {
-    DropTablePrepared { timestamp: self.prepared_timestamp }
+    DropTablePrepared { timestamp: self.prepared_timestamp.clone() }
   }
 
   fn mk_committed_plm<IO: BasicIOCtx>(
@@ -75,7 +75,7 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
     _: &mut IO,
     commit: &DropTableCommit,
   ) -> DropTableRMCommitted {
-    DropTableRMCommitted { timestamp: commit.timestamp }
+    DropTableRMCommitted { timestamp: commit.timestamp.clone() }
   }
 
   /// Apply the `alter_op` to this Tablet's `table_schema`.

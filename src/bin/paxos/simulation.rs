@@ -1,6 +1,6 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::RangeEnds;
+use runiversal::common::{mk_t, RangeEnds};
 use runiversal::model::common::{EndpointId, Timestamp};
 use runiversal::model::message as msg;
 use runiversal::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent};
@@ -15,7 +15,7 @@ use std::sync::mpsc::channel;
 
 pub struct PaxosContext<'a> {
   rand: &'a mut XorShiftRng,
-  current_time: u128,
+  current_time: Timestamp,
   queues: &'a mut BTreeMap<EndpointId, BTreeMap<EndpointId, VecDeque<NetworkMessage>>>,
   nonempty_queues: &'a mut Vec<(EndpointId, EndpointId)>,
 
@@ -41,8 +41,8 @@ impl<'a> PaxosContextBase<SimpleBundle> for PaxosContext<'a> {
     add_msg(&mut self.queues, &mut self.nonempty_queues, message, &self.this_eid, eid);
   }
 
-  fn defer(&mut self, defer_time: u128, timer_event: PaxosTimerEvent) {
-    let deferred_time = self.current_time + defer_time;
+  fn defer(&mut self, defer_time: Timestamp, timer_event: PaxosTimerEvent) {
+    let deferred_time = self.current_time.add(defer_time);
     if let Some(timer_inputs) = self.tasks.get_mut(&deferred_time) {
       timer_inputs.push(timer_event);
     } else {
@@ -120,7 +120,7 @@ pub struct Simulation {
 
   /// Meta
   next_int: u32,
-  true_timestamp: u128,
+  true_timestamp: Timestamp,
   config: SimConfig,
 }
 
@@ -139,7 +139,7 @@ impl Simulation {
       max_common_index: 0,
       global_paxos_log: vec![],
       next_int: 0,
-      true_timestamp: Default::default(),
+      true_timestamp: mk_t(0),
       config,
     };
 
@@ -173,7 +173,7 @@ impl Simulation {
   fn initialize_paxos_nodes(mut sim: Simulation) -> Simulation {
     let leader_eid = mk_paxos_eid(0);
     for (eid, paxos_data) in &mut sim.paxos_data {
-      let current_time = sim.true_timestamp;
+      let current_time = sim.true_timestamp.clone();
       let mut ctx = PaxosContext {
         rand: &mut sim.rand,
         current_time, // TODO: simulate clock skew
@@ -260,7 +260,7 @@ impl Simulation {
   /// any number of side effects, including adding new messages into `queues`.
   fn run_paxos_message(&mut self, _: &EndpointId, to_eid: &EndpointId, msg: NetworkMessage) {
     let paxos_data = self.paxos_data.get_mut(to_eid).unwrap();
-    let current_time = self.true_timestamp;
+    let current_time = self.true_timestamp.clone();
     let mut ctx = PaxosContext {
       rand: &mut self.rand,
       current_time, // TODO: simulate clock skew
@@ -291,10 +291,10 @@ impl Simulation {
   /// Execute the timer events up to the current `true_timestamp`.
   pub fn run_timer_events(&mut self) {
     for (eid, paxos_data) in &mut self.paxos_data {
-      let current_time = self.true_timestamp;
+      let current_time = self.true_timestamp.clone();
       let mut ctx = PaxosContext {
         rand: &mut self.rand,
-        current_time, // TODO: simulate clock skew
+        current_time: current_time.clone(), // TODO: simulate clock skew
         queues: &mut self.queues,
         nonempty_queues: &mut self.nonempty_queues,
         this_eid: eid,
@@ -324,7 +324,7 @@ impl Simulation {
   /// messages. For simplicity, we assume that this means that every non-empty queue
   /// of messages delivers about one message in this time.
   pub fn simulate1ms(&mut self) {
-    self.true_timestamp += 1;
+    self.true_timestamp = self.true_timestamp.add(mk_t(1));
     let num_msgs_to_deliver = self.nonempty_queues.len();
     for _ in 0..num_msgs_to_deliver {
       let r = self.rand.next_u32() as usize % self.nonempty_queues.len();

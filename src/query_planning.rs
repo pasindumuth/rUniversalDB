@@ -122,7 +122,7 @@ pub fn compute_extra_req_cols(ms_query: &proc::MSQuery) -> BTreeMap<TablePath, V
 pub fn compute_query_plan_data(
   ms_query: &proc::MSQuery,
   table_generation: &MVM<TablePath, Gen>,
-  timestamp: Timestamp,
+  timestamp: &Timestamp,
 ) -> (BTreeMap<TablePath, Gen>, BTreeMap<TablePath, Vec<ColName>>) {
   let mut table_location_map = BTreeMap::<TablePath, Gen>::new();
   iterate_stage_ms_query(
@@ -168,7 +168,7 @@ pub fn perform_static_validations(
   ms_query: &proc::MSQuery,
   table_generation: &MVM<TablePath, Gen>,
   db_schema: &BTreeMap<(TablePath, Gen), TableSchema>,
-  timestamp: Timestamp,
+  timestamp: &Timestamp,
 ) -> Result<(), KeyValidationError> {
   for (_, stage) in &ms_query.trans_tables {
     match stage {

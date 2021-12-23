@@ -4,7 +4,7 @@ use crate::simulation::Simulation;
 use rand::seq::SliceRandom;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_rid, read_index, TableSchema};
+use runiversal::common::{mk_rid, mk_t, read_index, TableSchema};
 use runiversal::model::common::{iast, ColName, TablePath};
 use runiversal::model::common::{
   EndpointId, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, RequestId, SlaveGroupId, Timestamp,
@@ -139,7 +139,7 @@ impl<'a> QueryGenCtx<'a> {
     all_val_cols[..].shuffle(r);
 
     // Choose a ColName that does not already exist and add it
-    let cur_val_cols = table_schema.val_cols.static_snapshot_read(self.timestamp);
+    let cur_val_cols = table_schema.val_cols.static_snapshot_read(&self.timestamp);
     for col in all_val_cols {
       if !cur_val_cols.contains_key(&col) {
         // Create the query
@@ -168,7 +168,7 @@ impl<'a> QueryGenCtx<'a> {
 
     // Choose a ColName that does not already exist and add it
     let mut cur_val_cols: Vec<ColName> =
-      table_schema.val_cols.static_snapshot_read(self.timestamp).into_keys().collect();
+      table_schema.val_cols.static_snapshot_read(&self.timestamp).into_keys().collect();
     let col = rand_elem(&cur_val_cols, r)?;
 
     // Create the query
@@ -400,7 +400,7 @@ impl<'a> QueryGenCtx<'a> {
       let mut source_idx = self.rand.next_u32() as usize % num_sources;
       let (source, schema) = read_index(self.table_schemas, source_idx).unwrap();
       let key_cols: Vec<ColName> = schema.key_cols.iter().map(|(c, _)| c).cloned().collect();
-      let val_col_map = schema.val_cols.static_snapshot_read(self.timestamp);
+      let val_col_map = schema.val_cols.static_snapshot_read(&self.timestamp);
       let val_cols: Vec<ColName> = val_col_map.into_keys().collect();
       Some((source.0.clone(), key_cols, val_cols))
     }
@@ -419,7 +419,7 @@ enum Request {
 /// Results of `verify_req_res`, which contains extra statistics useful for checking
 /// non-triviality of the test.
 struct VerifyResult {
-  replay_duration: u32,
+  replay_duration: Timestamp,
   total_queries: u32,
   successful_queries: u32,
   num_selects: u32,
@@ -447,7 +447,10 @@ fn verify_req_res(
         if abort.payload == msg::ExternalAbortedData::NodeDied {
           // Recall that the query could still have succeeded, so we check `req_success_map`.
           if let Some(timestamp) = req_success_map.get(&rid) {
-            if !sorted_success_res.insert(*timestamp, SuccessPair::Query(req, None)).is_none() {
+            if !sorted_success_res
+              .insert(timestamp.clone(), SuccessPair::Query(req, None))
+              .is_none()
+            {
               // Here, two responses had the same timestamp. We cannot replay this, so we
               // simply skip this test.
               return None;
@@ -469,7 +472,10 @@ fn verify_req_res(
         if abort.payload == msg::ExternalDDLQueryAbortData::NodeDied {
           // Recall that the query could still have succeeded, so we check `req_success_map`.
           if let Some(timestamp) = req_success_map.get(&rid) {
-            if !sorted_success_res.insert(*timestamp, SuccessPair::DDLQuery(req, None)).is_none() {
+            if !sorted_success_res
+              .insert(timestamp.clone(), SuccessPair::DDLQuery(req, None))
+              .is_none()
+            {
               // Here, two responses had the same timestamp. We cannot replay this, so we
               // simply skip this test.
               return None;
@@ -530,7 +536,7 @@ fn verify_req_res(
   }
 
   Some(VerifyResult {
-    replay_duration: *sim.true_timestamp() as u32,
+    replay_duration: sim.true_timestamp().clone(),
     total_queries,
     successful_queries,
     num_selects,
@@ -573,9 +579,10 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
 
   // TODO: change back to 5000
   const SIM_DURATION: u128 = 1000; // The duration that we run the simulation
+  let sim_duration = mk_t(SIM_DURATION);
   for iteration in 0.. {
-    let timestamp = *sim.true_timestamp();
-    if timestamp >= SIM_DURATION {
+    let timestamp = sim.true_timestamp().clone();
+    if timestamp >= sim_duration {
       break;
     }
 
@@ -584,7 +591,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
 
     // Extract all current TableSchemas
     let full_db_schema = sim.full_db_schema();
-    let cur_tables = full_db_schema.table_generation.static_snapshot_read(timestamp);
+    let cur_tables = full_db_schema.table_generation.static_snapshot_read(&timestamp);
     let mut table_schemas = BTreeMap::<TablePath, &TableSchema>::new();
     for (table_path, gen) in cur_tables {
       let table_schema = full_db_schema.db_schema.get(&(table_path.clone(), gen)).unwrap();
@@ -607,7 +614,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
         // Otherwise, we randomly generate any type of query chosen using a hard-coded
         // distribution. We define the distribution as a constant vector that specifies
         // the relative probabilities.
-        const DIST: [u32; 8] = [6, 4, 5, 5, 20, 20, 10, 40];
+        const DIST: [u32; 8] = [5, 4, 5, 5, 30, 20, 5, 40];
 
         // Select an `idx` into DIST based on its probability distribution.
         let mut i: u32 = gen_ctx.rand.next_u32() % DIST.iter().sum::<u32>();
@@ -727,8 +734,8 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
 
   // Iterate for some time limit to receiving responses
   const RESPONSE_TIME_LIMIT: u128 = 10000;
-  let start_time = *sim.true_timestamp();
-  while *sim.true_timestamp() < start_time + RESPONSE_TIME_LIMIT {
+  let end_time = sim.true_timestamp().add(mk_t(RESPONSE_TIME_LIMIT));
+  while sim.true_timestamp() < &end_time {
     // Next, we see if all unresponded requests have an old Leadership or not.
     let mut all_old = true;
     for (_, (gid, lid)) in &req_lid_map {
@@ -783,7 +790,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
       "Test 'test_all_ddl_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}, Leadership Changes: {:?}, 
        # Selects: {:?}, Avg. Selected Rows: {:?}",
-      res.replay_duration,
+      res.replay_duration.0,
       res.total_queries,
       res.successful_queries,
       num_leadership_changes,

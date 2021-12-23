@@ -1,11 +1,12 @@
 use crate::common::{
-  BasicIOCtx, GossipData, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage,
+  mk_t, BasicIOCtx, GossipData, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::CreateTableRMES;
 use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::model::common::{
   CoordGroupId, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TabletGroupId,
+  Timestamp,
 };
 use crate::model::common::{EndpointId, QueryId};
 use crate::model::message as msg;
@@ -78,7 +79,7 @@ impl<'a, IO: SlaveIOCtx> PaxosContextBase<SharedPaxosBundle> for SlavePaxosConte
       .send(eid, msg::NetworkMessage::Slave(msg::SlaveMessage::PaxosDriverMessage(message)));
   }
 
-  fn defer(&mut self, defer_time: u128, timer_event: PaxosTimerEvent) {
+  fn defer(&mut self, defer_time: Timestamp, timer_event: PaxosTimerEvent) {
     self.io_ctx.defer(defer_time, SlaveTimerInput::PaxosTimerEvent(timer_event));
   }
 }
@@ -481,7 +482,7 @@ impl SlaveContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx.defer(REMOTE_LEADER_CHANGED_PERIOD, SlaveTimerInput::RemoteLeaderChanged);
+          io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD), SlaveTimerInput::RemoteLeaderChanged);
         }
       },
       SlaveForwardMsg::SlaveBundle(bundle) => {

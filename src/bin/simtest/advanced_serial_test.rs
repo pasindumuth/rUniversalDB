@@ -63,7 +63,7 @@ fn subquery_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'subquery_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+  println!("Test 'subquery_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -139,5 +139,5 @@ fn trans_table_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'trans_table_test' Passed! Time taken: {:?}ms", sim.true_timestamp())
+  println!("Test 'trans_table_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
 }

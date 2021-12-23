@@ -1,6 +1,6 @@
 use crate::common::{
-  map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx, GeneralTraceMessage, GossipData,
-  OrigP, TMStatus,
+  map_insert, merge_table_views, mk_qid, mk_t, remove_item, BasicIOCtx, GeneralTraceMessage,
+  GossipData, OrigP, TMStatus,
 };
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::finish_query_tm_es::{
@@ -10,7 +10,7 @@ use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::iast::Query;
 use crate::model::common::{
   proc, CNodePath, CQueryPath, CSubNodePath, CTSubNodePath, ColName, CoordGroupId, LeadershipId,
-  PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TNodePath, TQueryPath, TableView,
+  PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TNodePath, TQueryPath, TableView, Timestamp,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
@@ -784,7 +784,7 @@ impl CoordContext {
         let exec = ms_coord.es.to_exec();
         let query_id = mk_qid(io_ctx.rand());
         ms_coord.es = FullMSCoordES::QueryPlanning(QueryPlanningES {
-          timestamp: max(io_ctx.now(), exec.timestamp + 1),
+          timestamp: max(io_ctx.now(), exec.timestamp.add(mk_t(1))),
           sql_query: exec.sql_query.clone(),
           query_id: query_id.clone(),
           state: QueryPlanningS::Start,
@@ -844,7 +844,7 @@ impl CoordContext {
                 sender_eid: response_data.sender_eid,
                 child_queries: vec![],
                 es: FullMSCoordES::QueryPlanning(QueryPlanningES {
-                  timestamp: max(io_ctx.now(), response_data.timestamp + 1),
+                  timestamp: max(io_ctx.now(), response_data.timestamp.add(mk_t(1))),
                   sql_query: response_data.sql_query,
                   query_id: query_id.clone(),
                   state: QueryPlanningS::Start,
