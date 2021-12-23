@@ -1,8 +1,6 @@
-use crate::common::{mk_t, BasicIOCtx, GeneralTraceMessage};
+use crate::common::{mk_t, BasicIOCtx, GeneralTraceMessage, Timestamp};
 use crate::master::{MasterContext, MasterPLm};
-use crate::model::common::{
-  proc, EndpointId, RequestId, TNodePath, TSubNodePath, TablePath, Timestamp,
-};
+use crate::model::common::{proc, EndpointId, RequestId, TNodePath, TSubNodePath, TablePath};
 use crate::model::message as msg;
 use crate::stmpaxos2pc_tm::{
   PayloadTypes, RMMessage, RMPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm,

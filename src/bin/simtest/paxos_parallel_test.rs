@@ -3,10 +3,10 @@ use crate::serial_test_utils::{setup, simulate_until_clean, TestContext};
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_rid, mk_t};
+use runiversal::common::{mk_rid, mk_t, Timestamp};
 use runiversal::model::common::iast;
 use runiversal::model::common::{
-  EndpointId, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, RequestId, SlaveGroupId, Timestamp,
+  EndpointId, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, RequestId, SlaveGroupId,
 };
 use runiversal::model::message as msg;
 use runiversal::paxos::PaxosConfig;
@@ -426,7 +426,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
       "Test 'test_all_paxos_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}, Leadership Changes: {:?}, 
        # Selects: {:?}, Avg. Selected Rows: {:?}",
-      res.replay_duration.0,
+      res.replay_duration.time_ms,
       res.total_queries,
       res.successful_queries,
       num_leadership_changes,

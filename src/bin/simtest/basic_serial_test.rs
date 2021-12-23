@@ -5,10 +5,10 @@ use crate::serial_test_utils::{
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_t, TableSchema};
+use runiversal::common::{mk_t, TableSchema, Timestamp};
 use runiversal::model::common::{
   ColName, ColType, EndpointId, Gen, LeadershipId, PaxosGroupIdTrait, PrimaryKey, RequestId,
-  SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange, Timestamp,
+  SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message as msg;
 use runiversal::model::message::NetworkMessage;
@@ -182,7 +182,7 @@ fn simple_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'simple_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'simple_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -289,7 +289,7 @@ fn subquery_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'subquery_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'subquery_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -325,7 +325,7 @@ fn trans_table_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'trans_table_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'trans_table_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -387,7 +387,7 @@ fn select_projection_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'select_projection_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'select_projection_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -434,7 +434,7 @@ fn insert_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'insert_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'insert_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -545,7 +545,7 @@ fn multi_key_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'multi_key_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'multi_key_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -604,7 +604,7 @@ fn multi_stage_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'multi_stage_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'multi_stage_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -709,7 +709,7 @@ fn aggregation_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'aggregation_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'aggregation_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -804,7 +804,7 @@ fn aliased_column_resolution_test(seed: [u8; 16]) {
 
   println!(
     "Test 'aliased_column_resolution_test' Passed! Time taken: {:?}ms",
-    sim.true_timestamp().0
+    sim.true_timestamp().time_ms
   )
 }
 
@@ -890,7 +890,7 @@ fn basic_add_column(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'basic_add_column' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'basic_add_column' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -999,7 +999,7 @@ fn drop_column(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'drop_column' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'drop_column' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1072,7 +1072,7 @@ fn basic_delete_test(seed: [u8; 16]) {
 
   // Delete it again and see if that succeeds
 
-  println!("Test 'basic_delete_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'basic_delete_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1125,7 +1125,10 @@ fn insert_delete_insert_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'insert_delete_insert_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!(
+    "Test 'insert_delete_insert_test' Passed! Time taken: {:?}ms",
+    sim.true_timestamp().time_ms
+  )
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1195,7 +1198,7 @@ fn ghost_deleted_row_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'ghost_deleted_row_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'ghost_deleted_row_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1294,7 +1297,7 @@ fn drop_table_test(seed: [u8; 16]) {
     );
   }
 
-  println!("Test 'drop_table_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0)
+  println!("Test 'drop_table_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1483,7 +1486,7 @@ fn cancellation_test(seed: [u8; 16]) {
     panic!();
   }
 
-  println!("Test 'cancellation_test' Passed! Time taken: {:?}ms", test_time_taken.0)
+  println!("Test 'cancellation_test' Passed! Time taken: {:?}ms", test_time_taken.time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1543,7 +1546,10 @@ fn paxos_leader_change_test(seed: [u8; 16]) {
   }
 
   if leader_did_change {
-    println!("Test 'paxos_leader_change_test' Passed! Time taken: {:?}ms", sim.true_timestamp().0);
+    println!(
+      "Test 'paxos_leader_change_test' Passed! Time taken: {:?}ms",
+      sim.true_timestamp().time_ms
+    );
   } else {
     panic!();
   }
@@ -1658,5 +1664,5 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
 
   // Ensure the test occurred in a sensible amount of time.
   assert!(test_time_taken < mk_t(1000));
-  println!("Test 'paxos_basic_serial_test' Passed! Time taken: {:?}ms", test_time_taken);
+  println!("Test 'paxos_basic_serial_test' Passed! Time taken: {:?}ms", test_time_taken.time_ms);
 }

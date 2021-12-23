@@ -4,7 +4,7 @@ use crate::master::MasterTimerInput;
 use crate::model::common::{
   proc, CTNodePath, ColName, ColType, ColVal, ColValN, CoordGroupId, EndpointId, Gen, LeadershipId,
   PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
-  TabletKeyRange, TierMap, Timestamp,
+  TabletKeyRange, TierMap,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
@@ -13,9 +13,13 @@ use crate::tablet::{TabletCreateHelper, TabletForwardMsg};
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
+use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::hash::Hash;
+
+#[path = "./common_test.rs"]
+pub mod common_test;
 
 // -----------------------------------------------------------------------------------------------
 //  Basic
@@ -342,8 +346,46 @@ pub fn to_table_path(source: &proc::GeneralSource) -> &TablePath {
   cast!(proc::GeneralSourceRef::TablePath, &source.source_ref).unwrap()
 }
 
-pub fn mk_t(timestamp: u128) -> Timestamp {
-  Timestamp(timestamp, vec![])
+// -----------------------------------------------------------------------------------------------
+//  Timestamp
+// -----------------------------------------------------------------------------------------------
+
+/// A simple Timestamp type.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Timestamp {
+  pub time_ms: u128,
+  pub random_fraction: Vec<u8>,
+}
+
+impl Timestamp {
+  fn new(time_ms: u128, random_fraction: Vec<u8>) -> Timestamp {
+    Timestamp { time_ms, random_fraction }
+  }
+
+  /// Grade-school base-256 decimal addition algorithm.
+  fn add_random_fraction(frac1: Vec<u8>, frac2: Vec<u8>) -> (u128, Vec<u8>) {
+    let new_frac_len = max(frac1.len(), frac2.len());
+    let mut new_frac: Vec<u8> = (0..new_frac_len).map(|_| 0).collect();
+    let mut borrow: u16 = 0;
+    for i in (0..new_frac_len).rev() {
+      let x1 = if i < frac1.len() { frac1[i] } else { 0 };
+      let x2 = if i < frac2.len() { frac2[i] } else { 0 };
+      let sum: u16 = x1 as u16 + x2 as u16 + borrow;
+      new_frac[i] = sum as u8;
+      borrow = if sum > u8::MAX as u16 { 1 } else { 0 };
+    }
+    (borrow as u128, new_frac)
+  }
+
+  pub fn add(&self, that: Timestamp) -> Timestamp {
+    let (borrow, random_fraction) =
+      Self::add_random_fraction(self.random_fraction.clone(), that.random_fraction);
+    Timestamp { time_ms: self.time_ms + that.time_ms + borrow, random_fraction }
+  }
+}
+
+pub fn mk_t(time_ms: u128) -> Timestamp {
+  Timestamp { time_ms, random_fraction: vec![] }
 }
 
 // -----------------------------------------------------------------------------------------------

@@ -3,10 +3,10 @@ use crate::simulation::Simulation;
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_rid, mk_t, read_index, TableSchema};
+use runiversal::common::{mk_rid, mk_t, read_index, TableSchema, Timestamp};
 use runiversal::master::FullDBSchema;
 use runiversal::model::common::{
-  ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TableView, Timestamp,
+  ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TableView,
 };
 use runiversal::model::message as msg;
 use runiversal::model::message::ExternalAbortedData;
@@ -839,7 +839,7 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
     println!(
       "Test 'test_all_advanced_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}",
-      true_time.0, total_queries, successful_queries
+      true_time.time_ms, total_queries, successful_queries
     );
   } else {
     println!("Skipped Test 'test_all_advanced_parallel' due to Timestamp Conflict");

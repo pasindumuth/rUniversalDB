@@ -3,7 +3,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
   mk_cid, mk_t, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData, MasterIOCtx,
-  MasterTraceMessage, RangeEnds, SlaveIOCtx, SlaveTraceMessage,
+  MasterTraceMessage, RangeEnds, SlaveIOCtx, SlaveTraceMessage, Timestamp,
 };
 use runiversal::coord::coord_test::{assert_coord_consistency, check_coord_clean};
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
@@ -13,7 +13,7 @@ use runiversal::master::{
 };
 use runiversal::model::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId,
-  SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
+  SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;

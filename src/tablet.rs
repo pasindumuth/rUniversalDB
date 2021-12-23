@@ -4,7 +4,7 @@ use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_extern
 use crate::common::{
   btree_multimap_insert, lookup, map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx,
   BoundType, CoreIOCtx, GossipData, KeyBound, OrigP, ReadRegion, RemoteLeaderChangedPLm, TMStatus,
-  TableSchema, WriteRegion,
+  TableSchema, Timestamp, WriteRegion,
 };
 use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;
@@ -20,7 +20,7 @@ use crate::model::common::{
   TQueryPath, TSubNodePath, TableView, TransTableName,
 };
 use crate::model::common::{
-  ColName, EndpointId, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
+  ColName, EndpointId, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
 };
 use crate::model::message as msg;
 use crate::model::message::TabletMessage;
@@ -456,9 +456,9 @@ pub fn compute_col_map(
 // -----------------------------------------------------------------------------------------------
 
 pub mod plm {
-  use crate::common::ReadRegion;
+  use crate::common::{ReadRegion, Timestamp};
   use crate::model::common::{CQueryPath, TQueryPath};
-  use crate::model::common::{ColName, QueryId, Timestamp};
+  use crate::model::common::{ColName, QueryId};
   use crate::storage::GenericTable;
   use crate::tablet::ReadWriteRegion;
   use serde::{Deserialize, Serialize};

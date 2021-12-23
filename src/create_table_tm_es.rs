@@ -1,8 +1,8 @@
 use crate::alter_table_tm_es::{maybe_respond_dead, ResponseData};
-use crate::common::{mk_t, BasicIOCtx, GeneralTraceMessage, TableSchema};
+use crate::common::{mk_t, BasicIOCtx, GeneralTraceMessage, TableSchema, Timestamp};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
-  ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange, Timestamp,
+  ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;

@@ -3,7 +3,7 @@ use crate::alter_table_tm_es::{
 };
 use crate::common::{
   lookup_pos, map_insert, mk_qid, mk_t, mk_tid, GeneralTraceMessage, GossipData, MasterIOCtx,
-  MasterTraceMessage, TableSchema,
+  MasterTraceMessage, TableSchema, Timestamp,
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
@@ -15,7 +15,7 @@ use crate::master_query_planning_es::{
 use crate::model::common::{
   proc, ColName, ColType, ColVal, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
   PrimaryKey, QueryId, RequestId, SlaveGroupId, TNodePath, TablePath, TabletGroupId,
-  TabletKeyRange, Timestamp,
+  TabletKeyRange,
 };
 use crate::model::message as msg;
 use crate::model::message::{
@@ -48,7 +48,8 @@ pub mod master_test;
 // -----------------------------------------------------------------------------------------------
 
 pub mod plm {
-  use crate::model::common::{proc, QueryId, Timestamp};
+  use crate::common::Timestamp;
+  use crate::model::common::{proc, QueryId};
   use serde::{Deserialize, Serialize};
 
   // MasterQueryPlanning

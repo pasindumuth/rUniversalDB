@@ -1,6 +1,6 @@
 use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::FrozenColUsageNode;
-use crate::common::{GossipData, QueryPlan};
+use crate::common::{GossipData, QueryPlan, Timestamp};
 use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::expression::EvalError;
@@ -9,7 +9,7 @@ use crate::master::MasterBundle;
 use crate::model::common::{
   proc, CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
   PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
-  TierMap, Timestamp, TransTableLocationPrefix, TransTableName,
+  TierMap, TransTableLocationPrefix, TransTableName,
 };
 use crate::paxos2pc_tm;
 use crate::slave::SharedPaxosBundle;

@@ -1,5 +1,5 @@
-use crate::common::{mk_t, mk_uuid, UUID};
-use crate::model::common::{EndpointId, Gen, LeadershipId, Timestamp};
+use crate::common::{mk_t, mk_uuid, Timestamp, UUID};
+use crate::model::common::{EndpointId, Gen, LeadershipId};
 use crate::model::message as msg;
 use crate::model::message::{
   LeaderChanged, PLEntry, PLIndex, PaxosDriverMessage, PaxosMessage, Rnd,

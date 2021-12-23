@@ -1,7 +1,7 @@
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_t, RangeEnds};
-use runiversal::model::common::{EndpointId, Timestamp};
+use runiversal::common::{mk_t, RangeEnds, Timestamp};
+use runiversal::model::common::EndpointId;
 use runiversal::model::message as msg;
 use runiversal::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use runiversal::simulation_utils::{add_msg, mk_paxos_eid};

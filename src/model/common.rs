@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::cmp::min;
 use std::collections::BTreeMap;
 
 /// These are common PODs that form the core data objects
@@ -61,18 +62,6 @@ impl PrimaryKey {
 pub struct TabletKeyRange {
   pub start: Option<PrimaryKey>,
   pub end: Option<PrimaryKey>,
-}
-
-/// A simple Timestamp type.
-/// Note: We avoid defining a new type so we can use the arithmetic operators easily
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Timestamp(pub u128, pub Vec<u8>);
-
-impl Timestamp {
-  pub fn add(&self, other: Timestamp) -> Timestamp {
-    // TODO: do addition. Extend both vecs so they align, then do addition from grade school.
-    Timestamp(self.0 + other.0, vec![])
-  }
 }
 
 /// A Type used to represent a generation.

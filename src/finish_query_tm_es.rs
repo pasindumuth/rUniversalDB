@@ -1,7 +1,7 @@
-use crate::common::BasicIOCtx;
+use crate::common::{BasicIOCtx, Timestamp};
 use crate::coord::CoordContext;
 use crate::model::common::{
-  proc, CNodePath, EndpointId, QueryId, RequestId, TNodePath, TQueryPath, TableView, Timestamp,
+  proc, CNodePath, EndpointId, QueryId, RequestId, TNodePath, TQueryPath, TableView,
 };
 use crate::model::message as msg;
 use crate::paxos2pc_tm::{

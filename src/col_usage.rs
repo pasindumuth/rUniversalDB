@@ -1,8 +1,6 @@
-use crate::common::{lookup, TableSchema};
+use crate::common::{lookup, TableSchema, Timestamp};
 use crate::model::common::proc::{GeneralSourceRef, MSQueryStage};
-use crate::model::common::{
-  iast, proc, ColName, Gen, TablePath, TierMap, Timestamp, TransTableName,
-};
+use crate::model::common::{iast, proc, ColName, Gen, TablePath, TierMap, TransTableName};
 use crate::multiversion_map::MVM;
 use crate::server::contains_col;
 use serde::{Deserialize, Serialize};

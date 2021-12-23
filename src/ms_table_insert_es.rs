@@ -1,7 +1,7 @@
 use crate::col_usage::{compute_insert_schema, free_external_cols};
 use crate::common::{
   lookup, lookup_pos, mk_qid, ColBound, CoreIOCtx, KeyBound, OrigP, PolyColBound, QueryESResult,
-  QueryPlan, ReadRegion, SingleBound, WriteRegion, WriteRegionType,
+  QueryPlan, ReadRegion, SingleBound, Timestamp, WriteRegion, WriteRegionType,
 };
 use crate::expression::{
   compress_row_region, construct_colvaln, construct_simple_cexpr, evaluate_c_expr, is_true, CExpr,
@@ -10,7 +10,7 @@ use crate::expression::{
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
   proc, CQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow, PrimaryKey, QueryId,
-  TQueryPath, TableView, Timestamp, TransTableName,
+  TQueryPath, TableView, TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::{

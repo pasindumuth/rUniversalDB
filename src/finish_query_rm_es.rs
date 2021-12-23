@@ -1,9 +1,9 @@
-use crate::common::{BasicIOCtx, GeneralTraceMessage};
+use crate::common::{BasicIOCtx, GeneralTraceMessage, Timestamp};
 use crate::finish_query_tm_es::{
   FinishQueryPayloadTypes, FinishQueryPrepare, FinishQueryRMAborted, FinishQueryRMCommitted,
   FinishQueryRMPrepared,
 };
-use crate::model::common::{proc, QueryId, Timestamp};
+use crate::model::common::{proc, QueryId};
 use crate::paxos2pc_rm::{Paxos2PCRMInner, Paxos2PCRMOuter};
 use crate::paxos2pc_tm::PayloadTypes;
 use crate::storage::{commit_to_storage, compress_updates_views, GenericTable};

@@ -2,10 +2,10 @@ use crate::col_usage::{
   free_external_cols, iterate_stage_ms_query, ColUsageError, ColUsagePlanner, FrozenColUsageNode,
   GeneralStage,
 };
-use crate::common::{lookup, TableSchema};
+use crate::common::{lookup, TableSchema, Timestamp};
 use crate::master::{plm, MasterContext};
 use crate::model::common::proc::MSQueryStage;
-use crate::model::common::{proc, CQueryPath, ColName, QueryId, Timestamp, TransTableName};
+use crate::model::common::{proc, CQueryPath, ColName, QueryId, TransTableName};
 use crate::model::message as msg;
 use crate::model::message::ExternalAbortedData::QueryPlanningError;
 use crate::query_planning::{

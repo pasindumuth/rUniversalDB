@@ -3,11 +3,11 @@ use crate::col_usage::{
   node_external_trans_tables, FrozenColUsageNode,
 };
 use crate::common::{
-  lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, OrigP, QueryPlan, TMStatus,
+  lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, OrigP, QueryPlan, TMStatus, Timestamp,
 };
 use crate::model::common::{
   proc, CQueryPath, ColName, Context, ContextRow, ContextSchema, Gen, LeadershipId,
-  PaxosGroupIdTrait, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TierMap, Timestamp,
+  PaxosGroupIdTrait, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TierMap,
   TransTableLocationPrefix, TransTableName,
 };
 use crate::model::message as msg;

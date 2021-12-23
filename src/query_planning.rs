@@ -1,8 +1,8 @@
 use crate::col_usage::{iterate_stage_ms_query, GeneralStage};
-use crate::common::{lookup, TableSchema};
+use crate::common::{lookup, TableSchema, Timestamp};
 use crate::model::common::proc::MSQueryStage;
 use crate::model::common::TablePath;
-use crate::model::common::{proc, ColName, Gen, TierMap, Timestamp, TransTableName};
+use crate::model::common::{proc, ColName, Gen, TierMap, TransTableName};
 use crate::multiversion_map::MVM;
 use std::collections::{BTreeMap, BTreeSet};
 

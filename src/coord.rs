@@ -1,6 +1,6 @@
 use crate::common::{
   map_insert, merge_table_views, mk_qid, mk_t, remove_item, BasicIOCtx, GeneralTraceMessage,
-  GossipData, OrigP, TMStatus,
+  GossipData, OrigP, TMStatus, Timestamp,
 };
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::finish_query_tm_es::{
@@ -10,7 +10,7 @@ use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::iast::Query;
 use crate::model::common::{
   proc, CNodePath, CQueryPath, CSubNodePath, CTSubNodePath, ColName, CoordGroupId, LeadershipId,
-  PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TNodePath, TQueryPath, TableView, Timestamp,
+  PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TNodePath, TQueryPath, TableView,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;

@@ -2,15 +2,15 @@ use crate::col_usage::{
   iterate_stage_ms_query, node_external_trans_tables, ColUsageError, ColUsagePlanner,
   FrozenColUsageNode, GeneralStage,
 };
-use crate::common::{lookup, merge_table_views, mk_qid, OrigP, QueryPlan, TMStatus};
+use crate::common::{lookup, merge_table_views, mk_qid, OrigP, QueryPlan, TMStatus, Timestamp};
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::expression::EvalError;
 use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
   proc, ColName, Context, ContextRow, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId,
-  SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId, TierMap, Timestamp,
-  TransTableLocationPrefix, TransTableName,
+  SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId, TierMap, TransTableLocationPrefix,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::model::message::{ExternalAbortedData, MasteryQueryPlanningResult};

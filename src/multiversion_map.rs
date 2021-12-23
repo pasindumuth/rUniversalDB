@@ -1,5 +1,5 @@
 use crate::common::mk_t;
-use crate::model::common::Timestamp;
+use crate::common::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::BTreeMap;
@@ -171,7 +171,7 @@ fn find_prior_version<'a, V>(
 #[cfg(test)]
 mod tests {
   use crate::common::mk_t;
-  use crate::model::common::Timestamp;
+  use crate::common::Timestamp;
   use crate::multiversion_map::MVM;
 
   #[test]

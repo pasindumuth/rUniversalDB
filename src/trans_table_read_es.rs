@@ -1,11 +1,11 @@
 use crate::col_usage::{
   collect_top_level_cols, compute_select_schema, nodes_external_cols, nodes_external_trans_tables,
 };
-use crate::common::{mk_qid, CoreIOCtx, QueryESResult, QueryPlan};
+use crate::common::{mk_qid, CoreIOCtx, QueryESResult, QueryPlan, Timestamp};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, CQueryPath, ColName, ColValN, ContextRow, ContextSchema, TQueryPath, TableView, Timestamp,
+  proc, CQueryPath, ColName, ColValN, ContextRow, ContextSchema, TQueryPath, TableView,
   TransTableName,
 };
 use crate::model::common::{CTQueryPath, Context, QueryId, TransTableLocationPrefix};

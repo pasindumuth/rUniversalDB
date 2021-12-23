@@ -2,9 +2,9 @@ use crate::message as msg;
 use crate::slave::{FullSlaveInput, SlaveBundle, SlaveContext, SlaveState, SlaveTimerInput};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_t, BasicIOCtx, GeneralTraceMessage, RangeEnds};
+use runiversal::common::{mk_t, BasicIOCtx, GeneralTraceMessage, RangeEnds, Timestamp};
 use runiversal::model::common::{
-  EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, Timestamp,
+  EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId,
 };
 use runiversal::model::message::LeaderChanged;
 use runiversal::simulation_utils::{add_msg, mk_client_eid};

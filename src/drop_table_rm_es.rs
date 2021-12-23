@@ -1,9 +1,9 @@
+use crate::common::Timestamp;
 use crate::common::{mk_t, BasicIOCtx};
 use crate::drop_table_tm_es::{
   DropTableClosed, DropTableCommit, DropTablePayloadTypes, DropTablePrepare, DropTablePrepared,
   DropTableRMAborted, DropTableRMCommitted, DropTableRMPrepared,
 };
-use crate::model::common::Timestamp;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::TabletContext;

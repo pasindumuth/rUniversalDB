@@ -1,12 +1,13 @@
 use crate::col_usage::{collect_top_level_cols, compute_select_schema, free_external_cols};
 use crate::common::{
   lookup, mk_qid, to_table_path, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion,
+  Timestamp,
 };
 use crate::expression::{compress_row_region, compute_key_region, is_true};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
   proc, CQueryPath, ColName, ColValN, Context, ContextRow, QueryId, TQueryPath, TableView,
-  Timestamp, TransTableName,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::{

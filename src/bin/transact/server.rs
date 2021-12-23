@@ -2,12 +2,12 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
   btree_multimap_insert, mk_cid, mk_sid, mk_t, BasicIOCtx, CoreIOCtx, GeneralTraceMessage,
-  GossipData, SlaveIOCtx, SlaveTraceMessage,
+  GossipData, SlaveIOCtx, SlaveTraceMessage, Timestamp,
 };
 use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
 use runiversal::model::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId,
-  TabletGroupId, Timestamp,
+  TabletGroupId,
 };
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;

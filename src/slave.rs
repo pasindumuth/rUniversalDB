@@ -1,12 +1,11 @@
 use crate::common::{
-  mk_t, BasicIOCtx, GossipData, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage,
+  mk_t, BasicIOCtx, GossipData, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::CreateTableRMES;
 use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::model::common::{
   CoordGroupId, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TabletGroupId,
-  Timestamp,
 };
 use crate::model::common::{EndpointId, QueryId};
 use crate::model::message as msg;
