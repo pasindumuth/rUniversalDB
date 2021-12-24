@@ -348,7 +348,6 @@ pub struct Simulation {
   master_address_config: Vec<EndpointId>,
 
   /// Meta
-  next_int: i32,
   true_timestamp: Timestamp,
   stats: Stats,
 
@@ -381,7 +380,6 @@ impl Simulation {
       slave_data: Default::default(),
       slave_address_config: slave_address_config.clone(),
       master_address_config: master_address_config.clone(),
-      next_int: Default::default(),
       true_timestamp: mk_t(0),
       client_msgs_received: Default::default(),
       stats: Stats::default(),
@@ -494,7 +492,6 @@ impl Simulation {
     }
 
     // Metadata
-    sim.next_int = 0;
     sim.true_timestamp = mk_t(0);
 
     // Bootstrap the nodes
@@ -950,12 +947,5 @@ impl Simulation {
     for _ in 0..n {
       self.simulate1ms();
     }
-  }
-
-  // TODO: delete this:
-  pub fn mk_request_id(&mut self) -> RequestId {
-    let request_id = RequestId(self.next_int.to_string());
-    self.next_int += 1;
-    return request_id;
   }
 }

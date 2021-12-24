@@ -711,7 +711,7 @@ impl MasterContext {
                   msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
                     msg::ExternalDDLQueryAborted {
                       request_id: cancel.request_id,
-                      payload: msg::ExternalDDLQueryAbortData::ConfirmCancel,
+                      payload: msg::ExternalDDLQueryAbortData::CancelConfirmed,
                     },
                   )),
                 );

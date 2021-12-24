@@ -241,27 +241,25 @@ impl CoordContext {
             }
           }
           msg::SlaveExternalReq::CancelExternalQuery(cancel) => {
-            let payload =
-              if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
-                if statuses.ms_coord_ess.contains_key(query_id) {
-                  // Recall that a request is only cancellable while it is an MSCoordES.
-                  self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
-                  msg::ExternalAbortedData::CancelConfirmed
-                } else {
-                  // Otherwise, it is a `FinishQueryES` and thus cannot be cancelled.
-                  msg::ExternalAbortedData::CancelDenied
-                }
-              } else {
-                msg::ExternalAbortedData::CancelNonExistantRequestId
-              };
+            // Recall that Cancellation is merely a passive hint on how the execution of the
+            // original query should go. The Coord have no obligation to respond to it.
+            if let Some(query_id) = self.external_request_id_map.get(&cancel.request_id) {
+              if statuses.ms_coord_ess.contains_key(query_id) {
+                // Recall that a request is only cancellable while it is an MSCoordES.
+                self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
 
-            // Send the payload back to the client.
-            io_ctx.send(
-              &cancel.sender_eid,
-              msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
-                msg::ExternalQueryAborted { request_id: cancel.request_id, payload },
-              )),
-            );
+                // Send the payload back to the client.
+                io_ctx.send(
+                  &cancel.sender_eid,
+                  msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+                    msg::ExternalQueryAborted {
+                      request_id: cancel.request_id,
+                      payload: msg::ExternalAbortedData::CancelConfirmed,
+                    },
+                  )),
+                );
+              }
+            }
           }
         }
       }

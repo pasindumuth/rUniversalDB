@@ -557,7 +557,13 @@ pub fn test_all_ddl_parallel(rand: &mut XorShiftRng) {
 
 pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
   println!("seed: {:?}", seed);
-  let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes, 10);
+  let mut sim = mk_general_sim(
+    [240, 120, 122, 208, 55, 91, 32, 177, 104, 63, 150, 106, 225, 94, 173, 11],
+    3,
+    5,
+    num_paxos_nodes,
+    10,
+  );
 
   // Run the simulation
   let client_eids: Vec<_> = sim.get_all_responses().keys().cloned().collect();
@@ -565,7 +571,8 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
   let gids: Vec<_> = sim.leader_map.keys().cloned().collect();
 
   // These 2 are kept in sync, where the set of RequestIds in each map are always the same.
-  let mut req_lid_map = BTreeMap::<RequestId, (PaxosGroupId, LeadershipId)>::new();
+  // In both, the EndpointId is that of the client that send the request.
+  let mut req_lid_map = BTreeMap::<RequestId, (EndpointId, PaxosGroupId, LeadershipId)>::new();
   let mut req_map = BTreeMap::<EndpointId, BTreeMap<RequestId, Request>>::new();
   for eid in &client_eids {
     req_map.insert(eid.clone(), BTreeMap::new());
@@ -582,116 +589,162 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
       break;
     }
 
-    // Create a new RNG for query generation
-    let mut rand = XorShiftRng::from_seed(mk_seed(&mut sim.rand));
+    const NUM_WARMUP_ITERATIONS: u32 = 5;
 
-    // Extract all current TableSchemas
-    let full_db_schema = sim.full_db_schema();
-    let cur_tables = full_db_schema.table_generation.static_snapshot_read(&timestamp);
-    let mut table_schemas = BTreeMap::<TablePath, &TableSchema>::new();
-    for (table_path, gen) in cur_tables {
-      let table_schema = full_db_schema.db_schema.get(&(table_path.clone(), gen)).unwrap();
-      table_schemas.insert(table_path, table_schema);
-    }
+    // Decide whether to send a query or to send a cancellation. We usually send a query with high
+    // probability, but we must certainly send a query if we have not warmed up or if there are
+    // no existing queries to cancel.
+    let do_query = (sim.rand.next_u32() % 100) < 95;
+    if do_query || iteration < NUM_WARMUP_ITERATIONS || req_lid_map.is_empty() {
+      // Create a new RNG for query generation
+      let mut rand = XorShiftRng::from_seed(mk_seed(&mut sim.rand));
 
-    // Construct a Query generation ctx
-    let mut gen_ctx = QueryGenCtx { rand: &mut rand, timestamp, table_schemas: &table_schemas };
-
-    // Generate a Query. Try 5 times to generate it
-    let mut maybe_query_data: Option<(bool, String)> = None;
-    for _ in 0..5 {
-      let (is_ddl, maybe_query) = if iteration < 2 {
-        // For the first few iterations, we create some tables.
-        (true, gen_ctx.mk_create_table())
-      } else if iteration < 5 {
-        // For the next few iterations, we populate that ables.
-        (true, gen_ctx.mk_insert())
-      } else {
-        // Otherwise, we randomly generate any type of query chosen using a hard-coded
-        // distribution. We define the distribution as a constant vector that specifies
-        // the relative probabilities.
-        const DIST: [u32; 8] = [5, 4, 5, 5, 30, 20, 5, 40];
-
-        // Select an `idx` into DIST based on its probability distribution.
-        let mut i: u32 = gen_ctx.rand.next_u32() % DIST.iter().sum::<u32>();
-        let mut idx: usize = 0;
-        while idx < DIST.len() && i >= DIST[idx] {
-          i -= DIST[idx];
-          idx += 1;
-        }
-
-        // Map the selected `idx` to the corresponding query.
-        match idx {
-          0 => (true, gen_ctx.mk_create_table()),
-          1 => (true, gen_ctx.mk_drop_table()),
-          2 => (true, gen_ctx.mk_add_col()),
-          3 => (true, gen_ctx.mk_drop_col()),
-          4 => (false, gen_ctx.mk_insert()),
-          5 => (false, gen_ctx.mk_update()),
-          6 => (false, gen_ctx.mk_delete()),
-          7 => (false, gen_ctx.mk_select()),
-          _ => panic!(),
-        }
-      };
-
-      if let Some(query) = maybe_query {
-        maybe_query_data = Some((is_ddl, query));
-        break;
+      // Extract all current TableSchemas
+      let full_db_schema = sim.full_db_schema();
+      let cur_tables = full_db_schema.table_generation.static_snapshot_read(&timestamp);
+      let mut table_schemas = BTreeMap::<TablePath, &TableSchema>::new();
+      for (table_path, gen) in cur_tables {
+        let table_schema = full_db_schema.db_schema.get(&(table_path.clone(), gen)).unwrap();
+        table_schemas.insert(table_path, table_schema);
       }
-    }
 
-    if let Some((is_ddl, query)) = maybe_query_data {
-      // Construct a request and populate `req_map`
-      let request_id = mk_rid(&mut sim.rand);
-      let client_idx = sim.rand.next_u32() as usize % client_eids.len();
-      let client_eid = client_eids.get(client_idx).unwrap();
+      // Construct a Query generation ctx
+      let mut gen_ctx = QueryGenCtx { rand: &mut rand, timestamp, table_schemas: &table_schemas };
 
-      if is_ddl {
-        let perform = msg::PerformExternalDDLQuery {
-          sender_eid: client_eid.clone(),
-          request_id: request_id.clone(),
-          query,
+      // Generate a Query. Try 5 times to generate it
+      let mut maybe_query_data: Option<(bool, String)> = None;
+      for _ in 0..5 {
+        let (is_ddl, maybe_query) = if iteration < NUM_WARMUP_ITERATIONS / 2 {
+          // For the first few iterations, we create some tables.
+          (true, gen_ctx.mk_create_table())
+        } else if iteration < NUM_WARMUP_ITERATIONS {
+          // For the next few iterations, we populate that ables.
+          (true, gen_ctx.mk_insert())
+        } else {
+          // Otherwise, we randomly generate any type of query chosen using a hard-coded
+          // distribution. We define the distribution as a constant vector that specifies
+          // the relative probabilities.
+          const DIST: [u32; 8] = [5, 4, 5, 5, 30, 20, 5, 40];
+
+          // Select an `idx` into DIST based on its probability distribution.
+          let mut i: u32 = gen_ctx.rand.next_u32() % DIST.iter().sum::<u32>();
+          let mut idx: usize = 0;
+          while idx < DIST.len() && i >= DIST[idx] {
+            i -= DIST[idx];
+            idx += 1;
+          }
+
+          // Map the selected `idx` to the corresponding query.
+          match idx {
+            0 => (true, gen_ctx.mk_create_table()),
+            1 => (true, gen_ctx.mk_drop_table()),
+            2 => (true, gen_ctx.mk_add_col()),
+            3 => (true, gen_ctx.mk_drop_col()),
+            4 => (false, gen_ctx.mk_insert()),
+            5 => (false, gen_ctx.mk_update()),
+            6 => (false, gen_ctx.mk_delete()),
+            7 => (false, gen_ctx.mk_select()),
+            _ => panic!(),
+          }
         };
-        req_map
-          .get_mut(client_eid)
-          .unwrap()
-          .insert(request_id.clone(), Request::DDLQuery(perform.clone()));
 
-        // Record the leadership of the Master PaxosGroup and then send the `query` to it.
-        let gid = PaxosGroupId::Master;
-        let cur_lid = sim.leader_map.get(&gid).unwrap().clone();
-        req_lid_map.insert(request_id, (gid, cur_lid.clone()));
-        sim.add_msg(
-          msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
-            msg::MasterExternalReq::PerformExternalDDLQuery(perform),
-          )),
-          client_eid,
-          &cur_lid.eid,
-        );
-      } else {
-        let perform = msg::PerformExternalQuery {
-          sender_eid: client_eid.clone(),
-          request_id: request_id.clone(),
-          query,
-        };
-        req_map
-          .get_mut(client_eid)
-          .unwrap()
-          .insert(request_id.clone(), Request::Query(perform.clone()));
+        if let Some(query) = maybe_query {
+          maybe_query_data = Some((is_ddl, query));
+          break;
+        }
+      }
 
-        // Choose a SlaveGroupId, record its leadership, and then send the `query` to it.
-        let slave_idx = sim.rand.next_u32() as usize % sids.len();
-        let sid = sids.get(slave_idx).unwrap();
-        let gid = sid.to_gid();
-        let cur_lid = sim.leader_map.get(&gid).unwrap().clone();
-        req_lid_map.insert(request_id, (gid, cur_lid.clone()));
-        sim.add_msg(
-          msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
-            msg::SlaveExternalReq::PerformExternalQuery(perform),
-          )),
-          client_eid,
-          &cur_lid.eid,
-        );
+      if let Some((is_ddl, query)) = maybe_query_data {
+        // Construct a request and populate `req_map`
+        let request_id = mk_rid(&mut sim.rand);
+        let client_idx = sim.rand.next_u32() as usize % client_eids.len();
+        let client_eid = client_eids.get(client_idx).unwrap();
+
+        if is_ddl {
+          let perform = msg::PerformExternalDDLQuery {
+            sender_eid: client_eid.clone(),
+            request_id: request_id.clone(),
+            query,
+          };
+          req_map
+            .get_mut(client_eid)
+            .unwrap()
+            .insert(request_id.clone(), Request::DDLQuery(perform.clone()));
+
+          // Record the leadership of the Master PaxosGroup and then send the `query` to it.
+          let gid = PaxosGroupId::Master;
+          let cur_lid = sim.leader_map.get(&gid).unwrap().clone();
+          req_lid_map.insert(request_id, (client_eid.clone(), gid, cur_lid.clone()));
+          sim.add_msg(
+            msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+              msg::MasterExternalReq::PerformExternalDDLQuery(perform),
+            )),
+            client_eid,
+            &cur_lid.eid,
+          );
+        } else {
+          let perform = msg::PerformExternalQuery {
+            sender_eid: client_eid.clone(),
+            request_id: request_id.clone(),
+            query,
+          };
+          req_map
+            .get_mut(client_eid)
+            .unwrap()
+            .insert(request_id.clone(), Request::Query(perform.clone()));
+
+          // Choose a SlaveGroupId, record its leadership, and then send the `query` to it.
+          let slave_idx = sim.rand.next_u32() as usize % sids.len();
+          let sid = sids.get(slave_idx).unwrap();
+          let gid = sid.to_gid();
+          let cur_lid = sim.leader_map.get(&gid).unwrap().clone();
+          req_lid_map.insert(request_id, (client_eid.clone(), gid, cur_lid.clone()));
+          sim.add_msg(
+            msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+              msg::SlaveExternalReq::PerformExternalQuery(perform),
+            )),
+            client_eid,
+            &cur_lid.eid,
+          );
+        }
+      }
+    } else {
+      // Otherwise, send out a cancellation. We try 5 times to find a request whose
+      // original Leadership still seems to be alive.
+      for _ in 0..5 {
+        // First, pick a random pending query to cancel.
+        let idx = sim.rand.next_u32() as usize % req_lid_map.len();
+        let (request_id, (client_eid, gid, lid)) = read_index(&req_lid_map, idx).unwrap();
+        // Check if the Leadership is still the same to avoid sending trivial cancellations
+        // (recall that a cancellation arriving at a non-leader is simply ignored).
+        if lid == sim.leader_map.get(gid).unwrap() {
+          if &PaxosGroupId::Master == gid {
+            // Here, we send a DDL query cancellation.
+            sim.add_msg(
+              msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+                msg::MasterExternalReq::CancelExternalDDLQuery(msg::CancelExternalDDLQuery {
+                  sender_eid: client_eid.clone(),
+                  request_id: request_id.clone(),
+                }),
+              )),
+              client_eid,
+              &lid.eid,
+            );
+          } else {
+            // Here, we send a query cancellation.
+            sim.add_msg(
+              msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+                msg::SlaveExternalReq::CancelExternalQuery(msg::CancelExternalQuery {
+                  sender_eid: client_eid.clone(),
+                  request_id: request_id.clone(),
+                }),
+              )),
+              client_eid,
+              &lid.eid,
+            );
+          }
+          break;
+        }
       }
     }
 
@@ -734,7 +787,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
   while sim.true_timestamp() < &end_time {
     // Next, we see if all unresponded requests have an old Leadership or not.
     let mut all_old = true;
-    for (_, (gid, lid)) in &req_lid_map {
+    for (_, (_, gid, lid)) in &req_lid_map {
       let cur_lid = sim.leader_map.get(&gid).unwrap();
       if cur_lid.gen >= lid.gen {
         all_old = false;

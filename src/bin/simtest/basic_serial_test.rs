@@ -1389,6 +1389,7 @@ fn cancellation_test(seed: [u8; 16]) {
       let response = ctx.next_response(&mut sim);
       match response.clone() {
         msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
+          // Here, the original query responded before we can even send a cancellation.
           check_success(&mut sim, &mut ctx, &payload, request_id.clone());
         }
         _ => panic!(),
@@ -1400,38 +1401,13 @@ fn cancellation_test(seed: [u8; 16]) {
       let response = ctx.next_response(&mut sim);
       match response.clone() {
         msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
-          // Here, the original query responded before the cancellation could. First, flush
-          // out the cancellation response, and check that it is as expected.
-          assert!(ctx.simulate_until_response(&mut sim, 10000));
-          match ctx.next_response(&mut sim) {
-            msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(payload)) => {
-              assert_eq!(payload.payload, msg::ExternalAbortedData::CancelNonExistantRequestId);
-            }
-            _ => panic!(),
-          }
-
-          // Then check the final state.
+          // Here, despite the cancellation request, the original request succeeded.
           check_success(&mut sim, &mut ctx, &payload, request_id.clone());
         }
         msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(payload)) => {
-          assert_eq!(payload.request_id, request_id.clone());
-          if payload.payload == msg::ExternalAbortedData::CancelDenied {
-            // In case the cancellation failed, finish the original query, expecting success.
-            assert!(ctx.simulate_until_response(&mut sim, 10000));
-            let response = ctx.next_response(&mut sim);
-            match response.clone() {
-              msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
-                payload,
-              )) => {
-                check_success(&mut sim, &mut ctx, &payload, request_id.clone());
-              }
-              _ => panic!(),
-            }
-          } else {
-            // Otherwise, mark the cancellation as successful.
-            assert_eq!(payload.payload, msg::ExternalAbortedData::CancelConfirmed);
-            cancel_succeeded = true;
-          }
+          // Here, the cancellation request successfullly cancelled the original request.
+          assert_eq!(payload.payload, msg::ExternalAbortedData::CancelConfirmed);
+          cancel_succeeded = true;
         }
         _ => panic!("Incorrect Response: {:#?}", response),
       }
