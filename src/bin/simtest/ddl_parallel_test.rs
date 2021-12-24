@@ -58,6 +58,10 @@ struct QueryGenCtx<'a> {
 /// set of columns in a table to 10 ValCols, named "c0" ... "c9". There also only 10 KeyCols
 /// names we get to choose from: "k0" ... "k9"
 impl<'a> QueryGenCtx<'a> {
+  /// The absolute bound on what an integer value can take on; all ColVal::Int values
+  /// `x` must be `-INT_BOUND < x < INT_BOUND`.
+  const INT_BOUND: u32 = 100;
+
   fn mk_create_table(&mut self) -> Option<String> {
     let r = &mut self.rand;
 
@@ -210,7 +214,7 @@ impl<'a> QueryGenCtx<'a> {
       let mut values = Vec::<String>::new();
       for _ in 0..row_len {
         // Recall that all columns have Int type
-        values.push(format!("{}", mk_int(r, 100)));
+        values.push(format!("{}", mk_int(r, Self::INT_BOUND)));
       }
       rows.push(format!("({})", values.join(", ")));
     }
@@ -241,26 +245,28 @@ impl<'a> QueryGenCtx<'a> {
       format!(
         " UPDATE {source}
           SET {val_col} = {val_col} + {x1}
-          WHERE {key_col} >= {x2};
+          WHERE {key_col} >= {x2} AND ({val_col} + {x1} < {INT_BOUND});
         ",
         source = source,
         val_col = val_col.0,
         key_col = key_col.0,
         x1 = mk_uint(r, 5),
-        x2 = mk_int(r, 100)
+        x2 = mk_int(r, Self::INT_BOUND),
+        INT_BOUND = Self::INT_BOUND
       )
     } else if query_type == 1 {
       let val_col = val_col_it.next()?;
       format!(
         " UPDATE {source}
           SET {val_col} = {val_col} - {x1}
-          WHERE {key_col} >= {x2};
+          WHERE {key_col} >= {x2} AND ({val_col} - {x1} > -{INT_BOUND});;
         ",
         source = source,
         val_col = val_col.0,
         key_col = key_col.0,
         x1 = mk_uint(r, 5),
-        x2 = mk_int(r, 100)
+        x2 = mk_int(r, Self::INT_BOUND),
+        INT_BOUND = Self::INT_BOUND
       )
     } else if query_type == 2 {
       let set_val_col = val_col_it.next()?;
@@ -273,8 +279,8 @@ impl<'a> QueryGenCtx<'a> {
         source = source,
         set_val_col = set_val_col.0,
         filter_val_col = filter_val_col.0,
-        x1 = mk_int(r, 100),
-        x2 = mk_int(r, 100)
+        x1 = mk_int(r, Self::INT_BOUND),
+        x2 = mk_int(r, Self::INT_BOUND)
       )
     } else {
       panic!()
@@ -303,7 +309,7 @@ impl<'a> QueryGenCtx<'a> {
         ",
         source = source,
         val_col = val_col.0,
-        x1 = mk_int(r, 100)
+        x1 = mk_int(r, Self::INT_BOUND)
       )
     } else if query_type == 1 {
       let val_col = val_col_it.next()?;
@@ -314,8 +320,8 @@ impl<'a> QueryGenCtx<'a> {
         ",
         source = source,
         val_col = val_col.0,
-        x1 = mk_int(r, 50),
-        x2 = mk_int(r, 50) + 100
+        x1 = mk_int(r, Self::INT_BOUND / 2),
+        x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32
       )
     } else if query_type == 2 {
       format!(
@@ -325,8 +331,8 @@ impl<'a> QueryGenCtx<'a> {
         ",
         source = source,
         key_col = key_col.0,
-        x1 = mk_int(r, 50),
-        x2 = mk_int(r, 50) + 100
+        x1 = mk_int(r, Self::INT_BOUND / 2),
+        x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32
       )
     } else {
       panic!()
@@ -345,7 +351,7 @@ impl<'a> QueryGenCtx<'a> {
     val_cols[..].shuffle(r);
     let mut val_col_it = val_cols.into_iter();
 
-    let query_type = r.next_u32() % 3;
+    let query_type = r.next_u32() % 4;
     let query = if query_type == 0 {
       let proj_val_col = val_col_it.next()?;
       let filter_val_col = val_col_it.next()?;
@@ -357,7 +363,7 @@ impl<'a> QueryGenCtx<'a> {
         source = source,
         proj_val_col = proj_val_col.0,
         filter_val_col = filter_val_col.0,
-        x1 = mk_int(r, 100)
+        x1 = mk_int(r, Self::INT_BOUND)
       )
     } else if query_type == 1 {
       let filter_val_col = val_col_it.next()?;
@@ -369,8 +375,8 @@ impl<'a> QueryGenCtx<'a> {
         source = source,
         key_col = key_col.0,
         filter_val_col = filter_val_col.0,
-        x1 = mk_int(r, 50),
-        x2 = mk_int(r, 50) + 100
+        x1 = mk_int(r, Self::INT_BOUND / 2),
+        x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32
       )
     } else if query_type == 2 {
       let proj_val_col = val_col_it.next()?;
@@ -382,14 +388,53 @@ impl<'a> QueryGenCtx<'a> {
         source = source,
         proj_val_col = proj_val_col.0,
         key_col = key_col.0,
-        x1 = mk_int(r, 50),
-        x2 = mk_int(r, 50) + 100
+        x1 = mk_int(r, Self::INT_BOUND / 2),
+        x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32
+      )
+    } else if query_type == 3 {
+      // CTE
+      let proj_val_col = val_col_it.next()?;
+      format!(
+        " WITH
+            tt1 = (SELECT {proj_val_col} AS c1
+                   FROM {source}
+                   WHERE {key_col} >= {x1} AND {key_col} < {x2});
+            SELECT c1
+            FROM tt1
+            WHERE c1 > {x3};
+        ",
+        source = source,
+        proj_val_col = proj_val_col.0,
+        key_col = key_col.0,
+        x1 = mk_int(r, Self::INT_BOUND / 2),
+        x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32,
+        x3 = mk_int(r, Self::INT_BOUND)
       )
     } else {
       panic!()
     };
 
     Some(query)
+  }
+
+  /// Since the different stages in a Multi-Stage Transaction do not interact with one
+  /// another (e.g. prior Stages do not define a TransTable for subsequent Stages), generating
+  /// one is just a matter of generating a sequence of Single-Stage Transactions.
+  fn mk_multi_stage(&mut self) -> Option<String> {
+    let num_stages = self.rand.next_u32() % 6;
+    let mut stages = Vec::<String>::new();
+    for _ in 0..num_stages {
+      let stage_type = self.rand.next_u32() % 4;
+      let stage = match stage_type {
+        0 => self.mk_insert()?,
+        1 => self.mk_update()?,
+        2 => self.mk_delete()?,
+        3 => self.mk_select()?,
+        _ => panic!(),
+      };
+      stages.push(stage);
+    }
+    Some(stages.join("\n"))
   }
 
   /// Choose a random table and return its name, KeyCols, and ValCols
@@ -424,6 +469,7 @@ struct VerifyResult {
   total_queries: u32,
   successful_queries: u32,
   num_selects: u32,
+  num_multi_stage: u32,
   average_select_rows: f32,
   queries_cancelled: u32,
   ddl_queries_cancelled: u32,
@@ -515,10 +561,18 @@ fn verify_req_res(
   // Compute various statistics
   let mut num_selects = 0;
   let mut row_sum = 0;
+  let mut num_multi_stage = 0;
   for (_, pair) in &sorted_success_res {
     if let SuccessPair::Query(req, Some(res)) = pair {
       // Here, the `req` is expected to be a DML or DQL (not DDL).
       let parsed_ast = Parser::parse_sql(&GenericDialect {}, &req.query).unwrap();
+
+      // See if this is a multi-stage transaction.
+      if parsed_ast.len() > 1 {
+        num_multi_stage += 1;
+      }
+
+      // See if this is a Select, counting rows if so.
       let ast = convert_ast(parsed_ast).unwrap();
       match ast.body {
         iast::QueryBody::SuperSimpleSelect(_) => {
@@ -555,6 +609,7 @@ fn verify_req_res(
     total_queries,
     successful_queries,
     num_selects,
+    num_multi_stage,
     average_select_rows,
     queries_cancelled,
     ddl_queries_cancelled,
@@ -635,7 +690,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
           // Otherwise, we randomly generate any type of query chosen using a hard-coded
           // distribution. We define the distribution as a constant vector that specifies
           // the relative probabilities.
-          const DIST: [u32; 8] = [5, 4, 5, 5, 30, 20, 5, 40];
+          const DIST: [u32; 9] = [5, 4, 5, 5, 30, 20, 5, 40, 15];
 
           // Select an `idx` into DIST based on its probability distribution.
           let mut i: u32 = gen_ctx.rand.next_u32() % DIST.iter().sum::<u32>();
@@ -655,6 +710,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
             5 => (false, gen_ctx.mk_update()),
             6 => (false, gen_ctx.mk_delete()),
             7 => (false, gen_ctx.mk_select()),
+            8 => (false, gen_ctx.mk_multi_stage()),
             _ => panic!(),
           }
         };
@@ -850,6 +906,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
       "Test 'test_all_ddl_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}, Leadership Changes: {:?}, 
        # Selects: {:?}, Avg. Selected Rows: {:?}
+       # Multi-Stage: {:?},
        # Query Cancels: {:?}, # DDL Query Cancels: {:?}",
       res.replay_duration.time_ms,
       res.total_queries,
@@ -857,6 +914,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
       num_leadership_changes,
       res.num_selects,
       res.average_select_rows,
+      res.num_multi_stage,
       res.queries_cancelled,
       res.ddl_queries_cancelled
     );
