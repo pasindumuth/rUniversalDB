@@ -2,7 +2,7 @@ use crate::alter_table_tm_es::{
   AlterTableClosed, AlterTableCommit, AlterTablePayloadTypes, AlterTablePrepare,
   AlterTablePrepared, AlterTableRMAborted, AlterTableRMCommitted, AlterTableRMPrepared,
 };
-use crate::common::{mk_t, BasicIOCtx, Timestamp};
+use crate::common::{cur_timestamp, mk_t, BasicIOCtx, Timestamp};
 use crate::model::common::proc;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
@@ -28,7 +28,7 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     payload: AlterTablePrepare,
   ) -> AlterTableRMInner {
     // Construct the `preparing_timestamp`
-    let mut timestamp = io_ctx.now();
+    let mut timestamp = cur_timestamp(io_ctx, ctx.tablet_config.timestamp_suffix_divisor);
     let col_name = &payload.alter_op.col_name;
     timestamp = max(timestamp, ctx.table_schema.val_cols.get_lat(col_name));
     for (_, req) in ctx.waiting_locked_cols.iter().chain(ctx.inserting_locked_cols.iter()) {

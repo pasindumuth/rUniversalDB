@@ -1498,6 +1498,7 @@ pub fn mk_general_sim(
   num_clients: u32,
   num_paxos_groups: u32,
   num_paxos_nodes: u32,
+  timestamp_suffix_divisor: u64,
 ) -> Simulation {
   // Create one Slave Paxos Group to test Leader change logic with.
   let mut master_address_config = Vec::<EndpointId>::new();
@@ -1519,12 +1520,13 @@ pub fn mk_general_sim(
     slave_address_config.clone(),
     master_address_config.clone(),
     PaxosConfig::test(),
+    timestamp_suffix_divisor,
   )
 }
 
 fn paxos_leader_change_test(seed: [u8; 16]) {
   // Create one Slave Paxos Group to test Leader change logic with.
-  let mut sim = mk_general_sim(seed, 1, 1, 5);
+  let mut sim = mk_general_sim(seed, 1, 1, 5, 1);
 
   // Warmup the simulation
   sim.simulate_n_ms(100);
@@ -1568,7 +1570,7 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
   let mut failed = 0;
   'outer: for i in 0..NUM_ITERATIONS {
     println!("    iteration {:?}", i);
-    let mut sim = mk_general_sim(seed, 1, 5, 5);
+    let mut sim = mk_general_sim(seed, 1, 5, 5, 1);
     let mut ctx = TestContext::new();
 
     // Test Simple Update-Select

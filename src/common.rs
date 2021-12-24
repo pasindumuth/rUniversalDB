@@ -357,11 +357,11 @@ pub fn to_table_path(source: &proc::GeneralSource) -> &TablePath {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp {
   pub time_ms: u128,
-  suffix: u64,
+  pub suffix: u64,
 }
 
 impl Timestamp {
-  fn new(time_ms: u128, suffix: u64) -> Timestamp {
+  pub fn new(time_ms: u128, suffix: u64) -> Timestamp {
     Timestamp { time_ms, suffix }
   }
 
@@ -376,6 +376,16 @@ impl Timestamp {
 
 pub fn mk_t(time_ms: u128) -> Timestamp {
   Timestamp { time_ms, suffix: 0 }
+}
+
+/// Add some noise to the `Timestamp` returned by the clock to help avoid collisions
+/// between transactions. Importantly, a server should not expect that consecutive calls
+/// to `cur_timestamp` would result in non-decreasing `Timestamp`; only the `time_ms`
+/// will be non-decreasing
+pub fn cur_timestamp<IO: BasicIOCtx>(io_ctx: &mut IO, timestamp_suffix_divisor: u64) -> Timestamp {
+  let mut now_timestamp = io_ctx.now();
+  now_timestamp.suffix = io_ctx.rand().next_u64() % timestamp_suffix_divisor;
+  now_timestamp
 }
 
 // -----------------------------------------------------------------------------------------------

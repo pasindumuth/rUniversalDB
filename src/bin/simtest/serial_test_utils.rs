@@ -194,7 +194,7 @@ pub fn setup(seed: [u8; 16]) -> (Simulation, TestContext) {
   .collect();
 
   let sim =
-    Simulation::new(seed, 1, slave_address_config, master_address_config, PaxosConfig::prod());
+    Simulation::new(seed, 1, slave_address_config, master_address_config, PaxosConfig::prod(), 1);
   let context = TestContext::new();
   (sim, context)
 }

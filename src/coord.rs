@@ -1,6 +1,6 @@
 use crate::common::{
-  map_insert, merge_table_views, mk_qid, mk_t, remove_item, BasicIOCtx, GeneralTraceMessage,
-  GossipData, OrigP, TMStatus, Timestamp,
+  cur_timestamp, map_insert, merge_table_views, mk_qid, mk_t, remove_item, BasicIOCtx,
+  GeneralTraceMessage, GossipData, OrigP, TMStatus, Timestamp,
 };
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::finish_query_tm_es::{
@@ -24,6 +24,7 @@ use crate::server::{CommonQuery, ServerContextBase, SlaveServerContext};
 use crate::sql_parser::convert_ast;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
+use rand::RngCore;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::parser::ParserError::{ParserError, TokenizerError};
@@ -100,6 +101,24 @@ impl paxos2pc::TMServerContext<FinishQueryPayloadTypes> for CoordContext {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  CoordConfig
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct CoordConfig {
+  /// This is used for generate the `suffix` of a Timestamp, where we just generate
+  /// a random `u64` and take the remainder after dividing by `timestamp_suffix_divisor`.
+  /// This cannot be 0; the default value is 1, making the suffix always be 0.
+  pub timestamp_suffix_divisor: u64,
+}
+
+impl Default for CoordConfig {
+  fn default() -> Self {
+    CoordConfig { timestamp_suffix_divisor: 1 }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Coord State
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
@@ -112,6 +131,7 @@ pub struct CoordState {
 #[derive(Debug)]
 pub struct CoordContext {
   /// Metadata
+  pub coord_config: CoordConfig, // Config
   pub this_sid: SlaveGroupId,
   pub this_cid: CoordGroupId,
   pub sub_node_path: CTSubNodePath, // Wraps `this_cid` for expedience
@@ -142,6 +162,7 @@ impl CoordState {
 
 impl CoordContext {
   pub fn new(
+    coord_config: CoordConfig,
     this_sid: SlaveGroupId,
     this_cid: CoordGroupId,
     this_eid: EndpointId,
@@ -149,6 +170,7 @@ impl CoordContext {
     leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
   ) -> CoordContext {
     CoordContext {
+      coord_config,
       this_sid,
       this_cid: this_cid.clone(),
       sub_node_path: CTSubNodePath::Coord(this_cid),
@@ -200,7 +222,7 @@ impl CoordContext {
                     sender_eid: external_query.sender_eid,
                     child_queries: vec![],
                     es: FullMSCoordES::QueryPlanning(QueryPlanningES {
-                      timestamp: io_ctx.now(),
+                      timestamp: cur_timestamp(io_ctx, self.coord_config.timestamp_suffix_divisor),
                       sql_query: ms_query,
                       query_id: query_id.clone(),
                       state: QueryPlanningS::Start,
@@ -784,7 +806,10 @@ impl CoordContext {
         let exec = ms_coord.es.to_exec();
         let query_id = mk_qid(io_ctx.rand());
         ms_coord.es = FullMSCoordES::QueryPlanning(QueryPlanningES {
-          timestamp: max(io_ctx.now(), exec.timestamp.add(mk_t(1))),
+          timestamp: max(
+            cur_timestamp(io_ctx, self.coord_config.timestamp_suffix_divisor),
+            exec.timestamp.add(mk_t(1)),
+          ),
           sql_query: exec.sql_query.clone(),
           query_id: query_id.clone(),
           state: QueryPlanningS::Start,
@@ -844,7 +869,10 @@ impl CoordContext {
                 sender_eid: response_data.sender_eid,
                 child_queries: vec![],
                 es: FullMSCoordES::QueryPlanning(QueryPlanningES {
-                  timestamp: max(io_ctx.now(), response_data.timestamp.add(mk_t(1))),
+                  timestamp: max(
+                    cur_timestamp(io_ctx, self.coord_config.timestamp_suffix_divisor),
+                    response_data.timestamp.add(mk_t(1)),
+                  ),
                   sql_query: response_data.sql_query,
                   query_id: query_id.clone(),
                   state: QueryPlanningS::Start,

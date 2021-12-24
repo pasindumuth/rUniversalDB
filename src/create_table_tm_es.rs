@@ -1,5 +1,5 @@
 use crate::alter_table_tm_es::{maybe_respond_dead, ResponseData};
-use crate::common::{mk_t, BasicIOCtx, GeneralTraceMessage, TableSchema, Timestamp};
+use crate::common::{cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, TableSchema, Timestamp};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
   ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
@@ -346,10 +346,14 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
 
   fn mk_closed_plm<IO: BasicIOCtx>(
     &mut self,
-    _: &mut MasterContext,
+    ctx: &mut MasterContext,
     io_ctx: &mut IO,
   ) -> CreateTableTMClosed {
-    let timestamp_hint = if self.did_commit { Some(io_ctx.now()) } else { None };
+    let timestamp_hint = if self.did_commit {
+      Some(cur_timestamp(io_ctx, ctx.master_config.timestamp_suffix_divisor))
+    } else {
+      None
+    };
     CreateTableTMClosed { timestamp_hint }
   }
 

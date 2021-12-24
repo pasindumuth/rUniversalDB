@@ -252,7 +252,7 @@ pub fn test_all_paxos_parallel(rand: &mut XorShiftRng) {
 }
 
 pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
-  let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes);
+  let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes, 1);
   let mut ctx = TestContext::new();
 
   // Setup Tables

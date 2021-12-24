@@ -4,7 +4,7 @@ use runiversal::common::{
   btree_multimap_insert, mk_cid, mk_sid, mk_t, BasicIOCtx, CoreIOCtx, GeneralTraceMessage,
   GossipData, SlaveIOCtx, SlaveTraceMessage, Timestamp,
 };
-use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
+use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
 use runiversal::model::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId,
   TabletGroupId,
@@ -13,7 +13,7 @@ use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
-  FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
+  FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
 };
 use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
 use runiversal::test_utils::mk_seed;
@@ -249,6 +249,7 @@ pub fn start_server(
 
     // Create the Tablet
     let coord_context = CoordContext::new(
+      CoordConfig::default(),
       this_sid.clone(),
       coord_group_id,
       this_eid.clone(),
@@ -279,8 +280,15 @@ pub fn start_server(
     tasks: Arc::new(Mutex::new(Default::default())),
   };
   io_ctx.start();
-  let slave_context =
-    SlaveContext::new(coord_positions, this_sid, this_eid, gossip, leader_map, PaxosConfig::prod());
+  let slave_context = SlaveContext::new(
+    coord_positions,
+    SlaveConfig::default(),
+    this_sid,
+    this_eid,
+    gossip,
+    leader_map,
+    PaxosConfig::prod(),
+  );
   let mut slave = SlaveState::new(slave_context);
   loop {
     // Receive data from the `to_server_receiver` and update the SlaveState accordingly.

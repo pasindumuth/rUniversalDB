@@ -6,10 +6,10 @@ use runiversal::common::{
   MasterTraceMessage, RangeEnds, SlaveIOCtx, SlaveTraceMessage, Timestamp,
 };
 use runiversal::coord::coord_test::{assert_coord_consistency, check_coord_clean};
-use runiversal::coord::{CoordContext, CoordForwardMsg, CoordState};
+use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::master_test::check_master_clean;
 use runiversal::master::{
-  FullDBSchema, FullMasterInput, MasterContext, MasterState, MasterTimerInput,
+  FullDBSchema, FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput,
 };
 use runiversal::model::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId,
@@ -21,7 +21,7 @@ use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::{add_msg, mk_client_eid};
 use runiversal::slave::slave_test::check_slave_clean;
 use runiversal::slave::{
-  FullSlaveInput, SlaveBackMessage, SlaveContext, SlaveState, SlaveTimerInput,
+  FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
 };
 use runiversal::tablet::tablet_test::{assert_tablet_consistency, check_tablet_clean};
 use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
@@ -371,6 +371,7 @@ impl Simulation {
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     master_address_config: Vec<EndpointId>,
     paxos_config: PaxosConfig,
+    timestamp_suffix_divisor: u64,
   ) -> Simulation {
     let mut sim = Simulation {
       rand: XorShiftRng::from_seed(seed),
@@ -431,6 +432,7 @@ impl Simulation {
     // Construct MasterState
     for eid in master_address_config.clone() {
       let master_state = MasterState::new(MasterContext::new(
+        MasterConfig { timestamp_suffix_divisor },
         eid.clone(),
         slave_address_config.clone(),
         master_address_config.clone(),
@@ -452,6 +454,7 @@ impl Simulation {
         for cid in &coord_ids {
           // Create the Coord
           let coord_state = CoordState::new(CoordContext::new(
+            CoordConfig { timestamp_suffix_divisor },
             sid.clone(),
             cid.clone(),
             eid.clone(),
@@ -465,6 +468,7 @@ impl Simulation {
         // Create Slave
         let slave_state = SlaveState::new(SlaveContext::new(
           coord_ids.clone(),
+          SlaveConfig { timestamp_suffix_divisor },
           sid.clone(),
           eid.clone(),
           Arc::new(gossip.clone()),

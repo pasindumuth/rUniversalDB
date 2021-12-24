@@ -514,6 +514,7 @@ pub struct TabletCreateHelper {
   pub rand_seed: [u8; 16],
 
   /// Metadata
+  pub tablet_config: TabletConfig,
   pub this_sid: SlaveGroupId,
   pub this_tid: TabletGroupId,
   pub this_eid: EndpointId,
@@ -606,6 +607,24 @@ impl paxos2pc_tm::RMServerContext<FinishQueryPayloadTypes> for TabletContext {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  TabletConfig
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct TabletConfig {
+  /// This is used for generate the `suffix` of a Timestamp, where we just generate
+  /// a random `u64` and take the remainder after dividing by `timestamp_suffix_divisor`.
+  /// This cannot be 0; the default value is 1, making the suffix always be 0.
+  pub timestamp_suffix_divisor: u64,
+}
+
+impl Default for TabletConfig {
+  fn default() -> Self {
+    TabletConfig { timestamp_suffix_divisor: 1 }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Tablet State
 // -----------------------------------------------------------------------------------------------
 
@@ -618,6 +637,7 @@ pub struct TabletState {
 #[derive(Debug)]
 pub struct TabletContext {
   /// Metadata
+  pub tablet_config: TabletConfig,
   pub this_sid: SlaveGroupId,
   pub this_tid: TabletGroupId,
   pub sub_node_path: CTSubNodePath, // Wraps `this_tablet_group_id` for expedience
@@ -671,6 +691,7 @@ impl TabletState {
 impl TabletContext {
   pub fn new(helper: TabletCreateHelper) -> TabletContext {
     TabletContext {
+      tablet_config: helper.tablet_config,
       this_sid: helper.this_sid,
       this_tid: helper.this_tid.clone(),
       sub_node_path: CTSubNodePath::Tablet(helper.this_tid),

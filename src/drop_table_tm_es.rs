@@ -1,5 +1,5 @@
 use crate::alter_table_tm_es::{get_rms, maybe_respond_dead, ResponseData};
-use crate::common::{mk_t, BasicIOCtx, GeneralTraceMessage, Timestamp};
+use crate::common::{cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, Timestamp};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{TNodePath, TablePath};
 use crate::model::message as msg;
@@ -176,11 +176,11 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
 
   fn mk_committed_plm<IO: BasicIOCtx>(
     &mut self,
-    _: &mut MasterContext,
+    ctx: &mut MasterContext,
     io_ctx: &mut IO,
     prepared: &BTreeMap<TNodePath, DropTablePrepared>,
   ) -> DropTableTMCommitted {
-    let mut timestamp_hint = io_ctx.now();
+    let mut timestamp_hint = cur_timestamp(io_ctx, ctx.master_config.timestamp_suffix_divisor);
     for (_, prepared) in prepared {
       timestamp_hint = max(timestamp_hint, prepared.timestamp.clone());
     }

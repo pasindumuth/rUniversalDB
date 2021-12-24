@@ -8,7 +8,7 @@ use crate::multiversion_map::MVM;
 use crate::slave::SlaveContext;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
-use crate::tablet::TabletCreateHelper;
+use crate::tablet::{TabletConfig, TabletCreateHelper};
 use rand::RngCore;
 
 // -----------------------------------------------------------------------------------------------
@@ -112,6 +112,9 @@ impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
     io_ctx.rand().fill_bytes(&mut rand_seed);
     self.committed_helper = Some(TabletCreateHelper {
       rand_seed,
+      tablet_config: TabletConfig {
+        timestamp_suffix_divisor: ctx.slave_config.timestamp_suffix_divisor,
+      },
       this_sid: ctx.this_sid.clone(),
       this_tid: self.tablet_group_id.clone(),
       this_eid: ctx.this_eid.clone(),

@@ -243,6 +243,24 @@ pub struct FullDBSchema<'a> {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  MasterConfig
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct MasterConfig {
+  /// This is used for generate the `suffix` of a Timestamp, where we just generate
+  /// a random `u64` and take the remainder after dividing by `timestamp_suffix_divisor`.
+  /// This cannot be 0; the default value is 1, making the suffix always be 0.
+  pub timestamp_suffix_divisor: u64,
+}
+
+impl Default for MasterConfig {
+  fn default() -> Self {
+    MasterConfig { timestamp_suffix_divisor: 1 }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Master State
 // -----------------------------------------------------------------------------------------------
 
@@ -262,6 +280,7 @@ pub struct MasterState {
 
 pub struct MasterContext {
   /// Metadata
+  pub master_config: MasterConfig,
   pub this_eid: EndpointId,
 
   // Database Schema
@@ -349,6 +368,7 @@ impl MasterState {
 
 impl MasterContext {
   pub fn new(
+    master_config: MasterConfig,
     this_eid: EndpointId,
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     master_address_config: Vec<EndpointId>,
@@ -357,6 +377,7 @@ impl MasterContext {
   ) -> MasterContext {
     let all_gids = leader_map.keys().cloned().collect();
     MasterContext {
+      master_config,
       this_eid,
       gen: Gen(0),
       db_schema: Default::default(),

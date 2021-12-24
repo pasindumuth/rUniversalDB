@@ -555,12 +555,9 @@ pub fn test_all_ddl_parallel(rand: &mut XorShiftRng) {
   }
 }
 
-// TODO: extend Timestamp with random bits so we can extend the simulation duration
-//  without too many more conflicts.
-
 pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
   println!("seed: {:?}", seed);
-  let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes);
+  let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes, 10);
 
   // Run the simulation
   let client_eids: Vec<_> = sim.get_all_responses().keys().cloned().collect();
@@ -577,8 +574,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
   // Elements from the above are moved here as responses arrive
   let mut req_res_map = BTreeMap::<RequestId, (Request, msg::ExternalMessage)>::new();
 
-  // TODO: change back to 5000
-  const SIM_DURATION: u128 = 1000; // The duration that we run the simulation
+  const SIM_DURATION: u128 = 5000; // The duration that we run the simulation
   let sim_duration = mk_t(SIM_DURATION);
   for iteration in 0.. {
     let timestamp = sim.true_timestamp().clone();

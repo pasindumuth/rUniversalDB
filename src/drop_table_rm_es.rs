@@ -1,4 +1,4 @@
-use crate::common::Timestamp;
+use crate::common::{cur_timestamp, Timestamp};
 use crate::common::{mk_t, BasicIOCtx};
 use crate::drop_table_tm_es::{
   DropTableClosed, DropTableCommit, DropTablePayloadTypes, DropTablePrepare, DropTablePrepared,
@@ -31,7 +31,7 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
     _: DropTablePrepare,
   ) -> DropTableRMInner {
     // Construct the `preparing_timestamp`
-    let mut timestamp = io_ctx.now();
+    let mut timestamp = cur_timestamp(io_ctx, ctx.tablet_config.timestamp_suffix_divisor);
     timestamp = max(timestamp, ctx.table_schema.val_cols.get_latest_lat());
     for (_, req) in ctx.waiting_locked_cols.iter().chain(ctx.inserting_locked_cols.iter()) {
       timestamp = max(timestamp, req.timestamp.clone());

@@ -173,6 +173,24 @@ impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  SlaveConfig
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct SlaveConfig {
+  /// This is used for generate the `suffix` of a Timestamp, where we just generate
+  /// a random `u64` and take the remainder after dividing by `timestamp_suffix_divisor`.
+  /// This cannot be 0; the default value is 1, making the suffix always be 0.
+  pub timestamp_suffix_divisor: u64,
+}
+
+impl Default for SlaveConfig {
+  fn default() -> Self {
+    SlaveConfig { timestamp_suffix_divisor: 1 }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Slave State
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
@@ -187,6 +205,7 @@ pub struct SlaveContext {
   pub coord_positions: Vec<CoordGroupId>,
 
   // Metadata
+  pub slave_config: SlaveConfig,
   pub this_sid: SlaveGroupId,
   pub this_gid: PaxosGroupId, // self.this_sid.to_gid()
   pub this_eid: EndpointId,
@@ -272,6 +291,7 @@ impl SlaveState {
 impl SlaveContext {
   pub fn new(
     coord_positions: Vec<CoordGroupId>,
+    slave_config: SlaveConfig,
     this_sid: SlaveGroupId,
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
@@ -282,6 +302,7 @@ impl SlaveContext {
     let paxos_nodes = gossip.slave_address_config.get(&this_sid).unwrap().clone();
     SlaveContext {
       coord_positions,
+      slave_config,
       this_sid: this_sid.clone(),
       this_gid: this_sid.to_gid(),
       this_eid,
