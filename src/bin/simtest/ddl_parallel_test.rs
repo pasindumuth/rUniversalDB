@@ -424,6 +424,8 @@ struct VerifyResult {
   successful_queries: u32,
   num_selects: u32,
   average_select_rows: f32,
+  queries_cancelled: u32,
+  ddl_queries_cancelled: u32,
 }
 
 /// Replay the requests that succeeded in timestamp order serially, and very that
@@ -439,11 +441,20 @@ fn verify_req_res(
     Query(msg::PerformExternalQuery, Option<msg::ExternalQuerySuccess>),
     DDLQuery(msg::PerformExternalDDLQuery, Option<msg::ExternalDDLQuerySuccess>),
   }
+
+  // Setup some stats
+  let mut queries_cancelled = 0;
+  let mut ddl_queries_cancelled = 0;
+
+  // Sort the queries
   let mut sorted_success_res = BTreeMap::<Timestamp, SuccessPair>::new();
   let total_queries = req_res_map.len() as u32;
   for (rid, (req, res)) in req_res_map {
     match (req, res) {
       (Request::Query(req), msg::ExternalMessage::ExternalQueryAborted(abort)) => {
+        if abort.payload == msg::ExternalAbortedData::CancelConfirmed {
+          queries_cancelled += 1;
+        }
         if abort.payload == msg::ExternalAbortedData::NodeDied {
           // Recall that the query could still have succeeded, so we check `req_success_map`.
           if let Some(timestamp) = req_success_map.get(&rid) {
@@ -469,6 +480,9 @@ fn verify_req_res(
         }
       }
       (Request::DDLQuery(req), msg::ExternalMessage::ExternalDDLQueryAborted(abort)) => {
+        if abort.payload == msg::ExternalDDLQueryAbortData::CancelConfirmed {
+          ddl_queries_cancelled += 1;
+        }
         if abort.payload == msg::ExternalDDLQueryAbortData::NodeDied {
           // Recall that the query could still have succeeded, so we check `req_success_map`.
           if let Some(timestamp) = req_success_map.get(&rid) {
@@ -541,6 +555,8 @@ fn verify_req_res(
     successful_queries,
     num_selects,
     average_select_rows,
+    queries_cancelled,
+    ddl_queries_cancelled,
   })
 }
 
@@ -557,13 +573,7 @@ pub fn test_all_ddl_parallel(rand: &mut XorShiftRng) {
 
 pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
   println!("seed: {:?}", seed);
-  let mut sim = mk_general_sim(
-    [240, 120, 122, 208, 55, 91, 32, 177, 104, 63, 150, 106, 225, 94, 173, 11],
-    3,
-    5,
-    num_paxos_nodes,
-    10,
-  );
+  let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes, 100);
 
   // Run the simulation
   let client_eids: Vec<_> = sim.get_all_responses().keys().cloned().collect();
@@ -594,7 +604,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
     // Decide whether to send a query or to send a cancellation. We usually send a query with high
     // probability, but we must certainly send a query if we have not warmed up or if there are
     // no existing queries to cancel.
-    let do_query = (sim.rand.next_u32() % 100) < 95;
+    let do_query = (sim.rand.next_u32() % 100) < 85;
     if do_query || iteration < NUM_WARMUP_ITERATIONS || req_lid_map.is_empty() {
       // Create a new RNG for query generation
       let mut rand = XorShiftRng::from_seed(mk_seed(&mut sim.rand));
@@ -838,13 +848,16 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
     println!(
       "Test 'test_all_ddl_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}, Leadership Changes: {:?}, 
-       # Selects: {:?}, Avg. Selected Rows: {:?}",
+       # Selects: {:?}, Avg. Selected Rows: {:?}
+       # Query Cancels: {:?}, # DDL Query Cancels: {:?}",
       res.replay_duration.time_ms,
       res.total_queries,
       res.successful_queries,
       num_leadership_changes,
       res.num_selects,
-      res.average_select_rows
+      res.average_select_rows,
+      res.queries_cancelled,
+      res.ddl_queries_cancelled
     );
   } else {
     println!("Skipped Test 'test_all_ddl_parallel' due to Timestamp Conflict");

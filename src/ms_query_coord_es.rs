@@ -21,6 +21,7 @@ use crate::query_planning::{
 use crate::server::{contains_col, CommonQuery, ServerContextBase};
 use crate::table_read_es::perform_aggregation;
 use crate::trans_table_read_es::TransTableSource;
+use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
 
 // -----------------------------------------------------------------------------------------------
@@ -731,23 +732,15 @@ impl QueryPlanningES {
     }
 
     // Next, we do various validations on the MSQuery.
-    match perform_static_validations(
+    if perform_static_validations(
       &self.sql_query,
       &ctx.gossip.table_generation,
       &ctx.gossip.db_schema,
       &self.timestamp,
-    ) {
-      Ok(_) => {}
-      Err(KeyValidationError::InvalidUpdate) => {
-        return QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryPlanningError(
-          msg::QueryPlanningError::InvalidUpdate,
-        ));
-      }
-      Err(KeyValidationError::InvalidInsert) => {
-        return QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryPlanningError(
-          msg::QueryPlanningError::InvalidInsert,
-        ));
-      }
+    )
+    .is_err()
+    {
+      return self.perform_master_query_planning(ctx, io_ctx);
     }
 
     // Next, we see if all extra required columns in all queries are present.
@@ -846,19 +839,26 @@ impl QueryPlanningES {
       MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
         // By now, we know the QueryPlanning can succeed. However, recall that the MasterQueryPlan
         // might have used a db_schema that is beyond what this node has in its GossipData. Thus,
-        // we check if all TablePaths are in the GossipData, waiting if not. This is only needed
-        // so that we can actually contact those nodes.
-        for table_path in collect_table_paths(&self.sql_query) {
-          if ctx.gossip.table_generation.static_read(&table_path, &self.timestamp).is_none() {
-            // We send a MasterGossipRequest and go to GossipDataWaiting.
-            let sender_path = ctx.this_sid.clone();
-            ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
-              msg::MasterGossipRequest { sender_path },
-            ));
-
-            self.state = QueryPlanningS::GossipDataWaiting(GossipDataWaiting { master_query_plan });
-            return QueryPlanningAction::Wait;
+        // we check if all (TablePath, Gen)s used by the MasterQueryPlan are in this node's
+        // GossipData, waiting if not. We need this to know where the appropriate Tablets are.
+        for (table_path, gen) in &master_query_plan.table_location_map {
+          if let Some(cur_gen) =
+            ctx.gossip.table_generation.static_read(&table_path, &self.timestamp)
+          {
+            if gen <= cur_gen {
+              continue;
+            }
           }
+
+          // This means that this node's GossipData is too far out-of-date. We send
+          // a MasterGossipRequest and go to GossipDataWaiting.
+          let sender_path = ctx.this_sid.clone();
+          ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+            msg::MasterGossipRequest { sender_path },
+          ));
+
+          self.state = QueryPlanningS::GossipDataWaiting(GossipDataWaiting { master_query_plan });
+          return QueryPlanningAction::Wait;
         }
 
         // Otherwise, we can finish QueryPlanning and return a Success.
@@ -881,11 +881,16 @@ impl QueryPlanningES {
       // We must check again whether the GossipData is new enough, since this is called
       // for any GossipData update whatsoever (not just the one resulting from the
       // MasterGossipRequest we sent out).
-      for table_path in collect_table_paths(&self.sql_query) {
-        if ctx.gossip.table_generation.static_read(&table_path, &self.timestamp).is_none() {
-          // We stay in GossipDataWaiting.
-          return QueryPlanningAction::Wait;
+      for (table_path, gen) in &last_state.master_query_plan.table_location_map {
+        if let Some(cur_gen) = ctx.gossip.table_generation.static_read(&table_path, &self.timestamp)
+        {
+          if gen <= cur_gen {
+            continue;
+          }
         }
+
+        // We are still out-of-date, so we stay in GossipDataWaiting.
+        return QueryPlanningAction::Wait;
       }
 
       // We have a recent enough GossipData, so we finish QueryPlanning and return Success.

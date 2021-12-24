@@ -751,7 +751,7 @@ pub fn advanced_parallel_test(seed: [u8; 16]) {
 
   // We create 3 clients.
   let mut sim =
-    Simulation::new(seed, 3, slave_address_config, master_address_config, PaxosConfig::prod(), 1);
+    Simulation::new(seed, 3, slave_address_config, master_address_config, PaxosConfig::test(), 1);
 
   let mut ctx = TestContext::new();
 
