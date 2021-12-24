@@ -709,6 +709,22 @@ fn aggregation_test(seed: [u8; 16]) {
     );
   }
 
+  // Test all NULL column SUM
+
+  {
+    let mut exp_result = TableView::new(vec![None]);
+    exp_result.add_row(vec![None]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT SUM(count)
+        FROM inventory
+        WHERE product_id = 3;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
   println!("Test 'aggregation_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 

@@ -17,6 +17,7 @@ use runiversal::test_utils::{mk_eid, mk_seed, mk_sid};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::test_utils::table;
+use std::cmp::{max, min};
 use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
@@ -238,42 +239,42 @@ impl<'a> QueryGenCtx<'a> {
     let query = if query_type == 0 {
       let val_col = val_col_it.next()?;
       format!(
-        " UPDATE {0}
-          SET {1} = {1} + {3}
-          WHERE {2} >= {4};
+        " UPDATE {source}
+          SET {val_col} = {val_col} + {x1}
+          WHERE {key_col} >= {x2};
         ",
-        source,
-        val_col.0,
-        key_col.0,
-        mk_uint(r, 5),
-        mk_int(r, 100)
+        source = source,
+        val_col = val_col.0,
+        key_col = key_col.0,
+        x1 = mk_uint(r, 5),
+        x2 = mk_int(r, 100)
       )
     } else if query_type == 1 {
       let val_col = val_col_it.next()?;
       format!(
-        " UPDATE {0}
-          SET {1} = {1} - {3}
-          WHERE {2} >= {4};
+        " UPDATE {source}
+          SET {val_col} = {val_col} - {x1}
+          WHERE {key_col} >= {x2};
         ",
-        source,
-        val_col.0,
-        key_col.0,
-        mk_uint(r, 5),
-        mk_int(r, 100)
+        source = source,
+        val_col = val_col.0,
+        key_col = key_col.0,
+        x1 = mk_uint(r, 5),
+        x2 = mk_int(r, 100)
       )
     } else if query_type == 2 {
       let set_val_col = val_col_it.next()?;
       let filter_val_col = val_col_it.next()?;
       format!(
-        " UPDATE {0}
-          SET {1} = {3}
-          WHERE {2} >= {4};
+        " UPDATE {source}
+          SET {set_val_col} = {x1}
+          WHERE {filter_val_col} >= {x2};
         ",
-        source,
-        set_val_col.0,
-        filter_val_col.0,
-        mk_int(r, 100),
-        mk_int(r, 100)
+        source = source,
+        set_val_col = set_val_col.0,
+        filter_val_col = filter_val_col.0,
+        x1 = mk_int(r, 100),
+        x2 = mk_int(r, 100)
       )
     } else {
       panic!()
@@ -297,35 +298,35 @@ impl<'a> QueryGenCtx<'a> {
       let val_col = val_col_it.next()?;
       format!(
         " DELETE
-          FROM {0}
-          WHERE {1} >= {2};
+          FROM {source}
+          WHERE {val_col} >= {x1};
         ",
-        source,
-        val_col.0,
-        mk_int(r, 100)
+        source = source,
+        val_col = val_col.0,
+        x1 = mk_int(r, 100)
       )
     } else if query_type == 1 {
       let val_col = val_col_it.next()?;
       format!(
         " DELETE
-          FROM {0}
-          WHERE {1} >= {2} AND {1} < {3};
+          FROM {source}
+          WHERE {val_col} >= {x1} AND {val_col} < {x2};
         ",
-        source,
-        val_col.0,
-        mk_int(r, 50),
-        mk_int(r, 50) + 100
+        source = source,
+        val_col = val_col.0,
+        x1 = mk_int(r, 50),
+        x2 = mk_int(r, 50) + 100
       )
     } else if query_type == 2 {
       format!(
         " DELETE
-          FROM {0}
-          WHERE {1} >= {2} AND {1} < {3};
+          FROM {source}
+          WHERE {key_col} >= {x1} AND {key_col} < {x2};
         ",
-        source,
-        key_col.0,
-        mk_int(r, 50),
-        mk_int(r, 50) + 100
+        source = source,
+        key_col = key_col.0,
+        x1 = mk_int(r, 50),
+        x2 = mk_int(r, 50) + 100
       )
     } else {
       panic!()
@@ -349,40 +350,40 @@ impl<'a> QueryGenCtx<'a> {
       let proj_val_col = val_col_it.next()?;
       let filter_val_col = val_col_it.next()?;
       format!(
-        " SELECT {1}
-          FROM {0}
-          WHERE {2} >= {3};
+        " SELECT {proj_val_col}
+          FROM {source}
+          WHERE {filter_val_col} >= {x1};
         ",
-        source,
-        proj_val_col.0,
-        filter_val_col.0,
-        mk_int(r, 100)
+        source = source,
+        proj_val_col = proj_val_col.0,
+        filter_val_col = filter_val_col.0,
+        x1 = mk_int(r, 100)
       )
     } else if query_type == 1 {
       let filter_val_col = val_col_it.next()?;
       format!(
-        " SELECT {1}
-          FROM {0}
-          WHERE {2} >= {3} AND {2} < {4};
+        " SELECT {key_col}
+          FROM {source}
+          WHERE {filter_val_col} >= {x1} AND {filter_val_col} < {x2};
         ",
-        source,
-        key_col.0,
-        filter_val_col.0,
-        mk_int(r, 50),
-        mk_int(r, 50) + 100
+        source = source,
+        key_col = key_col.0,
+        filter_val_col = filter_val_col.0,
+        x1 = mk_int(r, 50),
+        x2 = mk_int(r, 50) + 100
       )
     } else if query_type == 2 {
       let proj_val_col = val_col_it.next()?;
       format!(
-        " SELECT {1}
-          FROM {0}
-          WHERE {2} >= {3} AND {2} < {4};
+        " SELECT {proj_val_col}
+          FROM {source}
+          WHERE {key_col} >= {x1} AND {key_col} < {x2};
         ",
-        source,
-        proj_val_col.0,
-        key_col.0,
-        mk_int(r, 50),
-        mk_int(r, 50) + 100
+        source = source,
+        proj_val_col = proj_val_col.0,
+        key_col = key_col.0,
+        x1 = mk_int(r, 50),
+        x2 = mk_int(r, 50) + 100
       )
     } else {
       panic!()

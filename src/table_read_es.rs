@@ -594,18 +594,27 @@ pub fn perform_aggregation(
             Some(ColVal::Int(total_count))
           }
           iast::UnaryAggregateOp::Sum => {
-            let mut total_sum: i32 = 0;
+            let mut all_null = true; // Keeps track of if all ColVals are all NULL.
+            let mut total_sum = 0;
             for (val_row, count) in column.rows {
               let val = val_row.into_iter().next().unwrap();
               match val {
                 None => {}
                 Some(ColVal::Int(int_val)) => {
                   total_sum += int_val * count as i32;
+                  all_null = false;
                 }
                 Some(_) => return Err(EvalError::GenericError),
               }
             }
-            Some(ColVal::Int(total_sum))
+
+            // In SQL, there are no non-NULL ColVals, then the SUM evaluate to NULL. This
+            // includes the case of an empty table.
+            if all_null {
+              None
+            } else {
+              Some(ColVal::Int(total_sum))
+            }
           }
         };
         res_row.push(res_col_val);
