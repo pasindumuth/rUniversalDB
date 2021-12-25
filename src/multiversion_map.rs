@@ -60,12 +60,15 @@ where
     }
   }
 
-  /// Reads the version prior to the timestamp. Asserts that the `lat` is high enough.
+  /// Reads the version prior to the timestamp. This function asserts that the `lat` of
+  /// the `key` is `>= timestamp`. Recall that all keys in existance implicitly at
+  /// least have a `lat` of 0. Thus, the return value of this function is idempotent.
   pub fn strong_static_read(&self, key: &K, timestamp: &Timestamp) -> Option<&V> {
     if let Some((lat, versions)) = self.map.get(key) {
       assert!(timestamp <= lat);
       find_prior_value(versions, timestamp)
     } else {
+      assert_eq!(timestamp, &mk_t(0));
       None
     }
   }

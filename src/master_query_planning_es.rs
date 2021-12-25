@@ -55,7 +55,11 @@ pub fn master_query_planning(
   for table_path in collect_table_paths(&planning_msg.ms_query) {
     if ctx.table_generation.get_lat(&table_path) < planning_msg.timestamp {
       return MasterQueryPlanningAction::Wait;
-    } else if ctx.table_generation.get_last_version(&table_path).is_none() {
+    } else if ctx
+      .table_generation
+      .strong_static_read(&table_path, &planning_msg.timestamp)
+      .is_none()
+    {
       // Otherwise, if the TablePath does not exist, we respond accordingly.
       return respond_error(msg::QueryPlanningError::TablesDNE(vec![table_path]));
     }
@@ -152,15 +156,16 @@ pub fn master_query_planning(
   ));
 }
 
-/// Checks if the LATs of all `ColName`s in `safe_present_cols` and `external_cols` are higher
-/// that `timestamp` for all `FrozenColUsageNode`s under `node`, where that node refers to a
-/// Table (as opposed to a TransTable).
+/// Checks if the LATs of all `ColName`s in `safe_present_cols` and free `external_cols` are
+/// higher than `timestamp` for all `FrozenColUsageNode`s under `node`, where that node refers
+/// to a Table (as opposed to a TransTable). We only consider the free `external_cols` because
+/// idempotence of only these is sufficient for `ColUsagePlanner` to be idempotent.
 fn check_node_lats(ctx: &MasterContext, node: &FrozenColUsageNode, timestamp: &Timestamp) -> bool {
   match &node.source.source_ref {
     proc::GeneralSourceRef::TablePath(table_path) => {
       let gen = ctx.table_generation.static_read(table_path, timestamp).unwrap();
       let schema = ctx.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
-      // Check `safe_present_cols` and `external_cols`.
+      // Check LATs of `safe_present_cols` and free `external_cols`.
       let free_external_cols = free_external_cols(&node.external_cols);
       for col_name in node.safe_present_cols.iter().chain(free_external_cols.iter()) {
         if lookup(&schema.key_cols, col_name).is_none() {
@@ -169,7 +174,7 @@ fn check_node_lats(ctx: &MasterContext, node: &FrozenColUsageNode, timestamp: &T
           }
         }
       }
-      // Check children
+      // Check LATs of children.
       for child in &node.children {
         for (_, (_, child_node)) in child {
           if !check_node_lats(ctx, child_node, timestamp) {
@@ -291,22 +296,23 @@ pub fn master_query_planning_post(
   });
 }
 
-/// Checks if the LATs of all `ColName`s in `safe_present_cols` and `external_cols` are higher
-/// that `timestamp` for all `FrozenColUsageNode`s under `node`, where that node refers to a
-/// Table (as opposed to a TransTable).
+/// Increase the LATs of all `ColName`s in `safe_present_cols` and free `external_cols` so that
+/// they are higher than `timestamp` for all `FrozenColUsageNode`s under `node`, where that node
+/// refers to a Table (as opposed to a TransTable). We only consider the free `external_cols`
+/// because idempotence of only these is sufficient for `ColUsagePlanner` to be idempotent.
 fn increase_node_lats(ctx: &mut MasterContext, node: &FrozenColUsageNode, timestamp: &Timestamp) {
   match &node.source.source_ref {
     proc::GeneralSourceRef::TablePath(table_path) => {
       let gen = ctx.table_generation.static_read(table_path, timestamp).unwrap();
       let schema = ctx.db_schema.get_mut(&(table_path.clone(), gen.clone())).unwrap();
-      // Check `safe_present_cols` and `external_cols`.
+      // Increase LATs for `safe_present_cols` and free `external_cols`.
       let free_external_cols = free_external_cols(&node.external_cols);
       for col_name in node.safe_present_cols.iter().chain(free_external_cols.iter()) {
         if lookup(&schema.key_cols, col_name).is_none() {
           schema.val_cols.update_lat(col_name, timestamp.clone());
         }
       }
-      // Check children
+      // Increase LATs for children.
       for child in &node.children {
         for (_, (_, child_node)) in child {
           increase_node_lats(ctx, child_node, timestamp);

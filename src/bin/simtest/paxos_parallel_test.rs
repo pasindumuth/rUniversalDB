@@ -524,9 +524,7 @@ struct VerifyResult {
   total_queries: u32,
   successful_queries: u32,
   num_multi_stage: u32,
-  stats_0cte_0stage: AvgCounter,
-  stats_1cte_1stage: AvgCounter,
-  stats_2cte_2stage: AvgCounter,
+  stats_ncte_1stage: Vec<AvgCounter>,
   queries_cancelled: u32,
   ddl_queries_cancelled: u32,
 }
@@ -644,9 +642,7 @@ fn verify_req_res(
 
   // Compute various statistics
   let mut num_multi_stage = 0;
-  let mut stats_0cte_0stage = AvgCounter { num_elems: 0, sum: 0 };
-  let mut stats_1cte_1stage = AvgCounter { num_elems: 0, sum: 0 };
-  let mut stats_2cte_2stage = AvgCounter { num_elems: 0, sum: 0 };
+  let mut stats_ncte_1stage = Vec::new();
   for (_, pair) in &sorted_success_res {
     if let SuccessPair::Query(req, Some(res)) = pair {
       // Here, the `req` is expected to be a DML or DQL (not DDL).
@@ -661,13 +657,11 @@ fn verify_req_res(
         let ast = convert_ast(parsed_ast).unwrap();
         match ast.body {
           iast::QueryBody::SuperSimpleSelect(_) => {
-            if ast.ctes.len() == 0 {
-              stats_0cte_0stage.add_entry(res.result.rows.len() as i32);
-            } else if ast.ctes.len() == 1 {
-              stats_1cte_1stage.add_entry(res.result.rows.len() as i32);
-            } else if ast.ctes.len() == 2 {
-              stats_2cte_2stage.add_entry(res.result.rows.len() as i32);
+            let i = ast.ctes.len();
+            for _ in stats_ncte_1stage.len()..(i + 1) {
+              stats_ncte_1stage.push(AvgCounter { num_elems: 0, sum: 0 });
             }
+            stats_ncte_1stage.get_mut(i).unwrap().add_entry(res.result.rows.len() as i32);
           }
           _ => {}
         }
@@ -698,9 +692,7 @@ fn verify_req_res(
     total_queries,
     successful_queries,
     num_multi_stage,
-    stats_0cte_0stage,
-    stats_1cte_1stage,
-    stats_2cte_2stage,
+    stats_ncte_1stage,
     queries_cancelled,
     ddl_queries_cancelled,
   })
@@ -1000,24 +992,28 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
       num_leadership_changes += lid.gen.0;
     }
 
+    let mut select_stats_strs = Vec::<String>::new();
+    for (i, stat) in res.stats_ncte_1stage.into_iter().enumerate() {
+      select_stats_strs.push(format!(
+        "# Select {}CTE1Stage: {}, Avg. Selected Rows: {:?}",
+        i,
+        stat.num_elems,
+        stat.avg()
+      ));
+    }
+    let select_stats_str = select_stats_strs.join("\n       ");
+
     println!(
       "Test 'test_all_paxos_parallel' Passed! Replay time taken: {:?}ms.
-       Total Queries: {:?}, Succeeded: {:?}, Leadership Changes: {:?}, 
-       # Select 0CTE1Stage: {:?}, Avg. Selected Rows: {:?}
-       # Select 1CTE1Stage: {:?}, Avg. Selected Rows: {:?}
-       # Select 2CTE1Stage: {:?}, Avg. Selected Rows: {:?}
-       # Multi-Stage: {:?},
-       # Query Cancels: {:?}, # DDL Query Cancels: {:?}",
+       Total Queries: {}, Succeeded: {}, Leadership Changes: {}, 
+       {}
+       # Multi-Stage: {},
+       # Query Cancels: {}, # DDL Query Cancels: {}",
       res.replay_duration.time_ms,
       res.total_queries,
       res.successful_queries,
       num_leadership_changes,
-      res.stats_0cte_0stage.num_elems,
-      res.stats_0cte_0stage.avg(),
-      res.stats_1cte_1stage.num_elems,
-      res.stats_1cte_1stage.avg(),
-      res.stats_2cte_2stage.num_elems,
-      res.stats_2cte_2stage.avg(),
+      select_stats_str,
       res.num_multi_stage,
       res.queries_cancelled,
       res.ddl_queries_cancelled
