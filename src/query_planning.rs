@@ -72,8 +72,9 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
 }
 
 /// Computes `extra_req_cols`, which is a class of columns that must be present in the
-/// Tablets according to the MSQuery. The presence of these columns need to be validated before
-/// other algorithms can run, e.g. `ColUsagePlanner`.
+/// Tablets according to the MSQuery. The presence of these columns need to be validated
+/// before other algorithms can run, e.g. `ColUsagePlanner`. Note that KeyCols of a
+/// Table can also be here.
 pub fn compute_extra_req_cols(ms_query: &proc::MSQuery) -> BTreeMap<TablePath, Vec<ColName>> {
   let mut extra_req_cols = BTreeMap::<TablePath, Vec<ColName>>::new();
 
@@ -117,13 +118,16 @@ pub fn compute_extra_req_cols(ms_query: &proc::MSQuery) -> BTreeMap<TablePath, V
   extra_req_cols
 }
 
-/// Compute miscellaneous data related to QueryPlanning. This can be shared between
-/// the Master and MSCoordESs.
-pub fn compute_query_plan_data(
+/// Computes a map that maps all `TablePath`s used in the MSQuery to the `Gen`
+/// in the `table_generation` at `timestamp`.
+///
+/// Precondition:
+///   1. All `TablePath`s in the MSQuery must have a non-None `Gen` in `table_generation`.
+pub fn compute_table_location_map(
   ms_query: &proc::MSQuery,
   table_generation: &MVM<TablePath, Gen>,
   timestamp: &Timestamp,
-) -> (BTreeMap<TablePath, Gen>, BTreeMap<TablePath, Vec<ColName>>) {
+) -> BTreeMap<TablePath, Gen> {
   let mut table_location_map = BTreeMap::<TablePath, Gen>::new();
   iterate_stage_ms_query(
     &mut |stage: GeneralStage| match stage {
@@ -149,7 +153,7 @@ pub fn compute_query_plan_data(
     ms_query,
   );
 
-  (table_location_map, compute_extra_req_cols(ms_query))
+  table_location_map
 }
 
 pub enum KeyValidationError {
@@ -157,13 +161,14 @@ pub enum KeyValidationError {
   InvalidInsert,
 }
 
-/// This function performs validations that include checks on the shape of the query,
+/// This function performs validations that include checks on the shape of the query
 /// and checks related to the Key Columns of the Tablets.
 ///
 /// Preconditions:
 ///   1. All `TablePaths` that appear in `ms_query` must be present in `table_generation`
 ///      at `timestamp` (by `static_read`).
-///   2. All `(TablePath, Gen)` pairs in `table_generation` must be a key in `db_schema`.
+///   2. All `(TablePath, Gen)` pairs in `table_generation` must be a key in `db_schema`
+///      (this will be true of all `GossipData` instances).
 pub fn perform_static_validations(
   ms_query: &proc::MSQuery,
   table_generation: &MVM<TablePath, Gen>,
@@ -174,9 +179,7 @@ pub fn perform_static_validations(
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(query) => {
-        // We do some validations of the Update queries:
-        //   1. We check that it is not trying to modify a Key Column.
-
+        // Check that the `stage` is not trying to modify a KeyCol.
         let gen = table_generation.static_read(&query.table.source_ref, timestamp).unwrap();
         let schema = db_schema.get(&(query.table.source_ref.clone(), gen.clone())).unwrap();
         for (col_name, _) in &query.assignment {
@@ -186,20 +189,15 @@ pub fn perform_static_validations(
         }
       }
       proc::MSQueryStage::Insert(query) => {
-        // We do some validations of the Insert queries:
-        //   1. We check that all Key Columns are present in `columns`
-        //   2. We check that every row in `values` has equal length to `columns`.
-
-        // The TablePath exists, from the above.
+        // Check that the `stage` is inserting to all KeyCols.
         let gen = table_generation.static_read(&query.table.source_ref, timestamp).unwrap();
         let schema = db_schema.get(&(query.table.source_ref.clone(), gen.clone())).unwrap();
-        // Check that all KeyCols are present
         for (col_name, _) in &schema.key_cols {
           if !query.columns.contains(col_name) {
             return Err(KeyValidationError::InvalidInsert);
           }
         }
-        // Check that `values` is valid
+        // Check that `values` has equal length to `columns`.
         for row in &query.values {
           if row.len() != query.columns.len() {
             return Err(KeyValidationError::InvalidInsert);

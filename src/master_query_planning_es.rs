@@ -9,7 +9,7 @@ use crate::model::common::{proc, CQueryPath, ColName, QueryId, TransTableName};
 use crate::model::message as msg;
 use crate::model::message::ExternalAbortedData::QueryPlanningError;
 use crate::query_planning::{
-  collect_table_paths, compute_all_tier_maps, compute_extra_req_cols, compute_query_plan_data,
+  collect_table_paths, compute_all_tier_maps, compute_extra_req_cols, compute_table_location_map,
   perform_static_validations, KeyValidationError,
 };
 
@@ -79,7 +79,8 @@ pub fn master_query_planning(
 
   // Next, we see if all required columns in all queries are present.
   let mut helper = PreReqColHelper::AllColsPresent;
-  for (table_path, col_names) in compute_extra_req_cols(&planning_msg.ms_query) {
+  let extra_req_cols = compute_extra_req_cols(&planning_msg.ms_query);
+  for (table_path, col_names) in &extra_req_cols {
     for col_name in col_names {
       // The TablePath exists, from the above.
       let gen = ctx.table_generation.static_read(&table_path, &planning_msg.timestamp).unwrap();
@@ -93,7 +94,9 @@ pub fn master_query_planning(
           if schema.val_cols.static_read(&col_name, &planning_msg.timestamp).is_none() {
             // Here, we know for sure this `col_name` does not exist. We break out and
             // respond immediately.
-            return respond_error(msg::QueryPlanningError::RequiredColumnDNE(vec![col_name]));
+            return respond_error(msg::QueryPlanningError::RequiredColumnDNE(vec![
+              col_name.clone()
+            ]));
           }
         }
       }
@@ -139,8 +142,11 @@ pub fn master_query_planning(
 
   // Finally we construct a MasterQueryPlan and respond to the sender.
   let all_tier_maps = compute_all_tier_maps(&planning_msg.ms_query);
-  let (table_location_map, extra_req_cols) =
-    compute_query_plan_data(&planning_msg.ms_query, &ctx.table_generation, &planning_msg.timestamp);
+  let table_location_map = compute_table_location_map(
+    &planning_msg.ms_query,
+    &ctx.table_generation,
+    &planning_msg.timestamp,
+  );
   return MasterQueryPlanningAction::Respond(msg::MasteryQueryPlanningResult::MasterQueryPlan(
     msg::MasterQueryPlan { all_tier_maps, table_location_map, extra_req_cols, col_usage_nodes },
   ));
@@ -232,7 +238,8 @@ pub fn master_query_planning_post(
 
   // Next, we see if all extra required columns in all queries are present, making sure to
   // increase the `lat` either way.
-  for (table_path, col_names) in compute_extra_req_cols(&planning_plm.ms_query) {
+  let extra_req_cols = compute_extra_req_cols(&planning_plm.ms_query);
+  for (table_path, col_names) in &extra_req_cols {
     for col_name in col_names {
       // The TablePath exists, from the above.
       let gen = ctx.table_generation.static_read(&table_path, &planning_plm.timestamp).unwrap();
@@ -242,7 +249,7 @@ pub fn master_query_planning_post(
           // Here, we know for sure this `col_name` does not exist, and will never since we
           // just increased the LAT. Thus, we respond with it to the sender.
           return msg::MasteryQueryPlanningResult::QueryPlanningError(
-            msg::QueryPlanningError::RequiredColumnDNE(vec![col_name]),
+            msg::QueryPlanningError::RequiredColumnDNE(vec![col_name.clone()]),
           );
         }
       }
@@ -271,8 +278,11 @@ pub fn master_query_planning_post(
 
   // Finally we construct a MasterQueryPlan and respond to the sender.
   let all_tier_maps = compute_all_tier_maps(&planning_plm.ms_query);
-  let (table_location_map, extra_req_cols) =
-    compute_query_plan_data(&planning_plm.ms_query, &ctx.table_generation, &planning_plm.timestamp);
+  let table_location_map = compute_table_location_map(
+    &planning_plm.ms_query,
+    &ctx.table_generation,
+    &planning_plm.timestamp,
+  );
   return msg::MasteryQueryPlanningResult::MasterQueryPlan(msg::MasterQueryPlan {
     all_tier_maps,
     table_location_map,

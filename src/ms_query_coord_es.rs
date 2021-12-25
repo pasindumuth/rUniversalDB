@@ -15,7 +15,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::model::message::{ExternalAbortedData, MasteryQueryPlanningResult};
 use crate::query_planning::{
-  collect_table_paths, compute_all_tier_maps, compute_extra_req_cols, compute_query_plan_data,
+  collect_table_paths, compute_all_tier_maps, compute_extra_req_cols, compute_table_location_map,
   perform_static_validations, KeyValidationError,
 };
 use crate::server::{contains_col, CommonQuery, ServerContextBase};
@@ -148,9 +148,16 @@ impl FullMSCoordES {
     master_qid: QueryId,
     result: msg::MasteryQueryPlanningResult,
   ) -> MSQueryCoordAction {
-    let plan_es = cast!(FullMSCoordES::QueryPlanning, self).unwrap();
-    let action = plan_es.handle_master_query_plan(ctx, io_ctx, master_qid, result);
-    self.handle_planning_action(ctx, io_ctx, action)
+    match self {
+      FullMSCoordES::QueryPlanning(plan_es) => {
+        let action = plan_es.handle_master_query_plan(ctx, io_ctx, master_qid, result);
+        self.handle_planning_action(ctx, io_ctx, action)
+      }
+      _ => {
+        debug_assert!(false);
+        MSQueryCoordAction::Wait
+      }
+    }
   }
 
   /// Handle the `action` sent back by the `MSQueryCoordReplanningES`.
@@ -744,7 +751,8 @@ impl QueryPlanningES {
     }
 
     // Next, we see if all extra required columns in all queries are present.
-    for (table_path, col_names) in compute_extra_req_cols(&self.sql_query) {
+    let extra_req_cols = compute_extra_req_cols(&self.sql_query);
+    for (table_path, col_names) in &extra_req_cols {
       for col_name in col_names {
         // The TablePath exists, from the above.
         let gen = ctx.gossip.table_generation.static_read(&table_path, &self.timestamp).unwrap();
@@ -772,8 +780,8 @@ impl QueryPlanningES {
 
     // If we get here, the QueryPlan is valid, so we return it and go to Done.
     let all_tier_maps = compute_all_tier_maps(&self.sql_query);
-    let (table_location_map, extra_req_cols) =
-      compute_query_plan_data(&self.sql_query, &ctx.gossip.table_generation, &self.timestamp);
+    let table_location_map =
+      compute_table_location_map(&self.sql_query, &ctx.gossip.table_generation, &self.timestamp);
     self.state = QueryPlanningS::Done;
     QueryPlanningAction::Success(CoordQueryPlan {
       all_tier_maps,
@@ -806,7 +814,16 @@ impl QueryPlanningES {
     QueryPlanningAction::Wait
   }
 
-  /// Compute a query_leader_map using the `TablePath`s in `table_location_map`.
+  /// Computes the Leaderships of `SlaveGroupId`s whose LeadershipChanges would require us to
+  /// retry the whole MSCoordES. Generally, this only needs to contain `SlaveGroupId`s
+  /// that would contain a write (since an MSQueryES should be reused many times).
+  ///
+  /// Note: For simplicity, we just take the set of `SlaveGroupId`s for every `TablePath`
+  /// in the MSQuery.
+  ///
+  /// Preconditions:
+  ///   1. The `Gen`s must be present in the local `GossipData` (which might not be the case if
+  ///      `table_location_map` was sent from the Master.
   fn compute_query_leader_map<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut CoordContext,
@@ -833,40 +850,48 @@ impl QueryPlanningES {
     master_qid: QueryId,
     result: msg::MasteryQueryPlanningResult,
   ) -> QueryPlanningAction {
-    let last_state = cast!(QueryPlanningS::MasterQueryPlanning, &self.state).unwrap();
-    assert_eq!(last_state.master_query_id, master_qid);
-    match result {
-      MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
-        // By now, we know the QueryPlanning can succeed. However, recall that the MasterQueryPlan
-        // might have used a db_schema that is beyond what this node has in its GossipData. Thus,
-        // we check if all (TablePath, Gen)s used by the MasterQueryPlan are in this node's
-        // GossipData, waiting if not. We need this to know where the appropriate Tablets are.
-        for (table_path, gen) in &master_query_plan.table_location_map {
-          if let Some(cur_gen) =
-            ctx.gossip.table_generation.static_read(&table_path, &self.timestamp)
-          {
-            if gen <= cur_gen {
-              continue;
+    match &self.state {
+      QueryPlanningS::MasterQueryPlanning(state) => {
+        debug_assert_eq!(state.master_query_id, master_qid);
+        match result {
+          MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
+            // By now, we know the QueryPlanning can succeed. However, recall that the MasterQueryPlan
+            // might have used a db_schema that is beyond what this node has in its GossipData. Thus,
+            // we check if all (TablePath, Gen)s used by the MasterQueryPlan are in this node's
+            // GossipData, waiting if not. We need this to know where the appropriate Tablets are.
+            for (table_path, gen) in &master_query_plan.table_location_map {
+              if let Some(cur_gen) =
+                ctx.gossip.table_generation.static_read(&table_path, &self.timestamp)
+              {
+                if gen <= cur_gen {
+                  continue;
+                }
+              }
+
+              // This means that this node's GossipData is too far out-of-date. We send
+              // a MasterGossipRequest and go to GossipDataWaiting.
+              let sender_path = ctx.this_sid.clone();
+              ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+                msg::MasterGossipRequest { sender_path },
+              ));
+
+              self.state =
+                QueryPlanningS::GossipDataWaiting(GossipDataWaiting { master_query_plan });
+              return QueryPlanningAction::Wait;
             }
+
+            // Otherwise, we can finish QueryPlanning and return a Success.
+            self.finish_master_query_plan(ctx, io_ctx, master_query_plan)
           }
-
-          // This means that this node's GossipData is too far out-of-date. We send
-          // a MasterGossipRequest and go to GossipDataWaiting.
-          let sender_path = ctx.this_sid.clone();
-          ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
-            msg::MasterGossipRequest { sender_path },
-          ));
-
-          self.state = QueryPlanningS::GossipDataWaiting(GossipDataWaiting { master_query_plan });
-          return QueryPlanningAction::Wait;
+          MasteryQueryPlanningResult::QueryPlanningError(error) => {
+            self.state = QueryPlanningS::Done;
+            QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryPlanningError(error))
+          }
         }
-
-        // Otherwise, we can finish QueryPlanning and return a Success.
-        self.finish_master_query_plan(ctx, io_ctx, master_query_plan)
       }
-      MasteryQueryPlanningResult::QueryPlanningError(error) => {
-        self.state = QueryPlanningS::Done;
-        QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryPlanningError(error))
+      _ => {
+        debug_assert!(false);
+        QueryPlanningAction::Wait
       }
     }
   }
