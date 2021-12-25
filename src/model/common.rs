@@ -604,6 +604,7 @@ pub mod iast {
   pub enum UnaryAggregateOp {
     Count,
     Sum,
+    Avg,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

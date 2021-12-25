@@ -226,6 +226,7 @@ fn convert_select_clause(
       let op = match &func_name.to_lowercase()[..] {
         "count" => iast::UnaryAggregateOp::Count,
         "sum" => iast::UnaryAggregateOp::Sum,
+        "avg" => iast::UnaryAggregateOp::Avg,
         _ => return Err(format!("{:?} aggregate function", func_name)),
       };
       let expr = cast!(ast::FunctionArg::Unnamed, func.args.get(0).unwrap()).unwrap();

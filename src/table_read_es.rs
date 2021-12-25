@@ -3,7 +3,9 @@ use crate::common::{
   btree_multimap_insert, lookup, mk_qid, to_table_path, CoreIOCtx, KeyBound, OrigP, QueryESResult,
   QueryPlan, ReadRegion, Timestamp,
 };
-use crate::expression::{compress_row_region, compute_key_region, is_true, EvalError};
+use crate::expression::{
+  compress_row_region, compute_key_region, evaluate_c_expr, is_true, CExpr, EvalError,
+};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
   iast, proc, CQueryPath, ColName, ColVal, ColValN, Context, ContextRow, QueryId, TQueryPath,
@@ -578,44 +580,57 @@ pub fn perform_aggregation(
           }
         }
 
+        fn count_op(column: &TableView) -> Result<ColValN, EvalError> {
+          let mut total_count: i32 = 0;
+          for (val_row, count) in &column.rows {
+            let val = val_row.iter().next().unwrap();
+            match val {
+              None => {}
+              Some(_) => {
+                total_count += (*count) as i32;
+              }
+            }
+          }
+          Ok(Some(ColVal::Int(total_count)))
+        }
+
+        fn sum_op(column: &TableView) -> Result<ColValN, EvalError> {
+          let mut all_null = true; // Keeps track of if all ColVals are all NULL.
+          let mut total_sum = 0;
+          for (val_row, count) in &column.rows {
+            let val = val_row.iter().next().unwrap();
+            match val {
+              None => {}
+              Some(ColVal::Int(int_val)) => {
+                total_sum += int_val * (*count) as i32;
+                all_null = false;
+              }
+              Some(_) => return Err(EvalError::GenericError),
+            }
+          }
+
+          // In SQL, there are no non-NULL ColVals, then the SUM evaluate to NULL. This
+          // includes the case of an empty table.
+          Ok(if all_null { None } else { Some(ColVal::Int(total_sum)) })
+        }
+
+        // TODO: This should actually be returning a float
+        fn avg_op(column: &TableView) -> Result<ColValN, EvalError> {
+          let sum_val = sum_op(column)?;
+          let count_val = count_op(column)?;
+          let avg_expr = CExpr::BinaryExpr {
+            op: iast::BinaryOp::Divide,
+            left: Box::new(CExpr::Value { val: sum_val }),
+            right: Box::new(CExpr::Value { val: count_val }),
+          };
+          evaluate_c_expr(&avg_expr)
+        }
+
         // Compute the result row
         let res_col_val = match &unary_agg.op {
-          iast::UnaryAggregateOp::Count => {
-            let mut total_count: i32 = 0;
-            for (val_row, count) in column.rows {
-              let val = val_row.into_iter().next().unwrap();
-              match val {
-                None => {}
-                Some(_) => {
-                  total_count += count as i32;
-                }
-              }
-            }
-            Some(ColVal::Int(total_count))
-          }
-          iast::UnaryAggregateOp::Sum => {
-            let mut all_null = true; // Keeps track of if all ColVals are all NULL.
-            let mut total_sum = 0;
-            for (val_row, count) in column.rows {
-              let val = val_row.into_iter().next().unwrap();
-              match val {
-                None => {}
-                Some(ColVal::Int(int_val)) => {
-                  total_sum += int_val * count as i32;
-                  all_null = false;
-                }
-                Some(_) => return Err(EvalError::GenericError),
-              }
-            }
-
-            // In SQL, there are no non-NULL ColVals, then the SUM evaluate to NULL. This
-            // includes the case of an empty table.
-            if all_null {
-              None
-            } else {
-              Some(ColVal::Int(total_sum))
-            }
-          }
+          iast::UnaryAggregateOp::Count => count_op(&column)?,
+          iast::UnaryAggregateOp::Sum => sum_op(&column)?,
+          iast::UnaryAggregateOp::Avg => avg_op(&column)?,
         };
         res_row.push(res_col_val);
       }

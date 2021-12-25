@@ -119,7 +119,7 @@ pub fn construct_cexpr(
 }
 
 /// Construct a `CExpr` for Simple `ValExpr`s, which are `ValExpr`s where there
-/// are no `ColumnRef`s or subqueries.
+/// are no `ColumnRef`s or `Subquery`s.
 pub fn construct_simple_cexpr(sql_expr: &proc::ValExpr) -> Result<CExpr, EvalError> {
   match sql_expr {
     ValExpr::ColumnRef(_) => Err(EvalError::InvalidSimpleExpr),
