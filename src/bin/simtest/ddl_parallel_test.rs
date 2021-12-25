@@ -221,7 +221,7 @@ impl<'a> QueryGenCtx<'a> {
 
     Some(format!(
       " INSERT INTO {} ({})
-        VALUES {}
+        VALUES {};
       ",
       source,
       insert_cols.join(", "),
@@ -259,7 +259,7 @@ impl<'a> QueryGenCtx<'a> {
       format!(
         " UPDATE {source}
           SET {val_col} = {val_col} - {x1}
-          WHERE {key_col} >= {x2} AND ({val_col} - {x1} > -{INT_BOUND});;
+          WHERE {key_col} >= {x2} AND ({val_col} - {x1} > -{INT_BOUND});
         ",
         source = source,
         val_col = val_col.0,
@@ -351,7 +351,7 @@ impl<'a> QueryGenCtx<'a> {
     val_cols[..].shuffle(r);
     let mut val_col_it = val_cols.into_iter();
 
-    let query_type = r.next_u32() % 4;
+    let query_type = r.next_u32() % 3;
     let query = if query_type == 0 {
       let proj_val_col = val_col_it.next()?;
       let filter_val_col = val_col_it.next()?;
@@ -391,21 +391,76 @@ impl<'a> QueryGenCtx<'a> {
         x1 = mk_int(r, Self::INT_BOUND / 2),
         x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32
       )
-    } else if query_type == 3 {
-      // CTE
-      let proj_val_col = val_col_it.next()?;
+    } else {
+      panic!()
+    };
+
+    Some(query)
+  }
+
+  /// This create queries that touch 2 tables, containing CTEs and subqueries.
+  fn mk_advanced_query(&mut self) -> Option<String> {
+    let (source1, mut key_cols1, mut val_cols1) = self.pick_random_table()?;
+    let (source2, mut key_cols2, mut val_cols2) = self.pick_random_table()?;
+    let r = &mut self.rand;
+
+    // Recall that there is only one KeyCol in all Tables
+    let key_col1 = key_cols1.into_iter().next().unwrap();
+    val_cols1[..].shuffle(r);
+    let mut val_col_it1 = val_cols1.into_iter();
+
+    let key_col2 = key_cols2.into_iter().next().unwrap();
+    val_cols2[..].shuffle(r);
+    let mut val_col_it2 = val_cols2.into_iter();
+
+    let query_type = r.next_u32() % 2;
+    let query = if query_type == 0 {
+      let proj_val_col11 = val_col_it1.next()?;
+      let proj_val_col12 = val_col_it1.next()?;
       format!(
         " WITH
-            tt1 = (SELECT {proj_val_col} AS c1
-                   FROM {source}
-                   WHERE {key_col} >= {x1} AND {key_col} < {x2});
-            SELECT c1
-            FROM tt1
-            WHERE c1 > {x3};
+            tt1 AS (SELECT {proj_val_col11} AS c11, {proj_val_col12} AS c12
+                    FROM {source1}
+                    WHERE {key_col1} >= {x1} AND {key_col1} < {x2})
+            SELECT c11
+            FROM tt1;
         ",
-        source = source,
-        proj_val_col = proj_val_col.0,
-        key_col = key_col.0,
+        source1 = source1,
+        proj_val_col11 = proj_val_col11.0,
+        proj_val_col12 = proj_val_col12.0,
+        key_col1 = key_col1.0,
+        x1 = mk_int(r, Self::INT_BOUND / 2),
+        x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32,
+      )
+    } else if query_type == 1 {
+      let proj_val_col11 = val_col_it1.next()?;
+      let proj_val_col12 = val_col_it1.next()?;
+      let proj_val_col21 = val_col_it2.next()?;
+      let proj_val_col22 = val_col_it2.next()?;
+      format!(
+        " WITH
+            tt1 AS (SELECT {proj_val_col11} AS c11, {proj_val_col12} AS c12
+                    FROM {source1}
+                    WHERE {key_col1} >= {x1} AND {key_col1} < {x2}),
+            tt2 AS (SELECT {proj_val_col21} AS c21, {proj_val_col22} AS c22
+                    FROM {source2}
+                    WHERE {key_col2} < 
+                     (SELECT AVG(c11)
+                      FROM tt1
+                      WHERE c12 < {x3})
+                     OR
+                     ({key_col2} < 0))
+            SELECT c21
+            FROM tt2;
+        ",
+        source1 = source1,
+        proj_val_col11 = proj_val_col11.0,
+        proj_val_col12 = proj_val_col12.0,
+        key_col1 = key_col1.0,
+        source2 = source2,
+        proj_val_col21 = proj_val_col21.0,
+        proj_val_col22 = proj_val_col22.0,
+        key_col2 = key_col2.0,
         x1 = mk_int(r, Self::INT_BOUND / 2),
         x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32,
         x3 = mk_int(r, Self::INT_BOUND)
@@ -421,7 +476,7 @@ impl<'a> QueryGenCtx<'a> {
   /// another (e.g. prior Stages do not define a TransTable for subsequent Stages), generating
   /// one is just a matter of generating a sequence of Single-Stage Transactions.
   fn mk_multi_stage(&mut self) -> Option<String> {
-    let num_stages = self.rand.next_u32() % 6;
+    let num_stages = (self.rand.next_u32() % 6) + 1;
     let mut stages = Vec::<String>::new();
     for _ in 0..num_stages {
       let stage_type = self.rand.next_u32() % 4;
@@ -468,11 +523,32 @@ struct VerifyResult {
   replay_duration: Timestamp,
   total_queries: u32,
   successful_queries: u32,
-  num_selects: u32,
   num_multi_stage: u32,
-  average_select_rows: f32,
+  stats_0cte_0stage: AvgCounter,
+  stats_1cte_1stage: AvgCounter,
+  stats_2cte_2stage: AvgCounter,
   queries_cancelled: u32,
   ddl_queries_cancelled: u32,
+}
+
+struct AvgCounter {
+  num_elems: u32,
+  sum: i32,
+}
+
+impl AvgCounter {
+  fn add_entry(&mut self, val: i32) {
+    self.num_elems += 1;
+    self.sum += val;
+  }
+
+  fn avg(&self) -> Option<f32> {
+    if self.num_elems == 0 {
+      None
+    } else {
+      Some(self.sum as f32 / self.num_elems as f32)
+    }
+  }
 }
 
 /// Replay the requests that succeeded in timestamp order serially, and very that
@@ -499,6 +575,10 @@ fn verify_req_res(
   for (rid, (req, res)) in req_res_map {
     match (req, res) {
       (Request::Query(req), msg::ExternalMessage::ExternalQueryAborted(abort)) => {
+        if let msg::ExternalAbortedData::ParseError(parse_error) = abort.payload {
+          println!("Query Parse Error: {:?}", parse_error);
+          panic!();
+        }
         if abort.payload == msg::ExternalAbortedData::CancelConfirmed {
           queries_cancelled += 1;
         }
@@ -527,6 +607,10 @@ fn verify_req_res(
         }
       }
       (Request::DDLQuery(req), msg::ExternalMessage::ExternalDDLQueryAborted(abort)) => {
+        if let msg::ExternalDDLQueryAbortData::ParseError(parse_error) = abort.payload {
+          println!("DDLQuery Parse Error: {:?}", parse_error);
+          panic!();
+        }
         if abort.payload == msg::ExternalDDLQueryAbortData::CancelConfirmed {
           ddl_queries_cancelled += 1;
         }
@@ -559,32 +643,37 @@ fn verify_req_res(
   }
 
   // Compute various statistics
-  let mut num_selects = 0;
-  let mut row_sum = 0;
   let mut num_multi_stage = 0;
+  let mut stats_0cte_0stage = AvgCounter { num_elems: 0, sum: 0 };
+  let mut stats_1cte_1stage = AvgCounter { num_elems: 0, sum: 0 };
+  let mut stats_2cte_2stage = AvgCounter { num_elems: 0, sum: 0 };
   for (_, pair) in &sorted_success_res {
     if let SuccessPair::Query(req, Some(res)) = pair {
       // Here, the `req` is expected to be a DML or DQL (not DDL).
       let parsed_ast = Parser::parse_sql(&GenericDialect {}, &req.query).unwrap();
+      let num_stages = parsed_ast.len();
 
       // See if this is a multi-stage transaction.
-      if parsed_ast.len() > 1 {
+      if num_stages > 1 {
         num_multi_stage += 1;
-      }
-
-      // See if this is a Select, counting rows if so.
-      let ast = convert_ast(parsed_ast).unwrap();
-      match ast.body {
-        iast::QueryBody::SuperSimpleSelect(_) => {
-          num_selects += 1;
-          row_sum += res.result.rows.len();
+      } else {
+        // Otherwise, collect stats for Single-Stage queries.
+        let ast = convert_ast(parsed_ast).unwrap();
+        match ast.body {
+          iast::QueryBody::SuperSimpleSelect(_) => {
+            if ast.ctes.len() == 0 {
+              stats_0cte_0stage.add_entry(res.result.rows.len() as i32);
+            } else if ast.ctes.len() == 1 {
+              stats_1cte_1stage.add_entry(res.result.rows.len() as i32);
+            } else if ast.ctes.len() == 2 {
+              stats_2cte_2stage.add_entry(res.result.rows.len() as i32);
+            }
+          }
+          _ => {}
         }
-        _ => {}
       }
     }
   }
-
-  let average_select_rows = row_sum as f32 / num_selects as f32;
 
   // Run the Replay
   let (mut sim, mut ctx) = setup(mk_seed(rand));
@@ -608,9 +697,10 @@ fn verify_req_res(
     replay_duration: sim.true_timestamp().clone(),
     total_queries,
     successful_queries,
-    num_selects,
     num_multi_stage,
-    average_select_rows,
+    stats_0cte_0stage,
+    stats_1cte_1stage,
+    stats_2cte_2stage,
     queries_cancelled,
     ddl_queries_cancelled,
   })
@@ -685,12 +775,12 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
           (true, gen_ctx.mk_create_table())
         } else if iteration < NUM_WARMUP_ITERATIONS {
           // For the next few iterations, we populate that ables.
-          (true, gen_ctx.mk_insert())
+          (false, gen_ctx.mk_insert())
         } else {
           // Otherwise, we randomly generate any type of query chosen using a hard-coded
           // distribution. We define the distribution as a constant vector that specifies
           // the relative probabilities.
-          const DIST: [u32; 9] = [5, 4, 5, 5, 30, 20, 5, 40, 15];
+          const DIST: [u32; 10] = [5, 4, 5, 5, 30, 20, 5, 40, 15, 10];
 
           // Select an `idx` into DIST based on its probability distribution.
           let mut i: u32 = gen_ctx.rand.next_u32() % DIST.iter().sum::<u32>();
@@ -711,6 +801,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
             6 => (false, gen_ctx.mk_delete()),
             7 => (false, gen_ctx.mk_select()),
             8 => (false, gen_ctx.mk_multi_stage()),
+            9 => (false, gen_ctx.mk_advanced_query()),
             _ => panic!(),
           }
         };
@@ -905,15 +996,21 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
     println!(
       "Test 'test_all_ddl_parallel' Passed! Replay time taken: {:?}ms.
        Total Queries: {:?}, Succeeded: {:?}, Leadership Changes: {:?}, 
-       # Selects: {:?}, Avg. Selected Rows: {:?}
+       # Select 0CTE1Stage: {:?}, Avg. Selected Rows: {:?}
+       # Select 1CTE1Stage: {:?}, Avg. Selected Rows: {:?}
+       # Select 2CTE1Stage: {:?}, Avg. Selected Rows: {:?}
        # Multi-Stage: {:?},
        # Query Cancels: {:?}, # DDL Query Cancels: {:?}",
       res.replay_duration.time_ms,
       res.total_queries,
       res.successful_queries,
       num_leadership_changes,
-      res.num_selects,
-      res.average_select_rows,
+      res.stats_0cte_0stage.num_elems,
+      res.stats_0cte_0stage.avg(),
+      res.stats_1cte_1stage.num_elems,
+      res.stats_1cte_1stage.avg(),
+      res.stats_2cte_2stage.num_elems,
+      res.stats_2cte_2stage.avg(),
       res.num_multi_stage,
       res.queries_cancelled,
       res.ddl_queries_cancelled
