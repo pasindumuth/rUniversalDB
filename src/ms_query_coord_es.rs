@@ -812,6 +812,26 @@ impl QueryPlanningES {
     query_leader_map
   }
 
+  /// Check if the local `GossipData` is sufficiently up-to-date to handle the
+  /// `MasterQueryPlan`. In particular, we check that the local `GossipData` knows has all the
+  /// desired (TablePath, Gen)s so that we can communicate with the Tablets that contain them.
+  pub fn check_local_gossip(
+    &self,
+    ctx: &CoordContext,
+    master_query_plan: &msg::MasterQueryPlan,
+  ) -> bool {
+    for (table_path, gen) in &master_query_plan.table_location_map {
+      if let Some(cur_gen) = ctx.gossip.table_generation.static_read(&table_path, &self.timestamp) {
+        if cur_gen < gen {
+          return false;
+        }
+      } else {
+        return false;
+      }
+    }
+    true
+  }
+
   /// Handles the QueryPlan constructed by the Master.
   pub fn handle_master_query_plan<IO: CoreIOCtx>(
     &mut self,
@@ -825,20 +845,12 @@ impl QueryPlanningES {
         debug_assert_eq!(state.master_query_id, master_qid);
         match result {
           MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
-            // By now, we know the QueryPlanning can succeed. However, recall that the MasterQueryPlan
-            // might have used a db_schema that is beyond what this node has in its GossipData. Thus,
-            // we check if all (TablePath, Gen)s used by the MasterQueryPlan are in this node's
-            // GossipData, waiting if not. We need this to know where the appropriate Tablets are.
-            for (table_path, gen) in &master_query_plan.table_location_map {
-              if let Some(cur_gen) =
-                ctx.gossip.table_generation.static_read(&table_path, &self.timestamp)
-              {
-                if gen <= cur_gen {
-                  continue;
-                }
-              }
-
-              // This means that this node's GossipData is too far out-of-date. We send
+            // By now, we know the QueryPlanning can succeed. However, we need to make sure
+            // the local GossipData is recent enough so we can communicate with the shared.
+            if self.check_local_gossip(ctx, &master_query_plan) {
+              self.finish_master_query_plan(ctx, io_ctx, master_query_plan)
+            } else {
+              // Otherwise, this node's GossipData is too far out-of-date. We send
               // a MasterGossipRequest and go to GossipDataWaiting.
               let sender_path = ctx.this_sid.clone();
               ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
@@ -849,9 +861,6 @@ impl QueryPlanningES {
                 QueryPlanningS::GossipDataWaiting(GossipDataWaiting { master_query_plan });
               return QueryPlanningAction::Wait;
             }
-
-            // Otherwise, we can finish QueryPlanning and return a Success.
-            self.finish_master_query_plan(ctx, io_ctx, master_query_plan)
           }
           MasteryQueryPlanningResult::QueryPlanningError(error) => {
             self.state = QueryPlanningS::Done;
@@ -875,21 +884,13 @@ impl QueryPlanningES {
     if let QueryPlanningS::GossipDataWaiting(last_state) = &self.state {
       // We must check again whether the GossipData is new enough, since this is called
       // for any GossipData update whatsoever (not just the one resulting from the
-      // MasterGossipRequest we sent out).
-      for (table_path, gen) in &last_state.master_query_plan.table_location_map {
-        if let Some(cur_gen) = ctx.gossip.table_generation.static_read(&table_path, &self.timestamp)
-        {
-          if gen <= cur_gen {
-            continue;
-          }
-        }
-
-        // We are still out-of-date, so we stay in GossipDataWaiting.
+      // MasterGossipRequest we sent out above).
+      if self.check_local_gossip(ctx, &last_state.master_query_plan) {
+        self.finish_master_query_plan(ctx, io_ctx, last_state.master_query_plan.clone())
+      } else {
+        // Otherwise, are still out-of-date, so we stay in GossipDataWaiting.
         return QueryPlanningAction::Wait;
       }
-
-      // We have a recent enough GossipData, so we finish QueryPlanning and return Success.
-      self.finish_master_query_plan(ctx, io_ctx, last_state.master_query_plan.clone())
     } else {
       QueryPlanningAction::Wait
     }
