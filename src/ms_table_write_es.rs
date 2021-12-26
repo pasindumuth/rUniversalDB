@@ -459,7 +459,7 @@ impl MSTableWriteES {
 
     // Setup the TableView that we are going to return and the UpdateView that we're going
     // to hold in the MSQueryES.
-    let res_col_names = compute_update_schema(&self.sql_query, &ctx.table_schema);
+    let res_col_names = compute_update_schema(&self.sql_query, &ctx.table_schema.key_cols);
     let mut res_table_view = TableView::new(res_col_names.clone());
     let mut update_view = GenericTable::new();
 

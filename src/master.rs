@@ -9,7 +9,7 @@ use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
 use crate::drop_table_tm_es::{DropTablePayloadTypes, DropTableTMES, DropTableTMInner};
 use crate::master_query_planning_es::{
-  master_query_planning, master_query_planning_post, MasterQueryPlanningAction,
+  master_query_planning_post, master_query_planning_pre, MasterQueryPlanningAction,
   MasterQueryPlanningES,
 };
 use crate::model::common::{
@@ -757,7 +757,7 @@ impl MasterContext {
       MasterForwardMsg::MasterRemotePayload(payload) => {
         match payload {
           MasterRemotePayload::PerformMasterQueryPlanning(query_planning) => {
-            let action = master_query_planning(self, query_planning.clone());
+            let action = master_query_planning_pre(self, query_planning.clone());
             match action {
               MasterQueryPlanningAction::Wait => {
                 map_insert(

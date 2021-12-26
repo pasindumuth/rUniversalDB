@@ -6,6 +6,9 @@ use crate::common::{lookup, merge_table_views, mk_qid, OrigP, QueryPlan, TMStatu
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::expression::EvalError;
+use crate::master_query_planning_es::{
+  master_query_planning, StaticDBSchemaView, StaticDBSchemaViewError,
+};
 use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
   proc, ColName, Context, ContextRow, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId,
@@ -14,10 +17,6 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::model::message::{ExternalAbortedData, MasteryQueryPlanningResult};
-use crate::query_planning::{
-  collect_table_paths, compute_all_tier_maps, compute_extra_req_cols, compute_table_location_map,
-  perform_static_validations, KeyValidationError,
-};
 use crate::server::{contains_col, CommonQuery, ServerContextBase};
 use crate::table_read_es::perform_aggregation;
 use crate::trans_table_read_es::TransTableSource;
@@ -730,66 +729,16 @@ impl QueryPlanningES {
   ) -> QueryPlanningAction {
     debug_assert!(matches!(&self.state, QueryPlanningS::Start));
 
-    // First, we see if all TablePaths are in the GossipData
-    for table_path in collect_table_paths(&self.sql_query) {
-      if ctx.gossip.table_generation.static_read(&table_path, &self.timestamp).is_none() {
-        // We must go to MasterQueryPlanning.
-        return self.perform_master_query_planning(ctx, io_ctx);
-      }
-    }
-
-    // Next, we do various validations on the MSQuery.
-    if perform_static_validations(
-      &self.sql_query,
-      &ctx.gossip.table_generation,
-      &ctx.gossip.db_schema,
-      &self.timestamp,
-    )
-    .is_err()
-    {
-      return self.perform_master_query_planning(ctx, io_ctx);
-    }
-
-    // Next, we see if all extra required columns in all queries are present.
-    let extra_req_cols = compute_extra_req_cols(&self.sql_query);
-    for (table_path, col_names) in &extra_req_cols {
-      for col_name in col_names {
-        // The TablePath exists, from the above.
-        let gen = ctx.gossip.table_generation.static_read(&table_path, &self.timestamp).unwrap();
-        let schema = ctx.gossip.db_schema.get(&(table_path.clone(), gen.clone())).unwrap();
-        if !contains_col(schema, &col_name, &self.timestamp) {
-          // We must go to MasterQueryPlanning.
-          return self.perform_master_query_planning(ctx, io_ctx);
-        }
-      }
-    }
-
-    // Next, we run the FrozenColUsageAlgorithm
-    let mut planner = ColUsagePlanner {
+    let mut view = StaticDBSchemaView {
       db_schema: &ctx.gossip.db_schema,
       table_generation: &ctx.gossip.table_generation,
-      timestamp: &self.timestamp,
+      timestamp: self.timestamp.clone(),
     };
 
-    let col_usage_nodes = match planner.plan_ms_query(&self.sql_query) {
-      Ok(col_usage_nodes) => col_usage_nodes,
-      Err(_) => {
-        return self.perform_master_query_planning(ctx, io_ctx);
-      }
-    };
-
-    // If we get here, the QueryPlan is valid, so we return it and go to Done.
-    let all_tier_maps = compute_all_tier_maps(&self.sql_query);
-    let table_location_map =
-      compute_table_location_map(&self.sql_query, &ctx.gossip.table_generation, &self.timestamp);
-    self.state = QueryPlanningS::Done;
-    QueryPlanningAction::Success(CoordQueryPlan {
-      all_tier_maps,
-      query_leader_map: self.compute_query_leader_map(ctx, io_ctx, &table_location_map),
-      table_location_map,
-      extra_req_cols,
-      col_usage_nodes,
-    })
+    match master_query_planning(view, &self.sql_query) {
+      Ok(master_query_plan) => self.finish_master_query_plan(ctx, io_ctx, master_query_plan),
+      Err(_) => return self.perform_master_query_planning(ctx, io_ctx),
+    }
   }
 
   /// Send a `PerformMasterQueryPlanning` and go to the `MasterQueryReplanning` state.
@@ -812,6 +761,27 @@ impl QueryPlanningES {
     // Advance Replanning State.
     self.state = QueryPlanningS::MasterQueryPlanning(MasterQueryPlanning { master_query_id });
     QueryPlanningAction::Wait
+  }
+
+  /// Here, we have verified all `TablePath`s are present in the GossipData.
+  fn finish_master_query_plan<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
+    master_query_plan: msg::MasterQueryPlan,
+  ) -> QueryPlanningAction {
+    self.state = QueryPlanningS::Done;
+    QueryPlanningAction::Success(CoordQueryPlan {
+      all_tier_maps: master_query_plan.all_tier_maps,
+      query_leader_map: self.compute_query_leader_map(
+        ctx,
+        io_ctx,
+        &master_query_plan.table_location_map,
+      ),
+      table_location_map: master_query_plan.table_location_map,
+      extra_req_cols: master_query_plan.extra_req_cols,
+      col_usage_nodes: master_query_plan.col_usage_nodes,
+    })
   }
 
   /// Computes the Leaderships of `SlaveGroupId`s whose LeadershipChanges would require us to
@@ -923,27 +893,6 @@ impl QueryPlanningES {
     } else {
       QueryPlanningAction::Wait
     }
-  }
-
-  /// Here, we have verified all `TablePath`s are present in the GossipData.
-  fn finish_master_query_plan<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut CoordContext,
-    io_ctx: &mut IO,
-    master_query_plan: msg::MasterQueryPlan,
-  ) -> QueryPlanningAction {
-    self.state = QueryPlanningS::Done;
-    QueryPlanningAction::Success(CoordQueryPlan {
-      all_tier_maps: master_query_plan.all_tier_maps,
-      query_leader_map: self.compute_query_leader_map(
-        ctx,
-        io_ctx,
-        &master_query_plan.table_location_map,
-      ),
-      table_location_map: master_query_plan.table_location_map,
-      extra_req_cols: master_query_plan.extra_req_cols,
-      col_usage_nodes: master_query_plan.col_usage_nodes,
-    })
   }
 
   /// This is called when there is a Leadership change in the Master PaxosGroup.
