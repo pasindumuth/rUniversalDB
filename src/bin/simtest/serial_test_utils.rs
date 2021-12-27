@@ -2,12 +2,12 @@ use crate::simulation::Simulation;
 use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId, TableView};
 use runiversal::model::message as msg;
 use runiversal::paxos::PaxosConfig;
-use runiversal::simulation_utils::mk_slave_eid;
+use runiversal::simulation_utils::{mk_master_eid, mk_slave_eid};
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid};
 use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
-//  Utils
+//  Serial Utils
 // -----------------------------------------------------------------------------------------------
 
 pub struct TestContext {
@@ -123,6 +123,27 @@ impl TestContext {
     match response {
       msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
         assert_eq!(payload.request_id, request_id);
+      }
+      _ => panic!("Incorrect Response: {:#?}", response),
+    }
+  }
+
+  /// Executes the `query` using `sim` with a time limit of `time_limit`. Here,
+  /// we expect it to fail.
+  pub fn execute_query_failure<PredT: Fn(&msg::ExternalAbortedData) -> bool>(
+    &mut self,
+    sim: &mut Simulation,
+    query: &str,
+    time_limit: u32,
+    abort_check: PredT,
+  ) {
+    let request_id = self.send_query(sim, query);
+    assert!(self.simulate_until_response(sim, time_limit));
+    let response = self.next_response(sim);
+    match response {
+      msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(payload)) => {
+        assert_eq!(payload.request_id, request_id);
+        assert!(abort_check(&payload.payload));
       }
       _ => panic!("Incorrect Response: {:#?}", response),
     }
@@ -262,4 +283,39 @@ pub fn populate_user_table_basic(sim: &mut Simulation, context: &mut TestContext
       exp_result,
     );
   }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Parallel Utils
+// -----------------------------------------------------------------------------------------------
+
+pub fn mk_general_sim(
+  seed: [u8; 16],
+  num_clients: u32,
+  num_paxos_groups: u32,
+  num_paxos_nodes: u32,
+  timestamp_suffix_divisor: u64,
+) -> Simulation {
+  // Create one Slave Paxos Group to test Leader change logic with.
+  let mut master_address_config = Vec::<EndpointId>::new();
+  for i in 0..num_paxos_nodes {
+    master_address_config.push(mk_master_eid(i));
+  }
+  let mut slave_address_config = BTreeMap::<SlaveGroupId, Vec<EndpointId>>::new();
+  for i in 0..num_paxos_groups {
+    let mut eids = Vec::<EndpointId>::new();
+    for j in 0..num_paxos_nodes {
+      eids.push(mk_slave_eid(i * num_paxos_nodes + j));
+    }
+    slave_address_config.insert(SlaveGroupId(format!("s{}", i)), eids);
+  }
+
+  Simulation::new(
+    seed,
+    num_clients,
+    slave_address_config.clone(),
+    master_address_config.clone(),
+    PaxosConfig::test(),
+    timestamp_suffix_divisor,
+  )
 }

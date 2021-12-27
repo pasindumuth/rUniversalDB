@@ -1,6 +1,6 @@
 use crate::serial_test_utils::{
-  populate_inventory_table_basic, populate_user_table_basic, setup, setup_inventory_table,
-  setup_user_table, simulate_until_clean, TestContext,
+  mk_general_sim, populate_inventory_table_basic, populate_user_table_basic, setup,
+  setup_inventory_table, setup_user_table, simulate_until_clean, TestContext,
 };
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
@@ -11,7 +11,7 @@ use runiversal::model::common::{
   SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
 };
 use runiversal::model::message as msg;
-use runiversal::model::message::NetworkMessage;
+use runiversal::model::message::{ExternalAbortedData, NetworkMessage};
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::{mk_master_eid, mk_slave_eid};
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_seed, mk_sid, mk_tab, mk_tid};
@@ -1031,7 +1031,7 @@ fn drop_column(seed: [u8; 16]) {
     );
   }
 
-  // Drop the column and add it back
+  // Drop the column
   {
     ctx.send_ddl_query(
       &mut sim,
@@ -1040,7 +1040,25 @@ fn drop_column(seed: [u8; 16]) {
       ",
       10000,
     );
+  }
 
+  // Ensure we get an error if we try using it
+  {
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT product_id, email, count
+        FROM inventory;
+      ",
+      10000,
+      |abort_data| match abort_data {
+        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidColUsage) => true,
+        _ => false,
+      },
+    );
+  }
+
+  // Add it back
+  {
     ctx.send_ddl_query(
       &mut sim,
       " ALTER TABLE inventory
@@ -1347,6 +1365,20 @@ fn drop_table_test(seed: [u8; 16]) {
     );
   }
 
+  {
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT count(product_id)
+        FROM inventory;
+      ",
+      10000,
+      |abort_data| match abort_data {
+        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::TablesDNE(_)) => true,
+        _ => false,
+      },
+    );
+  }
+
   // Create 'inventory' again and verify it is empty
   setup_inventory_table(&mut sim, &mut ctx);
 
@@ -1565,37 +1597,6 @@ fn cancellation_test(seed: [u8; 16]) {
 //  paxos_leader_change_test
 // -----------------------------------------------------------------------------------------------
 
-pub fn mk_general_sim(
-  seed: [u8; 16],
-  num_clients: u32,
-  num_paxos_groups: u32,
-  num_paxos_nodes: u32,
-  timestamp_suffix_divisor: u64,
-) -> Simulation {
-  // Create one Slave Paxos Group to test Leader change logic with.
-  let mut master_address_config = Vec::<EndpointId>::new();
-  for i in 0..num_paxos_nodes {
-    master_address_config.push(mk_master_eid(i));
-  }
-  let mut slave_address_config = BTreeMap::<SlaveGroupId, Vec<EndpointId>>::new();
-  for i in 0..num_paxos_groups {
-    let mut eids = Vec::<EndpointId>::new();
-    for j in 0..num_paxos_nodes {
-      eids.push(mk_slave_eid(i * num_paxos_nodes + j));
-    }
-    slave_address_config.insert(SlaveGroupId(format!("s{}", i)), eids);
-  }
-
-  Simulation::new(
-    seed,
-    num_clients,
-    slave_address_config.clone(),
-    master_address_config.clone(),
-    PaxosConfig::test(),
-    timestamp_suffix_divisor,
-  )
-}
-
 fn paxos_leader_change_test(seed: [u8; 16]) {
   // Create one Slave Paxos Group to test Leader change logic with.
   let mut sim = mk_general_sim(seed, 1, 1, 5, 1);
@@ -1737,6 +1738,6 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
   }
 
   // Ensure the test occurred in a sensible amount of time.
-  assert!(test_time_taken < mk_t(1000));
+  assert!(test_time_taken < mk_t(1500));
   println!("Test 'paxos_basic_serial_test' Passed! Time taken: {:?}ms", test_time_taken.time_ms);
 }

@@ -2,9 +2,9 @@ use crate::alter_table_rm_es::{AlterTableRMES, AlterTableRMInner};
 use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
 use crate::common::{
-  btree_multimap_insert, lookup, map_insert, merge_table_views, mk_qid, remove_item, BasicIOCtx,
-  BoundType, CoreIOCtx, GossipData, KeyBound, OrigP, ReadRegion, RemoteLeaderChangedPLm, TMStatus,
-  TableSchema, Timestamp, WriteRegion,
+  btree_multimap_insert, lookup, map_insert, merge_table_views, mk_qid, mk_t, remove_item,
+  BasicIOCtx, BoundType, CoreIOCtx, GossipData, KeyBound, OrigP, ReadRegion,
+  RemoteLeaderChangedPLm, TMStatus, TableSchema, Timestamp, WriteRegion,
 };
 use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;
@@ -46,6 +46,7 @@ use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableRe
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlparser::test_utils::table;
+use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::rc::Rc;
@@ -654,6 +655,7 @@ pub struct TabletContext {
   pub this_table_path: TablePath,
   pub this_table_key_range: TabletKeyRange,
   pub table_schema: TableSchema,
+  pub presence_timestamp: Timestamp,
 
   // Region Isolation Algorithm
   pub verifying_writes: BTreeMap<Timestamp, VerifyingReadWriteRegion>,
@@ -702,6 +704,7 @@ impl TabletContext {
       this_table_path: helper.this_table_path,
       this_table_key_range: helper.this_table_key_range,
       table_schema: helper.table_schema,
+      presence_timestamp: mk_t(0),
       verifying_writes: Default::default(),
       inserting_prepared_writes: Default::default(),
       prepared_writes: Default::default(),
@@ -745,6 +748,9 @@ impl TabletContext {
                     self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
                   }
                 }
+
+                self.presence_timestamp =
+                  max(self.presence_timestamp.clone(), locked_cols.timestamp);
 
                 // Remove RequestedLockedCols and grant GlobalLockedCols
                 let req = self.inserting_locked_cols.remove(&locked_cols.query_id).unwrap();
@@ -825,6 +831,9 @@ impl TabletContext {
                     self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
                   }
                 }
+
+                self.presence_timestamp =
+                  max(self.presence_timestamp.clone(), locked_cols.timestamp);
               }
               TabletPLm::ReadProtected(read_protected) => {
                 btree_multimap_insert(
@@ -1681,10 +1690,10 @@ impl TabletContext {
     // Process `waiting_locked_cols`
     for (_, req) in &self.waiting_locked_cols {
       // First, we see if we can grant GlobalLockedCols immediately.
-      let mut global_locked = true;
+      let mut global_locked = req.timestamp <= self.presence_timestamp;
       for col_name in &req.cols {
         if lookup(&self.table_schema.key_cols, col_name).is_none() {
-          if self.table_schema.val_cols.get_lat(col_name) < req.timestamp {
+          if !(req.timestamp <= self.table_schema.val_cols.get_lat(col_name)) {
             global_locked = false;
             break;
           }

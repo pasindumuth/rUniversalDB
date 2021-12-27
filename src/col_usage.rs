@@ -75,6 +75,8 @@ pub enum ColUsageError {
 /// corresponds to an `(MS/GR)QueryStage`, and every `Vec<(TransTableName, (Vec<Option<ColName>>,
 /// FrozenColUsageNode))>` corresponds to an `(MS/GR)Query`.
 ///
+/// TODO: these docs are out of date since we elegantly propagate up an abortion if these
+///  properties don't hold.
 /// This algorithm contains the following assumptions:
 ///   1. All `TablePath`s referenced in the `MSQuery` exist in `table_generation` and `db_schema`
 ///      at the given `Timestamp` (by `static_read`).

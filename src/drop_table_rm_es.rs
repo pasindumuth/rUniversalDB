@@ -33,6 +33,7 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
     // Construct the `preparing_timestamp`
     let mut timestamp = cur_timestamp(io_ctx, ctx.tablet_config.timestamp_suffix_divisor);
     timestamp = max(timestamp, ctx.table_schema.val_cols.get_latest_lat());
+    timestamp = max(timestamp, ctx.presence_timestamp.clone());
     for (_, req) in ctx.waiting_locked_cols.iter().chain(ctx.inserting_locked_cols.iter()) {
       timestamp = max(timestamp, req.timestamp.clone());
     }

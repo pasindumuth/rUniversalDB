@@ -1,5 +1,4 @@
-use crate::basic_serial_test::mk_general_sim;
-use crate::serial_test_utils::{setup, simulate_until_clean, TestContext};
+use crate::serial_test_utils::{mk_general_sim, setup, simulate_until_clean, TestContext};
 use crate::simulation::Simulation;
 use rand::seq::SliceRandom;
 use rand::{Rng, RngCore, SeedableRng};
