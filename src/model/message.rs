@@ -1,5 +1,5 @@
 use crate::alter_table_tm_es::AlterTablePayloadTypes;
-use crate::col_usage::FrozenColUsageNode;
+use crate::col_usage::ColUsageNode;
 use crate::common::{GossipData, QueryPlan, Timestamp};
 use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::drop_table_tm_es::DropTablePayloadTypes;
@@ -426,7 +426,7 @@ pub enum QueryPlanningError {
   InvalidSelect,
   /// Occurs if a `ColumnRef` has an `table_name`, but the reference table does not exist, or
   /// the does not contain the `col_name`, or if the `ColumnRef` appears as an `external_cols`
-  /// in the top-level `FrozenColUsageNode`s
+  /// in the top-level `ColUsageNode`s
   InvalidColUsage,
   /// Occurs when `ColName`s are not present in the database schema.
   RequiredColumnDNE(Vec<ColName>),
@@ -495,7 +495,7 @@ pub struct MasterQueryPlan {
   pub all_tier_maps: BTreeMap<TransTableName, TierMap>,
   pub table_location_map: BTreeMap<TablePath, Gen>,
   pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
-  pub col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
+  pub col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, ColUsageNode))>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

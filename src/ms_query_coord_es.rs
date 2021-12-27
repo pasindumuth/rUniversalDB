@@ -1,6 +1,6 @@
 use crate::col_usage::{
-  iterate_stage_ms_query, node_external_trans_tables, ColUsageError, ColUsagePlanner,
-  FrozenColUsageNode, GeneralStage,
+  iterate_stage_ms_query, node_external_trans_tables, ColUsageError, ColUsageNode, ColUsagePlanner,
+  GeneralStage,
 };
 use crate::common::{lookup, merge_table_views, mk_qid, OrigP, QueryPlan, TMStatus, Timestamp};
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
@@ -33,7 +33,7 @@ pub struct CoordQueryPlan {
   query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   table_location_map: BTreeMap<TablePath, Gen>,
   extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
-  col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
+  col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, ColUsageNode))>,
 }
 
 #[derive(Debug)]
@@ -418,7 +418,7 @@ impl FullMSCoordES {
   ) -> MSQueryCoordAction {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
 
-    // Get the corresponding MSQueryStage and FrozenColUsageNode.
+    // Get the corresponding MSQueryStage and ColUsageNode.
     let (trans_table_name, ms_query_stage) = es.sql_query.trans_tables.get(stage_idx).unwrap();
     let (_, col_usage_node) = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
 

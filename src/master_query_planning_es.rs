@@ -1,5 +1,5 @@
 use crate::col_usage::{
-  free_external_cols, iterate_stage_ms_query, ColUsageError, ColUsagePlanner, FrozenColUsageNode,
+  free_external_cols, iterate_stage_ms_query, ColUsageError, ColUsageNode, ColUsagePlanner,
   GeneralStage,
 };
 use crate::common::{lookup, TableSchema, Timestamp};

@@ -1,4 +1,4 @@
-use crate::col_usage::FrozenColUsageNode;
+use crate::col_usage::ColUsageNode;
 use crate::coord::CoordForwardMsg;
 use crate::master::MasterTimerInput;
 use crate::model::common::{
@@ -404,7 +404,7 @@ pub struct QueryPlan {
   ///
   /// Note: not all `TablePaths` used in the MSQuery needs to be here.
   pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
-  pub col_usage_node: FrozenColUsageNode,
+  pub col_usage_node: ColUsageNode,
 }
 
 // -------------------------------------------------------------------------------------------------

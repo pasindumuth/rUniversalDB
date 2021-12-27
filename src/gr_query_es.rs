@@ -1,6 +1,6 @@
 use crate::col_usage::{
   collect_delete_subqueries, collect_select_subqueries, collect_update_subqueries,
-  node_external_trans_tables, FrozenColUsageNode,
+  node_external_trans_tables, ColUsageNode,
 };
 use crate::common::{
   lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, OrigP, QueryPlan, TMStatus, Timestamp,
@@ -76,7 +76,7 @@ pub struct GRQueryPlan {
   pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   pub table_location_map: BTreeMap<TablePath, Gen>,
   pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
-  pub col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, FrozenColUsageNode))>,
+  pub col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, ColUsageNode))>,
 }
 
 #[derive(Debug)]

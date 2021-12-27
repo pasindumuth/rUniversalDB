@@ -106,10 +106,10 @@ impl MSTableReadES {
     MSTableReadAction::Wait
   }
 
-  /// This checks that `external_cols` are not present, and `safe_present_cols` and
+  /// This checks that free `external_cols` are not present, and `safe_present_cols` and
   /// `extra_req_cols` are preset.
   ///
-  /// Note: this does *not* required columns to be locked.
+  /// Note: this does *not* required columns to be globally locked, only locally.
   fn does_query_plan_align(&self, ctx: &TabletContext) -> bool {
     // First, check that `external_cols are absent.
     for col in free_external_cols(&self.query_plan.col_usage_node.external_cols) {
