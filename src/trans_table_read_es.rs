@@ -180,8 +180,7 @@ impl TransTableReadES {
       children.push((nodes_external_cols(child), nodes_external_trans_tables(child)));
     }
 
-    // Create the child context. Recall that we are able to unwrap `compute_contexts`
-    // for the case TransTables since there is no KeyBound Computation.
+    // Create the child context.
     let child_contexts = compute_contexts(
       self.context.deref(),
       TransLocalTable::new(
@@ -190,8 +189,7 @@ impl TransTableReadES {
         &self.query_plan.col_usage_node.source,
       ),
       children,
-    )
-    .unwrap();
+    );
 
     // Finally, compute the GRQueryESs.
     let subquery_view = GRQueryConstructorView {

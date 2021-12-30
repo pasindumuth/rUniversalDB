@@ -290,7 +290,7 @@ impl MSTableReadES {
   ) -> MSTableReadAction {
     match &self.state {
       MSReadExecutionS::Pending(pending) => {
-        let gr_query_statuses = match compute_subqueries(
+        let gr_query_statuses = compute_subqueries(
           GRQueryConstructorView {
             root_query_path: &self.root_query_path,
             timestamp: &self.timestamp,
@@ -312,13 +312,7 @@ impl MSTableReadES {
               self.tier.clone(),
             ),
           ),
-        ) {
-          Ok(gr_query_statuses) => gr_query_statuses,
-          Err(eval_error) => {
-            self.state = MSReadExecutionS::Done;
-            return MSTableReadAction::QueryError(mk_eval_error(eval_error));
-          }
-        };
+        );
 
         // Here, we have computed all GRQueryESs, and we can now add them to Executing.
         let mut subqueries = Vec::<SingleSubqueryStatus>::new();

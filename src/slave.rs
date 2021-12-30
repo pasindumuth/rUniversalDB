@@ -137,7 +137,7 @@ pub enum FullSlaveInput {
 //  Constants
 // -----------------------------------------------------------------------------------------------
 
-pub const REMOTE_LEADER_CHANGED_PERIOD: u128 = 4;
+pub const REMOTE_LEADER_CHANGED_PERIOD_MS: u128 = 5;
 
 // -----------------------------------------------------------------------------------------------
 //  Status
@@ -262,7 +262,7 @@ impl SlaveState {
     self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::LeaderHeartbeat);
     self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::NextIndex);
 
-    // Broadcast Gossip data
+    // Start periodic broadcasting of RemoteLeaderChanged
     self.ctx.handle_input(
       io_ctx,
       &mut self.statuses,
@@ -502,7 +502,7 @@ impl SlaveContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD), SlaveTimerInput::RemoteLeaderChanged);
+          io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD_MS), SlaveTimerInput::RemoteLeaderChanged);
         }
       },
       SlaveForwardMsg::SlaveBundle(bundle) => {

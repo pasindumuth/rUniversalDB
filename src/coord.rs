@@ -274,7 +274,7 @@ impl CoordContext {
                   statuses.ms_coord_ess.get(&query.location_prefix.source.query_id)
                 {
                   let es = ms_coord.es.to_exec();
-                  // Construct and start the TransQueryReplanningES
+                  // Construct and start the TransQueryPlanningES
                   let trans_table = map_insert(
                     &mut statuses.trans_table_read_ess,
                     &perform_query.query_id,
@@ -306,7 +306,7 @@ impl CoordContext {
                 } else if let Some(gr_query) =
                   statuses.gr_query_ess.get(&query.location_prefix.source.query_id)
                 {
-                  // Construct and start the TransQueryReplanningES
+                  // Construct and start the TransQueryPlanningES
                   let trans_table = map_insert(
                     &mut statuses.trans_table_read_ess,
                     &perform_query.query_id,
@@ -365,10 +365,6 @@ impl CoordContext {
             let (query_id, action) =
               paxos2pc::handle_tm_msg(self, io_ctx, &mut statuses.finish_query_tm_ess, message);
             self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
-          }
-          msg::CoordMessage::MasterQueryPlanningAborted(_) => {
-            // In practice, this is never received.
-            panic!();
           }
           msg::CoordMessage::MasterQueryPlanningSuccess(success) => {
             // Route the response to the appropriate MSCoordES.

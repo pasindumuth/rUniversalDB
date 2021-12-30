@@ -302,7 +302,7 @@ impl MSTableDeleteES {
   ) -> MSTableDeleteAction {
     match &self.state {
       MSDeleteExecutionS::Pending(pending) => {
-        let gr_query_statuses = match compute_subqueries(
+        let gr_query_statuses = compute_subqueries(
           GRQueryConstructorView {
             root_query_path: &self.root_query_path,
             timestamp: &self.timestamp,
@@ -325,13 +325,7 @@ impl MSTableDeleteES {
                                      // one lower than which to read from.
             ),
           ),
-        ) {
-          Ok(gr_query_statuses) => gr_query_statuses,
-          Err(eval_error) => {
-            self.state = MSDeleteExecutionS::Done;
-            return MSTableDeleteAction::QueryError(mk_eval_error(eval_error));
-          }
-        };
+        );
 
         // Here, we have to evaluate subqueries. Thus, we go to Executing and return
         // SendSubqueries to the parent server.

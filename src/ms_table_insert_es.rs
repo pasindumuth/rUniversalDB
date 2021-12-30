@@ -18,8 +18,8 @@ use crate::server::{
 };
 use crate::storage::{GenericTable, MSStorageView, StorageView, PRESENCE_VALN};
 use crate::tablet::{
-  compute_subqueries, ColumnsLocking, Executing, MSQueryES, RequestedReadProtected,
-  SingleSubqueryStatus, StorageLocalTable, SubqueryFinished, SubqueryPending, TabletContext,
+  ColumnsLocking, Executing, MSQueryES, RequestedReadProtected, SingleSubqueryStatus,
+  StorageLocalTable, SubqueryFinished, SubqueryPending, TabletContext,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;

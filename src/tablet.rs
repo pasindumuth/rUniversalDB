@@ -874,7 +874,7 @@ impl TabletContext {
                 if let Some(gr_query) =
                   statuses.gr_query_ess.get(&query.location_prefix.source.query_id)
                 {
-                  // Construct and start the TransQueryReplanningES
+                  // Construct and start the TransQueryPlanningES
                   let trans_table = map_insert(
                     &mut statuses.trans_table_read_ess,
                     &perform_query.query_id,
@@ -938,7 +938,7 @@ impl TabletContext {
                         query_id: ms_query_id.clone(),
                       };
 
-                      // Create an MSReadTableES in the QueryReplanning state, and start it.
+                      // Create an MSReadTableES in the QueryPlanning state, and start it.
                       let ms_read = map_insert(
                         &mut statuses.ms_table_read_ess,
                         &perform_query.query_id,
@@ -1033,7 +1033,7 @@ impl TabletContext {
                       query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
                     *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
 
-                    // Create an MSWriteTableES in the QueryReplanning state, and add it to
+                    // Create an MSWriteTableES in the QueryPlanning state, and add it to
                     // the MSQueryES.
                     let ms_write = map_insert(
                       &mut statuses.ms_table_write_ess,
@@ -1105,7 +1105,7 @@ impl TabletContext {
                       query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
                     *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
 
-                    // Create an MSTableInsertTableES in the QueryReplanning state, and add it to
+                    // Create an MSTableInsertTableES in the QueryPlanning state, and add it to
                     // the MSQueryES.
                     let ms_insert = map_insert(
                       &mut statuses.ms_table_insert_ess,
@@ -1170,7 +1170,7 @@ impl TabletContext {
                       query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
                     *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
 
-                    // Create an MSWriteTableES in the QueryReplanning state, and add it to
+                    // Create an MSWriteTableES in the QueryPlanning state, and add it to
                     // the MSQueryES.
                     let ms_delete = map_insert(
                       &mut statuses.ms_table_delete_ess,
@@ -2922,7 +2922,7 @@ pub fn compute_contexts<LocalTableT: LocalTable>(
   parent_context: &Context,
   local_table: LocalTableT,
   children: Vec<(Vec<proc::ColumnRef>, Vec<TransTableName>)>,
-) -> Result<Vec<Context>, EvalError> {
+) -> Vec<Context> {
   // Create the ContextConstruct.
   let context_constructor =
     ContextConstructor::new(parent_context.context_schema.clone(), local_table, children);
@@ -2949,9 +2949,10 @@ pub fn compute_contexts<LocalTableT: LocalTable>(
     Ok(())
   };
 
-  // Run the Constructor. Recall that this can return an error during to subtable computation.
-  context_constructor.run(&parent_context.context_rows, Vec::new(), callback)?;
-  Ok(child_contexts)
+  // Run the Constructor. Recall that errors are only returned from the callback,
+  // which in this case does not return any errors.
+  context_constructor.run(&parent_context.context_rows, Vec::new(), callback).unwrap();
+  child_contexts
 }
 
 /// This computes GRQueryESs corresponding to every element in `subqueries`.
@@ -2963,7 +2964,7 @@ pub fn compute_subqueries<
   subquery_view: GRQueryConstructorView<SqlQueryT>,
   rand: &mut RngCoreT,
   local_table: LocalTableT,
-) -> Result<Vec<GRQueryES>, EvalError> {
+) -> Vec<GRQueryES> {
   // Here, we construct first construct all of the subquery Contexts using the
   // ContextConstructor, and then we construct GRQueryESs.
 
@@ -2974,7 +2975,7 @@ pub fn compute_subqueries<
   }
 
   // Create the child context.
-  let child_contexts = compute_contexts(subquery_view.context, local_table, children)?;
+  let child_contexts = compute_contexts(subquery_view.context, local_table, children);
 
   // We compute all GRQueryESs.
   let mut gr_query_ess = Vec::<GRQueryES>::new();
@@ -2986,5 +2987,5 @@ pub fn compute_subqueries<
     ));
   }
 
-  Ok(gr_query_ess)
+  gr_query_ess
 }

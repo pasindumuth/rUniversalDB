@@ -107,7 +107,6 @@ impl Stats {
               TabletMessage::DropTable(_) => self.tablet_ddl += 1,
             },
             SlaveRemotePayload::CoordMessage(_, m) => match m {
-              CoordMessage::MasterQueryPlanningAborted(_) => {}
               CoordMessage::MasterQueryPlanningSuccess(_) => {}
               CoordMessage::PerformQuery(_) => self.coord_pcsa += 1,
               CoordMessage::CancelQuery(_) => self.coord_pcsa += 1,

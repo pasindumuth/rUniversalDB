@@ -303,7 +303,7 @@ impl MSTableWriteES {
   ) -> MSTableWriteAction {
     match &self.state {
       MSWriteExecutionS::Pending(pending) => {
-        let gr_query_statuses = match compute_subqueries(
+        let gr_query_statuses = compute_subqueries(
           GRQueryConstructorView {
             root_query_path: &self.root_query_path,
             timestamp: &self.timestamp,
@@ -326,13 +326,7 @@ impl MSTableWriteES {
                                      // one lower than which to read from.
             ),
           ),
-        ) {
-          Ok(gr_query_statuses) => gr_query_statuses,
-          Err(eval_error) => {
-            self.state = MSWriteExecutionS::Done;
-            return MSTableWriteAction::QueryError(mk_eval_error(eval_error));
-          }
-        };
+        );
 
         // Here, we have to evaluate subqueries. Thus, we go to Executing and return
         // SendSubqueries to the parent server.

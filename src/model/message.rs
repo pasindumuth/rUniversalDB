@@ -139,7 +139,6 @@ pub enum TabletMessage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum CoordMessage {
   // Master Responses
-  MasterQueryPlanningAborted(MasterQueryPlanningAborted),
   MasterQueryPlanningSuccess(MasterQueryPlanningSuccess),
 
   // PCSA
@@ -482,11 +481,6 @@ pub struct PerformMasterQueryPlanning {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CancelMasterQueryPlanning {
   pub query_id: QueryId,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct MasterQueryPlanningAborted {
-  pub return_qid: QueryId,
 }
 
 /// See `QueryPlan`

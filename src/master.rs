@@ -138,6 +138,9 @@ pub enum MasterTimerInput {
   /// This is used to periodically propagate out RemoteLeaderChanged. It is
   /// only used by the Leader.
   RemoteLeaderChanged,
+  /// This is used to periodically broadcast the `GossipData` to the Slave Leaderships. This
+  /// ensures all Slave Nodes eventually get the latest `GossipData`.
+  BroadcastGossip,
 }
 
 pub enum FullMasterInput {
@@ -149,7 +152,8 @@ pub enum FullMasterInput {
 //  Constants
 // -----------------------------------------------------------------------------------------------
 
-const REMOTE_LEADER_CHANGED_PERIOD: u128 = 1;
+const REMOTE_LEADER_CHANGED_PERIOD_MS: u128 = 5;
+const GOSSIP_DATA_PERIOD_MS: u128 = 5;
 
 // -----------------------------------------------------------------------------------------------
 //  TMServerContext AlterTable
@@ -345,12 +349,19 @@ impl MasterState {
     self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::LeaderHeartbeat);
     self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::NextIndex);
 
-    // Broadcast Gossip data
+    // Start periodic broadcasting of RemoteLeaderChanged
     self.ctx.handle_input(
       io_ctx,
       &mut self.statuses,
       MasterForwardMsg::MasterTimerInput(MasterTimerInput::RemoteLeaderChanged),
-    )
+    );
+
+    // Start periodic broadcasting of GossipData
+    self.ctx.handle_input(
+      io_ctx,
+      &mut self.statuses,
+      MasterForwardMsg::MasterTimerInput(MasterTimerInput::BroadcastGossip),
+    );
   }
 
   pub fn handle_input<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, input: FullMasterInput) {
@@ -510,13 +521,24 @@ impl MasterContext {
         }
         MasterTimerInput::RemoteLeaderChanged => {
           if self.is_leader() {
-            // If this node is the Leader, then send out RemoteLeaderChanged.
+            // If this node is the Leader, then send out RemoteLeaderChanged to all Slaves.
             self.broadcast_leadership(io_ctx);
           }
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD), MasterTimerInput::RemoteLeaderChanged);
+          io_ctx
+            .defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD_MS), MasterTimerInput::RemoteLeaderChanged);
+        }
+        MasterTimerInput::BroadcastGossip => {
+          if self.is_leader() {
+            // If this node is the Leader, then send out GossipData to all Slaves.
+            self.broadcast_gossip(io_ctx);
+          }
+
+          // We schedule this both for all nodes, not just Leaders, so that when a Follower
+          // becomes the Leader, these timer events will already be working.
+          io_ctx.defer(mk_t(GOSSIP_DATA_PERIOD_MS), MasterTimerInput::BroadcastGossip);
         }
       },
       MasterForwardMsg::MasterBundle(bundle) => {

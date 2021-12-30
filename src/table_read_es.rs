@@ -311,7 +311,7 @@ impl TableReadES {
   ) -> TableAction {
     self.waiting_global_locks.insert(protect_qid);
     let pending = cast!(ExecutionS::Pending, &self.state).unwrap();
-    let gr_query_statuses = match compute_subqueries(
+    let gr_query_statuses = compute_subqueries(
       GRQueryConstructorView {
         root_query_path: &self.root_query_path,
         timestamp: &self.timestamp,
@@ -328,13 +328,7 @@ impl TableReadES {
         &self.sql_query.selection,
         SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
       ),
-    ) {
-      Ok(gr_query_statuses) => gr_query_statuses,
-      Err(eval_error) => {
-        self.state = ExecutionS::Done;
-        return TableAction::QueryError(mk_eval_error(eval_error));
-      }
-    };
+    );
 
     // Here, we have computed all GRQueryESs, and we can now add them to Executing.
     let mut subqueries = Vec::<SingleSubqueryStatus>::new();

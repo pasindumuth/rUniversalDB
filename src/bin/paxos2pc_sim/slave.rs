@@ -16,7 +16,7 @@ use runiversal::paxos2pc_rm;
 use runiversal::paxos2pc_rm::Paxos2PCRMAction;
 use runiversal::paxos2pc_tm;
 use runiversal::paxos2pc_tm::Paxos2PCTMAction;
-use runiversal::slave::REMOTE_LEADER_CHANGED_PERIOD;
+use runiversal::slave::REMOTE_LEADER_CHANGED_PERIOD_MS;
 use runiversal::stmpaxos2pc_rm;
 use runiversal::stmpaxos2pc_rm::STMPaxos2PCRMAction;
 use runiversal::stmpaxos2pc_tm;
@@ -231,7 +231,7 @@ impl SlaveState {
 
   pub fn initialize<IO: ISlaveIOCtx>(&mut self, io_ctx: &mut IO) {
     // Start the RemoteLeaderChange dispatch cycle
-    io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD), SlaveTimerInput::RemoteLeaderChanged);
+    io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD_MS), SlaveTimerInput::RemoteLeaderChanged);
     if self.context.is_leader() {
       // Start the bundle insertion cycle for this PaxosGroup.
       io_ctx.insert_bundle(SlaveBundle::default());
@@ -545,7 +545,8 @@ impl SlaveContext {
             }
 
             // Do this again 5 ms later.
-            io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD), SlaveTimerInput::RemoteLeaderChanged);
+            io_ctx
+              .defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD_MS), SlaveTimerInput::RemoteLeaderChanged);
           }
         }
       }

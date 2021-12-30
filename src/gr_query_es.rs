@@ -57,11 +57,6 @@ pub struct ReadStage {
 }
 
 #[derive(Debug)]
-pub struct MasterQueryReplanning {
-  pub master_query_id: QueryId,
-}
-
-#[derive(Debug)]
 pub enum GRExecutionS {
   Start,
   ReadStage(ReadStage),
