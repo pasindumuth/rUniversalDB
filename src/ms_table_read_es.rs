@@ -286,10 +286,10 @@ impl MSTableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     ms_query_es: &MSQueryES,
-    _: QueryId,
+    protect_qid: QueryId,
   ) -> MSTableReadAction {
     match &self.state {
-      MSReadExecutionS::Pending(pending) => {
+      MSReadExecutionS::Pending(pending) if protect_qid == pending.query_id => {
         let gr_query_statuses = compute_subqueries(
           GRQueryConstructorView {
             root_query_path: &self.root_query_path,
@@ -388,7 +388,7 @@ impl MSTableReadES {
   }
 
   /// Handles a ES finishing with all subqueries results in.
-  pub fn finish_ms_table_read_es<IO: CoreIOCtx>(
+  fn finish_ms_table_read_es<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
     _: &mut IO,

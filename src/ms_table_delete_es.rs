@@ -298,10 +298,10 @@ impl MSTableDeleteES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     ms_query_es: &mut MSQueryES,
-    _: QueryId,
+    protect_qid: QueryId,
   ) -> MSTableDeleteAction {
     match &self.state {
-      MSDeleteExecutionS::Pending(pending) => {
+      MSDeleteExecutionS::Pending(pending) if protect_qid == pending.query_id => {
         let gr_query_statuses = compute_subqueries(
           GRQueryConstructorView {
             root_query_path: &self.root_query_path,
@@ -402,7 +402,7 @@ impl MSTableDeleteES {
   }
 
   /// Handles a ES finishing with all subqueries results in.
-  pub fn finish_ms_table_delete_es<IO: CoreIOCtx>(
+  fn finish_ms_table_delete_es<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
     _: &mut IO,

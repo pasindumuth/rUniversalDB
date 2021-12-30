@@ -309,49 +309,56 @@ impl TableReadES {
     io_ctx: &mut IO,
     protect_qid: QueryId,
   ) -> TableAction {
-    self.waiting_global_locks.insert(protect_qid);
-    let pending = cast!(ExecutionS::Pending, &self.state).unwrap();
-    let gr_query_statuses = compute_subqueries(
-      GRQueryConstructorView {
-        root_query_path: &self.root_query_path,
-        timestamp: &self.timestamp,
-        sql_query: &self.sql_query,
-        query_plan: &self.query_plan,
-        query_id: &self.query_id,
-        context: &self.context,
-      },
-      io_ctx.rand(),
-      StorageLocalTable::new(
-        &ctx.table_schema,
-        &self.timestamp,
-        &self.query_plan.col_usage_node.source,
-        &self.sql_query.selection,
-        SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
-      ),
-    );
+    match &self.state {
+      ExecutionS::Pending(pending) if protect_qid == pending.query_id => {
+        self.waiting_global_locks.insert(protect_qid);
+        let gr_query_statuses = compute_subqueries(
+          GRQueryConstructorView {
+            root_query_path: &self.root_query_path,
+            timestamp: &self.timestamp,
+            sql_query: &self.sql_query,
+            query_plan: &self.query_plan,
+            query_id: &self.query_id,
+            context: &self.context,
+          },
+          io_ctx.rand(),
+          StorageLocalTable::new(
+            &ctx.table_schema,
+            &self.timestamp,
+            &self.query_plan.col_usage_node.source,
+            &self.sql_query.selection,
+            SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
+          ),
+        );
 
-    // Here, we have computed all GRQueryESs, and we can now add them to Executing.
-    let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-    for gr_query_es in &gr_query_statuses {
-      subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-        context: gr_query_es.context.clone(),
-        query_id: gr_query_es.query_id.clone(),
-      }));
-    }
+        // Here, we have computed all GRQueryESs, and we can now add them to Executing.
+        let mut subqueries = Vec::<SingleSubqueryStatus>::new();
+        for gr_query_es in &gr_query_statuses {
+          subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
+            context: gr_query_es.context.clone(),
+            query_id: gr_query_es.query_id.clone(),
+          }));
+        }
 
-    // Move the ES to the Executing state.
-    self.state = ExecutionS::Executing(Executing {
-      completed: 0,
-      subqueries,
-      row_region: pending.read_region.row_region.clone(),
-    });
+        // Move the ES to the Executing state.
+        self.state = ExecutionS::Executing(Executing {
+          completed: 0,
+          subqueries,
+          row_region: pending.read_region.row_region.clone(),
+        });
 
-    if gr_query_statuses.is_empty() {
-      // Since there are no subqueries, we can go straight to finishing the ES.
-      self.finish_table_read_es(ctx, io_ctx)
-    } else {
-      // Return the subqueries
-      TableAction::SendSubqueries(gr_query_statuses)
+        if gr_query_statuses.is_empty() {
+          // Since there are no subqueries, we can go straight to finishing the ES.
+          self.finish_table_read_es(ctx, io_ctx)
+        } else {
+          // Return the subqueries
+          TableAction::SendSubqueries(gr_query_statuses)
+        }
+      }
+      _ => {
+        debug_assert!(false);
+        TableAction::Wait
+      }
     }
   }
 

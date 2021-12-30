@@ -34,6 +34,7 @@ pub struct Pending {
   row_region: Vec<KeyBound>,
   update_view: GenericTable,
   res_table_view: TableView,
+  query_id: QueryId,
 }
 
 #[derive(Debug)]
@@ -376,11 +377,13 @@ impl MSTableInsertES {
       self.state = MSTableInsertExecutionS::Done;
       MSTableInsertAction::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
     } else {
+      let protect_qid = mk_qid(io_ctx.rand());
       // Move the MSTableInsertES to the Pending state with the computed update view.
       self.state = MSTableInsertExecutionS::Pending(Pending {
         row_region: row_region.clone(),
         update_view,
         res_table_view,
+        query_id: protect_qid.clone(),
       });
 
       // Construct a ReadRegion for checking that none of the new rows already exist. Note that
@@ -389,7 +392,6 @@ impl MSTableInsertES {
 
       // Add a ReadRegion to the `m_waiting_read_protected` and the
       // WriteRegion into `m_write_protected`.
-      let protect_qid = mk_qid(io_ctx.rand());
       let verifying = ctx.verifying_writes.get_mut(&self.timestamp).unwrap();
       verifying.m_waiting_read_protected.insert(RequestedReadProtected {
         orig_p: OrigP::new(self.query_id.clone()),
@@ -407,10 +409,10 @@ impl MSTableInsertES {
     ctx: &mut TabletContext,
     _: &mut IO,
     ms_query_es: &mut MSQueryES,
-    _: QueryId,
+    protect_qid: QueryId,
   ) -> MSTableInsertAction {
     match &self.state {
-      MSTableInsertExecutionS::Pending(pending) => {
+      MSTableInsertExecutionS::Pending(pending) if protect_qid == pending.query_id => {
         // Verify that the keys are not in the storage. We create a PresenceSnapshot only
         // consisting of keys and verify that the Insert does not write to these keys.
         let storage_view = MSStorageView::new(

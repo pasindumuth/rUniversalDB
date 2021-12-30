@@ -50,23 +50,6 @@ pub enum CoordState {
   Done,
 }
 
-impl CoordState {
-  fn stage_idx(&self) -> Option<usize> {
-    match self {
-      CoordState::Start => Some(0),
-      CoordState::Stage(stage) => Some(stage.stage_idx),
-      _ => None,
-    }
-  }
-
-  fn stage_query_id(&self) -> Option<QueryId> {
-    match self {
-      CoordState::Stage(stage) => Some(stage.stage_query_id.clone()),
-      _ => None,
-    }
-  }
-}
-
 #[derive(Debug)]
 pub struct MSCoordES {
   // Metadata copied from outside.
@@ -138,8 +121,7 @@ impl FullMSCoordES {
       let action = plan_es.start(ctx, io_ctx);
       self.handle_planning_action(ctx, io_ctx, action)
     } else {
-      debug_assert!(false);
-      MSQueryCoordAction::Wait
+      Self::unexpected_branch()
     }
   }
 
@@ -155,8 +137,7 @@ impl FullMSCoordES {
       let action = plan_es.handle_master_query_plan(ctx, io_ctx, master_qid, result);
       self.handle_planning_action(ctx, io_ctx, action)
     } else {
-      debug_assert!(false);
-      MSQueryCoordAction::Wait
+      Self::unexpected_branch()
     }
   }
 
@@ -167,29 +148,32 @@ impl FullMSCoordES {
     io_ctx: &mut IO,
     action: QueryPlanningAction,
   ) -> MSQueryCoordAction {
-    match action {
-      QueryPlanningAction::Wait => MSQueryCoordAction::Wait,
-      QueryPlanningAction::Success(query_plan) => {
-        let plan_es = cast!(FullMSCoordES::QueryPlanning, self).unwrap();
-        *self = FullMSCoordES::Executing(MSCoordES {
-          timestamp: plan_es.timestamp.clone(),
-          query_id: plan_es.query_id.clone(),
-          sql_query: plan_es.sql_query.clone(),
-          query_plan: query_plan.clone(),
-          all_rms: Default::default(),
-          trans_table_views: vec![],
-          state: CoordState::Start,
-          registered_queries: Default::default(),
-        });
+    if let FullMSCoordES::QueryPlanning(plan_es) = self {
+      match action {
+        QueryPlanningAction::Wait => MSQueryCoordAction::Wait,
+        QueryPlanningAction::Success(query_plan) => {
+          *self = FullMSCoordES::Executing(MSCoordES {
+            timestamp: plan_es.timestamp.clone(),
+            query_id: plan_es.query_id.clone(),
+            sql_query: plan_es.sql_query.clone(),
+            query_plan: query_plan.clone(),
+            all_rms: Default::default(),
+            trans_table_views: vec![],
+            state: CoordState::Start,
+            registered_queries: Default::default(),
+          });
 
-        // Move the ES onto the next stage.
-        self.advance(ctx, io_ctx)
+          // Move the ES onto the next stage.
+          self.advance(ctx, io_ctx)
+        }
+        QueryPlanningAction::Failed(error) => {
+          // Here, the QueryPlanning had failed. We do not need to ECU because
+          // QueryPlanning will be in Done.
+          MSQueryCoordAction::FatalFailure(error)
+        }
       }
-      QueryPlanningAction::Failed(error) => {
-        // Here, the QueryPlanning had failed. We do not need to ECU because
-        // QueryPlanning will be in Done.
-        MSQueryCoordAction::FatalFailure(error)
-      }
+    } else {
+      Self::unexpected_branch()
     }
   }
 
@@ -202,53 +186,55 @@ impl FullMSCoordES {
     new_rms: BTreeSet<TQueryPath>,
     results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
   ) -> MSQueryCoordAction {
-    let es = if let FullMSCoordES::Executing(es) = self {
-      es
-    } else {
-      return MSQueryCoordAction::Wait;
-    };
+    match self {
+      FullMSCoordES::Executing(es) => {
+        match &es.state {
+          CoordState::Stage(stage) if tm_qid == stage.stage_query_id => {
+            // Combine the results into a single one
+            let (_, query_stage) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
+            let (schema, table_views) = match query_stage {
+              proc::MSQueryStage::SuperSimpleSelect(sql_query) => {
+                let (_, pre_agg_table_views) = merge_table_views(results);
+                match perform_aggregation(sql_query, pre_agg_table_views) {
+                  Ok(result) => result,
+                  Err(eval_error) => {
+                    self.exit_and_clean_up(ctx, io_ctx);
+                    return MSQueryCoordAction::FatalFailure(
+                      msg::ExternalAbortedData::QueryExecutionError(
+                        msg::ExternalQueryError::RuntimeError {
+                          msg: format!(
+                            "Aggregation of MSQueryES failed with error {:?}",
+                            eval_error
+                          ),
+                        },
+                      ),
+                    );
+                  }
+                }
+              }
+              proc::MSQueryStage::Update(_) => merge_table_views(results),
+              proc::MSQueryStage::Insert(_) => merge_table_views(results),
+              proc::MSQueryStage::Delete(_) => merge_table_views(results),
+            };
 
-    // We do some santity check on the result. We verify that the
-    // TMStatus that just finished had the right QueryId.
-    assert_eq!(tm_qid, es.state.stage_query_id().unwrap());
-    // Look up the schema for the stage in the QueryPlan, and assert it's the same as the result.
-    let stage = cast!(CoordState::Stage, &es.state).unwrap();
+            let (trans_table_name, _) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
+            let (plan_schema, _) =
+              lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
+            assert_eq!(plan_schema, &schema);
+            // Recall that since we only send out one ContextRow, there should only be one TableView.
+            assert_eq!(table_views.len(), 1);
 
-    // Combine the results into a single one
-    let (_, query_stage) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
-    let (schema, table_views) = match query_stage {
-      proc::MSQueryStage::SuperSimpleSelect(sql_query) => {
-        let (_, pre_agg_table_views) = merge_table_views(results);
-        match perform_aggregation(sql_query, pre_agg_table_views) {
-          Ok(result) => result,
-          Err(eval_error) => {
-            self.exit_and_clean_up(ctx, io_ctx);
-            return MSQueryCoordAction::FatalFailure(
-              msg::ExternalAbortedData::QueryExecutionError(
-                msg::ExternalQueryError::RuntimeError {
-                  msg: format!("Aggregation of MSQueryES failed with error {:?}", eval_error),
-                },
-              ),
-            );
+            // Then, the results to the `trans_table_views`
+            let table_view = table_views.into_iter().next().unwrap();
+            es.trans_table_views.push((trans_table_name.clone(), (schema, table_view)));
+            es.all_rms.extend(new_rms);
+            self.advance(ctx, io_ctx)
           }
+          _ => Self::unexpected_branch(),
         }
       }
-      proc::MSQueryStage::Update(_) => merge_table_views(results),
-      proc::MSQueryStage::Insert(_) => merge_table_views(results),
-      proc::MSQueryStage::Delete(_) => merge_table_views(results),
-    };
-
-    let (trans_table_name, _) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
-    let (plan_schema, _) = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
-    assert_eq!(plan_schema, &schema);
-    // Recall that since we only send out one ContextRow, there should only be one TableView.
-    assert_eq!(table_views.len(), 1);
-
-    // Then, the results to the `trans_table_views`
-    let table_view = table_views.into_iter().next().unwrap();
-    es.trans_table_views.push((trans_table_name.clone(), (schema, table_view)));
-    es.all_rms.extend(new_rms);
-    self.advance(ctx, io_ctx)
+      _ => Self::unexpected_branch(),
+    }
   }
 
   /// This is called when the TMStatus has aborted.
@@ -693,6 +679,11 @@ impl FullMSCoordES {
   pub fn to_exec(&self) -> &MSCoordES {
     cast!(FullMSCoordES::Executing, self).unwrap()
   }
+
+  fn unexpected_branch() -> MSQueryCoordAction {
+    debug_assert!(false);
+    MSQueryCoordAction::Wait
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -757,8 +748,7 @@ impl QueryPlanningES {
         Err(_) => return self.perform_master_query_planning(ctx, io_ctx),
       }
     } else {
-      debug_assert!(false);
-      QueryPlanningAction::Wait
+      Self::unexpected_branch()
     }
   }
 
@@ -882,10 +872,7 @@ impl QueryPlanningES {
           }
         }
       }
-      _ => {
-        debug_assert!(false);
-        QueryPlanningAction::Wait
-      }
+      _ => Self::unexpected_branch(),
     }
   }
 
@@ -937,5 +924,10 @@ impl QueryPlanningES {
       QueryPlanningS::Done => {}
     }
     self.state = QueryPlanningS::Done;
+  }
+
+  fn unexpected_branch() -> QueryPlanningAction {
+    debug_assert!(false);
+    QueryPlanningAction::Wait
   }
 }
