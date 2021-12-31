@@ -385,6 +385,10 @@ impl FullMSCoordES {
       }
 
       // Cancel all RegisteredQueries that are not also an RM in the upcoming Paxos2PC.
+      //
+      // Note: For all the Registered Queries we do not cancel here, we can think of them as
+      // being handed off to FinishQueryTMES to finish off. If that is implemented correctly,
+      // then this ES will have done its duty of making sure all RegisteredQueries get cleaned up.
       for registered_query in &es.registered_queries {
         if !es.all_rms.contains(registered_query) {
           ctx.ctx(io_ctx).send_to_ct(

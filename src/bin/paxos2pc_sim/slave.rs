@@ -399,11 +399,6 @@ impl SlaveContext {
         }
         ExternalMessage::SimpleRequest(simple_req) => {
           let query_id = simple_req.query_id;
-          let mut es = SimpleTMES {
-            query_id: query_id.clone(),
-            state: paxos2pc_tm::State::Start,
-            inner: SimpleTMInner {},
-          };
 
           // Construct SimplePrepares
           let mut prepare_payloads = BTreeMap::<SlaveGroupId, SimplePrepare>::new();
@@ -412,8 +407,15 @@ impl SlaveContext {
           }
 
           // Start the TM
-          es.start_orig(self, io_ctx, prepare_payloads);
-          statuses.simple_tm_ess.insert(query_id, es);
+          let outer = SimpleTMES::start_orig(
+            self,
+            io_ctx,
+            query_id.clone(),
+            SimpleTMInner {},
+            prepare_payloads,
+          );
+
+          statuses.simple_tm_ess.insert(query_id, outer);
         }
       },
       SlaveForwardMsg::SlaveRemotePayload(payload) => match payload {

@@ -1,5 +1,4 @@
 #![feature(map_first_last)]
-#![feature(map_into_keys_values)]
 
 use crate::advanced_parallel_test::test_all_advanced_parallel;
 use crate::advanced_serial_test::test_all_advanced_serial;

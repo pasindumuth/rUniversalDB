@@ -227,7 +227,6 @@ pub struct CheckingPreparedSt<T: PayloadTypes> {
 
 #[derive(Debug)]
 pub enum State<T: PayloadTypes> {
-  Start,
   Preparing(PreparingSt<T>),
   CheckingPrepared(CheckingPreparedSt<T>),
 }
@@ -246,22 +245,19 @@ pub struct Paxos2PCTMOuter<T: PayloadTypes, InnerT> {
 }
 
 impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
-  fn new(query_id: QueryId, inner: InnerT) -> Paxos2PCTMOuter<T, InnerT> {
-    Paxos2PCTMOuter { query_id, state: State::Start, inner }
-  }
-
   pub fn start_orig<IO: BasicIOCtx<T::NetworkMessageT>>(
-    &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
+    query_id: QueryId,
+    inner: InnerT,
     prepare_payloads: BTreeMap<T::RMPath, T::Prepare>,
-  ) -> Paxos2PCTMAction {
+  ) -> Self {
     // Send out FinishQueryPrepare to all RMs
     let all_rms: Vec<T::RMPath> = prepare_payloads.keys().cloned().collect();
     let mut rms_remaining = BTreeMap::<T::RMPath, Prepare<T>>::new();
     for (rm, payload) in prepare_payloads {
       let prepare = Prepare {
-        query_id: self.query_id.clone(),
+        query_id: query_id.clone(),
         tm: ctx.mk_node_path(),
         rms: all_rms.clone(),
         payload,
@@ -269,25 +265,32 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
       rms_remaining.insert(rm.clone(), prepare.clone());
       ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::Prepare(prepare)));
     }
-    self.state = State::Preparing(PreparingSt { all_rms, rms_remaining });
-    Paxos2PCTMAction::Wait
+    Paxos2PCTMOuter {
+      query_id,
+      state: State::Preparing(PreparingSt { all_rms, rms_remaining }),
+      inner,
+    }
   }
 
   fn start_rec<IO: BasicIOCtx<T::NetworkMessageT>>(
-    &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
+    query_id: QueryId,
+    inner: InnerT,
     all_rms: Vec<T::RMPath>,
-  ) -> Paxos2PCTMAction {
+  ) -> Self {
     // Send out FinishQueryPrepare to all RMs
     let mut rms_remaining = BTreeMap::<T::RMPath, CheckPrepared<T>>::new();
     for rm in &all_rms {
-      let check = CheckPrepared { query_id: self.query_id.clone(), tm: ctx.mk_node_path() };
+      let check = CheckPrepared { query_id: query_id.clone(), tm: ctx.mk_node_path() };
       rms_remaining.insert(rm.clone(), check.clone());
       ctx.send_to_rm(io_ctx, &rm, T::rm_msg(RMMessage::CheckPrepared(check)));
     }
-    self.state = State::CheckingPrepared(CheckingPreparedSt { all_rms, rms_remaining });
-    Paxos2PCTMAction::Wait
+    Paxos2PCTMOuter {
+      query_id,
+      state: State::CheckingPrepared(CheckingPreparedSt { all_rms, rms_remaining }),
+      inner,
+    }
   }
 
   // Paxos2PC messages
@@ -338,7 +341,6 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
           Paxos2PCTMAction::Wait
         }
       }
-      _ => Paxos2PCTMAction::Wait,
     }
   }
 
@@ -364,7 +366,6 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
         self.inner.aborted(ctx, io_ctx);
         Paxos2PCTMAction::Exit
       }
-      _ => Paxos2PCTMAction::Wait,
     }
   }
 
@@ -409,9 +410,17 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
           }
         }
       }
-      _ => {}
     }
     Paxos2PCTMAction::Wait
+  }
+
+  // Utilities
+
+  pub fn all_rms(&self) -> &Vec<T::RMPath> {
+    match &self.state {
+      State::Preparing(PreparingSt { all_rms, .. })
+      | State::CheckingPrepared(CheckingPreparedSt { all_rms, .. }) => all_rms,
+    }
   }
 }
 
@@ -469,10 +478,11 @@ pub fn handle_tm_msg<
       } else {
         // Otherwise, create a new ES
         let query_id = inform_prepared.query_id;
-        let mut outer = Paxos2PCTMOuter::new(query_id.clone(), InnerT::new_rec(ctx, io_ctx));
-        let action = outer.start_rec(ctx, io_ctx, inform_prepared.rms);
+        let inner = InnerT::new_rec(ctx, io_ctx);
+        let mut outer =
+          Paxos2PCTMOuter::start_rec(ctx, io_ctx, query_id.clone(), inner, inform_prepared.rms);
         con.insert(query_id.clone(), outer);
-        (query_id, action)
+        (query_id, Paxos2PCTMAction::Wait)
       }
     }
     TMMessage::Wait(wait) => {

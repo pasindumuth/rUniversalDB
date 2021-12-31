@@ -756,26 +756,23 @@ impl CoordContext {
           }
 
           // Add in the FinishQueryES and start it
-          let finish_query_es = map_insert(
-            &mut statuses.finish_query_tm_ess,
-            &query_id,
-            FinishQueryTMES {
-              query_id: query_id.clone(),
-              state: paxos2pc::State::Start,
-              inner: FinishQueryTMInner {
-                response_data: Some(ResponseData {
-                  request_id: ms_coord.request_id,
-                  sender_eid: ms_coord.sender_eid,
-                  sql_query,
-                  table_view,
-                  timestamp,
-                }),
-                committed: false,
-              },
+          let outer = FinishQueryTMES::start_orig(
+            self,
+            io_ctx,
+            query_id.clone(),
+            FinishQueryTMInner {
+              response_data: Some(ResponseData {
+                request_id: ms_coord.request_id,
+                sender_eid: ms_coord.sender_eid,
+                sql_query,
+                table_view,
+                timestamp,
+              }),
+              committed: false,
             },
+            prepare_payloads,
           );
-          let action = finish_query_es.start_orig(self, io_ctx, prepare_payloads);
-          self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+          statuses.finish_query_tm_ess.insert(query_id, outer);
         }
       }
       MSQueryCoordAction::FatalFailure(payload) => {
@@ -791,7 +788,6 @@ impl CoordContext {
       MSQueryCoordAction::NonFatalFailure => {
         // First ECU the MSCoordES without removing it from `statuses`.
         let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
-        ms_coord.es.exit_and_clean_up(self, io_ctx);
         let child_queries = ms_coord.child_queries.clone();
         self.exit_all(io_ctx, statuses, child_queries);
 
@@ -986,10 +982,12 @@ impl CoordContext {
     if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&register.root_query_id) {
       ms_coord.es.handle_register_query(register);
     } else {
-      // TODO: this is incorrect; we need to also check for FinishQueryES to see if this
-      //  is an RM.
-      // Otherwise, the MSCoordES no longer exists, and we should
-      // cancel the MSQueryES immediately.
+      // Otherwise, to guarantee that MSQueryESs always get cleaned up, we send a `CancelQuery`.
+      //
+      // Note that we do not need to check for the case that this MSQueryES will be cleaned up
+      // up by a FinishQueryTMES. Even if the `CancelQuery` we send out deletes the MSQueryES,
+      // Paxos2PC will gracefully abort. (But this will never happen, since we already sent out
+      // the Prepare and network queues are FIFO.)
       let query_path = register.query_path;
       self.ctx(io_ctx).send_to_t(
         query_path.node_path,

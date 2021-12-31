@@ -2782,6 +2782,8 @@ impl TabletContext {
   /// This function is used to initiate an Exit and Clean Up of ESs. This is needed to handle
   /// CancelQuery's, as well as when one on ES wants to Exit and Clean Up another ES. Note that
   /// We allow the ES at `query_id` to be in any state, or to not even exist.
+  /// TODO: I don't like the funneling behavior of this function. It makes it more cumbersome to
+  ///  verify with confidence that a particular ES exists at a certain time.
   fn exit_and_clean_up<IO: CoreIOCtx>(
     &mut self,
     io_ctx: &mut IO,
@@ -2822,15 +2824,14 @@ impl TabletContext {
     }
     // MSQueryES
     else if let Some(ms_query_es) = statuses.ms_query_ess.get(&query_id) {
-      // We should only run this code when a CancelQuery comes in (from the Slave) for
+      // We should only run this code when a CancelQuery comes in (from the Coord) for
       // the MSQueryES. We shouldn't run this code in any other circumstance (e.g.
       // DeadlockSafetyAborted), since this only sends back `LateralError`s to the origiators
       // of the MSTable*ESs, which we should only do if an ancestor is known already have exit
-      // (i..e the MSCoordES, in this case).
+      // (i.e. the MSCoordES, in this case).
       //
-      // The Slave should not send CancelQuery after it sends Prepare, since `exit_ms_query_es`
-      // can't handle Prepared MSQueryESs. As a corollary, this function should not be used when
-      // a FinishQueryAbort comes in.
+      // This is also called by RemoteLeaderChanged, when the Coord ceases to exist.
+      // Here, a LateralError is fine too.
       //
       // TODO: In the spirit of getting local safety, we shouldn't have the above expection.
       // Instead, we should give MSQueryES a state variable and have it react to CancelQuery
