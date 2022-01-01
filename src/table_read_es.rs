@@ -554,9 +554,9 @@ pub fn perform_aggregation(
 
     // Handle aggregation
     if is_agg(sql_query) {
-      // Invert `pre_agg_table_view.rows` having indexes in the outer vector
-      // correspond to the columns. Recall that there are as many columns in ``pre_agg_table_view`
-      // as there are in the final result table (due to how all SelectItems must be aggregates,
+      // Invert `pre_agg_table_view.rows` having indexes in the outer vector correspond
+      // to the columns. Recall that there are as many columns in `pre_agg_table_view` as
+      // there are in the final result table (due to how all SelectItems must be aggregates,
       // and how all aggregates take only one argument).
       // TODO perhaps introduce a SingleColumn type.
       let mut columns = Vec::<TableView>::new();

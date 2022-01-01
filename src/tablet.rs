@@ -59,33 +59,6 @@ pub mod tablet_test;
 //  SubqueryStatus
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
-pub struct SubqueryLockingSchemas {
-  // Recall that we only get to this State if a Subquery had failed. We hold onto
-  // the prior ColNames and TransTableNames (rather than computating from the QueryPlan
-  // again) so that we don't potentially lose prior ColName amendments.
-  pub old_columns: Vec<ColName>,
-  /// Recall that the set of TransTables required by a subquery never changes.
-  /// This is only here to construct the QueryPlan later.
-  pub trans_table_names: Vec<TransTableName>,
-  /// The `ColName`s from the InternalQueryError that was returned from the GRQueryES.
-  pub new_cols: Vec<ColName>,
-  /// The QueryId of the Column Locking request that this State is waiting for.
-  pub query_id: QueryId,
-}
-
-#[derive(Debug)]
-pub struct SubqueryPendingReadRegion {
-  /// This contains all columns from `old_columns`, as well as any new ones from
-  /// `new_cols` that's present in this Table that need to be locked.
-  pub new_columns: Vec<ColName>,
-  /// Recall that the set of TransTables required by a subquery never changes.
-  /// This is only here to construct the QueryPlan later.
-  pub trans_table_names: Vec<TransTableName>,
-  /// The QueryId of the ReadRegion protection request that this State is waiting for.
-  pub query_id: QueryId,
-}
-
-#[derive(Debug)]
 pub struct SubqueryPending {
   pub context: Rc<Context>,
   /// The QueryId of GRQueryES we are waiting for.
@@ -738,36 +711,38 @@ impl TabletContext {
   ) {
     match tablet_input {
       TabletForwardMsg::TabletBundle(bundle) => {
-        if self.is_leader() {
-          for paxos_log_msg in bundle {
-            match paxos_log_msg {
-              TabletPLm::LockedCols(locked_cols) => {
-                // Increase TableSchema LATs
-                for col_name in &locked_cols.cols {
-                  if lookup(&self.table_schema.key_cols, col_name).is_none() {
-                    self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
-                  }
+        for paxos_log_msg in bundle {
+          match paxos_log_msg {
+            TabletPLm::LockedCols(locked_cols) => {
+              // Increase TableSchema LATs
+              for col_name in &locked_cols.cols {
+                if lookup(&self.table_schema.key_cols, col_name).is_none() {
+                  self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
                 }
+              }
 
-                self.presence_timestamp =
-                  max(self.presence_timestamp.clone(), locked_cols.timestamp);
+              self.presence_timestamp = max(self.presence_timestamp.clone(), locked_cols.timestamp);
 
+              if self.is_leader() {
                 // Remove RequestedLockedCols and grant GlobalLockedCols
                 let req = self.inserting_locked_cols.remove(&locked_cols.query_id).unwrap();
                 self.grant_global_locked_cols(io_ctx, statuses, req.orig_p, req.query_id);
               }
-              TabletPLm::ReadProtected(read_protected) => {
+            }
+            TabletPLm::ReadProtected(read_protected) => {
+              btree_multimap_insert(
+                &mut self.read_protected,
+                &read_protected.timestamp,
+                read_protected.region,
+              );
+
+              if self.is_leader() {
                 let req = self
                   .remove_inserting_read_protected_request(
                     &read_protected.timestamp,
                     &read_protected.query_id,
                   )
                   .unwrap();
-                btree_multimap_insert(
-                  &mut self.read_protected,
-                  &read_protected.timestamp,
-                  read_protected.region,
-                );
 
                 // Inform the originator.
                 let query_id = req.orig_p.query_id;
@@ -776,27 +751,29 @@ impl TabletContext {
                   self.handle_read_es_action(io_ctx, statuses, query_id, action);
                 }
               }
-              // FinishQuery
-              TabletPLm::FinishQuery(plm) => {
-                let (query_id, action) =
-                  paxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.finish_query_ess, plm);
-                self.handle_finish_query_es_action(statuses, query_id, action);
-              }
-              // AlterTable
-              TabletPLm::AlterTable(plm) => {
-                let (query_id, action) =
-                  stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
-                self.handle_alter_table_es_action(statuses, query_id, action);
-              }
-              // DropTable
-              TabletPLm::DropTable(plm) => {
-                let (query_id, action) =
-                  stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
-                self.handle_drop_table_es_action(statuses, query_id, action);
-              }
+            }
+            // FinishQuery
+            TabletPLm::FinishQuery(plm) => {
+              let (query_id, action) =
+                paxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.finish_query_ess, plm);
+              self.handle_finish_query_es_action(statuses, query_id, action);
+            }
+            // AlterTable
+            TabletPLm::AlterTable(plm) => {
+              let (query_id, action) =
+                stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
+              self.handle_alter_table_es_action(statuses, query_id, action);
+            }
+            // DropTable
+            TabletPLm::DropTable(plm) => {
+              let (query_id, action) =
+                stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
+              self.handle_drop_table_es_action(statuses, query_id, action);
             }
           }
+        }
 
+        if self.is_leader() {
           // Run the Main Loop
           self.run_main_loop(io_ctx, statuses);
 
@@ -821,47 +798,6 @@ impl TabletContext {
             lid: self.leader_map.get(&self.this_sid.to_gid()).unwrap().clone(),
             bundle: std::mem::replace(&mut self.tablet_bundle, Vec::default()),
           }));
-        } else {
-          for paxos_log_msg in bundle {
-            match paxos_log_msg {
-              TabletPLm::LockedCols(locked_cols) => {
-                // Increase TableSchema LATs
-                for col_name in &locked_cols.cols {
-                  if lookup(&self.table_schema.key_cols, col_name).is_none() {
-                    self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
-                  }
-                }
-
-                self.presence_timestamp =
-                  max(self.presence_timestamp.clone(), locked_cols.timestamp);
-              }
-              TabletPLm::ReadProtected(read_protected) => {
-                btree_multimap_insert(
-                  &mut self.read_protected,
-                  &read_protected.timestamp,
-                  read_protected.region,
-                );
-              }
-              // FinishQuery
-              TabletPLm::FinishQuery(plm) => {
-                let (query_id, action) =
-                  paxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.finish_query_ess, plm);
-                self.handle_finish_query_es_action(statuses, query_id, action);
-              }
-              // AlterTable
-              TabletPLm::AlterTable(plm) => {
-                let (query_id, action) =
-                  stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
-                self.handle_alter_table_es_action(statuses, query_id, action);
-              }
-              // DropTable
-              TabletPLm::DropTable(plm) => {
-                let (query_id, action) =
-                  stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
-                self.handle_drop_table_es_action(statuses, query_id, action);
-              }
-            }
-          }
         }
       }
       TabletForwardMsg::TabletMessage(message) => {
@@ -1296,7 +1232,8 @@ impl TabletContext {
           // Only update the LeadershipId if the new one increases the old one.
           self.leader_map.insert(gid.clone(), lid.clone());
 
-          // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no response).
+          // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no
+          // response). Note that this is not critical for avoiding resource leaks.
           let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
           for query_id in query_ids {
             let read = statuses.table_read_ess.get_mut(&query_id).unwrap();

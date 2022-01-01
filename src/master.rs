@@ -542,12 +542,13 @@ impl MasterContext {
         }
       },
       MasterForwardMsg::MasterBundle(bundle) => {
-        if self.is_leader() {
-          for paxos_log_msg in bundle {
-            match paxos_log_msg {
-              MasterPLm::MasterQueryPlanning(planning_plm) => {
-                let query_id = planning_plm.query_id.clone();
-                let result = master_query_planning_post(self, planning_plm);
+        for paxos_log_msg in bundle {
+          match paxos_log_msg {
+            MasterPLm::MasterQueryPlanning(planning_plm) => {
+              let query_id = planning_plm.query_id.clone();
+              let result = master_query_planning_post(self, planning_plm);
+
+              if self.is_leader() {
                 if let Some(es) = statuses.planning_ess.remove(&query_id) {
                   // If the ES still exists, we respond.
                   self.ctx(io_ctx).send_to_c(
@@ -562,27 +563,29 @@ impl MasterContext {
                   );
                 }
               }
-              // CreateTable
-              MasterPLm::CreateTable(plm) => {
-                let (query_id, action) =
-                  handle_tm_plm(self, io_ctx, &mut statuses.create_table_tm_ess, plm);
-                self.handle_create_table_es_action(statuses, query_id, action);
-              }
-              // AlterTable
-              MasterPLm::AlterTable(plm) => {
-                let (query_id, action) =
-                  handle_tm_plm(self, io_ctx, &mut statuses.alter_table_tm_ess, plm);
-                self.handle_alter_table_es_action(statuses, query_id, action);
-              }
-              // DropTable
-              MasterPLm::DropTable(plm) => {
-                let (query_id, action) =
-                  handle_tm_plm(self, io_ctx, &mut statuses.drop_table_tm_ess, plm);
-                self.handle_drop_table_es_action(statuses, query_id, action);
-              }
+            }
+            // CreateTable
+            MasterPLm::CreateTable(plm) => {
+              let (query_id, action) =
+                handle_tm_plm(self, io_ctx, &mut statuses.create_table_tm_ess, plm);
+              self.handle_create_table_es_action(statuses, query_id, action);
+            }
+            // AlterTable
+            MasterPLm::AlterTable(plm) => {
+              let (query_id, action) =
+                handle_tm_plm(self, io_ctx, &mut statuses.alter_table_tm_ess, plm);
+              self.handle_alter_table_es_action(statuses, query_id, action);
+            }
+            // DropTable
+            MasterPLm::DropTable(plm) => {
+              let (query_id, action) =
+                handle_tm_plm(self, io_ctx, &mut statuses.drop_table_tm_ess, plm);
+              self.handle_drop_table_es_action(statuses, query_id, action);
             }
           }
+        }
 
+        if self.is_leader() {
           // Run the Main Loop
           self.run_main_loop(io_ctx, statuses);
 
@@ -613,32 +616,6 @@ impl MasterContext {
             &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
             std::mem::replace(&mut self.master_bundle, MasterBundle::default()),
           );
-        } else {
-          for paxos_log_msg in bundle {
-            match paxos_log_msg {
-              MasterPLm::MasterQueryPlanning(planning_plm) => {
-                master_query_planning_post(self, planning_plm);
-              }
-              // CreateTable
-              MasterPLm::CreateTable(plm) => {
-                let (query_id, action) =
-                  handle_tm_plm(self, io_ctx, &mut statuses.create_table_tm_ess, plm);
-                self.handle_create_table_es_action(statuses, query_id, action);
-              }
-              // AlterTable
-              MasterPLm::AlterTable(plm) => {
-                let (query_id, action) =
-                  handle_tm_plm(self, io_ctx, &mut statuses.alter_table_tm_ess, plm);
-                self.handle_alter_table_es_action(statuses, query_id, action);
-              }
-              // DropTable
-              MasterPLm::DropTable(plm) => {
-                let (query_id, action) =
-                  handle_tm_plm(self, io_ctx, &mut statuses.drop_table_tm_ess, plm);
-                self.handle_drop_table_es_action(statuses, query_id, action);
-              }
-            }
-          }
         }
       }
       MasterForwardMsg::MasterExternalReq(message) => {
