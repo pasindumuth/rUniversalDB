@@ -381,7 +381,7 @@ impl CoordContext {
         }
       }
       CoordForwardMsg::GossipData(gossip) => {
-        debug_assert!(self.gossip.gen < gossip.gen);
+        debug_assert!(self.gossip.get_gen() < gossip.get_gen());
         self.gossip = gossip;
 
         // Inform Top-Level ESs.

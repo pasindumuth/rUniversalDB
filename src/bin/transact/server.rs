@@ -213,15 +213,7 @@ pub fn start_server(
   let mut rand = XorShiftRng::from_entropy();
 
   // Create common Gossip
-  let gossip = Arc::new(GossipData {
-    gen: Gen(0),
-    db_schema: Default::default(),
-    table_generation: MVM::new(),
-    sharding_config: Default::default(),
-    tablet_address_config: Default::default(),
-    slave_address_config: slave_address_config.clone(),
-    master_address_config: master_address_config.clone(),
-  });
+  let gossip = Arc::new(GossipData::new(slave_address_config.clone(), master_address_config));
 
   // Construct LeaderMap
   let mut leader_map = BTreeMap::<PaxosGroupId, LeadershipId>::new();
@@ -229,8 +221,10 @@ pub fn start_server(
     PaxosGroupId::Master,
     LeadershipId { gen: Gen(0), eid: master_address_config[0].clone() },
   );
-  for (sid, eids) in &gossip.slave_address_config {
-    leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid: eids[0].clone() });
+
+  for (sid, eids) in slave_address_config {
+    let eid = eids.into_iter().next().unwrap();
+    leader_map.insert(sid.to_gid(), LeadershipId { gen: Gen(0), eid });
   }
 
   // Create the Coord

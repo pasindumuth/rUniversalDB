@@ -1,5 +1,7 @@
 use crate::alter_table_tm_es::{maybe_respond_dead, ResponseData};
-use crate::common::{cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, TableSchema, Timestamp};
+use crate::common::{
+  cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, GossipDataMutView, TableSchema, Timestamp,
+};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
   ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
@@ -172,15 +174,6 @@ pub struct CreateTableTMInner {
 }
 
 impl CreateTableTMInner {
-  /// Recompute the Gen of the Table that we are trying to create.
-  fn compute_gen(&self, ctx: &mut MasterContext) -> Gen {
-    if let Some(gen) = ctx.table_generation.get_last_present_version(&self.table_path) {
-      gen.next()
-    } else {
-      Gen(0)
-    }
-  }
-
   /// Create the Table and return the `Timestamp` at which the Table has been created
   /// (based on the `timestamp_hint` and from GossipData).
   fn apply_create<IO: BasicIOCtx>(
@@ -189,39 +182,38 @@ impl CreateTableTMInner {
     _: &mut IO,
     timestamp_hint: Timestamp,
   ) -> Timestamp {
-    let commit_timestamp =
-      max(timestamp_hint, ctx.table_generation.get_lat(&self.table_path).add(mk_t(1)));
-    let gen = self.compute_gen(ctx);
+    ctx.gossip.update(|gossip| {
+      let commit_timestamp =
+        max(timestamp_hint, gossip.table_generation.get_lat(&self.table_path).add(mk_t(1)));
+      let gen = next_gen(gossip.table_generation.get_last_present_version(&self.table_path));
 
-    // Update `table_generation`
-    ctx.table_generation.write(&self.table_path, Some(gen.clone()), commit_timestamp.clone());
+      // Update `table_generation`
+      gossip.table_generation.write(&self.table_path, Some(gen.clone()), commit_timestamp.clone());
 
-    // Update `db_schema`
-    let table_path_gen = (self.table_path.clone(), gen.clone());
-    debug_assert!(!ctx.db_schema.contains_key(&table_path_gen));
-    let mut val_cols = MVM::new();
-    for (col_name, col_type) in &self.val_cols {
-      val_cols.write(col_name, Some(col_type.clone()), commit_timestamp.clone());
-    }
-    let table_schema = TableSchema { key_cols: self.key_cols.clone(), val_cols };
-    ctx.db_schema.insert(table_path_gen.clone(), table_schema);
+      // Update `db_schema`
+      let table_path_gen = (self.table_path.clone(), gen.clone());
+      debug_assert!(!gossip.db_schema.contains_key(&table_path_gen));
+      let mut val_cols = MVM::new();
+      for (col_name, col_type) in &self.val_cols {
+        val_cols.write(col_name, Some(col_type.clone()), commit_timestamp.clone());
+      }
+      let table_schema = TableSchema { key_cols: self.key_cols.clone(), val_cols };
+      gossip.db_schema.insert(table_path_gen.clone(), table_schema);
 
-    // Update `sharding_config`.
-    let mut stripped_shards = Vec::<(TabletKeyRange, TabletGroupId)>::new();
-    for (key_range, tid, _) in &self.shards {
-      stripped_shards.push((key_range.clone(), tid.clone()));
-    }
-    ctx.sharding_config.insert(table_path_gen, stripped_shards);
+      // Update `sharding_config`.
+      let mut stripped_shards = Vec::<(TabletKeyRange, TabletGroupId)>::new();
+      for (key_range, tid, _) in &self.shards {
+        stripped_shards.push((key_range.clone(), tid.clone()));
+      }
+      gossip.sharding_config.insert(table_path_gen, stripped_shards);
 
-    // Update `tablet_address_config`.
-    for (_, tid, sid) in &self.shards {
-      ctx.tablet_address_config.insert(tid.clone(), sid.clone());
-    }
+      // Update `tablet_address_config`.
+      for (_, tid, sid) in &self.shards {
+        gossip.tablet_address_config.insert(tid.clone(), sid.clone());
+      }
 
-    // Update Gossip Gen
-    ctx.gen.inc();
-
-    commit_timestamp
+      commit_timestamp
+    })
   }
 }
 
@@ -261,7 +253,8 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
   ) -> BTreeMap<SlaveGroupId, CreateTablePrepare> {
     // The RMs are just the shards. Each shard should be in its own Slave.
     let mut prepares = BTreeMap::<SlaveGroupId, CreateTablePrepare>::new();
-    let gen = self.compute_gen(ctx);
+    let gossip_view = ctx.gossip.get();
+    let gen = next_gen(gossip_view.table_generation.get_last_present_version(&self.table_path));
     for (key_range, tid, sid) in &self.shards {
       prepares.insert(
         sid.clone(),
@@ -400,5 +393,14 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
 
   fn node_died<IO: BasicIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
+  }
+}
+
+/// Compute the next generating, taking it as 0 if it does not exist yet.
+fn next_gen(m_cur_gen: Option<&Gen>) -> Gen {
+  if let Some(gen) = m_cur_gen {
+    gen.next()
+  } else {
+    Gen(0)
   }
 }

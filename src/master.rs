@@ -237,16 +237,6 @@ impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Reflection
-// -----------------------------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub struct FullDBSchema<'a> {
-  pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: &'a MVM<TablePath, Gen>,
-}
-
-// -----------------------------------------------------------------------------------------------
 //  MasterConfig
 // -----------------------------------------------------------------------------------------------
 
@@ -287,16 +277,8 @@ pub struct MasterContext {
   pub master_config: MasterConfig,
   pub this_eid: EndpointId,
 
-  // Database Schema
-  pub gen: Gen,
-  pub db_schema: BTreeMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: MVM<TablePath, Gen>,
-
-  // Distribution
-  pub sharding_config: BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: BTreeMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
-  pub master_address_config: Vec<EndpointId>,
+  /// Metadata that is Gossiped out to the Slaves
+  pub gossip: GossipData,
 
   /// LeaderMap
   pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
@@ -316,13 +298,7 @@ impl Debug for MasterContext {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     let mut debug_trait_builder = f.debug_struct("MasterContext");
     let _ = debug_trait_builder.field("this_eid", &self.this_eid);
-    let _ = debug_trait_builder.field("gen", &self.gen);
-    let _ = debug_trait_builder.field("db_schema", &self.db_schema);
-    let _ = debug_trait_builder.field("table_generation", &self.table_generation);
-    let _ = debug_trait_builder.field("sharding_config", &self.sharding_config);
-    let _ = debug_trait_builder.field("tablet_address_config", &self.tablet_address_config);
-    let _ = debug_trait_builder.field("slave_address_config", &self.slave_address_config);
-    let _ = debug_trait_builder.field("master_address_config", &self.master_address_config);
+    let _ = debug_trait_builder.field("gossip", &self.gossip);
     let _ = debug_trait_builder.field("leader_map", &self.leader_map);
     let _ = debug_trait_builder.field("network_driver", &self.network_driver);
     let _ = debug_trait_builder.field("external_request_id_map", &self.external_request_id_map);
@@ -390,13 +366,7 @@ impl MasterContext {
     MasterContext {
       master_config,
       this_eid,
-      gen: Gen(0),
-      db_schema: Default::default(),
-      table_generation: MVM::new(),
-      sharding_config: Default::default(),
-      tablet_address_config: Default::default(),
-      slave_address_config,
-      master_address_config: master_address_config.clone(),
+      gossip: GossipData::new(slave_address_config.clone(), master_address_config.clone()),
       leader_map,
       network_driver: NetworkDriver::new(all_gids),
       external_request_id_map: Default::default(),
@@ -942,7 +912,7 @@ impl MasterContext {
     io_ctx: &mut IO,
     create_table: &proc::CreateTable,
   ) -> Vec<(TabletKeyRange, TabletGroupId, SlaveGroupId)> {
-    let mut sids = Vec::from_iter(self.slave_address_config.keys().into_iter());
+    let mut sids = Vec::from_iter(self.gossip.get().slave_address_config.keys().into_iter());
     debug_assert!(!sids.is_empty());
     let mut shards = Vec::<(TabletKeyRange, TabletGroupId, SlaveGroupId)>::new();
 
@@ -1063,7 +1033,7 @@ impl MasterContext {
   /// PaxosGroups to help maintain their LeaderMaps.
   fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
     let this_lid = self.leader_map.get(&PaxosGroupId::Master).unwrap().clone();
-    for (_, eids) in &self.slave_address_config {
+    for (_, eids) in self.gossip.get().slave_address_config {
       for eid in eids {
         io_ctx.send(
           eid,
@@ -1093,6 +1063,8 @@ impl MasterContext {
   /// This function advances the DDL ESs as far as possible. Properties:
   ///    1. Running this function again should not modify anything.
   fn advance_ddl_ess<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
+    let gossip = self.gossip.get();
+
     // First, we accumulate all TablePaths that currently have a a DDL Query running for them.
     let mut tables_being_modified = BTreeSet::<TablePath>::new();
     for (_, es) in &statuses.create_table_tm_ess {
@@ -1123,7 +1095,7 @@ impl MasterContext {
         if let paxos2pc::State::Start = &es.state {
           if !tables_being_modified.contains(&es.inner.table_path) {
             // Check Table Validity
-            if self.table_generation.get_last_version(&es.inner.table_path).is_none() {
+            if gossip.table_generation.get_last_version(&es.inner.table_path).is_none() {
               // If the table does not exist, we move the ES to WaitingInsertTMPrepared.
               es.state = paxos2pc::State::WaitingInsertTMPrepared;
               tables_being_modified.insert(es.inner.table_path.clone());
@@ -1151,10 +1123,10 @@ impl MasterContext {
           if !tables_being_modified.contains(&es.inner.table_path) {
             // Check Column Validity (which is where the Table exists and the column exists
             // or does not exist, depending on if alter_op is a DROP COLUMN or ADD COLUMN).
-            if let Some(gen) = self.table_generation.get_last_version(&es.inner.table_path) {
+            if let Some(gen) = gossip.table_generation.get_last_version(&es.inner.table_path) {
               // The Table Exists.
               let schema =
-                &self.db_schema.get(&(es.inner.table_path.clone(), gen.clone())).unwrap();
+                &gossip.db_schema.get(&(es.inner.table_path.clone(), gen.clone())).unwrap();
               if lookup_pos(&schema.key_cols, &es.inner.alter_op.col_name).is_none() {
                 // The `col_name` is not a KeyCol.
                 let contains_col = contains_col_latest(schema, &es.inner.alter_op.col_name);
@@ -1188,7 +1160,7 @@ impl MasterContext {
         if let paxos2pc::State::Start = &es.state {
           if !tables_being_modified.contains(&es.inner.table_path) {
             // Check Table Validity
-            if self.table_generation.get_last_version(&es.inner.table_path).is_some() {
+            if gossip.table_generation.get_last_version(&es.inner.table_path).is_some() {
               // If the table exists, we move the ES to WaitingInsertTMPrepared.
               es.state = paxos2pc::State::WaitingInsertTMPrepared;
               tables_being_modified.insert(es.inner.table_path.clone());
@@ -1262,7 +1234,7 @@ impl MasterContext {
 
   /// Broadcast GossipData
   pub fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO) {
-    let sids: Vec<SlaveGroupId> = self.slave_address_config.keys().cloned().collect();
+    let sids: Vec<SlaveGroupId> = self.gossip.get().slave_address_config.keys().cloned().collect();
     for sid in sids {
       self.send_gossip(io_ctx, sid);
     }
@@ -1270,24 +1242,10 @@ impl MasterContext {
 
   /// Send GossipData
   pub fn send_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, sid: SlaveGroupId) {
-    let gossip_data = GossipData {
-      gen: self.gen.clone(),
-      db_schema: self.db_schema.clone(),
-      table_generation: self.table_generation.clone(),
-      sharding_config: self.sharding_config.clone(),
-      tablet_address_config: self.tablet_address_config.clone(),
-      slave_address_config: self.slave_address_config.clone(),
-      master_address_config: self.master_address_config.clone(),
-    };
     self.ctx(io_ctx).send_to_slave_common(
       sid,
-      msg::SlaveRemotePayload::MasterGossip(msg::MasterGossip { gossip_data: gossip_data.clone() }),
+      msg::SlaveRemotePayload::MasterGossip(msg::MasterGossip { gossip_data: self.gossip.clone() }),
     );
-  }
-
-  /// This is used by the simulation tester to inspect what the current database schema is.
-  pub fn full_db_schema(&self) -> FullDBSchema {
-    FullDBSchema { db_schema: &self.db_schema, table_generation: &self.table_generation }
   }
 }
 

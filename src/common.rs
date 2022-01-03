@@ -230,19 +230,107 @@ impl TableSchema {
 // Gossip
 // -------------------------------------------------------------------------------------------------
 
-/// Holds Gossip Data in a node. It's accessible in both Tablets and Slaves.
+/// Holds system Metadata that is Gossiped out from the Master to the Slaves. It is very
+/// important, containing the dtabase schema, Paxos configuration, etc.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct GossipData {
   /// Database Schema
-  pub gen: Gen,
-  pub db_schema: BTreeMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: MVM<TablePath, Gen>,
+  gen: Gen,
+  db_schema: BTreeMap<(TablePath, Gen), TableSchema>,
+  table_generation: MVM<TablePath, Gen>,
 
   /// Distribution
-  pub sharding_config: BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
-  pub tablet_address_config: BTreeMap<TabletGroupId, SlaveGroupId>,
-  pub slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
-  pub master_address_config: Vec<EndpointId>,
+  sharding_config: BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
+  tablet_address_config: BTreeMap<TabletGroupId, SlaveGroupId>,
+  slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
+  master_address_config: Vec<EndpointId>,
+}
+
+impl GossipData {
+  pub fn new(
+    slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
+    master_address_config: Vec<EndpointId>,
+  ) -> GossipData {
+    GossipData {
+      gen: Gen(0),
+      db_schema: Default::default(),
+      table_generation: MVM::new(),
+      sharding_config: Default::default(),
+      tablet_address_config: Default::default(),
+      slave_address_config,
+      master_address_config,
+    }
+  }
+
+  /// This is the only way to modify a `GossipData` instance, which makes sure to
+  /// increment the `gen` accordingly.
+  pub fn update<T, F: FnOnce(GossipDataMutView) -> T>(&mut self, func: F) -> T {
+    self.gen.inc();
+    func(GossipDataMutView {
+      db_schema: &mut self.db_schema,
+      table_generation: &mut self.table_generation,
+      sharding_config: &mut self.sharding_config,
+      tablet_address_config: &mut self.tablet_address_config,
+      slave_address_config: &mut self.slave_address_config,
+      master_address_config: &mut self.master_address_config,
+    })
+  }
+
+  pub fn get_gen(&self) -> &Gen {
+    &self.gen
+  }
+
+  pub fn get(&self) -> GossipDataView {
+    GossipDataView {
+      db_schema: &self.db_schema,
+      table_generation: &self.table_generation,
+      sharding_config: &self.sharding_config,
+      tablet_address_config: &self.tablet_address_config,
+      slave_address_config: &self.slave_address_config,
+      master_address_config: &self.master_address_config,
+    }
+  }
+}
+
+/// An immutable view of GossipData, useful for read-only access.
+pub struct GossipDataView<'a> {
+  /// Database Schema
+  pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
+  pub table_generation: &'a MVM<TablePath, Gen>,
+
+  /// Distribution
+  pub sharding_config: &'a BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: &'a BTreeMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: &'a BTreeMap<SlaveGroupId, Vec<EndpointId>>,
+  pub master_address_config: &'a Vec<EndpointId>,
+}
+
+/// A mutable view of GossipData, useful when we want to update it (and have `gen`) be
+/// automatically updated.
+pub struct GossipDataMutView<'a> {
+  /// Database Schema
+  pub db_schema: &'a mut BTreeMap<(TablePath, Gen), TableSchema>,
+  pub table_generation: &'a mut MVM<TablePath, Gen>,
+
+  /// Distribution
+  pub sharding_config: &'a mut BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub tablet_address_config: &'a mut BTreeMap<TabletGroupId, SlaveGroupId>,
+  pub slave_address_config: &'a mut BTreeMap<SlaveGroupId, Vec<EndpointId>>,
+  pub master_address_config: &'a mut Vec<EndpointId>,
+}
+
+impl<'a> GossipDataMutView<'a> {
+  /// A convenience function to convert this mutable container into the immutable one.
+  pub fn get(&self) -> GossipDataView {
+    GossipDataView {
+      db_schema: &self.db_schema,
+      table_generation: &self.table_generation,
+      sharding_config: &self.sharding_config,
+      tablet_address_config: &self.tablet_address_config,
+      slave_address_config: &self.slave_address_config,
+      master_address_config: &self.master_address_config,
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

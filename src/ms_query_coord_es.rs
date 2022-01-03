@@ -603,7 +603,7 @@ impl FullMSCoordES {
         // `leader_map` is allowed to get ahead of the `query_leader_map` which we computed
         // earlier, so this check is necessary.
         for tid in &tids {
-          let sid = ctx.gossip.tablet_address_config.get(&tid).unwrap();
+          let sid = ctx.gossip.get().tablet_address_config.get(&tid).unwrap();
           if let Some(lid) = query_leader_map.get(sid) {
             if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
               // The `lid` has since changed, so we cannot finish this MSQueryES.
@@ -741,9 +741,10 @@ impl QueryPlanningES {
     io_ctx: &mut IO,
   ) -> QueryPlanningAction {
     if let QueryPlanningS::Start = &self.state {
+      let gossip = ctx.gossip.get();
       let mut view = StaticDBSchemaView {
-        db_schema: &ctx.gossip.db_schema,
-        table_generation: &ctx.gossip.table_generation,
+        db_schema: gossip.db_schema,
+        table_generation: gossip.table_generation,
         timestamp: self.timestamp.clone(),
       };
 
@@ -809,11 +810,12 @@ impl QueryPlanningES {
     ctx: &mut CoordContext,
     table_location_map: &BTreeMap<TablePath, Gen>,
   ) -> BTreeMap<SlaveGroupId, LeadershipId> {
+    let gossip = ctx.gossip.get();
     let mut query_leader_map = BTreeMap::<SlaveGroupId, LeadershipId>::new();
     for (table_path, gen) in table_location_map {
-      let shards = ctx.gossip.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap();
+      let shards = gossip.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap();
       for (_, tid) in shards.clone() {
-        let sid = ctx.gossip.tablet_address_config.get(&tid).unwrap().clone();
+        let sid = gossip.tablet_address_config.get(&tid).unwrap().clone();
         let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
         query_leader_map.insert(sid.clone(), lid.clone());
       }
@@ -829,8 +831,9 @@ impl QueryPlanningES {
     ctx: &CoordContext,
     master_query_plan: &msg::MasterQueryPlan,
   ) -> bool {
+    let gossip = ctx.gossip.get();
     for (table_path, gen) in &master_query_plan.table_location_map {
-      if let Some(cur_gen) = ctx.gossip.table_generation.static_read(&table_path, &self.timestamp) {
+      if let Some(cur_gen) = gossip.table_generation.static_read(&table_path, &self.timestamp) {
         if cur_gen < gen {
           return false;
         }

@@ -168,7 +168,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     _: &mut IO,
   ) -> BTreeMap<TNodePath, DropTablePrepare> {
     let mut prepares = BTreeMap::<TNodePath, DropTablePrepare>::new();
-    for rm in get_rms::<IO>(ctx, &self.table_path) {
+    for rm in get_rms::<IO>(&ctx.gossip.get(), &self.table_path) {
       prepares.insert(rm.clone(), DropTablePrepare {});
     }
     prepares
@@ -195,16 +195,19 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     io_ctx: &mut IO,
     committed_plm: &TMCommittedPLm<DropTablePayloadTypes>,
   ) -> BTreeMap<TNodePath, DropTableCommit> {
-    // Compute the resolved timestamp
-    let mut timestamp = committed_plm.payload.timestamp_hint.clone();
-    timestamp = max(timestamp, ctx.table_generation.get_lat(&self.table_path).add(mk_t(1)));
+    let (timestamp, rms) = ctx.gossip.update(|gossip| {
+      // Compute the resolved timestamp
+      let mut timestamp = committed_plm.payload.timestamp_hint.clone();
+      timestamp = max(timestamp, gossip.table_generation.get_lat(&self.table_path).add(mk_t(1)));
 
-    // The the RMs before dropping
-    let rms = get_rms::<IO>(ctx, &self.table_path);
+      // The the RMs before dropping
+      let rms = get_rms::<IO>(&gossip.get(), &self.table_path);
 
-    // Apply the Drop
-    ctx.gen.inc();
-    ctx.table_generation.write(&self.table_path, None, timestamp.clone());
+      // Apply the Drop
+      gossip.table_generation.write(&self.table_path, None, timestamp.clone());
+
+      (timestamp, rms)
+    });
 
     // Potentially respond to the External if we are the leader.
     if ctx.is_leader() {
@@ -273,7 +276,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     }
 
     let mut aborts = BTreeMap::<TNodePath, DropTableAbort>::new();
-    for rm in get_rms::<IO>(ctx, &self.table_path) {
+    for rm in get_rms::<IO>(&ctx.gossip.get(), &self.table_path) {
       aborts.insert(rm.clone(), DropTableAbort {});
     }
     aborts

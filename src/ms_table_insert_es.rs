@@ -151,7 +151,7 @@ impl MSTableInsertES {
     io_ctx: &mut IO,
   ) -> MSTableInsertAction {
     for (table_path, gen) in &self.query_plan.table_location_map {
-      if !ctx.gossip.sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
+      if !ctx.gossip.get().sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
         // If not, we go to GossipDataWaiting
         self.state = MSTableInsertExecutionS::GossipDataWaiting;
 

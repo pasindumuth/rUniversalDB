@@ -1,4 +1,6 @@
-use crate::common::{cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, Timestamp};
+use crate::common::{
+  cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, GossipData, GossipDataView, Timestamp,
+};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{proc, EndpointId, RequestId, TNodePath, TSubNodePath, TablePath};
 use crate::model::message as msg;
@@ -185,7 +187,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     _: &mut IO,
   ) -> BTreeMap<TNodePath, AlterTablePrepare> {
     let mut prepares = BTreeMap::<TNodePath, AlterTablePrepare>::new();
-    for rm in get_rms::<IO>(ctx, &self.table_path) {
+    for rm in get_rms::<IO>(&ctx.gossip.get(), &self.table_path) {
       prepares.insert(rm.clone(), AlterTablePrepare { alter_op: self.alter_op.clone() });
     }
     prepares
@@ -212,22 +214,26 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     io_ctx: &mut IO,
     committed_plm: &TMCommittedPLm<AlterTablePayloadTypes>,
   ) -> BTreeMap<TNodePath, AlterTableCommit> {
-    let gen = ctx.table_generation.get_last_version(&self.table_path).unwrap();
-    let table_schema = ctx.db_schema.get_mut(&(self.table_path.clone(), gen.clone())).unwrap();
+    let timestamp = ctx.gossip.update(|gossip| {
+      let gen = gossip.table_generation.get_last_version(&self.table_path).unwrap();
+      let table_schema = gossip.db_schema.get_mut(&(self.table_path.clone(), gen.clone())).unwrap();
 
-    // Compute the timestamp to commit at
-    let mut timestamp = committed_plm.payload.timestamp_hint.clone();
-    timestamp = max(timestamp, ctx.table_generation.get_lat(&self.table_path).add(mk_t(1)));
-    timestamp = max(timestamp, table_schema.val_cols.get_lat(&self.alter_op.col_name).add(mk_t(1)));
+      // Compute the timestamp to commit at
+      let mut timestamp = committed_plm.payload.timestamp_hint.clone();
+      timestamp = max(timestamp, gossip.table_generation.get_lat(&self.table_path).add(mk_t(1)));
+      timestamp =
+        max(timestamp, table_schema.val_cols.get_lat(&self.alter_op.col_name).add(mk_t(1)));
 
-    // Apply the AlterOp
-    ctx.gen.inc();
-    ctx.table_generation.update_lat(&self.table_path, timestamp.clone());
-    table_schema.val_cols.write(
-      &self.alter_op.col_name,
-      self.alter_op.maybe_col_type.clone(),
-      timestamp.clone(),
-    );
+      // Apply the AlterOp
+      gossip.table_generation.update_lat(&self.table_path, timestamp.clone());
+      table_schema.val_cols.write(
+        &self.alter_op.col_name,
+        self.alter_op.maybe_col_type.clone(),
+        timestamp.clone(),
+      );
+
+      timestamp
+    });
 
     // Potentially respond to the External if we are the leader.
     if ctx.is_leader() {
@@ -259,7 +265,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
 
     // Return Commit messages
     let mut commits = BTreeMap::<TNodePath, AlterTableCommit>::new();
-    for rm in get_rms::<IO>(ctx, &self.table_path) {
+    for rm in get_rms::<IO>(&ctx.gossip.get(), &self.table_path) {
       commits.insert(rm.clone(), AlterTableCommit { timestamp: timestamp.clone() });
     }
     commits
@@ -296,7 +302,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     }
 
     let mut aborts = BTreeMap::<TNodePath, AlterTableAbort>::new();
-    for rm in get_rms::<IO>(ctx, &self.table_path) {
+    for rm in get_rms::<IO>(&ctx.gossip.get(), &self.table_path) {
       aborts.insert(rm.clone(), AlterTableAbort {});
     }
     aborts
@@ -325,11 +331,11 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
 
 /// This returns the current set of RMs associated with the given `TablePath`. Recall that while
 /// the ES is alive, we ensure that this is idempotent.
-pub fn get_rms<IO: BasicIOCtx>(ctx: &mut MasterContext, table_path: &TablePath) -> Vec<TNodePath> {
-  let gen = ctx.table_generation.get_last_version(table_path).unwrap();
+pub fn get_rms<IO: BasicIOCtx>(gossip: &GossipDataView, table_path: &TablePath) -> Vec<TNodePath> {
+  let gen = gossip.table_generation.get_last_version(table_path).unwrap();
   let mut rms = Vec::<TNodePath>::new();
-  for (_, tid) in ctx.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap() {
-    let sid = ctx.tablet_address_config.get(&tid).unwrap().clone();
+  for (_, tid) in gossip.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap() {
+    let sid = gossip.tablet_address_config.get(&tid).unwrap().clone();
     rms.push(TNodePath { sid, sub: TSubNodePath::Tablet(tid.clone()) });
   }
   rms

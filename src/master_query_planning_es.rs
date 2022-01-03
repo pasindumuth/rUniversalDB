@@ -407,9 +407,10 @@ pub fn master_query_planning_pre(
   ctx: &MasterContext,
   planning_msg: msg::PerformMasterQueryPlanning,
 ) -> MasterQueryPlanningAction {
+  let gossip = ctx.gossip.get();
   let view = CheckingDBSchemaView {
-    db_schema: &ctx.db_schema,
-    table_generation: &ctx.table_generation,
+    db_schema: gossip.db_schema,
+    table_generation: gossip.table_generation,
     timestamp: planning_msg.timestamp.clone(),
   };
 
@@ -450,29 +451,31 @@ pub fn master_query_planning_post(
   ctx: &mut MasterContext,
   planning_plm: plm::MasterQueryPlanning,
 ) -> msg::MasteryQueryPlanningResult {
-  let mut view = LockingDBSchemaView {
-    db_schema: &mut ctx.db_schema,
-    table_generation: &mut ctx.table_generation,
-    timestamp: planning_plm.timestamp.clone(),
-  };
+  ctx.gossip.update(|gossip| {
+    let mut view = LockingDBSchemaView {
+      db_schema: gossip.db_schema,
+      table_generation: gossip.table_generation,
+      timestamp: planning_plm.timestamp.clone(),
+    };
 
-  match master_query_planning(view, &planning_plm.ms_query) {
-    Ok(master_query_plan) => msg::MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan),
-    Err(error) => msg::MasteryQueryPlanningResult::QueryPlanningError(match error {
-      LockingDBSchemaViewError::TableDNE(table_path) => {
-        msg::QueryPlanningError::TablesDNE(vec![table_path.clone()])
-      }
-      LockingDBSchemaViewError::ColUsageError(error) => match error {
-        ColUsageError::InvalidColumnRef => msg::QueryPlanningError::InvalidColUsage,
-        ColUsageError::InvalidSelectClause => msg::QueryPlanningError::InvalidSelect,
-      },
-      LockingDBSchemaViewError::KeyValidationError(error) => match error {
-        KeyValidationError::InvalidUpdate => msg::QueryPlanningError::InvalidUpdate,
-        KeyValidationError::InvalidInsert => msg::QueryPlanningError::InvalidInsert,
-      },
-      LockingDBSchemaViewError::ReqColPresenceError(missing_col) => {
-        msg::QueryPlanningError::RequiredColumnDNE(vec![missing_col])
-      }
-    }),
-  }
+    match master_query_planning(view, &planning_plm.ms_query) {
+      Ok(master_query_plan) => msg::MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan),
+      Err(error) => msg::MasteryQueryPlanningResult::QueryPlanningError(match error {
+        LockingDBSchemaViewError::TableDNE(table_path) => {
+          msg::QueryPlanningError::TablesDNE(vec![table_path.clone()])
+        }
+        LockingDBSchemaViewError::ColUsageError(error) => match error {
+          ColUsageError::InvalidColumnRef => msg::QueryPlanningError::InvalidColUsage,
+          ColUsageError::InvalidSelectClause => msg::QueryPlanningError::InvalidSelect,
+        },
+        LockingDBSchemaViewError::KeyValidationError(error) => match error {
+          KeyValidationError::InvalidUpdate => msg::QueryPlanningError::InvalidUpdate,
+          KeyValidationError::InvalidInsert => msg::QueryPlanningError::InvalidInsert,
+        },
+        LockingDBSchemaViewError::ReqColPresenceError(missing_col) => {
+          msg::QueryPlanningError::RequiredColumnDNE(vec![missing_col])
+        }
+      }),
+    }
+  })
 }

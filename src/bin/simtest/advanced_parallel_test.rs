@@ -4,7 +4,6 @@ use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_rid, mk_t, read_index, TableSchema, Timestamp};
-use runiversal::master::FullDBSchema;
 use runiversal::model::common::{
   ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TableView,
 };

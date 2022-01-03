@@ -487,7 +487,7 @@ impl GRQueryES {
         let tids =
           ctx.get_min_tablets(table_path, &child_sql_query.from, gen, &child_sql_query.selection);
         for tid in &tids {
-          let sid = ctx.gossip.tablet_address_config.get(&tid).unwrap();
+          let sid = ctx.gossip.get().tablet_address_config.get(&tid).unwrap();
           if let Some(lid) = query_leader_map.get(sid) {
             if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
               // The `lid` is too old, so we cannot finish this GRQueryES.

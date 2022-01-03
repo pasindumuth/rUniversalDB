@@ -1183,7 +1183,7 @@ impl TabletContext {
         self.run_main_loop(io_ctx, statuses);
       }
       TabletForwardMsg::GossipData(gossip) => {
-        debug_assert!(self.gossip.gen < gossip.gen);
+        debug_assert!(self.gossip.get_gen() < gossip.get_gen());
         self.gossip = gossip;
 
         // Inform Top-Level ESs.
@@ -1233,7 +1233,9 @@ impl TabletContext {
           self.leader_map.insert(gid.clone(), lid.clone());
 
           // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no
-          // response). Note that this is not critical for avoiding resource leaks.
+          // response). Note that although it is not critical for avoiding resource leaks, it
+          // means we only end up responding to the PaxosNode that sent the request (not a
+          // random subsequent one).
           let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
           for query_id in query_ids {
             let read = statuses.table_read_ess.get_mut(&query_id).unwrap();

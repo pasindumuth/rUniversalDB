@@ -186,7 +186,7 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
   /// Construct a `NodePath` from a `NodeGroupId`.
   /// NOTE: the `tid` must exist in the `gossip` at this point.
   pub fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
-    let sid = self.gossip.tablet_address_config.get(&tid).unwrap();
+    let sid = self.gossip.get().tablet_address_config.get(&tid).unwrap();
     TNodePath { sid: sid.clone(), sub: TSubNodePath::Tablet(tid.clone()) }
   }
 
@@ -241,7 +241,7 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
   ) -> Vec<TabletGroupId> {
     // Compute the Row Region that this selection is accessing.
     let table_path_gen = (table_path.clone(), gen.clone());
-    let key_cols = &self.gossip.db_schema.get(&table_path_gen).unwrap().key_cols;
+    let key_cols = &self.gossip.get().db_schema.get(&table_path_gen).unwrap().key_cols;
 
     // TODO: We use a trivial implementation for now. Do a proper implementation later.
     let _ = compute_key_region(selection, BTreeMap::new(), table_ref, key_cols);
@@ -251,7 +251,7 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
   /// Simply returns all `TabletGroupId`s for a `TablePath` and `Gen`
   pub fn get_all_tablets(&self, table_path: &TablePath, gen: &Gen) -> Vec<TabletGroupId> {
     let table_path_gen = (table_path.clone(), gen.clone());
-    let tablet_groups = self.gossip.sharding_config.get(&table_path_gen).unwrap();
+    let tablet_groups = self.gossip.get().sharding_config.get(&table_path_gen).unwrap();
     tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone()).collect()
   }
 }

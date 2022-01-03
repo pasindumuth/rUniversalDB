@@ -2,14 +2,14 @@ use crate::stats::Stats;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  mk_cid, mk_t, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData, MasterIOCtx,
-  MasterTraceMessage, RangeEnds, SlaveIOCtx, SlaveTraceMessage, Timestamp,
+  mk_cid, mk_t, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData, GossipDataView,
+  MasterIOCtx, MasterTraceMessage, RangeEnds, SlaveIOCtx, SlaveTraceMessage, Timestamp,
 };
 use runiversal::coord::coord_test::{assert_coord_consistency, check_coord_clean};
 use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::master_test::check_master_clean;
 use runiversal::master::{
-  FullDBSchema, FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput,
+  FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput,
 };
 use runiversal::model::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId,
@@ -408,15 +408,7 @@ impl Simulation {
     }
 
     // Gossip
-    let gossip = GossipData {
-      gen: Gen(0),
-      db_schema: Default::default(),
-      table_generation: MVM::new(),
-      sharding_config: Default::default(),
-      tablet_address_config: Default::default(),
-      slave_address_config: slave_address_config.clone(),
-      master_address_config: master_address_config.clone(),
-    };
+    let gossip = GossipData::new(slave_address_config.clone(), master_address_config.clone());
 
     // Construct LeaderMap
     sim.leader_map.insert(
@@ -568,10 +560,10 @@ impl Simulation {
 
   /// This returns the `FullDBSchema` of some random Master node. This might not be
   /// the most recent Leader. Thus, this is only an approximate of the latest `FullDBSchema`.
-  pub fn full_db_schema(&mut self) -> FullDBSchema {
+  pub fn full_db_schema(&mut self) -> GossipDataView {
     let master_eid = self.master_address_config.get(0).unwrap();
     let master_data = self.master_data.get(master_eid).unwrap();
-    master_data.master_state.ctx.full_db_schema()
+    master_data.master_state.ctx.gossip.get()
   }
 
   pub fn slave_address_config(&self) -> &BTreeMap<SlaveGroupId, Vec<EndpointId>> {

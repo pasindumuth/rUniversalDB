@@ -299,7 +299,7 @@ impl SlaveContext {
     paxos_config: PaxosConfig,
   ) -> SlaveContext {
     let all_gids = leader_map.keys().cloned().collect();
-    let paxos_nodes = gossip.slave_address_config.get(&this_sid).unwrap().clone();
+    let paxos_nodes = gossip.get().slave_address_config.get(&this_sid).unwrap().clone();
     SlaveContext {
       coord_positions,
       slave_config,
@@ -395,7 +395,7 @@ impl SlaveContext {
 
               // Dispatch GossipData
               if let Some(gossip_data) = slave_bundle.gossip_data {
-                if self.gossip.gen < gossip_data.gen {
+                if self.gossip.get_gen() < gossip_data.get_gen() {
                   let gossip = Arc::new(gossip_data);
                   slave_forward_msgs.push(SlaveForwardMsg::GossipData(gossip.clone()));
                   for tid in &all_tids {
@@ -550,10 +550,10 @@ impl SlaveContext {
           }
           msg::SlaveRemotePayload::MasterGossip(master_gossip) => {
             let incoming_gossip = master_gossip.gossip_data;
-            if self.gossip.gen < incoming_gossip.gen {
+            if self.gossip.get_gen() < incoming_gossip.get_gen() {
               if let Some(cur_next_gossip) = &self.slave_bundle.gossip_data {
                 // Check if there is an existing GossipData about to be inserted.
-                if cur_next_gossip.gen < incoming_gossip.gen {
+                if cur_next_gossip.get_gen() < incoming_gossip.get_gen() {
                   self.slave_bundle.gossip_data = Some(incoming_gossip);
                 }
               } else {
@@ -614,7 +614,7 @@ impl SlaveContext {
   /// PaxosGroups to help maintain their LeaderMaps.
   fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
     let this_lid = self.leader_map.get(&self.this_gid).unwrap().clone();
-    for (sid, eids) in &self.gossip.slave_address_config {
+    for (sid, eids) in self.gossip.get().slave_address_config {
       if sid == &self.this_sid {
         // Make sure to avoid sending this PaxosGroup the RemoteLeaderChanged.
         continue;
@@ -628,7 +628,7 @@ impl SlaveContext {
         )
       }
     }
-    for eid in &self.gossip.master_address_config {
+    for eid in self.gossip.get().master_address_config {
       io_ctx.send(
         eid,
         msg::NetworkMessage::Master(msg::MasterMessage::RemoteLeaderChangedGossip(
