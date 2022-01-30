@@ -472,7 +472,7 @@ impl SlaveContext {
     }
   }
 
-  /// Handles inputs the Slave Backend.
+  /// Handles inputs to the Slave Backend.
   fn handle_input<IO: SlaveIOCtx>(
     &mut self,
     io_ctx: &mut IO,
@@ -581,8 +581,8 @@ impl SlaveContext {
         }
       }
       SlaveForwardMsg::LeaderChanged(leader_changed) => {
-        let this_gid = self.this_sid.to_gid();
-        self.leader_map.insert(this_gid, leader_changed.lid); // Update the LeadershipId
+        // Update the LeadershipId
+        self.leader_map.insert(self.this_gid.clone(), leader_changed.lid);
 
         if self.is_leader() {
           // By the SharedPaxosInserter, these must be empty at the start of Leadership.

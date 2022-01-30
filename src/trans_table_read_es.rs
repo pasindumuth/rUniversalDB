@@ -170,6 +170,8 @@ impl TransTableReadES {
     ctx: &mut SlaveServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
+    // TODO: ... aren't we supposed to be using the GossipDataWaiting to make sure
+    //  table_location_map is high enough?
     assert!(matches!(&self.state, &TransExecutionS::Start));
     // Here, we first construct all of the subquery Contexts using the
     // ContextConstructor, and then we construct GRQueryESs.
