@@ -1,6 +1,6 @@
 use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::ColUsageNode;
-use crate::common::{GossipData, QueryPlan, Timestamp};
+use crate::common::{GossipData, QueryPlan, RemoteLeaderChangedPLm, Timestamp};
 use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::expression::EvalError;
@@ -26,6 +26,7 @@ pub enum NetworkMessage {
   External(ExternalMessage),
   Slave(SlaveMessage),
   Master(MasterMessage),
+  FreeNode(FreeNodeMessage),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -41,9 +42,97 @@ pub enum MasterExternalReq {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterMessage {
   MasterExternalReq(MasterExternalReq),
+  FreeNodeAssoc(FreeNodeAssoc),
   RemoteMessage(RemoteMessage<MasterRemotePayload>),
   RemoteLeaderChangedGossip(RemoteLeaderChangedGossip),
   PaxosDriverMessage(PaxosDriverMessage<MasterBundle>),
+}
+
+impl MasterMessage {
+  pub fn is_tier_1(&self) -> bool {
+    match self {
+      Self::PaxosDriverMessage(PaxosDriverMessage::InformLearned(_)) => true,
+      Self::PaxosDriverMessage(PaxosDriverMessage::LogSyncResponse(_)) => true,
+      _ => false,
+    }
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
+//  FreeNodeAssoc
+// -------------------------------------------------------------------------------------------------
+
+/// These are messages sent from a FreeNode to the Master.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum FreeNodeAssoc {
+  RegisterFreeNode(RegisterFreeNode),
+  FreeNodeHeartbeat(FreeNodeHeartbeat),
+  ConfirmSlaveCreation(ConfirmSlaveCreation),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum FreeNodeType {
+  NewSlaveFreeNode,
+  ReconfigFreeNode,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RegisterFreeNode {
+  pub sender_eid: EndpointId,
+  /// The type of FreeNode that we want to be registered as.
+  pub node_type: FreeNodeType,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FreeNodeHeartbeat {
+  pub sender_eid: EndpointId,
+  /// The Master `LeadershipId` the FreeNode is sending the hearbeat to.
+  pub cur_lid: LeadershipId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmSlaveCreation {
+  pub sender_eid: EndpointId,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  FreeNodeMessage
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum FreeNodeMessage {
+  StartMaster(StartMaster),
+  FreeNodeRegistered(FreeNodeRegistered),
+  MasterLeadershipId(LeadershipId),
+  ShutdownNode,
+  CreateSlaveGroup(CreateSlaveGroup),
+  SlaveSnapshot,
+  MasterSnapshot,
+}
+
+/// This sent by an admin client to the some initial master nodes to get them to start.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct StartMaster {
+  pub master_eids: Vec<EndpointId>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FreeNodeRegistered {
+  /// The `LeadershipId` of the sending Master node
+  pub cur_lid: LeadershipId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateSlaveGroup {
+  // Note that leader_map and gossip_data here will correspond exactly.
+  pub gossip: GossipData,
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+
+  pub sid: SlaveGroupId,
+  pub paxos_nodes: Vec<EndpointId>,
+
+  /// We send the `CoordGroupId`s to use
+  pub coord_ids: Vec<CoordGroupId>,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -62,6 +151,16 @@ pub enum SlaveMessage {
   RemoteMessage(RemoteMessage<SlaveRemotePayload>),
   RemoteLeaderChangedGossip(RemoteLeaderChangedGossip),
   PaxosDriverMessage(PaxosDriverMessage<SharedPaxosBundle>),
+}
+
+impl SlaveMessage {
+  pub fn is_tier_1(&self) -> bool {
+    match self {
+      Self::PaxosDriverMessage(PaxosDriverMessage::InformLearned(_)) => true,
+      Self::PaxosDriverMessage(PaxosDriverMessage::LogSyncResponse(_)) => true,
+      _ => false,
+    }
+  }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -231,6 +330,16 @@ pub struct IsLeader {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InformLearned {
+  pub should_learned: Vec<(PLIndex, Rnd)>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NewNodeStarted {
+  pub paxos_node: EndpointId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LogSyncRequest {
   pub sender_eid: EndpointId,
   pub next_index: PLIndex,
@@ -256,6 +365,8 @@ pub struct NextIndexResponse {
 pub enum PaxosDriverMessage<BundleT> {
   MultiPaxosMessage(MultiPaxosMessage<BundleT>),
   IsLeader(IsLeader),
+  InformLearned(InformLearned),
+  NewNodeStarted(NewNodeStarted),
   LogSyncRequest(LogSyncRequest),
   LogSyncResponse(LogSyncResponse<BundleT>),
   NextIndexRequest(NextIndexRequest),

@@ -345,6 +345,7 @@ pub struct RemoteLeaderChangedPLm {
 // -----------------------------------------------------------------------------------------------
 //  TMStatus
 // -----------------------------------------------------------------------------------------------
+
 // These are used to perform PCSA over the network for reads and writes.
 #[derive(Debug)]
 pub struct TMStatus {
@@ -432,6 +433,33 @@ pub fn merge_table_views(
 
 pub fn to_table_path(source: &proc::GeneralSource) -> &TablePath {
   cast!(proc::GeneralSourceRef::TablePath, &source.source_ref).unwrap()
+}
+
+/// An immutable value of type `T` with an associated version to easily tell
+/// when it has been updated.
+#[derive(Debug)]
+pub struct VersionedValue<T> {
+  gen: Gen,
+  value: T,
+}
+
+impl<T> VersionedValue<T> {
+  pub fn new(gen: Gen, value: T) -> VersionedValue<T> {
+    VersionedValue { gen, value }
+  }
+
+  pub fn set(&mut self, value: T) {
+    self.gen.inc();
+    self.value = value;
+  }
+
+  pub fn get_gen(&self) -> &Gen {
+    &self.gen
+  }
+
+  pub fn get_value(&self) -> &T {
+    &self.value
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

@@ -512,6 +512,9 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
           self.paxos_instances.remove(&index);
         }
       }
+      _ => {
+        // TODO: do
+      }
     }
     Vec::new()
   }

@@ -3,7 +3,7 @@ use crate::alter_table_tm_es::{
 };
 use crate::common::{
   lookup_pos, map_insert, mk_qid, mk_t, mk_tid, GeneralTraceMessage, GossipData, MasterIOCtx,
-  MasterTraceMessage, TableSchema, Timestamp,
+  MasterTraceMessage, TableSchema, Timestamp, VersionedValue,
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
@@ -351,6 +351,11 @@ impl MasterState {
       }
     }
   }
+
+  pub fn get_eids(&self) -> VersionedValue<BTreeSet<EndpointId>> {
+    // TODO: do this properly
+    panic!();
+  }
 }
 
 impl MasterContext {
@@ -472,6 +477,10 @@ impl MasterContext {
             }
           }
         }
+      }
+      MasterMessage::FreeNodeAssoc(_) => {
+        // TODO: do
+        unimplemented!()
       }
     }
   }

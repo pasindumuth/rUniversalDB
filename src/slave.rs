@@ -1,5 +1,6 @@
 use crate::common::{
   mk_t, BasicIOCtx, GossipData, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp,
+  VersionedValue,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::CreateTableRMES;
@@ -18,7 +19,7 @@ use crate::stmpaxos2pc_tm::RMServerContext;
 use crate::tablet::{TabletBundle, TabletForwardMsg};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -285,6 +286,11 @@ impl SlaveState {
         self.ctx.handle_input(io_ctx, &mut self.statuses, forward_msg);
       }
     }
+  }
+
+  pub fn get_eids(&self) -> VersionedValue<BTreeSet<EndpointId>> {
+    // TODO: do this properly
+    panic!();
   }
 }
 
