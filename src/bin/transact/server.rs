@@ -1,4 +1,4 @@
-use crate::GenericInput;
+use crate::{GenericInput, SERVER_PORT};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
@@ -13,6 +13,7 @@ use runiversal::model::common::{
 };
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
+use runiversal::net::{recv, send_bytes};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
@@ -21,6 +22,7 @@ use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, Ta
 use runiversal::test_utils::mk_seed;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
+use std::net::TcpStream;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -28,17 +30,74 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // -----------------------------------------------------------------------------------------------
-//  Common IO
+//  Network Helpers
 // -----------------------------------------------------------------------------------------------
 
-/// Send `msg` to the given `eid`. Note that it must be present in `net_conn_map`.
+/// Creates the FromNetwork threads for this new Incoming Connection, `stream`.
+pub fn handle_conn(to_server_sender: &Sender<GenericInput>, stream: TcpStream) -> EndpointId {
+  let other_ip = EndpointId(stream.peer_addr().unwrap().ip().to_string());
+
+  // Setup FromNetwork Thread
+  {
+    let to_server_sender = to_server_sender.clone();
+    let stream = stream.try_clone().unwrap();
+    let other_ip = other_ip.clone();
+    thread::spawn(move || loop {
+      let data = recv(&stream);
+      let network_msg: msg::NetworkMessage = rmp_serde::from_read_ref(&data).unwrap();
+      to_server_sender.send(GenericInput::Message(other_ip.clone(), network_msg)).unwrap();
+    });
+  }
+
+  other_ip
+}
+
+/// Creates a thread that acts as both the FromNetwork and ToNetwork Threads,
+/// setting up both the Incoming Connection as well as Outgoing Connection at once.
+pub fn handle_self_conn(
+  this_ip: &EndpointId,
+  out_conn_map: &Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  to_server_sender: &Sender<GenericInput>,
+) {
+  let mut out_conn_map = out_conn_map.lock().unwrap();
+  let (sender, receiver) = mpsc::channel();
+  out_conn_map.insert(this_ip.clone(), sender);
+
+  // Setup Self Connection Thread
+  let to_server_sender = to_server_sender.clone();
+  let this_ip = this_ip.clone();
+  thread::spawn(move || loop {
+    let data = receiver.recv().unwrap();
+    let network_msg: msg::NetworkMessage = rmp_serde::from_read_ref(&data).unwrap();
+    to_server_sender.send(GenericInput::Message(this_ip.clone(), network_msg)).unwrap();
+  });
+}
+
+/// Send `msg` to the given `eid`. Note that it must be present in `out_conn_map`.
 pub fn send_msg(
-  net_conn_map: &Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  out_conn_map: &Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
   eid: &EndpointId,
   msg: msg::NetworkMessage,
 ) {
-  let net_conn_map = net_conn_map.lock().unwrap();
-  let sender = net_conn_map.get(eid).unwrap();
+  let mut out_conn_map = out_conn_map.lock().unwrap();
+
+  // If there is not an out-going connection to `eid`, then make one.
+  if !out_conn_map.contains_key(eid) {
+    // We create the ToNetwork thread.
+    let (sender, receiver) = mpsc::channel();
+    out_conn_map.insert(eid.clone(), sender);
+    let EndpointId(ip) = eid.clone();
+    thread::spawn(move || {
+      let stream = TcpStream::connect(format!("{}:{}", ip, SERVER_PORT)).unwrap();
+      loop {
+        let data_out = receiver.recv().unwrap();
+        send_bytes(&data_out, &stream);
+      }
+    });
+  }
+
+  // Send the `msg` to the ToNetwork thread.
+  let sender = out_conn_map.get(eid).unwrap();
   sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
 }
 
@@ -47,12 +106,12 @@ pub fn send_msg(
 // -----------------------------------------------------------------------------------------------
 
 /// The granularity in which Timer events are executed, in microseconds
-const TIMER_INCREMENT: u64 = 250;
+pub const TIMER_INCREMENT: u64 = 250;
 
 pub struct ProdSlaveIOCtx {
   // Basic
   pub rand: XorShiftRng,
-  pub net_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
 
   // Constructing and communicating with Tablets
   pub to_slave: Sender<GenericInput>,
@@ -104,7 +163,7 @@ impl BasicIOCtx for ProdSlaveIOCtx {
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    send_msg(&self.net_conn_map, eid, msg);
+    send_msg(&self.out_conn_map, eid, msg);
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}
@@ -122,7 +181,7 @@ impl SlaveIOCtx for ProdSlaveIOCtx {
     // Spawn a new thread and create the Tablet.
     let tablet_context = TabletContext::new(helper);
     let mut io_ctx = ProdCoreIOCtx {
-      net_conn_map: self.net_conn_map.clone(),
+      out_conn_map: self.out_conn_map.clone(),
       rand,
       to_slave: self.to_slave.clone(),
     };
@@ -182,7 +241,7 @@ impl Debug for ProdSlaveIOCtx {
 pub struct ProdMasterIOCtx {
   // Basic
   pub rand: XorShiftRng,
-  pub net_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
 
   // Deferred timer tasks
   pub tasks: Arc<Mutex<BTreeMap<Timestamp, Vec<MasterTimerInput>>>>,
@@ -228,7 +287,7 @@ impl BasicIOCtx for ProdMasterIOCtx {
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    send_msg(&self.net_conn_map, eid, msg);
+    send_msg(&self.out_conn_map, eid, msg);
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}
@@ -262,7 +321,7 @@ impl Debug for ProdMasterIOCtx {
 pub struct ProdCoreIOCtx {
   // Basic
   pub rand: XorShiftRng,
-  pub net_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
 
   // Slave
   pub to_slave: Sender<GenericInput>,
@@ -280,8 +339,8 @@ impl BasicIOCtx for ProdCoreIOCtx {
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    let net_conn_map = self.net_conn_map.lock().unwrap();
-    let sender = net_conn_map.get(eid).unwrap();
+    let out_conn_map = self.out_conn_map.lock().unwrap();
+    let sender = out_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
   }
 

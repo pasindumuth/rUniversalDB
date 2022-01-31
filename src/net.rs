@@ -5,7 +5,7 @@ use std::net::TcpStream;
 /// We use simple 4 byte header that holds the
 /// length of the real message.
 
-pub fn send(data: &[u8], mut stream: &TcpStream) {
+pub fn send_bytes(data: &[u8], mut stream: &TcpStream) {
   // Write out the fixed-size header
   stream.write_u32::<BigEndian>(data.len() as u32).unwrap();
   // Write out the full message
