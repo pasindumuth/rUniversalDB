@@ -14,6 +14,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_t, GossipData};
 use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
+use runiversal::free_node_manager::FreeNodeType;
 use runiversal::master::{
   FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput,
 };
@@ -372,8 +373,8 @@ fn main() {
         .expect("entry_ip is requred if startup_type is 'freenode'");
 
       let node_type = match freenode_type {
-        "newslave" => msg::FreeNodeType::NewSlaveFreeNode,
-        "reconfig" => msg::FreeNodeType::ReconfigFreeNode,
+        "newslave" => FreeNodeType::NewSlaveFreeNode,
+        "reconfig" => FreeNodeType::ReconfigFreeNode,
         _ => unreachable!(),
       };
 
@@ -569,6 +570,18 @@ fn main() {
                   io_ctx,
                   slave_buffered_msgs,
                 ));
+
+                // Respond with a `ConfirmSlaveCreation`.
+                send_msg(
+                  &out_conn_map,
+                  &eid,
+                  msg::NetworkMessage::Master(msg::MasterMessage::FreeNodeAssoc(
+                    msg::FreeNodeAssoc::ConfirmSlaveCreation(msg::ConfirmSlaveCreation {
+                      sid: create.sid,
+                      sender_eid: this_eid.clone(),
+                    }),
+                  )),
+                );
               }
               FreeNodeMessage::SlaveSnapshot => {
                 // TODO: do
@@ -613,6 +626,7 @@ fn main() {
                   &eid,
                   msg::NetworkMessage::Master(msg::MasterMessage::FreeNodeAssoc(
                     msg::FreeNodeAssoc::ConfirmSlaveCreation(msg::ConfirmSlaveCreation {
+                      sid: nominal_state.state.ctx.this_sid.clone(),
                       sender_eid: this_eid.clone(),
                     }),
                   )),

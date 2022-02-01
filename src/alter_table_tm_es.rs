@@ -261,6 +261,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     }
 
     // Send out GossipData to all Slaves.
+    // TODO: should this and the other DDL TM Statuses only be doing this if this is the elader?
     ctx.broadcast_gossip(io_ctx);
 
     // Return Commit messages

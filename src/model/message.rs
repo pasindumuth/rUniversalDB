@@ -5,6 +5,7 @@ use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::expression::EvalError;
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
+use crate::free_node_manager::FreeNodeType;
 use crate::master::MasterBundle;
 use crate::model::common::{
   proc, CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
@@ -71,12 +72,6 @@ pub enum FreeNodeAssoc {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum FreeNodeType {
-  NewSlaveFreeNode,
-  ReconfigFreeNode,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RegisterFreeNode {
   pub sender_eid: EndpointId,
   /// The type of FreeNode that we want to be registered as.
@@ -92,6 +87,7 @@ pub struct FreeNodeHeartbeat {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmSlaveCreation {
+  pub sid: SlaveGroupId,
   pub sender_eid: EndpointId,
 }
 
@@ -200,6 +196,10 @@ pub enum MasterRemotePayload {
   AlterTable(stmpaxos2pc_tm::TMMessage<AlterTablePayloadTypes>),
   DropTable(stmpaxos2pc_tm::TMMessage<DropTablePayloadTypes>),
 
+  // Reconfig
+  NodesDead(NodesDead),
+  SlaveGroupReconfigured(SlaveGroupReconfigured),
+
   // Gossip
   MasterGossipRequest(MasterGossipRequest),
 }
@@ -211,6 +211,9 @@ pub enum MasterRemotePayload {
 pub enum SlaveRemotePayload {
   // CreateTable RM Messages
   CreateTable(stmpaxos2pc_tm::RMMessage<CreateTablePayloadTypes>),
+
+  // Reconfig
+  ReconfigSlaveGroup(ReconfigSlaveGroup),
 
   // Gossip
   MasterGossip(MasterGossip),
@@ -614,6 +617,27 @@ pub struct MasterQueryPlanningSuccess {
   pub return_qid: QueryId,
   pub query_id: QueryId,
   pub result: MasteryQueryPlanningResult,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Reconfig messages
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NodesDead {
+  pub sid: SlaveGroupId,
+  pub eids: Vec<EndpointId>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ReconfigSlaveGroup {
+  pub add_eids: Vec<EndpointId>,
+  pub rem_eids: Vec<EndpointId>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SlaveGroupReconfigured {
+  pub sid: SlaveGroupId,
 }
 
 // -------------------------------------------------------------------------------------------------

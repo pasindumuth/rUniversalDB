@@ -3,7 +3,7 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
   mk_cid, mk_t, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData, GossipDataView,
-  MasterIOCtx, MasterTraceMessage, RangeEnds, SlaveIOCtx, SlaveTraceMessage, Timestamp,
+  MasterIOCtx, MasterTraceMessage, RangeEnds, SlaveIOCtx, SlaveTraceMessage, Timestamp, NUM_COORDS,
 };
 use runiversal::coord::coord_test::{assert_coord_consistency, check_coord_clean};
 use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
@@ -300,8 +300,6 @@ impl RequestSuccessTracer {
 // -----------------------------------------------------------------------------------------------
 //  Simulation
 // -----------------------------------------------------------------------------------------------
-
-const NUM_COORDS: u32 = 3;
 
 #[derive(Debug)]
 pub struct MasterData {

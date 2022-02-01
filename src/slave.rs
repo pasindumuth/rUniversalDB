@@ -573,6 +573,9 @@ impl SlaveContext {
           msg::SlaveRemotePayload::CoordMessage(cid, coord_msg) => {
             io_ctx.coord_forward(&cid, CoordForwardMsg::CoordMessage(coord_msg))
           }
+          msg::SlaveRemotePayload::ReconfigSlaveGroup(_) => {
+            // TODO: do
+          }
         }
       }
       SlaveForwardMsg::GossipData(gossip) => {
