@@ -631,7 +631,7 @@ pub struct NodesDead {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ReconfigSlaveGroup {
-  pub add_eids: Vec<EndpointId>,
+  pub new_eids: Vec<EndpointId>,
   pub rem_eids: Vec<EndpointId>,
 }
 

@@ -30,6 +30,7 @@ use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent};
 use crate::server::{contains_col_latest, MasterServerContext, ServerContextBase};
 use crate::slave_group_create_es::SlaveGroupCreateES;
+use crate::slave_reconfig_es::SlaveReconfigES;
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::{
@@ -55,7 +56,7 @@ pub mod master_test;
 pub mod plm {
   use crate::common::Timestamp;
   use crate::free_node_manager::FreeNodeType;
-  use crate::model::common::{proc, CoordGroupId, EndpointId, QueryId, SlaveGroupId};
+  use crate::model::common::{proc, CoordGroupId, EndpointId, PaxosGroupId, QueryId, SlaveGroupId};
   use serde::{Deserialize, Serialize};
   use std::collections::BTreeMap;
 
@@ -76,7 +77,7 @@ pub mod plm {
     pub new_slave_groups: BTreeMap<SlaveGroupId, (Vec<EndpointId>, Vec<CoordGroupId>)>,
     pub new_nodes: Vec<(EndpointId, FreeNodeType)>,
     pub nodes_dead: Vec<EndpointId>,
-    pub granted_reconfig_eids: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
+    pub granted_reconfig_eids: BTreeMap<PaxosGroupId, Vec<EndpointId>>,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -87,7 +88,7 @@ pub mod plm {
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct ReconfigSlaveGroupPLm {
     pub sid: SlaveGroupId,
-    pub add_eids: Vec<EndpointId>,
+    pub new_eids: Vec<EndpointId>,
     pub rem_eids: Vec<EndpointId>,
   }
 
@@ -309,6 +310,7 @@ pub struct Statuses {
   pub planning_ess: BTreeMap<QueryId, MasterQueryPlanningES>,
 
   pub slave_group_create_ess: BTreeMap<SlaveGroupId, SlaveGroupCreateES>,
+  pub slave_reconfig_ess: BTreeMap<SlaveGroupId, SlaveReconfigES>,
 }
 
 #[derive(Debug)]
@@ -658,11 +660,20 @@ impl MasterContext {
               let mut es = statuses.slave_group_create_ess.remove(&confirm_create.sid).unwrap();
               es.handle_confirm_plm(self, io_ctx);
             }
-            MasterPLm::ReconfigSlaveGroupPLm(_) => {
-              // TODO
+            MasterPLm::ReconfigSlaveGroupPLm(reconfig) => {
+              if let Some(es) = statuses.slave_reconfig_ess.get_mut(&reconfig.sid) {
+                es.handle_reconfig_plm(self, io_ctx, reconfig);
+              } else {
+                // If there is not a `SlaveReconfigES`, this is a backup and we should make one.
+                statuses
+                  .slave_reconfig_ess
+                  .insert(reconfig.sid.clone(), SlaveReconfigES::new_follower(self, reconfig));
+              }
             }
-            MasterPLm::SlaveGroupReconfiguredPLm(_) => {
-              // TODO
+            MasterPLm::SlaveGroupReconfiguredPLm(reconfigured) => {
+              // Here, we remove the ES and then finish it off.
+              let mut es = statuses.slave_reconfig_ess.remove(&reconfigured.sid).unwrap();
+              es.handle_reconfigured_plm(self, io_ctx, reconfigured);
             }
           }
         }
@@ -702,7 +713,19 @@ impl MasterContext {
             },
             io_ctx,
           );
-          // TODO
+
+          // Forwarded the granted `EndpointId`s to the `SlaveGroupReconfig`s that requested it.
+          for (gid, new_eids) in granted_reconfig_eids {
+            match gid {
+              PaxosGroupId::Master => {
+                // TODO:
+              }
+              PaxosGroupId::Slave(sid) => {
+                let es = statuses.slave_reconfig_ess.get_mut(&sid).unwrap();
+                es.handle_eids_granted(self, new_eids);
+              }
+            }
+          }
 
           // Continue the insert cycle.
           self.paxos_driver.insert_bundle(
@@ -899,11 +922,19 @@ impl MasterContext {
           MasterRemotePayload::MasterGossipRequest(gossip_req) => {
             self.send_gossip(io_ctx, gossip_req.sender_path);
           }
-          MasterRemotePayload::NodesDead(_) => {
-            // TODO
+          MasterRemotePayload::NodesDead(nodes_dead) => {
+            // Construct an `SlaveReconfigES` if it does not already exist.
+            let sid = nodes_dead.sid;
+            if !statuses.slave_reconfig_ess.contains_key(&sid) {
+              statuses
+                .slave_reconfig_ess
+                .insert(sid.clone(), SlaveReconfigES::new(self, sid, nodes_dead.eids));
+            }
           }
-          MasterRemotePayload::SlaveGroupReconfigured(_) => {
-            // TODO
+          MasterRemotePayload::SlaveGroupReconfigured(reconfigured) => {
+            if let Some(es) = statuses.slave_reconfig_ess.get_mut(&reconfigured.sid) {
+              es.handle_reconfigured_msg(self, io_ctx, reconfigured);
+            }
           }
         }
 
@@ -939,6 +970,11 @@ impl MasterContext {
             let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
             let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
             self.handle_drop_table_es_action(statuses, query_id, action);
+          }
+
+          // SlaveReconfigES
+          for (_, es) in &mut statuses.slave_reconfig_ess {
+            es.remote_leader_changed(self, io_ctx, &remote_leader_changed);
           }
 
           // For MasterQueryPlanningESs, if the sending PaxosGroup's Leadership changed,
@@ -987,6 +1023,15 @@ impl MasterContext {
         // SlaveGroupCreate
         for (_, es) in &mut statuses.slave_group_create_ess {
           es.leader_changed(self, io_ctx);
+        }
+
+        // SlaveReconfig
+        let sids: Vec<SlaveGroupId> = statuses.slave_reconfig_ess.keys().cloned().collect();
+        for sid in sids {
+          let es = statuses.slave_reconfig_ess.get_mut(&sid).unwrap();
+          if !es.leader_changed(self, io_ctx) {
+            statuses.slave_reconfig_ess.remove(&sid);
+          }
         }
 
         // FreeNodeManager

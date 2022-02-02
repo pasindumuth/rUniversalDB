@@ -37,6 +37,7 @@ pub mod server;
 pub mod simulation_utils;
 pub mod slave;
 pub mod slave_group_create_es;
+pub mod slave_reconfig_es;
 pub mod sql_parser;
 pub mod stmpaxos2pc_rm;
 pub mod stmpaxos2pc_tm;

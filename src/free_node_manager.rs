@@ -47,7 +47,7 @@ pub struct FreeNodeManager {
   free_nodes: BTreeMap<EndpointId, FreeNodeType>,
   pending_new_free_nodes: BTreeSet<(EndpointId, FreeNodeType)>,
   free_node_heartbeat: BTreeMap<EndpointId, u32>,
-  requested_reconfig_eids: BTreeMap<SlaveGroupId, u32>,
+  requested_reconfig_eids: BTreeMap<PaxosGroupId, usize>,
 }
 
 impl FreeNodeManager {
@@ -88,12 +88,21 @@ impl FreeNodeManager {
   }
 
   pub fn leader_changed(&mut self, ctx: FreeNodeManagerContext) {
-    // If we lost Leadership, we set the heartbeats to steady but non-zero value.
+    // Check if we lost Leadership.
     if !ctx.is_leader() {
+      // Set the heartbeats to a steady but non-zero value.
       for (_, count) in &mut self.free_node_heartbeat {
         *count = HEARTBEAT_BACKUP_VALUE;
       }
+
+      // Clear grant requests
+      self.requested_reconfig_eids.clear();
     }
+  }
+
+  /// Used by `SlaveReconfigES`s to request `count` many new nodes to reconfigure `sid` with.
+  pub fn request_new_eids(&mut self, gid: PaxosGroupId, count: usize) {
+    self.requested_reconfig_eids.insert(gid, count);
   }
 
   /// This returns the new SlaveGroup `EndpointId`s that we should use to create new Groups.
@@ -149,11 +158,14 @@ impl FreeNodeManager {
   }
 
   /// This returns the Reconfig `EndpointId`s that were granted by this manager.
+  /// Note that this should only be called if this is the Leader.
   pub fn process<IO: MasterIOCtx>(
     &mut self,
     ctx: FreeNodeManagerContext,
     io_ctx: &mut IO,
-  ) -> BTreeMap<SlaveGroupId, Vec<EndpointId>> {
+  ) -> BTreeMap<PaxosGroupId, Vec<EndpointId>> {
+    debug_assert!(ctx.is_leader());
+
     // Construct the new PLm
     let mut plm = FreeNodeManagerPLm {
       new_slave_groups: Default::default(),
@@ -201,7 +213,7 @@ impl FreeNodeManager {
     // Delegate out `available_reconfig_nodes` for reconfig
     // requests (also removing the satisfied requests).
     let mut it = available_reconfig_nodes.into_iter();
-    'outer: for (sid, count) in self.requested_reconfig_eids.clone() {
+    'outer: for (gid, count) in self.requested_reconfig_eids.clone() {
       let mut reconfig_eids = Vec::<EndpointId>::new();
       for _ in 0..count {
         if let Some(eid) = it.next() {
@@ -211,8 +223,8 @@ impl FreeNodeManager {
           break 'outer;
         }
       }
-      self.requested_reconfig_eids.remove(&sid);
-      plm.granted_reconfig_eids.insert(sid, reconfig_eids);
+      self.requested_reconfig_eids.remove(&gid);
+      plm.granted_reconfig_eids.insert(gid, reconfig_eids);
     }
 
     // Delegate out `available_slave_nodes` for creating new SlaveGroups
