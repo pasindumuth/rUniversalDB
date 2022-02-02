@@ -1,3 +1,4 @@
+use runiversal::master::MasterBundle;
 use runiversal::model::message::{
   CoordMessage, ExternalMessage, MasterExternalReq, MasterMessage, MasterRemotePayload,
   NetworkMessage, PaxosDriverMessage, RemoteMessage, SlaveExternalReq, SlaveMessage,
@@ -76,6 +77,8 @@ impl Stats {
             MasterRemotePayload::AlterTable(_) => self.master_ddl += 1,
             MasterRemotePayload::DropTable(_) => self.master_ddl += 1,
             MasterRemotePayload::MasterGossipRequest(_) => {}
+            MasterRemotePayload::NodesDead(_) => {}
+            MasterRemotePayload::SlaveGroupReconfigured(_) => {}
           },
         },
         MasterMessage::RemoteLeaderChangedGossip(_) => self.master_remote_leader_changed += 1,
@@ -86,7 +89,10 @@ impl Stats {
           PaxosDriverMessage::LogSyncResponse(_) => self.master_log_sync_response += 1,
           PaxosDriverMessage::NextIndexRequest(_) => self.master_next_index_request += 1,
           PaxosDriverMessage::NextIndexResponse(_) => self.master_next_index_response += 1,
+          PaxosDriverMessage::InformLearned(_) => {}
+          PaxosDriverMessage::NewNodeStarted(_) => {}
         },
+        MasterMessage::FreeNodeAssoc(_) => {}
       },
       NetworkMessage::Slave(m) => match m {
         SlaveMessage::SlaveExternalReq(m) => match m {
@@ -115,6 +121,7 @@ impl Stats {
               CoordMessage::FinishQuery(_) => self.coord_finish_query += 1,
               CoordMessage::RegisterQuery(_) => {}
             },
+            SlaveRemotePayload::ReconfigSlaveGroup(_) => {}
           },
         },
         SlaveMessage::RemoteLeaderChangedGossip(_) => self.slave_remote_leader_changed += 1,
@@ -125,8 +132,11 @@ impl Stats {
           PaxosDriverMessage::LogSyncResponse(_) => self.slave_log_sync_response += 1,
           PaxosDriverMessage::NextIndexRequest(_) => self.slave_next_index_request += 1,
           PaxosDriverMessage::NextIndexResponse(_) => self.slave_next_index_response += 1,
+          PaxosDriverMessage::InformLearned(_) => {}
+          PaxosDriverMessage::NewNodeStarted(_) => {}
         },
       },
+      NetworkMessage::FreeNode(_) => {}
     }
   }
 }

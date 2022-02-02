@@ -11,6 +11,13 @@ docker network create --subnet=172.19.0.0/16 runiversal-net
 docker build -t runiversal -f Dockerfile.init .
 docker build -t runiversal .
 
+## Local Build and Test
+cargo build --release
+
+cargo run --release --bin paxos &&
+cargo run --release --bin paxos2pc_sim &&
+cargo run --release --bin simtest
+
 ## Run & Stop
 ### Only Slaves
 docker kill universal0; docker container rm universal0;
