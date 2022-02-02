@@ -12,8 +12,7 @@ docker build -t runiversal -f Dockerfile.init .
 docker build -t runiversal .
 
 ## Local Build and Test
-cargo build --release
-
+cargo build --release &&
 cargo run --release --bin paxos &&
 cargo run --release --bin paxos2pc_sim &&
 cargo run --release --bin simtest

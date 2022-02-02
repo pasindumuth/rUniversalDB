@@ -24,10 +24,11 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::model::message::{
   ExternalDDLQueryAbortData, FreeNodeAssoc, MasterExternalReq, MasterMessage, MasterRemotePayload,
+  PLEntry,
 };
 use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent};
+use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use crate::server::{contains_col_latest, MasterServerContext, ServerContextBase};
 use crate::slave_group_create_es::SlaveGroupCreateES;
 use crate::slave_reconfig_es::SlaveReconfigES;
@@ -368,7 +369,7 @@ impl MasterState {
     let ctx = &mut MasterPaxosContext { io_ctx, this_eid: &self.ctx.this_eid };
     if self.ctx.is_leader() {
       // Start the Paxos insertion cycle with an empty bundle.
-      self.ctx.paxos_driver.insert_bundle(ctx, MasterBundle::default());
+      self.ctx.paxos_driver.insert_bundle(ctx, UserPLEntry::Bundle(MasterBundle::default()));
     }
 
     // Start Paxos Timer Events
@@ -429,7 +430,7 @@ impl MasterContext {
       free_node_manager: FreeNodeManager::new(),
       external_request_id_map: Default::default(),
       master_bundle: MasterBundle::default(),
-      paxos_driver: PaxosDriver::new(master_address_config, paxos_config),
+      paxos_driver: PaxosDriver::create_initial(master_address_config, paxos_config),
     }
   }
 
@@ -552,6 +553,9 @@ impl MasterContext {
 
               // Trace for testing
               io_ctx.trace(MasterTraceMessage::LeaderChanged(leader_changed.lid));
+            }
+            PLEntry::Reconfig(_) => {
+              // TODO: do
             }
           }
         }
@@ -730,7 +734,10 @@ impl MasterContext {
           // Continue the insert cycle.
           self.paxos_driver.insert_bundle(
             &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
-            std::mem::replace(&mut self.master_bundle, MasterBundle::default()),
+            UserPLEntry::Bundle(std::mem::replace(
+              &mut self.master_bundle,
+              MasterBundle::default(),
+            )),
           );
         }
       }
@@ -1057,7 +1064,10 @@ impl MasterContext {
           self.broadcast_leadership(io_ctx); // Broadcast RemoteLeaderChanged
           self.paxos_driver.insert_bundle(
             &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
-            std::mem::replace(&mut self.master_bundle, MasterBundle::default()),
+            UserPLEntry::Bundle(std::mem::replace(
+              &mut self.master_bundle,
+              MasterBundle::default(),
+            )),
           ); // Start the insert cycle.
         }
       }

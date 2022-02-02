@@ -335,6 +335,9 @@ impl SlaveContext {
               SlaveForwardMsg::LeaderChanged(leader_changed.clone()),
             );
           }
+          msg::PLEntry::Reconfig(_) => {
+            // TODO: do
+          }
         }
       }
       FullSlaveInput::SlaveTimerInput(timer_input) => {

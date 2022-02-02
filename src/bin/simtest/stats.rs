@@ -91,6 +91,7 @@ impl Stats {
           PaxosDriverMessage::NextIndexResponse(_) => self.master_next_index_response += 1,
           PaxosDriverMessage::InformLearned(_) => {}
           PaxosDriverMessage::NewNodeStarted(_) => {}
+          PaxosDriverMessage::StartNewNode(_) => {}
         },
         MasterMessage::FreeNodeAssoc(_) => {}
       },
@@ -134,6 +135,7 @@ impl Stats {
           PaxosDriverMessage::NextIndexResponse(_) => self.slave_next_index_response += 1,
           PaxosDriverMessage::InformLearned(_) => {}
           PaxosDriverMessage::NewNodeStarted(_) => {}
+          PaxosDriverMessage::StartNewNode(_) => {}
         },
       },
       NetworkMessage::FreeNode(_) => {}

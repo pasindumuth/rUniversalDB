@@ -10,8 +10,9 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId};
 use crate::model::message as msg;
+use crate::model::message::PLEntry;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
-use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent};
+use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use crate::server::{MainSlaveServerContext, ServerContextBase};
 use crate::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
 use crate::stmpaxos2pc_tm as paxos2pc;
@@ -256,7 +257,7 @@ impl SlaveState {
     if self.ctx.is_leader() {
       // Start the Paxos insertion cycle with an empty bundle. Recall that since Slaves
       // start with no Tablets, the SharedPaxosBundle is trivially constructible.
-      self.ctx.paxos_driver.insert_bundle(ctx, SharedPaxosBundle::default());
+      self.ctx.paxos_driver.insert_bundle(ctx, UserPLEntry::Bundle(SharedPaxosBundle::default()));
     }
 
     // Start Paxos Timer Events
@@ -317,7 +318,7 @@ impl SlaveContext {
       network_driver: NetworkDriver::new(all_gids),
       slave_bundle: Default::default(),
       tablet_bundles: Default::default(),
-      paxos_driver: PaxosDriver::new(paxos_nodes, paxos_config),
+      paxos_driver: PaxosDriver::create_initial(paxos_nodes, paxos_config),
     }
   }
 
@@ -471,6 +472,9 @@ impl SlaveContext {
 
               // Trace for testing
               io_ctx.trace(SlaveTraceMessage::LeaderChanged(leader_changed.lid));
+            }
+            PLEntry::Reconfig(_) => {
+              // TODO: do
             }
           }
         }
@@ -655,9 +659,10 @@ impl SlaveContext {
         slave: std::mem::replace(&mut self.slave_bundle, SlaveBundle::default()),
         tablet: std::mem::replace(&mut self.tablet_bundles, BTreeMap::default()),
       };
-      self
-        .paxos_driver
-        .insert_bundle(&mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid }, shared_bundle);
+      self.paxos_driver.insert_bundle(
+        &mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid },
+        UserPLEntry::Bundle(shared_bundle),
+      );
     }
   }
 

@@ -16,7 +16,7 @@ use crate::paxos2pc_tm;
 use crate::slave::SharedPaxosBundle;
 use crate::stmpaxos2pc_tm;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // -------------------------------------------------------------------------------------------------
 //  NetworkMessage
@@ -307,6 +307,12 @@ pub enum PaxosMessage<ValT> {
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Reconfig<BundleT> {
+  pub rem_eids: Vec<EndpointId>,
+  pub new_eids: Vec<EndpointId>,
+  pub bundle: BundleT,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LeaderChanged {
   pub lid: LeadershipId,
 }
@@ -314,6 +320,7 @@ pub struct LeaderChanged {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum PLEntry<BundleT> {
   Bundle(BundleT),
+  Reconfig(Reconfig<BundleT>),
   LeaderChanged(LeaderChanged),
 }
 
@@ -322,6 +329,7 @@ pub type PLIndex = u128;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MultiPaxosMessage<BundleT> {
   pub sender_eid: EndpointId,
+  pub paxos_nodes: Vec<EndpointId>,
   pub index: PLIndex,
   pub paxos_message: PaxosMessage<PLEntry<BundleT>>,
 }
@@ -329,17 +337,13 @@ pub struct MultiPaxosMessage<BundleT> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct IsLeader {
   pub lid: LeadershipId,
-  pub should_learned: Vec<(PLIndex, Rnd)>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct InformLearned {
-  pub should_learned: Vec<(PLIndex, Rnd)>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct NewNodeStarted {
-  pub paxos_node: EndpointId,
+  pub sender_eid: EndpointId,
+  /// The `PLIndex`s here are contiguous.
+  pub should_learned: BTreeMap<PLIndex, Rnd>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -365,15 +369,34 @@ pub struct NextIndexResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct StartNewNode<BundleT> {
+  pub sender_eid: EndpointId,
+
+  // Data for Reconfiguration
+  pub paxos_nodes: Vec<EndpointId>,
+  pub remote_next_indices: BTreeMap<EndpointId, PLIndex>,
+  pub next_index: PLIndex,
+  pub paxos_instance_vals: BTreeMap<PLIndex, (Rnd, PLEntry<BundleT>)>,
+  pub unconfirmed_eids: BTreeSet<EndpointId>,
+  pub leader: LeadershipId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NewNodeStarted {
+  pub paxos_node: EndpointId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum PaxosDriverMessage<BundleT> {
   MultiPaxosMessage(MultiPaxosMessage<BundleT>),
   IsLeader(IsLeader),
   InformLearned(InformLearned),
-  NewNodeStarted(NewNodeStarted),
   LogSyncRequest(LogSyncRequest),
   LogSyncResponse(LogSyncResponse<BundleT>),
   NextIndexRequest(NextIndexRequest),
   NextIndexResponse(NextIndexResponse),
+  StartNewNode(StartNewNode<BundleT>),
+  NewNodeStarted(NewNodeStarted),
 }
 
 // -------------------------------------------------------------------------------------------------

@@ -3,7 +3,7 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_t, RangeEnds, Timestamp};
 use runiversal::model::common::EndpointId;
 use runiversal::model::message as msg;
-use runiversal::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent};
+use runiversal::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use runiversal::simulation_utils::{add_msg, mk_paxos_eid};
 use std::cmp::min;
 use std::collections::{BTreeMap, VecDeque};
@@ -159,7 +159,7 @@ impl Simulation {
       sim.paxos_data.insert(
         eid.clone(),
         PaxosNodeData {
-          paxos_driver: PaxosDriver::new(eids.clone(), PaxosConfig::prod()),
+          paxos_driver: PaxosDriver::create_initial(eids.clone(), PaxosConfig::prod()),
           tasks: Default::default(),
           paxos_log: Default::default(),
         },
@@ -185,7 +185,9 @@ impl Simulation {
 
       // If this node is the first Leader, then start inserting.
       if eid == &leader_eid {
-        paxos_data.paxos_driver.insert_bundle(&mut ctx, SimpleBundle { val: sim.next_int });
+        paxos_data
+          .paxos_driver
+          .insert_bundle(&mut ctx, UserPLEntry::Bundle(SimpleBundle { val: sim.next_int }));
       }
 
       // Start Paxos Timer Events
@@ -274,7 +276,9 @@ impl Simulation {
     if !entries.is_empty() && paxos_data.paxos_driver.is_leader(&ctx) {
       // Start inserting a new SimpleBundle
       self.next_int += 1;
-      paxos_data.paxos_driver.insert_bundle(&mut ctx, SimpleBundle { val: self.next_int });
+      paxos_data
+        .paxos_driver
+        .insert_bundle(&mut ctx, UserPLEntry::Bundle(SimpleBundle { val: self.next_int }));
     }
 
     self.extend_paxos_log(to_eid, entries);
