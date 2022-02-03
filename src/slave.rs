@@ -473,8 +473,15 @@ impl SlaveContext {
               // Trace for testing
               io_ctx.trace(SlaveTraceMessage::LeaderChanged(leader_changed.lid));
             }
-            PLEntry::Reconfig(_) => {
-              // TODO: do
+            PLEntry::Reconfig(reconfig) => {
+              // See if this node was kicked out of the PaxosGroup (by the current Leader),
+              // in which case we would exit before returning.
+              if !reconfig.rem_eids.contains(&self.this_eid) {
+                io_ctx.mark_exit();
+                return;
+              } else {
+                // TODO: do
+              }
             }
           }
         }

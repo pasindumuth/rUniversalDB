@@ -72,6 +72,10 @@ pub struct PaxosConfig {
   pub next_index_period_ms: Timestamp,
   pub retry_defer_time_ms: Timestamp,
   pub proposal_increment: u32,
+
+  /// The threshold for how far back the `remote_next_index` of a PaxosNode
+  /// can be before it might be suspected of being dead.
+  pub remote_next_index_thresh: u32,
 }
 
 impl PaxosConfig {
@@ -83,6 +87,7 @@ impl PaxosConfig {
       next_index_period_ms: mk_t(1000),
       retry_defer_time_ms: mk_t(1000),
       proposal_increment: 1000,
+      remote_next_index_thresh: 100,
     }
   }
 
@@ -94,6 +99,7 @@ impl PaxosConfig {
       next_index_period_ms: mk_t(10),
       retry_defer_time_ms: mk_t(5),
       proposal_increment: 1000,
+      remote_next_index_thresh: 5,
     }
   }
 }
@@ -241,10 +247,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
       unconfirmed_eids.insert(eid, false);
     }
 
-    // TODO: start the NextIndexRequest, leader_heartbeat_timer,
-    //  RetryInsert timer, and NewNodeStarted timer.
-
-    // TODO: Make sure buffered messages from the outside are piped down here properly.
+    // TODO: start unconfirmed_eids timer.
 
     // Broadcast `NewNodeStarted`
     for eid in &start.paxos_nodes {
@@ -270,8 +273,61 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
     }
   }
 
-  // TODO: start unconfirmed_eids timer.
+  /// This returns the set of `EndpointId`s that might be dead, based on how far
+  /// back the `remote_next_index` is.
+  pub fn get_maybe_dead(&self) -> Vec<EndpointId> {
+    let mut maybe_dead_eids = Vec::<EndpointId>::new();
+    for (eid, index) in &self.remote_next_indices {
+      if *index + (self.paxos_config.remote_next_index_thresh as u128) < self.next_index {
+        maybe_dead_eids.push(eid.clone())
+      }
+    }
 
+    maybe_dead_eids
+  }
+
+  /// Construct a `StartNewNode`, which is called from the outside (e.g. Master, Slave)
+  /// and attached to *its* reconfig Snapshot before it is sent off. This is typically
+  /// called immediately after processing a `UserPLEntry::Reconfig` element if this node
+  /// is the Leader, but can also be called by a backup.
+  pub fn mk_start_new_node<PaxosContextBaseT: PaxosContextBase<BundleT>>(
+    &mut self,
+    ctx: &PaxosContextBaseT,
+    new_eid: EndpointId,
+  ) -> msg::StartNewNode<BundleT> {
+    let mut start = msg::StartNewNode {
+      sender_eid: ctx.this_eid().clone(),
+      paxos_nodes: self.paxos_nodes.clone(),
+      remote_next_indices: self.remote_next_indices.clone(),
+      next_index: self.next_index.clone(),
+      paxos_instance_vals: Default::default(),
+      unconfirmed_eids: Default::default(),
+      leader: self.leader.clone(),
+    };
+
+    // Populate `paxos_instance_vals`.
+    for (index, instance_entry) in &self.paxos_instances {
+      if index < &self.next_index {
+        // Recall all entries prior to next_index will have learned a value.
+        let rnd_val = instance_entry.learned_rnd_val.as_ref().unwrap().clone();
+        start.paxos_instance_vals.insert(index.clone(), rnd_val);
+      } else {
+        break;
+      }
+    }
+
+    // Populate `unconfirmed_eids`
+    for (eid, _) in &self.unconfirmed_eids {
+      start.unconfirmed_eids.insert(eid.clone());
+    }
+
+    // Set unconfirmed_eids to true, since we will be sending out a StartNewNode
+    *self.unconfirmed_eids.get_mut(&new_eid).unwrap() = true;
+
+    start
+  }
+
+  /// Compute the minimum of `remote_next_indices`
   fn min_complete_index(&self) -> u128 {
     // We start with `next_index` since the minimum in `remote_next_indices`
     // is certainly <= to this.
@@ -300,27 +356,10 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
   ) -> Vec<msg::PLEntry<BundleT>> {
     let mut learned_entries = self.handle_paxos_message_internal(ctx, message);
     // Poll and process all `buffered_messages` which an index that is low enough.
-    loop {
-      if let Some(mut entry) = self.buffered_messages.first_entry() {
-        let index = entry.key().clone();
-        if index <= self.next_index {
-          let messages = entry.get_mut();
-          if messages.is_empty() {
-            self.buffered_messages.remove(&index);
-          } else {
-            // Here, there is a MultiPaxosMessage with low enough index, so we process it.
-            let msg = msg::PaxosDriverMessage::MultiPaxosMessage(messages.pop_front().unwrap());
-            learned_entries.extend(self.handle_paxos_message_internal(ctx, msg));
-          }
-          continue;
-        }
-      }
-      break;
-    }
+    self.handle_buffered_messages(ctx, &mut learned_entries);
 
-    // TODO: should we here be the one to observe the death of
-    //  this node, or should it occur above.
-
+    // Note that the caller is responsible for processing Reconfig PLms where
+    // this node had been kicked out.
     learned_entries
   }
 
@@ -513,20 +552,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
         let mut learned_entries = Vec::<PLEntry<BundleT>>::new();
         loop {
           // Poll and process a `buffered_messages` if there is one with low enough index.
-          if let Some(mut entry) = self.buffered_messages.first_entry() {
-            let index = entry.key().clone();
-            if index <= self.next_index {
-              let messages = entry.get_mut();
-              if messages.is_empty() {
-                self.buffered_messages.remove(&index);
-              } else {
-                // Here, there is a MultiPaxosMessage with low enough index, so we process it.
-                let msg = msg::PaxosDriverMessage::MultiPaxosMessage(messages.pop_front().unwrap());
-                learned_entries.extend(self.handle_paxos_message_internal(ctx, msg));
-              }
-              continue;
-            }
-          }
+          self.handle_buffered_messages(ctx, &mut learned_entries);
 
           // Use the next `learned_rnd` in `should_learned` to learn a new value
           if let Some(learned_rnd) = inform_learned.should_learned.get(&self.next_index) {
@@ -557,8 +583,6 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
           }
 
           // Here, we have processed all the `should_learned`s we could, so we finish.
-          // TODO: since handle_paxos_message handles PostExistence, I don't think we
-          //  have to here.
           return learned_entries;
         }
       }
@@ -602,26 +626,9 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
         let mut learned_entries = self.deliver_learned_entries();
 
         // Poll and process all `buffered_messages` which an index that is low enough.
-        loop {
-          if let Some(mut entry) = self.buffered_messages.first_entry() {
-            let index = entry.key().clone();
-            if index <= self.next_index {
-              let messages = entry.get_mut();
-              if messages.is_empty() {
-                self.buffered_messages.remove(&index);
-              } else {
-                // Here, there is a MultiPaxosMessage with low enough index, so we process it.
-                let msg = msg::PaxosDriverMessage::MultiPaxosMessage(messages.pop_front().unwrap());
-                learned_entries.extend(self.handle_paxos_message_internal(ctx, msg));
-              }
-              continue;
-            }
-          }
-          break;
-        }
+        self.handle_buffered_messages(ctx, &mut learned_entries);
 
-        // TODO: since handle_paxos_message handles PostExitence, I don't think we
-        //  have to here.
+        // Here, we have processed all the `should_learned`s we could, so we finish.
         return learned_entries;
       }
       PaxosDriverMessage::NextIndexRequest(request) => {
@@ -661,6 +668,34 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
     }
 
     Vec::new()
+  }
+
+  /// Process as many buffered messages as possible. At the end, there should be no
+  /// messages left that is <= `next_index`, and nothing should be learnable at
+  /// `next_index` either.
+  fn handle_buffered_messages<PaxosContextBaseT: PaxosContextBase<BundleT>>(
+    &mut self,
+    ctx: &mut PaxosContextBaseT,
+    learned_entries: &mut Vec<PLEntry<BundleT>>,
+  ) {
+    loop {
+      // Poll and process a `buffered_messages` if there is one with low enough index.
+      if let Some(mut entry) = self.buffered_messages.first_entry() {
+        let index = entry.key().clone();
+        if index <= self.next_index {
+          let messages = entry.get_mut();
+          if messages.is_empty() {
+            self.buffered_messages.remove(&index);
+          } else {
+            // Here, there is a MultiPaxosMessage with low enough index, so we process it.
+            let msg = msg::PaxosDriverMessage::MultiPaxosMessage(messages.pop_front().unwrap());
+            learned_entries.extend(self.handle_paxos_message_internal(ctx, msg));
+          }
+          continue;
+        }
+      }
+      break;
+    }
   }
 
   /// Checks whether there are any new learned values passed `next_index`. If so, we increase

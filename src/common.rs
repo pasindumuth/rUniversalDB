@@ -42,7 +42,11 @@ pub trait BasicIOCtx<NetworkMessageT = msg::NetworkMessage> {
   fn now(&mut self) -> Timestamp;
   fn send(&mut self, eid: &EndpointId, msg: NetworkMessageT);
 
-  // Tracer
+  /// This marks that the node should exit (which happens if the PaxosGroup ejects a node).
+  fn mark_exit(&mut self);
+  fn did_exit(&mut self) -> bool;
+
+  /// Tracer
   fn general_trace(&mut self, trace_msg: GeneralTraceMessage);
 }
 

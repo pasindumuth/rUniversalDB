@@ -6,7 +6,7 @@ use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::expression::EvalError;
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::free_node_manager::FreeNodeType;
-use crate::master::MasterBundle;
+use crate::master::{MasterBundle, MasterSnapshot};
 use crate::model::common::{
   proc, CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
   PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
@@ -103,7 +103,7 @@ pub enum FreeNodeMessage {
   ShutdownNode,
   CreateSlaveGroup(CreateSlaveGroup),
   SlaveSnapshot,
-  MasterSnapshot,
+  MasterSnapshot(MasterSnapshot),
 }
 
 /// This sent by an admin client to the some initial master nodes to get them to start.

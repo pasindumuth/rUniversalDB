@@ -60,6 +60,16 @@ impl FreeNodeManager {
     }
   }
 
+  /// Handles a `free_nodes` to initiate a `FreeNodeManager` for a reconfigured node properly.
+  pub fn create_reconfig(free_nodes: BTreeMap<EndpointId, FreeNodeType>) -> FreeNodeManager {
+    FreeNodeManager {
+      free_nodes,
+      pending_new_free_nodes: Default::default(),
+      free_node_heartbeat: Default::default(),
+      requested_reconfig_eids: Default::default(),
+    }
+  }
+
   pub fn handle_register(&mut self, register: msg::RegisterFreeNode) {
     self.pending_new_free_nodes.insert((register.sender_eid, register.node_type));
   }
@@ -253,5 +263,14 @@ impl FreeNodeManager {
 
     // Return reconfig eids
     granted_reconfig_eids
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  //  Utilities
+  // -----------------------------------------------------------------------------------------------
+
+  /// This is used to get a copy of all FreeNodes, which is useful for Reconfiguration.
+  pub fn mk_free_nodes(&self) -> BTreeMap<EndpointId, FreeNodeType> {
+    self.free_nodes.clone()
   }
 }

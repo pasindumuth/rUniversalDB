@@ -12,7 +12,7 @@ use crate::server::{
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_t, GossipData};
+use runiversal::common::{mk_t, BasicIOCtx, GossipData};
 use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
 use runiversal::free_node_manager::FreeNodeType;
 use runiversal::master::{
@@ -302,6 +302,14 @@ enum NodeState {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  General
+// -----------------------------------------------------------------------------------------------
+
+fn mk_master_config() -> MasterConfig {
+  MasterConfig { timestamp_suffix_divisor: 100 }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Main
 // -----------------------------------------------------------------------------------------------
 
@@ -423,13 +431,23 @@ fn main() {
                 node_state = NodeState::PostExistence;
               }
               msg::FreeNodeMessage::StartMaster(start) => {
+                // Create the ProdMasterIOCtx
+                let mut rand = XorShiftRng::from_entropy();
+                let mut io_ctx = ProdMasterIOCtx {
+                  rand,
+                  out_conn_map: out_conn_map.clone(),
+                  exited: false,
+                  to_master: to_server_sender.clone(),
+                  tasks: Arc::new(Mutex::new(BTreeMap::default())),
+                };
+
                 // Create the MasterState
                 let leader = start.master_eids.get(0).unwrap();
                 let master_lid = LeadershipId { gen: Gen(0), eid: leader.clone() };
                 let mut leader_map = BTreeMap::<PaxosGroupId, LeadershipId>::new();
                 leader_map.insert(PaxosGroupId::Master, master_lid);
-                let mut master_state = MasterState::new(MasterContext::new(
-                  MasterConfig { timestamp_suffix_divisor: 100 },
+                let mut master_state = MasterState::new(MasterContext::create_initial(
+                  mk_master_config(),
                   this_eid.clone(),
                   BTreeMap::default(),
                   start.master_eids,
@@ -437,19 +455,10 @@ fn main() {
                   PaxosConfig::prod(),
                 ));
 
-                // Create the ProdMasterIOCtx
-                let mut rand = XorShiftRng::from_entropy();
-                let mut io_ctx = ProdMasterIOCtx {
-                  rand,
-                  out_conn_map: out_conn_map.clone(),
-                  to_master: to_server_sender.clone(),
-                  tasks: Arc::new(Mutex::new(BTreeMap::default())),
-                };
-
                 // Bootstrap the Master
                 master_state.bootstrap(&mut io_ctx);
 
-                // Convert all buffered messages to SlaveMessages, since those should be all
+                // Convert all buffered messages to MasterMessage, since those should be all
                 // that is present.
                 let mut master_buffered_msgs =
                   BTreeMap::<EndpointId, Vec<msg::MasterMessage>>::new();
@@ -518,6 +527,7 @@ fn main() {
                   );
                   let mut io_ctx = ProdCoreIOCtx {
                     out_conn_map: out_conn_map.clone(),
+                    exited: false,
                     rand,
                     to_slave: to_server_sender.clone(),
                   };
@@ -534,6 +544,7 @@ fn main() {
                 let mut io_ctx = ProdSlaveIOCtx {
                   rand,
                   out_conn_map: out_conn_map.clone(),
+                  exited: false,
                   to_slave: to_server_sender.clone(),
                   tablet_map: Default::default(),
                   coord_map,
@@ -586,8 +597,46 @@ fn main() {
               FreeNodeMessage::SlaveSnapshot => {
                 // TODO: do
               }
-              FreeNodeMessage::MasterSnapshot => {
-                // TODO: do
+              FreeNodeMessage::MasterSnapshot(snapshot) => {
+                // Create the ProdMasterIOCtx
+                let mut rand = XorShiftRng::from_entropy();
+                let mut io_ctx = ProdMasterIOCtx {
+                  rand,
+                  out_conn_map: out_conn_map.clone(),
+                  exited: false,
+                  to_master: to_server_sender.clone(),
+                  tasks: Arc::new(Mutex::new(BTreeMap::default())),
+                };
+
+                // Create the MasterState
+                let mut master_state = MasterState::new(MasterContext::create_reconfig(
+                  &mut io_ctx,
+                  mk_master_config(),
+                  this_eid.clone(),
+                  snapshot,
+                  PaxosConfig::prod(),
+                ));
+
+                // Bootstrap the Master
+                master_state.bootstrap(&mut io_ctx);
+
+                // Convert all buffered messages to MasterMessage, since those should be all
+                // that is present.
+                let mut master_buffered_msgs =
+                  BTreeMap::<EndpointId, Vec<msg::MasterMessage>>::new();
+                for (eid, buffer) in std::mem::take(buffered_messages) {
+                  for message in buffer {
+                    let master_msg = cast!(msg::NetworkMessage::Master, message).unwrap();
+                    amend_buffer(&mut master_buffered_msgs, &eid, master_msg);
+                  }
+                }
+
+                // Advance
+                node_state = NodeState::NominalMasterState(NominalMasterState::init(
+                  master_state,
+                  io_ctx,
+                  master_buffered_msgs,
+                ));
               }
               FreeNodeMessage::ShutdownNode => {
                 node_state = NodeState::PostExistence;
@@ -614,96 +663,111 @@ fn main() {
         }
         _ => {}
       },
-      NodeState::NominalSlaveState(nominal_state) => match generic_input {
-        GenericInput::Message(eid, message) => {
-          // Handle FreeNode messages
-          if let msg::NetworkMessage::FreeNode(free_node_msg) = message {
-            match free_node_msg {
-              FreeNodeMessage::CreateSlaveGroup(_) => {
-                // Respond with a `ConfirmSlaveCreation`.
-                send_msg(
-                  &out_conn_map,
-                  &eid,
-                  msg::NetworkMessage::Master(msg::MasterMessage::FreeNodeAssoc(
-                    msg::FreeNodeAssoc::ConfirmSlaveCreation(msg::ConfirmSlaveCreation {
-                      sid: nominal_state.state.ctx.this_sid.clone(),
-                      sender_eid: this_eid.clone(),
-                    }),
-                  )),
-                );
+      NodeState::NominalSlaveState(nominal_state) => {
+        match generic_input {
+          GenericInput::Message(eid, message) => {
+            // Handle FreeNode messages
+            if let msg::NetworkMessage::FreeNode(free_node_msg) = message {
+              match free_node_msg {
+                FreeNodeMessage::CreateSlaveGroup(_) => {
+                  // Respond with a `ConfirmSlaveCreation`.
+                  send_msg(
+                    &out_conn_map,
+                    &eid,
+                    msg::NetworkMessage::Master(msg::MasterMessage::FreeNodeAssoc(
+                      msg::FreeNodeAssoc::ConfirmSlaveCreation(msg::ConfirmSlaveCreation {
+                        sid: nominal_state.state.ctx.this_sid.clone(),
+                        sender_eid: this_eid.clone(),
+                      }),
+                    )),
+                  );
+                }
+                FreeNodeMessage::SlaveSnapshot => {
+                  // Respond with a `NewNodeStarted`.
+                  send_msg(
+                    &out_conn_map,
+                    &eid,
+                    msg::NetworkMessage::Slave(msg::SlaveMessage::PaxosDriverMessage(
+                      msg::PaxosDriverMessage::NewNodeStarted(msg::NewNodeStarted {
+                        paxos_node: this_eid.clone(),
+                      }),
+                    )),
+                  );
+                }
+                FreeNodeMessage::ShutdownNode => {
+                  nominal_state.io_ctx.mark_exit();
+                }
+                _ => {}
               }
-              FreeNodeMessage::SlaveSnapshot => {
-                // Respond with a `NewNodeStarted`.
-                send_msg(
-                  &out_conn_map,
-                  &eid,
-                  msg::NetworkMessage::Slave(msg::SlaveMessage::PaxosDriverMessage(
-                    msg::PaxosDriverMessage::NewNodeStarted(msg::NewNodeStarted {
-                      paxos_node: this_eid.clone(),
-                    }),
-                  )),
-                );
-              }
-              FreeNodeMessage::ShutdownNode => {
-                node_state = NodeState::PostExistence;
-              }
-              _ => {}
+            } else if let msg::NetworkMessage::Slave(slave_msg) = message {
+              // Forward the message.
+              nominal_state.handle_msg(&eid, slave_msg);
             }
-          } else if let msg::NetworkMessage::Slave(slave_msg) = message {
-            // Forward the message.
-            nominal_state.handle_msg(&eid, slave_msg);
           }
+          GenericInput::SlaveTimerInput(timer_input) => {
+            // Forward the `SlaveTimerInput`
+            nominal_state.state.handle_input(
+              &mut nominal_state.io_ctx,
+              FullSlaveInput::SlaveTimerInput(timer_input),
+            );
+          }
+          GenericInput::SlaveBackMessage(back_msg) => {
+            // Forward the `SlaveBackMessage`
+            nominal_state
+              .state
+              .handle_input(&mut nominal_state.io_ctx, FullSlaveInput::SlaveBackMessage(back_msg));
+          }
+          _ => {}
         }
-        GenericInput::SlaveTimerInput(timer_input) => {
-          // Forward the `SlaveTimerInput`
-          nominal_state
-            .state
-            .handle_input(&mut nominal_state.io_ctx, FullSlaveInput::SlaveTimerInput(timer_input));
+
+        // Check the IOCtx and see if we should go to post existence.
+        if nominal_state.io_ctx.did_exit() {
+          node_state = NodeState::PostExistence;
         }
-        GenericInput::SlaveBackMessage(back_msg) => {
-          // Forward the `SlaveBackMessage`
-          nominal_state
-            .state
-            .handle_input(&mut nominal_state.io_ctx, FullSlaveInput::SlaveBackMessage(back_msg));
-        }
-        _ => {}
-      },
-      NodeState::NominalMasterState(nominal_state) => match generic_input {
-        GenericInput::Message(eid, message) => {
-          // Handle FreeNode messages
-          if let msg::NetworkMessage::FreeNode(free_node_msg) = message {
-            match free_node_msg {
-              FreeNodeMessage::MasterSnapshot => {
-                // Respond with a `NewNodeStarted`.
-                send_msg(
-                  &out_conn_map,
-                  &eid,
-                  msg::NetworkMessage::Master(msg::MasterMessage::PaxosDriverMessage(
-                    msg::PaxosDriverMessage::NewNodeStarted(msg::NewNodeStarted {
-                      paxos_node: this_eid.clone(),
-                    }),
-                  )),
-                );
+      }
+      NodeState::NominalMasterState(nominal_state) => {
+        match generic_input {
+          GenericInput::Message(eid, message) => {
+            // Handle FreeNode messages
+            if let msg::NetworkMessage::FreeNode(free_node_msg) = message {
+              match free_node_msg {
+                FreeNodeMessage::MasterSnapshot(_) => {
+                  // Respond with a `NewNodeStarted`.
+                  send_msg(
+                    &out_conn_map,
+                    &eid,
+                    msg::NetworkMessage::Master(msg::MasterMessage::PaxosDriverMessage(
+                      msg::PaxosDriverMessage::NewNodeStarted(msg::NewNodeStarted {
+                        paxos_node: this_eid.clone(),
+                      }),
+                    )),
+                  );
+                }
+                FreeNodeMessage::ShutdownNode => {
+                  nominal_state.io_ctx.mark_exit();
+                }
+                _ => {}
               }
-              FreeNodeMessage::ShutdownNode => {
-                node_state = NodeState::PostExistence;
-              }
-              _ => {}
+            } else if let msg::NetworkMessage::Master(master_msg) = message {
+              // Forward the message.
+              nominal_state.handle_msg(&eid, master_msg);
             }
-          } else if let msg::NetworkMessage::Master(master_msg) = message {
-            // Forward the message.
-            nominal_state.handle_msg(&eid, master_msg);
           }
+          GenericInput::MasterTimerInput(timer_input) => {
+            // Forward the `MasterTimerInput`
+            nominal_state.state.handle_input(
+              &mut nominal_state.io_ctx,
+              FullMasterInput::MasterTimerInput(timer_input),
+            );
+          }
+          _ => {}
         }
-        GenericInput::MasterTimerInput(timer_input) => {
-          // Forward the `MasterTimerInput`
-          nominal_state.state.handle_input(
-            &mut nominal_state.io_ctx,
-            FullMasterInput::MasterTimerInput(timer_input),
-          );
+
+        // Check the IOCtx and see if we should go to post existence.
+        if nominal_state.io_ctx.did_exit() {
+          node_state = NodeState::PostExistence;
         }
-        _ => {}
-      },
+      }
       NodeState::PostExistence => {}
     }
   }

@@ -112,6 +112,7 @@ pub struct ProdSlaveIOCtx {
   // Basic
   pub rand: XorShiftRng,
   pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  pub exited: bool,
 
   // Constructing and communicating with Tablets
   pub to_slave: Sender<GenericInput>,
@@ -166,6 +167,14 @@ impl BasicIOCtx for ProdSlaveIOCtx {
     send_msg(&self.out_conn_map, eid, msg);
   }
 
+  fn mark_exit(&mut self) {
+    self.exited = true;
+  }
+
+  fn did_exit(&mut self) -> bool {
+    self.exited
+  }
+
   fn general_trace(&mut self, _: GeneralTraceMessage) {}
 }
 
@@ -182,6 +191,7 @@ impl SlaveIOCtx for ProdSlaveIOCtx {
     let tablet_context = TabletContext::new(helper);
     let mut io_ctx = ProdCoreIOCtx {
       out_conn_map: self.out_conn_map.clone(),
+      exited: false,
       rand,
       to_slave: self.to_slave.clone(),
     };
@@ -242,6 +252,7 @@ pub struct ProdMasterIOCtx {
   // Basic
   pub rand: XorShiftRng,
   pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  pub exited: bool,
 
   // Deferred timer tasks
   pub tasks: Arc<Mutex<BTreeMap<Timestamp, Vec<MasterTimerInput>>>>,
@@ -290,6 +301,14 @@ impl BasicIOCtx for ProdMasterIOCtx {
     send_msg(&self.out_conn_map, eid, msg);
   }
 
+  fn mark_exit(&mut self) {
+    self.exited = true;
+  }
+
+  fn did_exit(&mut self) -> bool {
+    self.exited
+  }
+
   fn general_trace(&mut self, _: GeneralTraceMessage) {}
 }
 
@@ -322,6 +341,7 @@ pub struct ProdCoreIOCtx {
   // Basic
   pub rand: XorShiftRng,
   pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  pub exited: bool,
 
   // Slave
   pub to_slave: Sender<GenericInput>,
@@ -342,6 +362,14 @@ impl BasicIOCtx for ProdCoreIOCtx {
     let out_conn_map = self.out_conn_map.lock().unwrap();
     let sender = out_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
+  }
+
+  fn mark_exit(&mut self) {
+    self.exited = true;
+  }
+
+  fn did_exit(&mut self) -> bool {
+    self.exited
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}

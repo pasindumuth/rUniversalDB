@@ -8,7 +8,7 @@ use crate::common::{
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
 use crate::drop_table_tm_es::{DropTablePayloadTypes, DropTableTMES, DropTableTMInner};
-use crate::free_node_manager::{FreeNodeManager, FreeNodeManagerContext};
+use crate::free_node_manager::{FreeNodeManager, FreeNodeManagerContext, FreeNodeType};
 use crate::master::plm::{
   ConfirmCreateGroup, FreeNodeManagerPLm, ReconfigSlaveGroupPLm, SlaveGroupReconfiguredPLm,
 };
@@ -186,6 +186,10 @@ pub enum MasterTimerInput {
   /// This is used to periodically broadcast the `GossipData` to the Slave Leaderships. This
   /// ensures all Slave Nodes eventually get the latest `GossipData`.
   BroadcastGossip,
+  /// A Time event to detect if the Master PaxosGroup has a failed node.
+  PaxosGroupFailureDetector,
+  /// A Timer event to increase the heartbeat for FreeNodes
+  FreeNodeHeartbeatTimer,
 }
 
 pub enum FullMasterInput {
@@ -199,6 +203,8 @@ pub enum FullMasterInput {
 
 const REMOTE_LEADER_CHANGED_PERIOD_MS: u128 = 5;
 const GOSSIP_DATA_PERIOD_MS: u128 = 5;
+const FAILURE_DETECTOR_PERIOD_MS: u128 = 5;
+const FREE_NODE_HEARTBEAT_TIMER_MS: u128 = 5;
 
 // -----------------------------------------------------------------------------------------------
 //  TMServerContext AlterTable
@@ -285,7 +291,7 @@ impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
 //  MasterConfig
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MasterConfig {
   /// This is used for generate the `suffix` of a Timestamp, where we just generate
   /// a random `u64` and take the remainder after dividing by `timestamp_suffix_divisor`.
@@ -297,6 +303,34 @@ impl Default for MasterConfig {
   fn default() -> Self {
     MasterConfig { timestamp_suffix_divisor: 1 }
   }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  MasterReconfigES
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+enum ReconfigState {
+  WaitingRequestedNodes,
+  InsertingReconfig { new_eids: Vec<EndpointId> },
+}
+
+#[derive(Debug)]
+pub struct MasterReconfigES {
+  rem_eids: Vec<EndpointId>,
+  state: ReconfigState,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  MasterSnapshot
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MasterSnapshot {
+  pub gossip: GossipData,
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  pub free_nodes: BTreeMap<EndpointId, FreeNodeType>,
+  pub paxos_driver_start: msg::StartNewNode<MasterBundle>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -312,6 +346,8 @@ pub struct Statuses {
 
   pub slave_group_create_ess: BTreeMap<SlaveGroupId, SlaveGroupCreateES>,
   pub slave_reconfig_ess: BTreeMap<SlaveGroupId, SlaveReconfigES>,
+
+  pub master_reconfig_es: Option<MasterReconfigES>,
 }
 
 #[derive(Debug)]
@@ -376,21 +412,15 @@ impl MasterState {
     self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::LeaderHeartbeat);
     self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::NextIndex);
 
-    // Start periodic broadcasting of RemoteLeaderChanged
-    self.ctx.handle_input(
-      io_ctx,
-      &mut self.statuses,
-      MasterForwardMsg::MasterTimerInput(MasterTimerInput::RemoteLeaderChanged),
-    );
-
-    // TODO: do timer for FreeNodeManager.
-
-    // Start periodic broadcasting of GossipData
-    self.ctx.handle_input(
-      io_ctx,
-      &mut self.statuses,
-      MasterForwardMsg::MasterTimerInput(MasterTimerInput::BroadcastGossip),
-    );
+    // Start other time events
+    for event in [
+      MasterTimerInput::RemoteLeaderChanged,
+      MasterTimerInput::BroadcastGossip,
+      MasterTimerInput::PaxosGroupFailureDetector,
+      MasterTimerInput::FreeNodeHeartbeatTimer,
+    ] {
+      self.ctx.handle_input(io_ctx, &mut self.statuses, MasterForwardMsg::MasterTimerInput(event));
+    }
   }
 
   pub fn handle_input<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, input: FullMasterInput) {
@@ -412,7 +442,8 @@ impl MasterState {
 }
 
 impl MasterContext {
-  pub fn new(
+  /// Constructs a `MasterContext` for a node in the initial PaxosGroup.
+  pub fn create_initial(
     master_config: MasterConfig,
     this_eid: EndpointId,
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
@@ -431,6 +462,32 @@ impl MasterContext {
       external_request_id_map: Default::default(),
       master_bundle: MasterBundle::default(),
       paxos_driver: PaxosDriver::create_initial(master_address_config, paxos_config),
+    }
+  }
+
+  /// Handles a `MasterSnapshot` to initiate a reconfigured node properly
+  pub fn create_reconfig<IO: MasterIOCtx>(
+    io_ctx: &mut IO,
+    master_config: MasterConfig,
+    this_eid: EndpointId,
+    snapshot: MasterSnapshot,
+    paxos_config: PaxosConfig,
+  ) -> MasterContext {
+    // TODO: fix the NetworkDriver
+    MasterContext {
+      master_config,
+      this_eid: this_eid.clone(),
+      gossip: snapshot.gossip,
+      leader_map: snapshot.leader_map,
+      network_driver: NetworkDriver::new(vec![]),
+      free_node_manager: FreeNodeManager::create_reconfig(snapshot.free_nodes),
+      external_request_id_map: Default::default(),
+      master_bundle: Default::default(),
+      paxos_driver: PaxosDriver::create_reconfig(
+        &mut MasterPaxosContext { io_ctx, this_eid: &this_eid },
+        snapshot.paxos_driver_start,
+        paxos_config,
+      ),
     }
   }
 
@@ -509,40 +566,6 @@ impl MasterContext {
         );
         for pl_entry in pl_entries {
           match pl_entry {
-            msg::PLEntry::Bundle(master_bundle) => {
-              // Dispatch RemoteLeaderChanges
-              for remote_change in master_bundle.remote_leader_changes.clone() {
-                let forward_msg = MasterForwardMsg::RemoteLeaderChanged(remote_change.clone());
-                self.handle_input(io_ctx, statuses, forward_msg);
-              }
-
-              // Dispatch the PaxosBundles
-              self.handle_input(
-                io_ctx,
-                statuses,
-                MasterForwardMsg::MasterBundle(master_bundle.plms),
-              );
-
-              // Dispatch any messages that were buffered in the NetworkDriver.
-              // Note: we must do this after RemoteLeaderChanges have been executed. Also note
-              // that there will be no payloads in the NetworkBuffer if this nodes is a Follower.
-              for remote_change in master_bundle.remote_leader_changes {
-                if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
-                  // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
-                  // for the same `gid` with different `gen`s.
-                  let payloads = self
-                    .network_driver
-                    .deliver_blocked_messages(remote_change.gid, remote_change.lid);
-                  for payload in payloads {
-                    self.handle_input(
-                      io_ctx,
-                      statuses,
-                      MasterForwardMsg::MasterRemotePayload(payload),
-                    );
-                  }
-                }
-              }
-            }
             msg::PLEntry::LeaderChanged(leader_changed) => {
               // Forward to Master Backend
               self.handle_input(
@@ -554,10 +577,75 @@ impl MasterContext {
               // Trace for testing
               io_ctx.trace(MasterTraceMessage::LeaderChanged(leader_changed.lid));
             }
-            PLEntry::Reconfig(_) => {
-              // TODO: do
+            msg::PLEntry::Bundle(master_bundle) => {
+              self.process_bundle(io_ctx, statuses, master_bundle);
+            }
+            msg::PLEntry::Reconfig(reconfig) => {
+              // See if this node was kicked out of the PaxosGroup (by the
+              // current Leader), in which case we would exit before returning.
+              if !reconfig.rem_eids.contains(&self.this_eid) {
+                io_ctx.mark_exit();
+                return;
+              } else {
+                // First, process the bundle data as normal.
+                self.process_bundle(io_ctx, statuses, reconfig.bundle);
+
+                // Next, send the new `EndpointId`s a MasterSnapshot so that they can start up.
+                for new_eid in &reconfig.new_eids {
+                  let paxos_driver_start = self.paxos_driver.mk_start_new_node(
+                    &MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
+                    new_eid.clone(),
+                  );
+
+                  // Construct the snapshot
+                  let snapshot = MasterSnapshot {
+                    gossip: self.gossip.clone(),
+                    leader_map: self.leader_map.clone(),
+                    free_nodes: self.free_node_manager.mk_free_nodes(),
+                    paxos_driver_start,
+                  };
+
+                  // Send the Snapshot
+                  io_ctx.send(
+                    new_eid,
+                    msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::MasterSnapshot(snapshot)),
+                  )
+                }
+              }
             }
           }
+        }
+      }
+    }
+  }
+
+  /// Processes the insertion of a `MasterBundle`.
+  pub fn process_bundle<IO: MasterIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    master_bundle: MasterBundle,
+  ) {
+    // Dispatch RemoteLeaderChanges
+    for remote_change in master_bundle.remote_leader_changes.clone() {
+      let forward_msg = MasterForwardMsg::RemoteLeaderChanged(remote_change.clone());
+      self.handle_input(io_ctx, statuses, forward_msg);
+    }
+
+    // Dispatch the PaxosBundles
+    self.handle_input(io_ctx, statuses, MasterForwardMsg::MasterBundle(master_bundle.plms));
+
+    // Dispatch any messages that were buffered in the NetworkDriver.
+    // Note: we must do this after RemoteLeaderChanges have been executed. Also note
+    // that there will be no payloads in the NetworkBuffer if this nodes is a Follower.
+    for remote_change in master_bundle.remote_leader_changes {
+      if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
+        // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
+        // for the same `gid` with different `gen`s.
+        let payloads =
+          self.network_driver.deliver_blocked_messages(remote_change.gid, remote_change.lid);
+        for payload in payloads {
+          self.handle_input(io_ctx, statuses, MasterForwardMsg::MasterRemotePayload(payload));
         }
       }
     }
@@ -596,6 +684,43 @@ impl MasterContext {
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
           io_ctx.defer(mk_t(GOSSIP_DATA_PERIOD_MS), MasterTimerInput::BroadcastGossip);
+        }
+        MasterTimerInput::PaxosGroupFailureDetector => {
+          if self.is_leader() {
+            // Only do PaxosGroup failure detection if we are not already trying to reconfigure.
+            if statuses.master_reconfig_es.is_none() {
+              let maybe_dead_eids = self.paxos_driver.get_maybe_dead();
+              // If there are nodes that might be dead, we take only the first and then
+              // attempt a Reconfiguration. Recall we only reconfigure one-at-a-time to
+              // preserve our liveness properties.
+              if let Some(eid) = maybe_dead_eids.into_iter().next() {
+                self.free_node_manager.request_new_eids(PaxosGroupId::Master, 1);
+                statuses.master_reconfig_es = Some(MasterReconfigES {
+                  rem_eids: vec![eid],
+                  state: ReconfigState::WaitingRequestedNodes,
+                });
+              }
+            }
+          }
+
+          // We schedule this both for all nodes, not just Leaders, so that when a Follower
+          // becomes the Leader, these timer events will already be working.
+          io_ctx
+            .defer(mk_t(FAILURE_DETECTOR_PERIOD_MS), MasterTimerInput::PaxosGroupFailureDetector);
+        }
+        MasterTimerInput::FreeNodeHeartbeatTimer => {
+          if self.is_leader() {
+            self.free_node_manager.handle_timer(FreeNodeManagerContext {
+              this_eid: &self.this_eid,
+              leader_map: &self.leader_map,
+              master_bundle: &mut self.master_bundle,
+            });
+          }
+
+          // We schedule this both for all nodes, not just Leaders, so that when a Follower
+          // becomes the Leader, these timer events will already be working.
+          io_ctx
+            .defer(mk_t(FREE_NODE_HEARTBEAT_TIMER_MS), MasterTimerInput::FreeNodeHeartbeatTimer);
         }
       },
       MasterForwardMsg::MasterBundle(bundle) => {
@@ -719,10 +844,14 @@ impl MasterContext {
           );
 
           // Forwarded the granted `EndpointId`s to the `SlaveGroupReconfig`s that requested it.
+          // We might also be doing a Master Reconfig, record the new_eids for that.
+          let mut do_reconfig: Option<(Vec<EndpointId>, Vec<EndpointId>)> = None;
           for (gid, new_eids) in granted_reconfig_eids {
             match gid {
               PaxosGroupId::Master => {
-                // TODO:
+                let es = statuses.master_reconfig_es.as_mut().unwrap();
+                do_reconfig = Some((es.rem_eids.clone(), new_eids.clone()));
+                es.state = ReconfigState::InsertingReconfig { new_eids };
               }
               PaxosGroupId::Slave(sid) => {
                 let es = statuses.slave_reconfig_ess.get_mut(&sid).unwrap();
@@ -731,13 +860,17 @@ impl MasterContext {
             }
           }
 
-          // Continue the insert cycle.
+          // Continue the insert cycle. If the Master needs to reconfigure, we choose
+          // `Reconfig`. Otherwise, we choose `Bundle`.
+          let bundle = std::mem::replace(&mut self.master_bundle, MasterBundle::default());
+          let user_entry = if let Some((rem_eids, new_eids)) = do_reconfig {
+            UserPLEntry::Reconfig(msg::Reconfig { rem_eids, new_eids, bundle })
+          } else {
+            UserPLEntry::Bundle(bundle)
+          };
           self.paxos_driver.insert_bundle(
             &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
-            UserPLEntry::Bundle(std::mem::replace(
-              &mut self.master_bundle,
-              MasterBundle::default(),
-            )),
+            user_entry,
           );
         }
       }
@@ -1041,6 +1174,9 @@ impl MasterContext {
           }
         }
 
+        // MasterReconfig
+        statuses.master_reconfig_es = None;
+
         // FreeNodeManager
         self.free_node_manager.leader_changed(FreeNodeManagerContext {
           this_eid: &self.this_eid,
@@ -1062,13 +1198,15 @@ impl MasterContext {
 
           // This node is the new Leader
           self.broadcast_leadership(io_ctx); // Broadcast RemoteLeaderChanged
+
+          // Start the insert cycle.
           self.paxos_driver.insert_bundle(
             &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
             UserPLEntry::Bundle(std::mem::replace(
               &mut self.master_bundle,
               MasterBundle::default(),
             )),
-          ); // Start the insert cycle.
+          );
         }
       }
     }

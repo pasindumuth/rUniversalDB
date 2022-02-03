@@ -80,6 +80,16 @@ impl<'a> BasicIOCtx for TestSlaveIOCtx<'a> {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
 
+  fn mark_exit(&mut self) {
+    // TODO: do
+    unimplemented!()
+  }
+
+  fn did_exit(&mut self) -> bool {
+    // TODO: do
+    unimplemented!()
+  }
+
   fn general_trace(&mut self, _: GeneralTraceMessage) {
     unimplemented!()
   }
@@ -179,6 +189,16 @@ impl<'a> BasicIOCtx for TestCoreIOCtx<'a> {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
 
+  fn mark_exit(&mut self) {
+    // TODO: do
+    unimplemented!()
+  }
+
+  fn did_exit(&mut self) -> bool {
+    // TODO: do
+    unimplemented!()
+  }
+
   fn general_trace(&mut self, trace_msg: GeneralTraceMessage) {
     self.success_tracer.process(trace_msg);
   }
@@ -225,6 +245,16 @@ impl<'a> BasicIOCtx for TestMasterIOCtx<'a> {
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
+  }
+
+  fn mark_exit(&mut self) {
+    // TODO: do
+    unimplemented!()
+  }
+
+  fn did_exit(&mut self) -> bool {
+    // TODO: do
+    unimplemented!()
   }
 
   fn general_trace(&mut self, trace_msg: GeneralTraceMessage) {
@@ -419,7 +449,7 @@ impl Simulation {
 
     // Construct MasterState
     for eid in master_address_config.clone() {
-      let master_state = MasterState::new(MasterContext::new(
+      let master_state = MasterState::new(MasterContext::create_initial(
         MasterConfig { timestamp_suffix_divisor },
         eid.clone(),
         slave_address_config.clone(),
