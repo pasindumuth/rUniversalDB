@@ -140,14 +140,14 @@ pub enum PaxosTimerEvent {
 #[derive(Debug, Clone)]
 pub enum UserPLEntry<BundleT> {
   Bundle(BundleT),
-  Reconfig(msg::Reconfig<BundleT>),
+  ReconfigBundle(msg::ReconfigBundle<BundleT>),
 }
 
 impl<BundleT> UserPLEntry<BundleT> {
   fn convert(self) -> msg::PLEntry<BundleT> {
     match self {
       UserPLEntry::Bundle(bundle) => msg::PLEntry::Bundle(bundle),
-      UserPLEntry::Reconfig(reconfig) => msg::PLEntry::Reconfig(reconfig),
+      UserPLEntry::ReconfigBundle(reconfig) => msg::PLEntry::ReconfigBundle(reconfig),
     }
   }
 }
@@ -247,8 +247,6 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
       unconfirmed_eids.insert(eid, false);
     }
 
-    // TODO: start unconfirmed_eids timer.
-
     // Broadcast `NewNodeStarted`
     for eid in &start.paxos_nodes {
       ctx.send(
@@ -286,15 +284,50 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
     maybe_dead_eids
   }
 
+  /// Compute the minimum of `remote_next_indices`
+  fn min_complete_index(&self) -> u128 {
+    // We start with `next_index` since the minimum in `remote_next_indices`
+    // is certainly <= to this.
+    let mut min_index = self.next_index;
+    for remote_index in self.remote_next_indices.values() {
+      min_index = min(min_index, *remote_index);
+    }
+    min_index
+  }
+
+  pub fn is_leader<PaxosContextBaseT: PaxosContextBase<BundleT>>(
+    &self,
+    ctx: &PaxosContextBaseT,
+  ) -> bool {
+    &self.leader.eid == ctx.this_eid()
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  //  StartNewNode Utilities
+  // -----------------------------------------------------------------------------------------------
+
+  /// This returns `true` iff there are `unconfirmed_eids` that map to `false`. (This will
+  /// will primarily only be the case in backups, where Snapshot sending is lazy).
+  pub fn has_unsent_unconfirmed(&self) -> bool {
+    for (_, did_send_start) in &self.unconfirmed_eids {
+      if !did_send_start {
+        return true;
+      }
+    }
+
+    false
+  }
+
   /// Construct a `StartNewNode`, which is called from the outside (e.g. Master, Slave)
   /// and attached to *its* reconfig Snapshot before it is sent off. This is typically
   /// called immediately after processing a `UserPLEntry::Reconfig` element if this node
   /// is the Leader, but can also be called by a backup.
+  ///
+  /// We also return the set of `EndpointId`s that we should send `StartNewNode` to.
   pub fn mk_start_new_node<PaxosContextBaseT: PaxosContextBase<BundleT>>(
     &mut self,
     ctx: &PaxosContextBaseT,
-    new_eid: EndpointId,
-  ) -> msg::StartNewNode<BundleT> {
+  ) -> (msg::StartNewNode<BundleT>, Vec<EndpointId>) {
     let mut start = msg::StartNewNode {
       sender_eid: ctx.this_eid().clone(),
       paxos_nodes: self.paxos_nodes.clone(),
@@ -321,28 +354,17 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
       start.unconfirmed_eids.insert(eid.clone());
     }
 
-    // Set unconfirmed_eids to true, since we will be sending out a StartNewNode
-    *self.unconfirmed_eids.get_mut(&new_eid).unwrap() = true;
-
-    start
-  }
-
-  /// Compute the minimum of `remote_next_indices`
-  fn min_complete_index(&self) -> u128 {
-    // We start with `next_index` since the minimum in `remote_next_indices`
-    // is certainly <= to this.
-    let mut min_index = self.next_index;
-    for remote_index in self.remote_next_indices.values() {
-      min_index = min(min_index, *remote_index);
+    // Compute all `EndpointId` we did not send `StartNewNode`.
+    // (We will send these nodes a Snapshot.)
+    let mut non_started_eids = Vec::<EndpointId>::new();
+    for (eid, did_send_start) in &mut self.unconfirmed_eids {
+      if !*did_send_start {
+        non_started_eids.push(eid.clone());
+        *did_send_start = true;
+      }
     }
-    min_index
-  }
 
-  pub fn is_leader<PaxosContextBaseT: PaxosContextBase<BundleT>>(
-    &self,
-    ctx: &PaxosContextBaseT,
-  ) -> bool {
-    &self.leader.eid == ctx.this_eid()
+    (start, non_started_eids)
   }
 
   // -----------------------------------------------------------------------------------------------
@@ -710,7 +732,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
           self.next_index += 1;
           match learned_val {
             PLEntry::Bundle(_) => {}
-            PLEntry::Reconfig(reconfig) => {
+            PLEntry::ReconfigBundle(reconfig) => {
               // Process new_eids
               for eid in &reconfig.new_eids {
                 self.remote_next_indices.insert(eid.clone(), self.next_index.clone());
@@ -869,6 +891,17 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
   // -----------------------------------------------------------------------------------------------
   //  Utilities
   // -----------------------------------------------------------------------------------------------
+
+  /// Checks if all `EndpointId` in `eids` is in `paxos_nodes`.
+  pub fn contains_nodes(&self, eids: &Vec<EndpointId>) -> bool {
+    for eid in eids {
+      if !self.paxos_nodes.contains(eid) {
+        return false;
+      }
+    }
+
+    true
+  }
 
   /// Propose `entry` at the `self.next_index` once.
   fn propose_next_index<PaxosContextBaseT: PaxosContextBase<BundleT>>(

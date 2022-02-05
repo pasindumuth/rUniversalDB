@@ -594,7 +594,7 @@ fn main() {
                   )),
                 );
               }
-              FreeNodeMessage::SlaveSnapshot => {
+              FreeNodeMessage::SlaveSnapshot(_) => {
                 // TODO: do
               }
               FreeNodeMessage::MasterSnapshot(snapshot) => {
@@ -682,7 +682,7 @@ fn main() {
                     )),
                   );
                 }
-                FreeNodeMessage::SlaveSnapshot => {
+                FreeNodeMessage::SlaveSnapshot(_) => {
                   // Respond with a `NewNodeStarted`.
                   send_msg(
                     &out_conn_map,

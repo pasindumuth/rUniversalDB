@@ -1,6 +1,7 @@
 use crate::common::{
   mk_t, BasicIOCtx, GossipData, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp,
-  VersionedValue,
+  VersionedValue, CHECK_UNCONFIRMED_EIDS_PERIOD_MS, FAILURE_DETECTOR_PERIOD_MS,
+  REMOTE_LEADER_CHANGED_PERIOD_MS,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::CreateTableRMES;
@@ -17,12 +18,13 @@ use crate::server::{MainSlaveServerContext, ServerContextBase};
 use crate::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::RMServerContext;
-use crate::tablet::{TabletBundle, TabletForwardMsg};
+use crate::tablet::{TabletBundle, TabletForwardMsg, TabletSnapshot};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
+use std::os::macos::raw::stat;
 use std::sync::Arc;
 
 #[path = "./slave_test.rs"]
@@ -118,6 +120,7 @@ pub struct TabletBundleInsertion {
 #[derive(Debug)]
 pub enum SlaveBackMessage {
   TabletBundleInsertion(TabletBundleInsertion),
+  TabletSnapshot(TabletSnapshot),
 }
 
 /// Messages deferred by the Slave to be run on the Slave.
@@ -127,6 +130,11 @@ pub enum SlaveTimerInput {
   /// This is used to periodically propagate out RemoteLeaderChanged. It is
   /// only used by the Leader.
   RemoteLeaderChanged,
+  /// A timer event to detect if the Slave PaxosGroup has a failed node.
+  PaxosGroupFailureDetector,
+  /// A timer event to detect if there are any `unconfirmed_eids` in the PaxosDriver. We
+  /// use this to start constructing a `SlaveSnapshot` if there is.
+  CheckUnconfirmedEids,
 }
 
 pub enum FullSlaveInput {
@@ -136,10 +144,18 @@ pub enum FullSlaveInput {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Constants
+//  SlaveSnapshot
 // -----------------------------------------------------------------------------------------------
 
-pub const REMOTE_LEADER_CHANGED_PERIOD_MS: u128 = 5;
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SlaveSnapshot {
+  pub gossip: GossipData,
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  pub paxos_driver_start: msg::StartNewNode<SharedPaxosBundle>,
+
+  /// We remember the set of Tablets to wait for here so that
+  pub tablet_snapshots: BTreeMap<TabletGroupId, TabletSnapshot>,
+}
 
 // -----------------------------------------------------------------------------------------------
 //  Status
@@ -150,6 +166,20 @@ pub const REMOTE_LEADER_CHANGED_PERIOD_MS: u128 = 5;
 #[derive(Debug, Default)]
 pub struct Statuses {
   create_table_ess: BTreeMap<QueryId, CreateTableRMES>,
+
+  /// We create this once a `ReconfigSlaveGroup` arrives that contains a new config. We use
+  /// `do_reconfig` to communicate to the point of `SharedPaxosBundle` to insert a `ReconfigBundle`
+  /// instead. We should keep `do_reconfig` around until this insertion happens and where
+  /// `paxos_nodes.contains` reflects this fact. However, we need to be careful to clear
+  /// `do_reconfig` before the next time a SharedPaxosBundle is computed for insertion, since
+  /// we don’t want to accidentally make that into a ReconfigBundle too.
+  do_reconfig: Option<(Vec<EndpointId>, Vec<EndpointId>)>,
+  /// This is populated whenever we start building a `SlaveSnapshot`. We call the PaxosDriver
+  /// to get the current set of `unconfirmed_eids` that map to `false` (held in `Vec<EndpointId>`),
+  /// which also returns the `paxos_driver_start`. We send `ConstructTabletSnapshot` to the current
+  /// set of Tablets and we remember `io_ctx.num_tablets` so that we can determine when all Tablets
+  /// have responded with their their snapshots.
+  pending_snapshot: Option<(SlaveSnapshot, Vec<EndpointId>, usize)>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -264,12 +294,14 @@ impl SlaveState {
     self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::LeaderHeartbeat);
     self.ctx.paxos_driver.timer_event(ctx, PaxosTimerEvent::NextIndex);
 
-    // Start periodic broadcasting of RemoteLeaderChanged
-    self.ctx.handle_input(
-      io_ctx,
-      &mut self.statuses,
-      SlaveForwardMsg::SlaveTimerInput(SlaveTimerInput::RemoteLeaderChanged),
-    )
+    // Start other time events
+    for event in [
+      SlaveTimerInput::RemoteLeaderChanged,
+      SlaveTimerInput::PaxosGroupFailureDetector,
+      SlaveTimerInput::CheckUnconfirmedEids,
+    ] {
+      self.ctx.handle_input(io_ctx, &mut self.statuses, SlaveForwardMsg::SlaveTimerInput(event));
+    }
   }
 
   pub fn handle_input<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO, input: FullSlaveInput) {
@@ -378,76 +410,6 @@ impl SlaveContext {
         );
         for shared_bundle in bundles {
           match shared_bundle {
-            msg::PLEntry::Bundle(shared_bundle) => {
-              let all_tids = io_ctx.all_tids();
-              let all_cids = io_ctx.all_cids();
-              let slave_bundle = shared_bundle.slave;
-
-              // We buffer the SlaveForwardMsgs and execute them at the end.
-              let mut slave_forward_msgs = Vec::<SlaveForwardMsg>::new();
-
-              // Dispatch RemoteLeaderChanges
-              for remote_change in slave_bundle.remote_leader_changes.clone() {
-                let forward_msg = SlaveForwardMsg::RemoteLeaderChanged(remote_change.clone());
-                slave_forward_msgs.push(forward_msg);
-                for tid in &all_tids {
-                  let forward_msg = TabletForwardMsg::RemoteLeaderChanged(remote_change.clone());
-                  io_ctx.tablet_forward(&tid, forward_msg);
-                }
-                for cid in &all_cids {
-                  let forward_msg = CoordForwardMsg::RemoteLeaderChanged(remote_change.clone());
-                  io_ctx.coord_forward(&cid, forward_msg);
-                }
-              }
-
-              // Dispatch GossipData
-              if let Some(gossip_data) = slave_bundle.gossip_data {
-                if self.gossip.get_gen() < gossip_data.get_gen() {
-                  let gossip = Arc::new(gossip_data);
-                  slave_forward_msgs.push(SlaveForwardMsg::GossipData(gossip.clone()));
-                  for tid in &all_tids {
-                    let forward_msg = TabletForwardMsg::GossipData(gossip.clone());
-                    io_ctx.tablet_forward(&tid, forward_msg);
-                  }
-                  for cid in &all_cids {
-                    let forward_msg = CoordForwardMsg::GossipData(gossip.clone());
-                    io_ctx.coord_forward(&cid, forward_msg);
-                  }
-                }
-              }
-
-              // Dispatch the PaxosBundles
-              slave_forward_msgs.push(SlaveForwardMsg::SlaveBundle(slave_bundle.plms));
-              for (tid, tablet_bundle) in shared_bundle.tablet {
-                let forward_msg = TabletForwardMsg::TabletBundle(tablet_bundle);
-                io_ctx.tablet_forward(&tid, forward_msg);
-              }
-
-              // Forward to Slave Backend
-              for forward_msg in slave_forward_msgs {
-                self.handle_input(io_ctx, statuses, forward_msg);
-              }
-
-              // Dispatch any messages that were buffered in the NetworkDriver.
-              // Note: we must do this after RemoteLeaderChanges have been executed. Also note
-              // that there will be no payloads in the NetworkBuffer if this nodes is a Follower.
-              for remote_change in slave_bundle.remote_leader_changes {
-                if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
-                  // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
-                  // for the same `gid` with different `gen`s.
-                  let payloads = self
-                    .network_driver
-                    .deliver_blocked_messages(remote_change.gid, remote_change.lid);
-                  for payload in payloads {
-                    self.handle_input(
-                      io_ctx,
-                      statuses,
-                      SlaveForwardMsg::SlaveRemotePayload(payload),
-                    );
-                  }
-                }
-              }
-            }
             msg::PLEntry::LeaderChanged(leader_changed) => {
               // Forward the LeaderChanged to all Tablets.
               let all_tids = io_ctx.all_tids();
@@ -473,17 +435,129 @@ impl SlaveContext {
               // Trace for testing
               io_ctx.trace(SlaveTraceMessage::LeaderChanged(leader_changed.lid));
             }
-            PLEntry::Reconfig(reconfig) => {
-              // See if this node was kicked out of the PaxosGroup (by the current Leader),
-              // in which case we would exit before returning.
-              if !reconfig.rem_eids.contains(&self.this_eid) {
+            msg::PLEntry::Bundle(shared_bundle) => {
+              // Process the persisted data only first.
+              let remote_leader_changed = shared_bundle.slave.remote_leader_changes.clone();
+              self.process_bundle(io_ctx, statuses, shared_bundle);
+              // Then, deliver any messages that were blocked.
+              self.deliver_blocked_messages(io_ctx, statuses, remote_leader_changed);
+            }
+            msg::PLEntry::ReconfigBundle(reconfig) => {
+              // See if this node was kicked out of the PaxosGroup (by the
+              // current Leader), in which case we would exit before returning.
+              if reconfig.rem_eids.contains(&self.this_eid) {
                 io_ctx.mark_exit();
                 return;
               } else {
-                // TODO: do
+                // We clear this here to guarantee that we do not accidentally
+                // insert another ReconfigBundle.
+                statuses.do_reconfig = None;
+
+                // Process the persisted data only first.
+                let remote_leader_changed = reconfig.bundle.slave.remote_leader_changes.clone();
+                self.process_bundle(io_ctx, statuses, reconfig.bundle);
+
+                // If this is a Leader, we try to start building a SlaveSnapshot. Note that there
+                // might already one being constructed (from an unfortunately timed
+                // `CheckUnconfirmedEids`), in which case we do nothing. This is okay; we will
+                // compensate on a subsequent `CheckUnconfirmedEids`.
+                if self.is_leader() {
+                  self.maybe_start_snapshot(io_ctx, statuses);
+
+                  // Inform the Master that the Reconfiguration was a success.
+                  self.ctx(io_ctx).send_to_master(
+                    msg::MasterRemotePayload::SlaveGroupReconfigured(msg::SlaveGroupReconfigured {
+                      sid: self.this_sid.clone(),
+                    }),
+                  );
+                }
+
+                // Then, deliver any messages that were blocked.
+                self.deliver_blocked_messages(io_ctx, statuses, remote_leader_changed);
               }
             }
           }
+        }
+      }
+    }
+  }
+
+  /// Processes the insertion of a `SlaveBundle`.
+  pub fn process_bundle<IO: SlaveIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    shared_bundle: SharedPaxosBundle,
+  ) {
+    let all_tids = io_ctx.all_tids();
+    let all_cids = io_ctx.all_cids();
+    let slave_bundle = shared_bundle.slave;
+
+    // We buffer the SlaveForwardMsgs and execute them at the end.
+    let mut slave_forward_msgs = Vec::<SlaveForwardMsg>::new();
+
+    // Dispatch RemoteLeaderChanges
+    for remote_change in slave_bundle.remote_leader_changes {
+      let forward_msg = SlaveForwardMsg::RemoteLeaderChanged(remote_change.clone());
+      slave_forward_msgs.push(forward_msg);
+      for tid in &all_tids {
+        let forward_msg = TabletForwardMsg::RemoteLeaderChanged(remote_change.clone());
+        io_ctx.tablet_forward(&tid, forward_msg);
+      }
+      for cid in &all_cids {
+        let forward_msg = CoordForwardMsg::RemoteLeaderChanged(remote_change.clone());
+        io_ctx.coord_forward(&cid, forward_msg);
+      }
+    }
+
+    // Dispatch GossipData
+    if let Some(gossip_data) = slave_bundle.gossip_data {
+      if self.gossip.get_gen() < gossip_data.get_gen() {
+        let gossip = Arc::new(gossip_data);
+        slave_forward_msgs.push(SlaveForwardMsg::GossipData(gossip.clone()));
+        for tid in &all_tids {
+          let forward_msg = TabletForwardMsg::GossipData(gossip.clone());
+          io_ctx.tablet_forward(&tid, forward_msg);
+        }
+        for cid in &all_cids {
+          let forward_msg = CoordForwardMsg::GossipData(gossip.clone());
+          io_ctx.coord_forward(&cid, forward_msg);
+        }
+      }
+    }
+
+    // Dispatch the PaxosBundles
+    slave_forward_msgs.push(SlaveForwardMsg::SlaveBundle(slave_bundle.plms));
+    for (tid, tablet_bundle) in shared_bundle.tablet {
+      let forward_msg = TabletForwardMsg::TabletBundle(tablet_bundle);
+      io_ctx.tablet_forward(&tid, forward_msg);
+    }
+
+    // Forward to Slave Backend
+    for forward_msg in slave_forward_msgs {
+      self.handle_input(io_ctx, statuses, forward_msg);
+    }
+  }
+
+  /// Delivery any messages in the `network_driver` that were blocked by not having
+  /// a high enough leadership.
+  pub fn deliver_blocked_messages<IO: SlaveIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    remote_leader_changes: Vec<RemoteLeaderChangedPLm>,
+  ) {
+    // Dispatch any messages that were buffered in the NetworkDriver.
+    // Note: we must do this after RemoteLeaderChanges have been executed. Also note
+    // that there will be no payloads in the NetworkBuffer if this nodes is a Follower.
+    for remote_change in remote_leader_changes {
+      if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
+        // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
+        // for the same `gid` with different `gen`s.
+        let payloads =
+          self.network_driver.deliver_blocked_messages(remote_change.gid, remote_change.lid);
+        for payload in payloads {
+          self.handle_input(io_ctx, statuses, SlaveForwardMsg::SlaveRemotePayload(payload));
         }
       }
     }
@@ -501,7 +575,27 @@ impl SlaveContext {
         SlaveBackMessage::TabletBundleInsertion(insert) => {
           if self.leader_map.get(&self.this_gid).unwrap() == &insert.lid {
             self.tablet_bundles.insert(insert.tid, insert.bundle);
-            self.maybe_start_insert(io_ctx);
+            self.maybe_start_insert(io_ctx, statuses);
+          }
+        }
+        SlaveBackMessage::TabletSnapshot(tablet_snapshot) => {
+          // Recall that there will definitely be a `pending_snapshot`, since that is
+          // never erased until it is complete
+          let (snapshot, new_eids, num_tablets) = statuses.pending_snapshot.as_mut().unwrap();
+          snapshot.tablet_snapshots.insert(tablet_snapshot.tid.clone(), tablet_snapshot);
+
+          // If all TabletSnapshots have been added, we clear `pending_snapshot` and send
+          // it off to the new nodes.
+          if snapshot.tablet_snapshots.len() == *num_tablets {
+            for new_eid in new_eids {
+              io_ctx.send(
+                new_eid,
+                msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::SlaveSnapshot(
+                  snapshot.clone(),
+                )),
+              )
+            }
+            statuses.pending_snapshot = None;
           }
         }
       },
@@ -520,6 +614,36 @@ impl SlaveContext {
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
           io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD_MS), SlaveTimerInput::RemoteLeaderChanged);
+        }
+        SlaveTimerInput::PaxosGroupFailureDetector => {
+          if self.is_leader() {
+            // Only do PaxosGroup failure detection if we are not already trying to reconfigure.
+            let maybe_dead_eids = self.paxos_driver.get_maybe_dead();
+            if let Some(eid) = maybe_dead_eids.into_iter().next() {
+              // Here, we send the Master a `NodesDead` message indicating that we
+              // want to reconfigure. Recall we only reconfigure one-at-a-time to
+              // preserve our liveness properties.
+              let nodes_dead = msg::NodesDead { sid: self.this_sid.clone(), eids: vec![eid] };
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::NodesDead(nodes_dead))
+            }
+          }
+
+          // We schedule this both for all nodes, not just Leaders, so that when a Follower
+          // becomes the Leader, these timer events will already be working.
+          io_ctx
+            .defer(mk_t(FAILURE_DETECTOR_PERIOD_MS), SlaveTimerInput::PaxosGroupFailureDetector);
+        }
+        SlaveTimerInput::CheckUnconfirmedEids => {
+          // We do this for both the Leader and Followers. If there are `unconfirmed_eids` in
+          // the PaxosDriver, then we attempt to send a `SlaveSnapshot`.
+          if self.paxos_driver.has_unsent_unconfirmed() {
+            self.maybe_start_snapshot(io_ctx, statuses);
+          }
+
+          // We schedule this both for all nodes, not just Leaders, so that when a Follower
+          // becomes the Leader, these timer events will already be working.
+          io_ctx
+            .defer(mk_t(CHECK_UNCONFIRMED_EIDS_PERIOD_MS), SlaveTimerInput::CheckUnconfirmedEids);
         }
       },
       SlaveForwardMsg::SlaveBundle(bundle) => {
@@ -540,7 +664,7 @@ impl SlaveContext {
           }
 
           // Continue the insert cycle if there are no Tablets.
-          self.maybe_start_insert(io_ctx);
+          self.maybe_start_insert(io_ctx, statuses);
         }
       }
       SlaveForwardMsg::SlaveExternalReq(request) => {
@@ -584,8 +708,22 @@ impl SlaveContext {
           msg::SlaveRemotePayload::CoordMessage(cid, coord_msg) => {
             io_ctx.coord_forward(&cid, CoordForwardMsg::CoordMessage(coord_msg))
           }
-          msg::SlaveRemotePayload::ReconfigSlaveGroup(_) => {
-            // TODO: do
+          msg::SlaveRemotePayload::ReconfigSlaveGroup(reconfig) => {
+            // Respond affirmative immeidately if this node has already completed this reconfig.
+            if self.paxos_driver.contains_nodes(&reconfig.new_eids) {
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::SlaveGroupReconfigured(
+                msg::SlaveGroupReconfigured { sid: self.this_sid.clone() },
+              ));
+            } else {
+              // Otherwise, do nothing if we are already going to do this reconfig.
+              if let Some((rem_eids, new_eids)) = &statuses.do_reconfig {
+                debug_assert!(rem_eids == &reconfig.rem_eids);
+                debug_assert!(new_eids == &reconfig.new_eids);
+              } else {
+                // Otherwise, populate `statuses` to make sure we insert a `ReconfigBundle` next.
+                statuses.do_reconfig = Some((reconfig.rem_eids, reconfig.new_eids));
+              }
+            }
           }
         }
       }
@@ -618,13 +756,19 @@ impl SlaveContext {
           self.handle_create_table_es_action(io_ctx, statuses, query_id.clone(), action);
         }
 
+        // MasterReconfig
+        statuses.do_reconfig = None;
+
         // Inform the NetworkDriver
         self.network_driver.leader_changed();
 
         if self.is_leader() {
           // This node is the new Leader
-          self.broadcast_leadership(io_ctx); // Broadcast RemoteLeaderChanged
-          self.maybe_start_insert(io_ctx); // Start the insert cycle if there are no Tablets.
+
+          // Broadcast RemoteLeaderChanged
+          self.broadcast_leadership(io_ctx);
+          // Start the insert cycle if there are no Tablets.
+          self.maybe_start_insert(io_ctx, statuses);
         }
       }
     }
@@ -660,16 +804,69 @@ impl SlaveContext {
 
   /// Checks whether all Tablets have forwarded their `TabletBundle`s back up to the Slave, and
   /// if so, send it to the PaxosDriver for insertion. We also clear the current set of Bundles.
-  fn maybe_start_insert<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
+  fn maybe_start_insert<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
     if self.tablet_bundles.len() == io_ctx.num_tablets() {
-      let shared_bundle = SharedPaxosBundle {
-        slave: std::mem::replace(&mut self.slave_bundle, SlaveBundle::default()),
-        tablet: std::mem::replace(&mut self.tablet_bundles, BTreeMap::default()),
+      let bundle = SharedPaxosBundle {
+        slave: std::mem::take(&mut self.slave_bundle),
+        tablet: std::mem::take(&mut self.tablet_bundles),
       };
-      self.paxos_driver.insert_bundle(
-        &mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid },
-        UserPLEntry::Bundle(shared_bundle),
-      );
+
+      // Check if we should reconfigure, construct the appropriate `UserPLEntry`.
+      let user_entry = if let Some((rem_eids, new_eids)) = statuses.do_reconfig.clone() {
+        UserPLEntry::ReconfigBundle(msg::ReconfigBundle { rem_eids, new_eids, bundle })
+      } else {
+        UserPLEntry::Bundle(bundle)
+      };
+      self
+        .paxos_driver
+        .insert_bundle(&mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid }, user_entry);
+    }
+  }
+
+  // TODO: this can be pulled out and isolated so that nobody else touches `pending_snapshot`
+  /// This start the construction of a `SlaveSnapshot` if one is not already being constructed.
+  /// We only ever try to create `SlaveSnapshot` via this methods. This guarantees that each
+  /// one is constructed successfully (i.e. not preempted), which is important for making sure
+  /// that all `EndpointId`s returned by `mk_start_new_node` actually do get a `SlaveSnapshot`
+  /// sent to it.
+  ///
+  /// Importantly, merely needs to be called between the processing of Inserted bundles. That way
+  /// the `paxos_driver_start`, along with the `SlaveSnapshot` and `TabletSnapshot`s we get would
+  /// be sufficient to start up a new node successfully.
+  fn maybe_start_snapshot<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
+    if statuses.pending_snapshot.is_none() {
+      let (paxos_driver_start, non_started_eids) = self
+        .paxos_driver
+        .mk_start_new_node(&SlavePaxosContext { io_ctx, this_eid: &self.this_eid });
+
+      // TODO: handle CreateTableES persisted state.
+
+      // Construct the snapshot.
+      let snapshot = SlaveSnapshot {
+        gossip: self.gossip.as_ref().clone(),
+        leader_map: self.leader_map.clone(),
+        paxos_driver_start,
+        tablet_snapshots: Default::default(),
+      };
+
+      // Request the Tablets to send back a TabletSnapshot
+      for tid in io_ctx.all_tids() {
+        io_ctx.tablet_forward(&tid, TabletForwardMsg::ConstructTabletSnapshot);
+      }
+
+      // If there are no Tablets in this Slave, then we can send off the SlaveSnapshot
+      // early. (Otherwise, we must wait).
+      let num_tablets = io_ctx.num_tablets();
+      if num_tablets == 0 {
+        for new_eid in &non_started_eids {
+          io_ctx.send(
+            new_eid,
+            msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::SlaveSnapshot(snapshot.clone())),
+          )
+        }
+      } else {
+        statuses.pending_snapshot = Some((snapshot, non_started_eids, num_tablets));
+      }
     }
   }
 

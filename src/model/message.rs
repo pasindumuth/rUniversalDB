@@ -13,7 +13,7 @@ use crate::model::common::{
   TierMap, TransTableLocationPrefix, TransTableName,
 };
 use crate::paxos2pc_tm;
-use crate::slave::SharedPaxosBundle;
+use crate::slave::{SharedPaxosBundle, SlaveSnapshot};
 use crate::stmpaxos2pc_tm;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -102,7 +102,7 @@ pub enum FreeNodeMessage {
   MasterLeadershipId(LeadershipId),
   ShutdownNode,
   CreateSlaveGroup(CreateSlaveGroup),
-  SlaveSnapshot,
+  SlaveSnapshot(SlaveSnapshot),
   MasterSnapshot(MasterSnapshot),
 }
 
@@ -307,7 +307,7 @@ pub enum PaxosMessage<ValT> {
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Reconfig<BundleT> {
+pub struct ReconfigBundle<BundleT> {
   pub rem_eids: Vec<EndpointId>,
   pub new_eids: Vec<EndpointId>,
   pub bundle: BundleT,
@@ -320,7 +320,7 @@ pub struct LeaderChanged {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum PLEntry<BundleT> {
   Bundle(BundleT),
-  Reconfig(Reconfig<BundleT>),
+  ReconfigBundle(ReconfigBundle<BundleT>),
   LeaderChanged(LeaderChanged),
 }
 

@@ -225,6 +225,18 @@ pub struct GRQueryESWrapper {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  TabletSnapshot
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TabletSnapshot {
+  /// The Tablet that is sending this message
+  pub tid: TabletGroupId,
+  pub gossip: GossipData,
+  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Status
 // -----------------------------------------------------------------------------------------------
 
@@ -477,6 +489,7 @@ pub enum TabletForwardMsg {
   GossipData(Arc<GossipData>),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(msg::LeaderChanged),
+  ConstructTabletSnapshot,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1396,6 +1409,7 @@ impl TabletContext {
           }));
         }
       }
+      TabletForwardMsg::ConstructTabletSnapshot => {}
     }
   }
 

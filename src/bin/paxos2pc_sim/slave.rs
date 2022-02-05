@@ -8,7 +8,9 @@ use crate::stm_simple_tm_es::{
   STMSimpleAborted, STMSimplePayloadTypes, STMSimpleTMES, STMSimpleTMInner,
 };
 use rand::RngCore;
-use runiversal::common::{mk_t, BasicIOCtx, RemoteLeaderChangedPLm};
+use runiversal::common::{
+  mk_t, BasicIOCtx, RemoteLeaderChangedPLm, REMOTE_LEADER_CHANGED_PERIOD_MS,
+};
 use runiversal::model::common::{EndpointId, PaxosGroupIdTrait, QueryId};
 use runiversal::model::common::{LeadershipId, PaxosGroupId, SlaveGroupId};
 use runiversal::network_driver::{NetworkDriver, NetworkDriverContext};
@@ -16,7 +18,6 @@ use runiversal::paxos2pc_rm;
 use runiversal::paxos2pc_rm::Paxos2PCRMAction;
 use runiversal::paxos2pc_tm;
 use runiversal::paxos2pc_tm::Paxos2PCTMAction;
-use runiversal::slave::REMOTE_LEADER_CHANGED_PERIOD_MS;
 use runiversal::stmpaxos2pc_rm;
 use runiversal::stmpaxos2pc_rm::STMPaxos2PCRMAction;
 use runiversal::stmpaxos2pc_tm;
@@ -335,7 +336,7 @@ impl SlaveContext {
               SlaveForwardMsg::LeaderChanged(leader_changed.clone()),
             );
           }
-          msg::PLEntry::Reconfig(_) => assert!(false),
+          msg::PLEntry::ReconfigBundle(_) => assert!(false),
         }
       }
       FullSlaveInput::SlaveTimerInput(timer_input) => {

@@ -3,7 +3,9 @@ use crate::alter_table_tm_es::{
 };
 use crate::common::{
   lookup_pos, map_insert, mk_qid, mk_t, mk_tid, GeneralTraceMessage, GossipData, MasterIOCtx,
-  MasterTraceMessage, TableSchema, Timestamp, VersionedValue,
+  MasterTraceMessage, TableSchema, Timestamp, VersionedValue, CHECK_UNCONFIRMED_EIDS_PERIOD_MS,
+  FAILURE_DETECTOR_PERIOD_MS, FREE_NODE_HEARTBEAT_TIMER_MS, GOSSIP_DATA_PERIOD_MS,
+  REMOTE_LEADER_CHANGED_PERIOD_MS,
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
@@ -188,6 +190,9 @@ pub enum MasterTimerInput {
   BroadcastGossip,
   /// A Time event to detect if the Master PaxosGroup has a failed node.
   PaxosGroupFailureDetector,
+  /// A timer event to detect if there are any `unconfirmed_eids` in the PaxosDriver. We
+  /// use this to start constructing a `MasterSnapshot` if there is.
+  CheckUnconfirmedEids,
   /// A Timer event to increase the heartbeat for FreeNodes
   FreeNodeHeartbeatTimer,
 }
@@ -196,15 +201,6 @@ pub enum FullMasterInput {
   MasterMessage(msg::MasterMessage),
   MasterTimerInput(MasterTimerInput),
 }
-
-// -----------------------------------------------------------------------------------------------
-//  Constants
-// -----------------------------------------------------------------------------------------------
-
-const REMOTE_LEADER_CHANGED_PERIOD_MS: u128 = 5;
-const GOSSIP_DATA_PERIOD_MS: u128 = 5;
-const FAILURE_DETECTOR_PERIOD_MS: u128 = 5;
-const FREE_NODE_HEARTBEAT_TIMER_MS: u128 = 5;
 
 // -----------------------------------------------------------------------------------------------
 //  TMServerContext AlterTable
@@ -306,22 +302,6 @@ impl Default for MasterConfig {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  MasterReconfigES
-// -----------------------------------------------------------------------------------------------
-
-#[derive(Debug)]
-enum ReconfigState {
-  WaitingRequestedNodes,
-  InsertingReconfig { new_eids: Vec<EndpointId> },
-}
-
-#[derive(Debug)]
-pub struct MasterReconfigES {
-  rem_eids: Vec<EndpointId>,
-  state: ReconfigState,
-}
-
-// -----------------------------------------------------------------------------------------------
 //  MasterSnapshot
 // -----------------------------------------------------------------------------------------------
 
@@ -347,7 +327,13 @@ pub struct Statuses {
   pub slave_group_create_ess: BTreeMap<SlaveGroupId, SlaveGroupCreateES>,
   pub slave_reconfig_ess: BTreeMap<SlaveGroupId, SlaveReconfigES>,
 
-  pub master_reconfig_es: Option<MasterReconfigES>,
+  /// When a reconfig seems warranted, we set this to be present so that during the
+  /// next bundle insertion, we make sure to insert a `ReconfigBundle`. We hold
+  /// onto the removed `EndpointId`s to help do this. We continue to hold onto this
+  /// until the `ReconfigBundle` is inserted, since if we do not, then
+  /// `PaxosGroupFailureDetector` might re-create `do_reconfig` and
+  /// request us to remove a node that already becomes removed.
+  pub do_reconfig: Option<Vec<EndpointId>>,
 }
 
 #[derive(Debug)]
@@ -417,6 +403,7 @@ impl MasterState {
       MasterTimerInput::RemoteLeaderChanged,
       MasterTimerInput::BroadcastGossip,
       MasterTimerInput::PaxosGroupFailureDetector,
+      MasterTimerInput::CheckUnconfirmedEids,
       MasterTimerInput::FreeNodeHeartbeatTimer,
     ] {
       self.ctx.handle_input(io_ctx, &mut self.statuses, MasterForwardMsg::MasterTimerInput(event));
@@ -578,39 +565,33 @@ impl MasterContext {
               io_ctx.trace(MasterTraceMessage::LeaderChanged(leader_changed.lid));
             }
             msg::PLEntry::Bundle(master_bundle) => {
+              // Process the persisted data only first.
+              let remote_leader_changed = master_bundle.remote_leader_changes.clone();
               self.process_bundle(io_ctx, statuses, master_bundle);
+              // Then, deliver any messages that were blocked.
+              self.deliver_blocked_messages(io_ctx, statuses, remote_leader_changed);
             }
-            msg::PLEntry::Reconfig(reconfig) => {
+            msg::PLEntry::ReconfigBundle(reconfig) => {
               // See if this node was kicked out of the PaxosGroup (by the
               // current Leader), in which case we would exit before returning.
-              if !reconfig.rem_eids.contains(&self.this_eid) {
+              if reconfig.rem_eids.contains(&self.this_eid) {
                 io_ctx.mark_exit();
                 return;
               } else {
-                // First, process the bundle data as normal.
+                // Reset the Reconfig ES.
+                statuses.do_reconfig = None;
+
+                // Process the persisted data only first.
+                let remote_leader_changed = reconfig.bundle.remote_leader_changes.clone();
                 self.process_bundle(io_ctx, statuses, reconfig.bundle);
 
-                // Next, send the new `EndpointId`s a MasterSnapshot so that they can start up.
-                for new_eid in &reconfig.new_eids {
-                  let paxos_driver_start = self.paxos_driver.mk_start_new_node(
-                    &MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
-                    new_eid.clone(),
-                  );
-
-                  // Construct the snapshot
-                  let snapshot = MasterSnapshot {
-                    gossip: self.gossip.clone(),
-                    leader_map: self.leader_map.clone(),
-                    free_nodes: self.free_node_manager.mk_free_nodes(),
-                    paxos_driver_start,
-                  };
-
-                  // Send the Snapshot
-                  io_ctx.send(
-                    new_eid,
-                    msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::MasterSnapshot(snapshot)),
-                  )
+                // If this is the leader, swe send a MasterSnapshot.
+                if self.is_leader() {
+                  self.start_snapshot(io_ctx);
                 }
+
+                // Then, deliver any messages that were blocked.
+                self.deliver_blocked_messages(io_ctx, statuses, remote_leader_changed);
               }
             }
           }
@@ -634,11 +615,20 @@ impl MasterContext {
 
     // Dispatch the PaxosBundles
     self.handle_input(io_ctx, statuses, MasterForwardMsg::MasterBundle(master_bundle.plms));
+  }
 
+  /// Delivery any messages in the `network_driver` that were blocked by not having
+  /// a high enough leadership.
+  pub fn deliver_blocked_messages<IO: MasterIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    remote_leader_changes: Vec<RemoteLeaderChangedPLm>,
+  ) {
     // Dispatch any messages that were buffered in the NetworkDriver.
     // Note: we must do this after RemoteLeaderChanges have been executed. Also note
     // that there will be no payloads in the NetworkBuffer if this nodes is a Follower.
-    for remote_change in master_bundle.remote_leader_changes {
+    for remote_change in remote_leader_changes {
       if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
         // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
         // for the same `gid` with different `gen`s.
@@ -688,17 +678,14 @@ impl MasterContext {
         MasterTimerInput::PaxosGroupFailureDetector => {
           if self.is_leader() {
             // Only do PaxosGroup failure detection if we are not already trying to reconfigure.
-            if statuses.master_reconfig_es.is_none() {
+            if statuses.do_reconfig.is_none() {
               let maybe_dead_eids = self.paxos_driver.get_maybe_dead();
               // If there are nodes that might be dead, we take only the first and then
               // attempt a Reconfiguration. Recall we only reconfigure one-at-a-time to
               // preserve our liveness properties.
               if let Some(eid) = maybe_dead_eids.into_iter().next() {
                 self.free_node_manager.request_new_eids(PaxosGroupId::Master, 1);
-                statuses.master_reconfig_es = Some(MasterReconfigES {
-                  rem_eids: vec![eid],
-                  state: ReconfigState::WaitingRequestedNodes,
-                });
+                statuses.do_reconfig = Some(vec![eid]);
               }
             }
           }
@@ -707,6 +694,18 @@ impl MasterContext {
           // becomes the Leader, these timer events will already be working.
           io_ctx
             .defer(mk_t(FAILURE_DETECTOR_PERIOD_MS), MasterTimerInput::PaxosGroupFailureDetector);
+        }
+        MasterTimerInput::CheckUnconfirmedEids => {
+          // We do this for both the Leader and Followers. If there are `unconfirmed_eids` in
+          // the PaxosDriver, then we attempt to send a `MasterSnapshot`.
+          if self.paxos_driver.has_unsent_unconfirmed() {
+            self.start_snapshot(io_ctx);
+          }
+
+          // We schedule this both for all nodes, not just Leaders, so that when a Follower
+          // becomes the Leader, these timer events will already be working.
+          io_ctx
+            .defer(mk_t(CHECK_UNCONFIRMED_EIDS_PERIOD_MS), MasterTimerInput::CheckUnconfirmedEids);
         }
         MasterTimerInput::FreeNodeHeartbeatTimer => {
           if self.is_leader() {
@@ -849,9 +848,8 @@ impl MasterContext {
           for (gid, new_eids) in granted_reconfig_eids {
             match gid {
               PaxosGroupId::Master => {
-                let es = statuses.master_reconfig_es.as_mut().unwrap();
-                do_reconfig = Some((es.rem_eids.clone(), new_eids.clone()));
-                es.state = ReconfigState::InsertingReconfig { new_eids };
+                let rem_eids = statuses.do_reconfig.clone().unwrap();
+                do_reconfig = Some((rem_eids, new_eids));
               }
               PaxosGroupId::Slave(sid) => {
                 let es = statuses.slave_reconfig_ess.get_mut(&sid).unwrap();
@@ -864,7 +862,7 @@ impl MasterContext {
           // `Reconfig`. Otherwise, we choose `Bundle`.
           let bundle = std::mem::replace(&mut self.master_bundle, MasterBundle::default());
           let user_entry = if let Some((rem_eids, new_eids)) = do_reconfig {
-            UserPLEntry::Reconfig(msg::Reconfig { rem_eids, new_eids, bundle })
+            UserPLEntry::ReconfigBundle(msg::ReconfigBundle { rem_eids, new_eids, bundle })
           } else {
             UserPLEntry::Bundle(bundle)
           };
@@ -1175,7 +1173,7 @@ impl MasterContext {
         }
 
         // MasterReconfig
-        statuses.master_reconfig_es = None;
+        statuses.do_reconfig = None;
 
         // FreeNodeManager
         self.free_node_manager.leader_changed(FreeNodeManagerContext {
@@ -1557,6 +1555,31 @@ impl MasterContext {
       STMPaxos2PCTMAction::Exit => {
         statuses.drop_table_tm_ess.remove(&query_id);
       }
+    }
+  }
+
+  /// Creates and sends a `MasterSnapshot` to all `unconfirmed_eids` that map to `false.
+  fn start_snapshot<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
+    // Next, send the new `EndpointId`s a MasterSnapshot so that they can start up.
+    let (paxos_driver_start, non_started_eids) =
+      self.paxos_driver.mk_start_new_node(&MasterPaxosContext { io_ctx, this_eid: &self.this_eid });
+
+    // TODO: Handle the persisted state in `statuses`.
+
+    // Construct the snapshot
+    let snapshot = MasterSnapshot {
+      gossip: self.gossip.clone(),
+      leader_map: self.leader_map.clone(),
+      free_nodes: self.free_node_manager.mk_free_nodes(),
+      paxos_driver_start,
+    };
+
+    for new_eid in &non_started_eids {
+      // Send the Snapshot.
+      io_ctx.send(
+        new_eid,
+        msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::MasterSnapshot(snapshot.clone())),
+      )
     }
   }
 
