@@ -208,7 +208,7 @@ impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
 //  SlaveConfig
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SlaveConfig {
   /// This is used for generate the `suffix` of a Timestamp, where we just generate
   /// a random `u64` and take the remainder after dividing by `timestamp_suffix_divisor`.

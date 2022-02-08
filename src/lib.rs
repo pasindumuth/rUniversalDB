@@ -28,6 +28,7 @@ pub mod ms_table_write_es;
 pub mod multiversion_map;
 pub mod net;
 pub mod network_driver;
+pub mod node;
 pub mod paxos;
 pub mod paxos2pc_rm;
 pub mod paxos2pc_tm;

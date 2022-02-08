@@ -3,8 +3,8 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
   btree_multimap_insert, mk_cid, mk_sid, mk_t, BasicIOCtx, CoreIOCtx, FreeNodeIOCtx,
-  GeneralTraceMessage, GossipData, MasterIOCtx, MasterTraceMessage, SlaveIOCtx, SlaveTraceMessage,
-  Timestamp,
+  GeneralTraceMessage, GossipData, MasterIOCtx, MasterTraceMessage, NodeIOCtx, SlaveIOCtx,
+  SlaveTraceMessage, Timestamp,
 };
 use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::{FullMasterInput, MasterTimerInput};
@@ -311,6 +311,8 @@ impl MasterIOCtx for ProdIOCtx {
 
   fn trace(&mut self, _: MasterTraceMessage) {}
 }
+
+impl NodeIOCtx for ProdIOCtx {}
 
 impl Debug for ProdIOCtx {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
