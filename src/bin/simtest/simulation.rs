@@ -2,7 +2,7 @@ use crate::stats::Stats;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  mk_cid, mk_t, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData, GossipDataView,
+  mk_cid, mk_t, BasicIOCtx, CoreIOCtx, GeneralTraceMessage, GossipData, GossipDataView, LeaderMap,
   MasterIOCtx, MasterTraceMessage, RangeEnds, SlaveIOCtx, SlaveTraceMessage, Timestamp, NUM_COORDS,
 };
 use runiversal::coord::coord_test::{assert_coord_consistency, check_coord_clean};
@@ -384,7 +384,7 @@ pub struct Simulation {
 
   /// Inferred LeaderMap. This will evolve continuously (there will be no jumps in
   /// LeadershipId; the `gen` will increases one by one).
-  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: LeaderMap,
   /// If this is set, the `IsLeader` messages disseminated from this Leadership will be blocked.
   blocked_leadership: Option<(PaxosGroupId, LeadershipId)>,
 }

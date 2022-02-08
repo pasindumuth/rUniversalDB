@@ -1,4 +1,4 @@
-use crate::common::{lookup_pos, BasicIOCtx, GossipData, TableSchema, Timestamp};
+use crate::common::{lookup_pos, BasicIOCtx, GossipData, LeaderMap, TableSchema, Timestamp};
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
   proc, CNodePath, CSubNodePath, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColVal, ColValN,
@@ -21,7 +21,7 @@ use std::sync::Arc;
 pub trait ServerContextBase {
   // Getters
 
-  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId>;
+  fn leader_map(&self) -> &LeaderMap;
   fn this_gid(&self) -> PaxosGroupId;
   fn this_eid(&self) -> &EndpointId;
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
@@ -176,7 +176,7 @@ pub struct SlaveServerContext<'a, IO: BasicIOCtx> {
   pub sub_node_path: &'a CTSubNodePath,
 
   /// Paxos
-  pub leader_map: &'a BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: &'a LeaderMap,
 
   /// Gossip
   pub gossip: &'a Arc<GossipData>,
@@ -257,7 +257,7 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
 }
 
 impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
-  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId> {
+  fn leader_map(&self) -> &LeaderMap {
     self.leader_map
   }
 
@@ -289,11 +289,11 @@ pub struct MainSlaveServerContext<'a, IO: BasicIOCtx> {
   pub this_eid: &'a EndpointId,
 
   /// Paxos
-  pub leader_map: &'a BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: &'a LeaderMap,
 }
 
 impl<'a, IO: BasicIOCtx> ServerContextBase for MainSlaveServerContext<'a, IO> {
-  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId> {
+  fn leader_map(&self) -> &LeaderMap {
     self.leader_map
   }
 
@@ -325,11 +325,11 @@ pub struct MasterServerContext<'a, IO> {
   pub this_eid: &'a EndpointId,
 
   /// Paxos
-  pub leader_map: &'a BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: &'a LeaderMap,
 }
 
 impl<'a, IO: BasicIOCtx> ServerContextBase for MasterServerContext<'a, IO> {
-  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId> {
+  fn leader_map(&self) -> &LeaderMap {
     self.leader_map
   }
 

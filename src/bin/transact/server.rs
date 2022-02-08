@@ -1,4 +1,3 @@
-use crate::{GenericInput, SERVER_PORT};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
@@ -15,6 +14,7 @@ use runiversal::model::common::{
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
 use runiversal::net::{recv, send_bytes};
+use runiversal::node::GenericInput;
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
@@ -33,6 +33,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // -----------------------------------------------------------------------------------------------
 //  Network Helpers
 // -----------------------------------------------------------------------------------------------
+
+pub const SERVER_PORT: u32 = 1610;
 
 /// Creates the FromNetwork threads for this new Incoming Connection, `stream`.
 pub fn handle_conn(to_server_sender: &Sender<GenericInput>, stream: TcpStream) -> EndpointId {

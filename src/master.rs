@@ -2,10 +2,10 @@ use crate::alter_table_tm_es::{
   AlterTablePayloadTypes, AlterTableTMES, AlterTableTMInner, ResponseData,
 };
 use crate::common::{
-  lookup_pos, map_insert, mk_qid, mk_t, mk_tid, GeneralTraceMessage, GossipData, MasterIOCtx,
-  MasterTraceMessage, TableSchema, Timestamp, VersionedValue, CHECK_UNCONFIRMED_EIDS_PERIOD_MS,
-  FAILURE_DETECTOR_PERIOD_MS, FREE_NODE_HEARTBEAT_TIMER_MS, GOSSIP_DATA_PERIOD_MS,
-  REMOTE_LEADER_CHANGED_PERIOD_MS,
+  lookup_pos, map_insert, mk_qid, mk_t, mk_tid, GeneralTraceMessage, GossipData, LeaderMap,
+  MasterIOCtx, MasterTraceMessage, TableSchema, Timestamp, VersionedValue,
+  CHECK_UNCONFIRMED_EIDS_PERIOD_MS, FAILURE_DETECTOR_PERIOD_MS, FREE_NODE_HEARTBEAT_TIMER_MS,
+  GOSSIP_DATA_PERIOD_MS, REMOTE_LEADER_CHANGED_PERIOD_MS,
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
@@ -308,7 +308,7 @@ impl Default for MasterConfig {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterSnapshot {
   pub gossip: GossipData,
-  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: LeaderMap,
   pub free_nodes: BTreeMap<EndpointId, FreeNodeType>,
   pub paxos_driver_start: msg::StartNewNode<MasterBundle>,
 }
@@ -350,8 +350,8 @@ pub struct MasterContext {
   /// Metadata that is Gossiped out to the Slaves
   pub gossip: GossipData,
 
-  /// LeaderMap
-  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  /// LeaderMap. We use a `VerionedValue` primarily for the `NetworkDriver`
+  pub leader_map: VersionedValue<LeaderMap>,
 
   /// NetworkDriver
   pub network_driver: NetworkDriver<msg::MasterRemotePayload>,
@@ -435,16 +435,17 @@ impl MasterContext {
     this_eid: EndpointId,
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     master_address_config: Vec<EndpointId>,
-    leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+    leader_map: LeaderMap,
     paxos_config: PaxosConfig,
   ) -> MasterContext {
-    let all_gids = leader_map.keys().cloned().collect();
+    let leader_map = VersionedValue::new(Gen(0), leader_map);
+    let network_driver = NetworkDriver::new(&leader_map);
     MasterContext {
       master_config,
       this_eid,
       gossip: GossipData::new(slave_address_config.clone(), master_address_config.clone()),
       leader_map,
-      network_driver: NetworkDriver::new(all_gids),
+      network_driver,
       free_node_manager: FreeNodeManager::new(),
       external_request_id_map: Default::default(),
       master_bundle: MasterBundle::default(),
@@ -460,13 +461,14 @@ impl MasterContext {
     snapshot: MasterSnapshot,
     paxos_config: PaxosConfig,
   ) -> MasterContext {
-    // TODO: fix the NetworkDriver
+    let leader_map = VersionedValue::new(Gen(0), snapshot.leader_map);
+    let network_driver = NetworkDriver::new(&leader_map);
     MasterContext {
       master_config,
       this_eid: this_eid.clone(),
       gossip: snapshot.gossip,
-      leader_map: snapshot.leader_map,
-      network_driver: NetworkDriver::new(vec![]),
+      leader_map,
+      network_driver,
       free_node_manager: FreeNodeManager::create_reconfig(snapshot.free_nodes),
       external_request_id_map: Default::default(),
       master_bundle: Default::default(),
@@ -479,7 +481,7 @@ impl MasterContext {
   }
 
   pub fn ctx<'a, IO: BasicIOCtx>(&'a self, io_ctx: &'a mut IO) -> MasterServerContext<'a, IO> {
-    MasterServerContext { io_ctx, this_eid: &self.this_eid, leader_map: &self.leader_map }
+    MasterServerContext { io_ctx, this_eid: &self.this_eid, leader_map: &self.leader_map.value() }
   }
 
   pub fn handle_incoming_message<IO: MasterIOCtx>(
@@ -514,7 +516,7 @@ impl MasterContext {
       }
       MasterMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip { gid, lid }) => {
         if self.is_leader() {
-          if &lid.gen > &self.leader_map.get(&gid).unwrap().gen {
+          if &lid.gen > &self.leader_map.value().get(&gid).unwrap().gen {
             // If the incoming RemoteLeaderChanged would increase the generation
             // in LeaderMap, then persist it.
             self.master_bundle.remote_leader_changes.push(RemoteLeaderChangedPLm { gid, lid })
@@ -531,7 +533,7 @@ impl MasterContext {
               self.free_node_manager.handle_heartbeat(
                 FreeNodeManagerContext {
                   this_eid: &self.this_eid,
-                  leader_map: &self.leader_map,
+                  leader_map: self.leader_map.value(),
                   master_bundle: &mut self.master_bundle,
                 },
                 heartbeat,
@@ -629,7 +631,7 @@ impl MasterContext {
     // Note: we must do this after RemoteLeaderChanges have been executed. Also note
     // that there will be no payloads in the NetworkBuffer if this nodes is a Follower.
     for remote_change in remote_leader_changes {
-      if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
+      if remote_change.lid.gen == self.leader_map.value().get(&remote_change.gid).unwrap().gen {
         // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
         // for the same `gid` with different `gen`s.
         let payloads =
@@ -711,7 +713,7 @@ impl MasterContext {
           if self.is_leader() {
             self.free_node_manager.handle_timer(FreeNodeManagerContext {
               this_eid: &self.this_eid,
-              leader_map: &self.leader_map,
+              leader_map: self.leader_map.value(),
               master_bundle: &mut self.master_bundle,
             });
           }
@@ -768,7 +770,7 @@ impl MasterContext {
               let new_slave_groups = self.free_node_manager.handle_plm(
                 FreeNodeManagerContext {
                   this_eid: &self.this_eid,
-                  leader_map: &self.leader_map,
+                  leader_map: self.leader_map.value(),
                   master_bundle: &mut self.master_bundle,
                 },
                 io_ctx,
@@ -836,7 +838,7 @@ impl MasterContext {
           let granted_reconfig_eids = self.free_node_manager.process(
             FreeNodeManagerContext {
               this_eid: &self.this_eid,
-              leader_map: &self.leader_map,
+              leader_map: self.leader_map.value(),
               master_bundle: &mut self.master_bundle,
             },
             io_ctx,
@@ -1082,9 +1084,11 @@ impl MasterContext {
       MasterForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
         let gid = remote_leader_changed.gid.clone();
         let lid = remote_leader_changed.lid.clone();
-        if lid.gen > self.leader_map.get(&gid).unwrap().gen {
+        if lid.gen > self.leader_map.value().get(&gid).unwrap().gen {
           // Only update the LeadershipId if the new one increases the old one.
-          self.leader_map.insert(gid.clone(), lid.clone());
+          self.leader_map.update(|leader_map| {
+            leader_map.insert(gid.clone(), lid.clone());
+          });
 
           // CreateTable
           let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
@@ -1127,7 +1131,9 @@ impl MasterContext {
         }
       }
       MasterForwardMsg::LeaderChanged(leader_changed) => {
-        self.leader_map.insert(PaxosGroupId::Master, leader_changed.lid); // Update the LeadershipId
+        self.leader_map.update(move |leader_map| {
+          leader_map.insert(PaxosGroupId::Master, leader_changed.lid);
+        });
 
         if self.is_leader() {
           // By the SharedPaxosInserter, these must be empty at the start of Leadership.
@@ -1178,7 +1184,7 @@ impl MasterContext {
         // FreeNodeManager
         self.free_node_manager.leader_changed(FreeNodeManagerContext {
           this_eid: &self.this_eid,
-          leader_map: &self.leader_map,
+          leader_map: self.leader_map.value(),
           master_bundle: &mut self.master_bundle,
         });
 
@@ -1364,7 +1370,7 @@ impl MasterContext {
   /// Used to broadcast out `RemoteLeaderChanged` to all other
   /// PaxosGroups to help maintain their LeaderMaps.
   fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
-    let this_lid = self.leader_map.get(&PaxosGroupId::Master).unwrap().clone();
+    let this_lid = self.leader_map.value().get(&PaxosGroupId::Master).unwrap().clone();
     for (_, eids) in self.gossip.get().slave_address_config {
       for eid in eids {
         io_ctx.send(
@@ -1569,7 +1575,7 @@ impl MasterContext {
     // Construct the snapshot
     let snapshot = MasterSnapshot {
       gossip: self.gossip.clone(),
-      leader_map: self.leader_map.clone(),
+      leader_map: self.leader_map.value().clone(),
       free_nodes: self.free_node_manager.mk_free_nodes(),
       paxos_driver_start,
     };
@@ -1585,7 +1591,7 @@ impl MasterContext {
 
   /// Returns true iff this is the Leader.
   pub fn is_leader(&self) -> bool {
-    let lid = self.leader_map.get(&PaxosGroupId::Master).unwrap();
+    let lid = self.leader_map.value().get(&PaxosGroupId::Master).unwrap();
     lid.eid == self.this_eid
   }
 
@@ -1602,7 +1608,10 @@ impl MasterContext {
   pub fn send_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, sid: SlaveGroupId) {
     self.ctx(io_ctx).send_to_slave_common(
       sid,
-      msg::SlaveRemotePayload::MasterGossip(msg::MasterGossip { gossip_data: self.gossip.clone() }),
+      msg::SlaveRemotePayload::MasterGossip(msg::MasterGossip {
+        gossip_data: self.gossip.clone(),
+        leader_map: self.leader_map.value().clone(),
+      }),
     );
   }
 }

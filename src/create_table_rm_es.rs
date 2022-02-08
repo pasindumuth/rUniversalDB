@@ -119,7 +119,7 @@ impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
       this_tid: self.tablet_group_id.clone(),
       this_eid: ctx.this_eid.clone(),
       gossip: ctx.gossip.clone(),
-      leader_map: ctx.leader_map.clone(),
+      leader_map: ctx.leader_map.value().clone(),
       this_table_path: self.table_path.clone(),
       this_table_key_range: self.key_range.clone(),
       table_schema: TableSchema {

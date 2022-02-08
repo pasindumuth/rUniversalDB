@@ -3,8 +3,8 @@ use crate::coord::{CoordContext, CoordForwardMsg, CoordState};
 use crate::master::MasterTimerInput;
 use crate::model::common::{
   proc, CTNodePath, ColName, ColType, ColVal, ColValN, CoordGroupId, EndpointId, Gen, LeadershipId,
-  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
-  TabletKeyRange, TierMap,
+  PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath,
+  TableView, TabletGroupId, TabletKeyRange, TierMap,
 };
 use crate::model::message as msg;
 use crate::model::message::NetworkMessage;
@@ -18,6 +18,7 @@ use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::sync::Arc;
 
 #[path = "./common_test.rs"]
 pub mod common_test;
@@ -358,6 +359,64 @@ impl<'a> GossipDataMutView<'a> {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  LeaderMap
+// -----------------------------------------------------------------------------------------------
+
+pub type LeaderMap = BTreeMap<PaxosGroupId, LeadershipId>;
+
+/// Amend the local LeaderMap to refect the new GossipData.
+pub fn update_leader_map(
+  leader_map: &mut VersionedValue<LeaderMap>,
+  old_gossip: &GossipData,
+  some_leader_map: &LeaderMap,
+  new_gossip: &GossipData,
+) {
+  // Add new PaxosGroupIds
+  for (sid, _) in new_gossip.get().slave_address_config {
+    if !old_gossip.get().slave_address_config.contains_key(sid) {
+      let gid = sid.to_gid();
+      let lid = some_leader_map.get(&gid).unwrap().clone();
+      leader_map.update(move |leader_map| {
+        leader_map.insert(gid, lid);
+      });
+    }
+  }
+
+  // Remove old PaxosGroupIds
+  for (sid, _) in old_gossip.get().slave_address_config {
+    if !new_gossip.get().slave_address_config.contains_key(sid) {
+      leader_map.update(move |leader_map| {
+        leader_map.remove(&sid.to_gid());
+      });
+    }
+  }
+}
+
+/// Amend the local LeaderMap to refect the new GossipData.
+pub fn update_leader_map_unversioned(
+  leader_map: &mut LeaderMap,
+  old_gossip: &GossipData,
+  some_leader_map: &LeaderMap,
+  new_gossip: &GossipData,
+) {
+  // Add new PaxosGroupIds
+  for (sid, _) in new_gossip.get().slave_address_config {
+    if !old_gossip.get().slave_address_config.contains_key(sid) {
+      let gid = sid.to_gid();
+      let lid = some_leader_map.get(&gid).unwrap().clone();
+      leader_map.insert(gid, lid);
+    }
+  }
+
+  // Remove old PaxosGroupIds
+  for (sid, _) in old_gossip.get().slave_address_config {
+    if !new_gossip.get().slave_address_config.contains_key(sid) {
+      leader_map.remove(&sid.to_gid());
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Common Paxos Messages
 // -----------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -461,7 +520,7 @@ pub fn to_table_path(source: &proc::GeneralSource) -> &TablePath {
 
 /// An immutable value of type `T` with an associated version to easily tell
 /// when it has been updated.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VersionedValue<T> {
   gen: Gen,
   value: T,
@@ -477,12 +536,17 @@ impl<T> VersionedValue<T> {
     self.value = value;
   }
 
-  pub fn get_gen(&self) -> &Gen {
+  pub fn gen(&self) -> &Gen {
     &self.gen
   }
 
-  pub fn get_value(&self) -> &T {
+  pub fn value(&self) -> &T {
     &self.value
+  }
+
+  pub fn update<F: FnOnce(&mut T)>(&mut self, f: F) {
+    f(&mut self.value);
+    self.gen.inc();
   }
 }
 

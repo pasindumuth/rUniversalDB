@@ -1,4 +1,4 @@
-use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
+use crate::common::{BasicIOCtx, LeaderMap, RemoteLeaderChangedPLm};
 use crate::model::common::{LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, SlaveGroupId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ pub trait RMServerContext<T: PayloadTypes> {
 
   fn is_leader(&self) -> bool;
 
-  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId>;
+  fn leader_map(&self) -> &LeaderMap;
 }
 
 // -----------------------------------------------------------------------------------------------

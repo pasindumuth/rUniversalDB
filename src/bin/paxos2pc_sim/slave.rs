@@ -9,9 +9,10 @@ use crate::stm_simple_tm_es::{
 };
 use rand::RngCore;
 use runiversal::common::{
-  mk_t, BasicIOCtx, RemoteLeaderChangedPLm, REMOTE_LEADER_CHANGED_PERIOD_MS,
+  mk_t, BasicIOCtx, LeaderMap, RemoteLeaderChangedPLm, VersionedValue,
+  REMOTE_LEADER_CHANGED_PERIOD_MS,
 };
-use runiversal::model::common::{EndpointId, PaxosGroupIdTrait, QueryId};
+use runiversal::model::common::{EndpointId, Gen, PaxosGroupIdTrait, QueryId};
 use runiversal::model::common::{LeadershipId, PaxosGroupId, SlaveGroupId};
 use runiversal::network_driver::{NetworkDriver, NetworkDriverContext};
 use runiversal::paxos2pc_rm;
@@ -186,8 +187,8 @@ impl paxos2pc_tm::RMServerContext<SimplePayloadTypes> for SlaveContext {
     SlaveContext::is_leader(self)
   }
 
-  fn leader_map(&self) -> &BTreeMap<PaxosGroupId, LeadershipId> {
-    &self.leader_map
+  fn leader_map(&self) -> &LeaderMap {
+    &self.leader_map.value()
   }
 }
 
@@ -211,8 +212,8 @@ pub struct SlaveContext {
   /// Gossip
   pub slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
 
-  /// LeaderMap
-  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  /// LeaderMap. We use a `VerionedValue` primarily for the `NetworkDriver`
+  pub leader_map: VersionedValue<LeaderMap>,
 
   /// NetworkDriver
   pub network_driver: NetworkDriver<msg::SlaveRemotePayload>,
@@ -245,16 +246,17 @@ impl SlaveContext {
     this_sid: SlaveGroupId,
     this_eid: EndpointId,
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
-    leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+    leader_map: LeaderMap,
   ) -> SlaveContext {
-    let all_gids = leader_map.keys().cloned().collect();
+    let leader_map = VersionedValue::new(Gen(0), leader_map);
+    let network_driver = NetworkDriver::new(&leader_map);
     SlaveContext {
       this_sid: this_sid.clone(),
       this_gid: this_sid.to_gid(),
       this_eid,
       slave_address_config,
       leader_map,
-      network_driver: NetworkDriver::new(all_gids),
+      network_driver,
       slave_bundle: Default::default(),
     }
   }
@@ -292,7 +294,7 @@ impl SlaveContext {
         }
         SlaveMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip { gid, lid }) => {
           if self.is_leader() {
-            if &lid.gen > &self.leader_map.get(&gid).unwrap().gen {
+            if &lid.gen > &self.leader_map.value().get(&gid).unwrap().gen {
               // If the incoming RemoteLeaderChanged would increase the generation
               // in LeaderMap, then persist it.
               self.slave_bundle.remote_leader_changes.push(RemoteLeaderChangedPLm { gid, lid })
@@ -316,7 +318,9 @@ impl SlaveContext {
             // Note: we must do this after RemoteLeaderChanges have been executed. Also note
             // that there will be no payloads in the NetworkBuffer if this nodes is a Follower.
             for remote_change in bundle.remote_leader_changes {
-              if remote_change.lid.gen == self.leader_map.get(&remote_change.gid).unwrap().gen {
+              if remote_change.lid.gen
+                == self.leader_map.value().get(&remote_change.gid).unwrap().gen
+              {
                 // We need this guard, since one Bundle can hold multiple `RemoteLeaderChanged`s
                 // for the same `gid` with different `gen`s.
                 let payloads = self
@@ -465,9 +469,11 @@ impl SlaveContext {
       SlaveForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
         let gid = remote_leader_changed.gid.clone();
         let lid = remote_leader_changed.lid.clone();
-        if lid.gen > self.leader_map.get(&gid).unwrap().gen {
+        if lid.gen > self.leader_map.value().get(&gid).unwrap().gen {
           // Only update the LeadershipId if the new one increases the old one.
-          self.leader_map.insert(gid.clone(), lid.clone());
+          self.leader_map.update(|leader_map| {
+            leader_map.insert(gid.clone(), lid.clone());
+          });
 
           // Inform STMSimpleTM
           let query_ids: Vec<QueryId> = statuses.stm_simple_tm_ess.keys().cloned().collect();
@@ -496,7 +502,10 @@ impl SlaveContext {
       }
       SlaveForwardMsg::LeaderChanged(leader_changed) => {
         // Update the LeadershipId
-        self.leader_map.insert(self.this_gid.clone(), leader_changed.lid);
+        let this_gid = self.this_gid.clone();
+        self.leader_map.update(move |leader_map| {
+          leader_map.insert(this_gid, leader_changed.lid);
+        });
 
         if self.is_leader() {
           // By the SharedPaxosInserter, these must be empty at the start of Leadership.
@@ -560,7 +569,7 @@ impl SlaveContext {
   /// Used to broadcast out `RemoteLeaderChanged` to all other
   /// PaxosGroups to help maintain their LeaderMaps.
   fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
-    let this_lid = self.leader_map.get(&self.this_gid).unwrap().clone();
+    let this_lid = self.leader_map.value().get(&self.this_gid).unwrap().clone();
     for (sid, eids) in &self.slave_address_config {
       if sid == &self.this_sid {
         // Make sure to avoid sending this PaxosGroup the RemoteLeaderChanged.
@@ -648,10 +657,10 @@ impl SlaveContext {
       // followers do not leak out Leadership information of this PaxosGroup.
 
       let this_gid = self.this_gid.clone();
-      let this_lid = self.leader_map.get(&this_gid).unwrap();
+      let this_lid = self.leader_map.value().get(&this_gid).unwrap();
 
       let to_gid = sid.to_gid();
-      let to_lid = self.leader_map.get(&to_gid).unwrap();
+      let to_lid = self.leader_map.value().get(&to_gid).unwrap();
 
       let remote_message = msg::RemoteMessage {
         payload,
@@ -670,7 +679,7 @@ impl SlaveContext {
 
   /// Returns true iff this is the Leader.
   pub fn is_leader(&self) -> bool {
-    let lid = self.leader_map.get(&self.this_gid).unwrap();
+    let lid = self.leader_map.value().get(&self.this_gid).unwrap();
     lid.eid == self.this_eid
   }
 }

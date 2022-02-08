@@ -1,14 +1,20 @@
-use crate::common::RemoteLeaderChangedPLm;
-use crate::model::common::{EndpointId, LeadershipId, PaxosGroupId};
+use crate::common::{LeaderMap, RemoteLeaderChangedPLm, VersionedValue};
+use crate::model::common::{EndpointId, Gen, LeadershipId, PaxosGroupId};
 use crate::model::message as msg;
 use std::collections::BTreeMap;
 
 pub struct NetworkDriverContext<'a> {
   pub this_gid: &'a PaxosGroupId,
   pub this_eid: &'a EndpointId,
-  pub leader_map: &'a BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: &'a VersionedValue<LeaderMap>,
   pub remote_leader_changes: &'a mut Vec<RemoteLeaderChangedPLm>,
 }
+
+// TODO: amend the proof for when PaxosGroupIds get removed. It can go something like:
+//  "Safety: a `remote_message` with PaxosGroupId outside of `network_buffer` will never
+//  come in unless `leader_map` comes in containing the new PaxosGroupIds. Liveness: a
+//  buffered messages, either `deliver_blocked_messages` is called with high enough `lid`,
+//  or the `gid` is removed.
 
 #[derive(Debug)]
 pub struct NetworkDriver<PayloadT> {
@@ -16,16 +22,18 @@ pub struct NetworkDriver<PayloadT> {
   /// Some properties:
   ///   1. All `RemoteMessage`s for a given `PaxosGroupId` have the same `from_lid`.
   network_buffer: BTreeMap<PaxosGroupId, Vec<msg::RemoteMessage<PayloadT>>>,
+  /// The `Gen` of the `ctx.leader_map` that `network_buffer` corresponds to.
+  gen: Gen,
 }
 
 impl<PayloadT: Clone> NetworkDriver<PayloadT> {
-  pub fn new(all_gids: Vec<PaxosGroupId>) -> NetworkDriver<PayloadT> {
+  pub fn new(leader_map: &VersionedValue<LeaderMap>) -> NetworkDriver<PayloadT> {
     let mut network_buffer = BTreeMap::<PaxosGroupId, Vec<msg::RemoteMessage<PayloadT>>>::new();
-    for gid in all_gids {
-      network_buffer.insert(gid, Vec::new());
+    for (gid, _) in leader_map.value() {
+      network_buffer.insert(gid.clone(), Vec::new());
     }
 
-    NetworkDriver { network_buffer }
+    NetworkDriver { network_buffer, gen: leader_map.gen().clone() }
   }
 
   pub fn receive(
@@ -33,8 +41,31 @@ impl<PayloadT: Clone> NetworkDriver<PayloadT> {
     ctx: NetworkDriverContext,
     remote_message: msg::RemoteMessage<PayloadT>,
   ) -> Option<PayloadT> {
+    // Update `network_buffer` if the LeaderMap has since been updated.
+    if &self.gen < ctx.leader_map.gen() {
+      self.gen = ctx.leader_map.gen().clone();
+
+      // Add new PaxosGroupIds
+      for (gid, _) in ctx.leader_map.value() {
+        if !self.network_buffer.contains_key(gid) {
+          self.network_buffer.insert(gid.clone(), vec![]);
+        }
+      }
+
+      // Remove old PaxosGroupIds
+      let mut removed_gids = Vec::<PaxosGroupId>::new();
+      for (gid, _) in &self.network_buffer {
+        if !ctx.leader_map.value().contains_key(gid) {
+          removed_gids.push(gid.clone());
+        }
+      }
+      for gid in removed_gids {
+        self.network_buffer.remove(&gid);
+      }
+    }
+
     let this_gid = &ctx.this_gid;
-    let this_lid = ctx.leader_map.get(&this_gid).unwrap();
+    let this_lid = ctx.leader_map.value().get(&this_gid).unwrap();
 
     // A node only gets to this code if it is the Leader.
     debug_assert!(&this_lid.eid == ctx.this_eid);
@@ -73,7 +104,7 @@ impl<PayloadT: Clone> NetworkDriver<PayloadT> {
         None
       }
     } else {
-      let cur_from_lid = ctx.leader_map.get(&from_gid).unwrap();
+      let cur_from_lid = ctx.leader_map.value().get(&from_gid).unwrap();
       if from_lid.gen < cur_from_lid.gen {
         // The Leadership of the new message is old, so we drop it.
         None

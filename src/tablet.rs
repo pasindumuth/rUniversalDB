@@ -3,8 +3,9 @@ use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
 use crate::common::{
   btree_multimap_insert, lookup, map_insert, merge_table_views, mk_qid, mk_t, remove_item,
-  BasicIOCtx, BoundType, CoreIOCtx, GossipData, KeyBound, OrigP, ReadRegion,
-  RemoteLeaderChangedPLm, TMStatus, TableSchema, Timestamp, WriteRegion,
+  update_leader_map, update_leader_map_unversioned, BasicIOCtx, BoundType, CoreIOCtx, GossipData,
+  KeyBound, LeaderMap, OrigP, ReadRegion, RemoteLeaderChangedPLm, TMStatus, TableSchema, Timestamp,
+  VersionedValue, WriteRegion,
 };
 use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;
@@ -16,8 +17,8 @@ use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
 use crate::model::common::{
   proc, CNodePath, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColVal, ColValN, Context,
-  ContextRow, ContextSchema, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, PrimaryKey, TNodePath,
-  TQueryPath, TSubNodePath, TableView, TransTableName,
+  ContextRow, ContextSchema, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, PrimaryKey,
+  TNodePath, TQueryPath, TSubNodePath, TableView, TransTableName,
 };
 use crate::model::common::{
   ColName, EndpointId, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
@@ -501,7 +502,7 @@ pub type TabletBundle = Vec<TabletPLm>;
 pub enum TabletForwardMsg {
   TabletBundle(TabletBundle),
   TabletMessage(msg::TabletMessage),
-  GossipData(Arc<GossipData>),
+  GossipData(Arc<GossipData>, LeaderMap),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(msg::LeaderChanged),
   ConstructTabletSnapshot,
@@ -526,7 +527,7 @@ pub struct TabletCreateHelper {
   pub gossip: Arc<GossipData>,
 
   /// LeaderMap
-  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: LeaderMap,
 
   // Storage
   pub this_table_path: TablePath,
@@ -650,7 +651,7 @@ pub struct TabletContext {
   pub gossip: Arc<GossipData>,
 
   /// LeaderMap
-  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: LeaderMap,
 
   // Storage
   pub storage: GenericMVTable,
@@ -1211,8 +1212,18 @@ impl TabletContext {
         // Run Main Loop
         self.run_main_loop(io_ctx, statuses);
       }
-      TabletForwardMsg::GossipData(gossip) => {
+      TabletForwardMsg::GossipData(gossip, some_leader_map) => {
         debug_assert!(self.gossip.get_gen() < gossip.get_gen());
+
+        // Amend the local LeaderMap to refect the new GossipData.
+        update_leader_map_unversioned(
+          &mut self.leader_map,
+          self.gossip.as_ref(),
+          &some_leader_map,
+          gossip.as_ref(),
+        );
+
+        // Update Gossip
         self.gossip = gossip;
 
         // Inform Top-Level ESs.

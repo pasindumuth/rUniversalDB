@@ -1,4 +1,4 @@
-use crate::common::{mk_cid, mk_sid, MasterIOCtx, NUM_COORDS, PAXOS_GROUP_SIZE};
+use crate::common::{mk_cid, mk_sid, LeaderMap, MasterIOCtx, NUM_COORDS, PAXOS_GROUP_SIZE};
 use crate::master::plm::FreeNodeManagerPLm;
 use crate::master::{MasterBundle, MasterContext, MasterPLm};
 use crate::model::common::{CoordGroupId, EndpointId, LeadershipId, PaxosGroupId, SlaveGroupId};
@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub struct FreeNodeManagerContext<'a> {
   pub this_eid: &'a EndpointId,
-  pub leader_map: &'a BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: &'a LeaderMap,
   pub master_bundle: &'a mut MasterBundle,
 }
 

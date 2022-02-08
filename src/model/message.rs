@@ -1,6 +1,6 @@
 use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::ColUsageNode;
-use crate::common::{GossipData, QueryPlan, RemoteLeaderChangedPLm, Timestamp};
+use crate::common::{GossipData, LeaderMap, QueryPlan, RemoteLeaderChangedPLm, Timestamp};
 use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::expression::EvalError;
@@ -122,7 +122,7 @@ pub struct FreeNodeRegistered {
 pub struct CreateSlaveGroup {
   // Note that leader_map and gossip_data here will correspond exactly.
   pub gossip: GossipData,
-  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: LeaderMap,
 
   pub sid: SlaveGroupId,
   pub paxos_nodes: Vec<EndpointId>,
@@ -670,6 +670,9 @@ pub struct SlaveGroupReconfigured {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterGossip {
   pub gossip_data: GossipData,
+  // This is use to distribute a valid Leadership of a Slave so that Slaves that do not yet
+  // know about a it can populate their LeaderMap properly.
+  pub leader_map: LeaderMap,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

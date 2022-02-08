@@ -1,6 +1,7 @@
 use crate::common::{
-  cur_timestamp, map_insert, merge_table_views, mk_qid, mk_t, remove_item, BasicIOCtx,
-  GeneralTraceMessage, GossipData, OrigP, TMStatus, Timestamp,
+  cur_timestamp, map_insert, merge_table_views, mk_qid, mk_t, remove_item, update_leader_map,
+  update_leader_map_unversioned, BasicIOCtx, GeneralTraceMessage, GossipData, LeaderMap, OrigP,
+  TMStatus, Timestamp, VersionedValue,
 };
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::finish_query_tm_es::{
@@ -9,8 +10,8 @@ use crate::finish_query_tm_es::{
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
 use crate::model::common::iast::Query;
 use crate::model::common::{
-  proc, CNodePath, CQueryPath, CSubNodePath, CTSubNodePath, ColName, CoordGroupId, LeadershipId,
-  PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TNodePath, TQueryPath, TableView,
+  proc, CNodePath, CQueryPath, CSubNodePath, CTSubNodePath, ColName, CoordGroupId, Gen,
+  LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TNodePath, TQueryPath, TableView,
 };
 use crate::model::common::{EndpointId, QueryId, RequestId};
 use crate::model::message as msg;
@@ -44,7 +45,7 @@ pub mod coord_test;
 pub enum CoordForwardMsg {
   ExternalMessage(msg::SlaveExternalReq),
   CoordMessage(msg::CoordMessage),
-  GossipData(Arc<GossipData>),
+  GossipData(Arc<GossipData>, LeaderMap),
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(msg::LeaderChanged),
 }
@@ -141,7 +142,7 @@ pub struct CoordContext {
   pub gossip: Arc<GossipData>,
 
   /// Paxos
-  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  pub leader_map: LeaderMap,
 
   /// This is used to allow the user to cancel requests. There is an element (`RequestId`,
   /// `QueryId`) here exactly when there is an `MSCoordES` (exclusive) or `FinishQueryES`
@@ -167,7 +168,7 @@ impl CoordContext {
     this_cid: CoordGroupId,
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
-    leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+    leader_map: LeaderMap,
   ) -> CoordContext {
     CoordContext {
       coord_config,
@@ -380,8 +381,18 @@ impl CoordContext {
           }
         }
       }
-      CoordForwardMsg::GossipData(gossip) => {
+      CoordForwardMsg::GossipData(gossip, some_leader_map) => {
         debug_assert!(self.gossip.get_gen() < gossip.get_gen());
+
+        // Amend the local LeaderMap to refect the new GossipData.
+        update_leader_map_unversioned(
+          &mut self.leader_map,
+          self.gossip.as_ref(),
+          &some_leader_map,
+          gossip.as_ref(),
+        );
+
+        // Update Gossip
         self.gossip = gossip;
 
         // Inform Top-Level ESs.

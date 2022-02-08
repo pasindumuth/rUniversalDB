@@ -6,7 +6,7 @@ mod server;
 extern crate runiversal;
 
 use crate::server::{
-  handle_conn, handle_self_conn, send_msg, ProdCoreIOCtx, ProdIOCtx, TIMER_INCREMENT,
+  handle_conn, handle_self_conn, send_msg, ProdCoreIOCtx, ProdIOCtx, SERVER_PORT, TIMER_INCREMENT,
 };
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
@@ -25,7 +25,7 @@ use runiversal::model::common::{
 use runiversal::model::message as msg;
 use runiversal::model::message::FreeNodeMessage;
 use runiversal::net::{recv, send_bytes};
-use runiversal::node::GenericInput;
+use runiversal::node::{GenericInput, NodeContainer};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
@@ -187,7 +187,14 @@ fn main() {
     master_tasks: Arc::new(Mutex::new(Default::default())),
   };
 
-  let mut node = NodeContainer { this_eid, state: NodeState::DNEState(BTreeMap::default()) };
+  let mut node = NodeContainer::new(
+    this_eid,
+    PaxosConfig::prod(),
+    CoordConfig::default(),
+    MasterConfig::default(),
+    SlaveConfig::default(),
+  );
+
   loop {
     let generic_input = to_server_receiver.recv().unwrap();
     node.process_input(&mut io_ctx, generic_input);

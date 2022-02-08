@@ -67,7 +67,7 @@ impl NominalSlaveState {
     // Record and maintain the current version of `get_eids`, which we use to
     // detect if `get_eids` changes and ensure that all buffered messages that
     // should be delivered actually are.
-    let mut cur_gen = state.get_eids().get_gen().clone();
+    let mut cur_gen = state.get_eids().gen().clone();
 
     // Construct NominalSlaveState
     let mut nominal_state = NominalSlaveState { state, buffered_messages, cur_gen };
@@ -109,7 +109,7 @@ impl NominalSlaveState {
       self.state.handle_input(io_ctx, FullSlaveInput::SlaveMessage(slave_msg));
     }
     // Otherwise, if it is from an EndpointId from `get_eids`, we deliver it.
-    else if self.state.get_eids().get_value().contains(eid) {
+    else if self.state.get_eids().value().contains(eid) {
       self.state.handle_input(io_ctx, FullSlaveInput::SlaveMessage(slave_msg));
     }
     // Otherwise, if the message is a tier 1 message, we deliver it
@@ -134,12 +134,12 @@ impl NominalSlaveState {
   fn deliver_all<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
     // Next, we see if `get_eids` have changed. If so, there might now be buffered
     // messages that need to be delivered.
-    let mut gen_did_change = &self.cur_gen != self.state.get_eids().get_gen();
+    let mut gen_did_change = &self.cur_gen != self.state.get_eids().gen();
     while gen_did_change {
-      let cur_gen = self.state.get_eids().get_gen().clone();
+      let cur_gen = self.state.get_eids().gen().clone();
       self.deliver_all_once(io_ctx);
       // Check again whether the `get_eids` changed.
-      gen_did_change = &cur_gen != self.state.get_eids().get_gen();
+      gen_did_change = &cur_gen != self.state.get_eids().gen();
     }
   }
 }
@@ -171,7 +171,7 @@ impl NominalMasterState {
     // Record and maintain the current version of `get_eids`, which we use to
     // detect if `get_eids` changes and ensure that all buffered messages that
     // should be delivered actually are.
-    let mut cur_gen = state.get_eids().get_gen().clone();
+    let mut cur_gen = state.get_eids().gen().clone();
 
     // Construct NominalMasterState
     let mut nominal_state = NominalMasterState { state, buffered_messages, cur_gen };
@@ -213,7 +213,7 @@ impl NominalMasterState {
       self.state.handle_input(io_ctx, FullMasterInput::MasterMessage(master_msg));
     }
     // Otherwise, if it is from an EndpointId from `get_eids`, we deliver it.
-    else if self.state.get_eids().get_value().contains(eid) {
+    else if self.state.get_eids().value().contains(eid) {
       self.state.handle_input(io_ctx, FullMasterInput::MasterMessage(master_msg));
     }
     // Otherwise, if the message is a tier 1 message, we deliver it
@@ -238,12 +238,12 @@ impl NominalMasterState {
   fn deliver_all<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
     // Next, we see if `get_eids` have changed. If so, there might now be buffered
     // messages that need to be delivered.
-    let mut gen_did_change = &self.cur_gen != self.state.get_eids().get_gen();
+    let mut gen_did_change = &self.cur_gen != self.state.get_eids().gen();
     while gen_did_change {
-      let cur_gen = self.state.get_eids().get_gen().clone();
+      let cur_gen = self.state.get_eids().gen().clone();
       self.deliver_all_once(io_ctx);
       // Check again whether the `get_eids` changed.
-      gen_did_change = &cur_gen != self.state.get_eids().get_gen();
+      gen_did_change = &cur_gen != self.state.get_eids().gen();
     }
   }
 }
@@ -262,7 +262,7 @@ enum NodeState {
 }
 
 #[derive(Debug)]
-struct NodeContainer {
+pub struct NodeContainer {
   this_eid: EndpointId,
 
   // The configs that should be used when constructing various state (e.g. `SlaveState`)
@@ -276,7 +276,28 @@ struct NodeContainer {
 }
 
 impl NodeContainer {
-  fn process_input<IOCtx: NodeIOCtx>(&mut self, io_ctx: &mut IOCtx, generic_input: GenericInput) {
+  pub fn new(
+    this_eid: EndpointId,
+    paxos_config: PaxosConfig,
+    coord_config: CoordConfig,
+    master_config: MasterConfig,
+    slave_config: SlaveConfig,
+  ) -> NodeContainer {
+    NodeContainer {
+      this_eid,
+      paxos_config,
+      coord_config,
+      master_config,
+      slave_config,
+      state: NodeState::DNEState(BTreeMap::default()),
+    }
+  }
+
+  pub fn process_input<IOCtx: NodeIOCtx>(
+    &mut self,
+    io_ctx: &mut IOCtx,
+    generic_input: GenericInput,
+  ) {
     match &mut self.state {
       NodeState::DNEState(buffered_messages) => match generic_input {
         GenericInput::Message(eid, message) => {

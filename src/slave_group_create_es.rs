@@ -37,7 +37,7 @@ impl SlaveGroupCreateES {
     // Construct the `CreateSlaveGroup` message.
     let create_msg = msg::CreateSlaveGroup {
       gossip: ctx.gossip.clone(),
-      leader_map: ctx.leader_map.clone(),
+      leader_map: ctx.leader_map.value().clone(),
       sid,
       paxos_nodes: paxos_nodes.clone(),
       coord_ids,
@@ -98,7 +98,9 @@ impl SlaveGroupCreateES {
 
         // Update the LeaderMap
         let lid = LeadershipId { gen: Gen(0), eid: paxos_nodes.get(0).unwrap().clone() };
-        ctx.leader_map.insert(sid.to_gid(), lid);
+        ctx.leader_map.update(move |leader_map| {
+          leader_map.insert(sid.to_gid(), lid);
+        });
 
         if ctx.is_leader() {
           // Broadcast the GossipData.
