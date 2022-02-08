@@ -582,7 +582,7 @@ impl SlaveContext {
           // Recall that there will definitely be a `pending_snapshot`, since that is
           // never erased until it is complete
           let (snapshot, new_eids, num_tablets) = statuses.pending_snapshot.as_mut().unwrap();
-          snapshot.tablet_snapshots.insert(tablet_snapshot.tid.clone(), tablet_snapshot);
+          snapshot.tablet_snapshots.insert(tablet_snapshot.this_tid.clone(), tablet_snapshot);
 
           // If all TabletSnapshots have been added, we clear `pending_snapshot` and send
           // it off to the new nodes.

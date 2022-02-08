@@ -123,7 +123,7 @@ impl Default for CoordConfig {
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct CoordState {
-  coord_context: CoordContext,
+  pub ctx: CoordContext,
   statuses: Statuses,
 }
 
@@ -151,12 +151,12 @@ pub struct CoordContext {
 }
 
 impl CoordState {
-  pub fn new(coord_context: CoordContext) -> CoordState {
-    CoordState { coord_context, statuses: Default::default() }
+  pub fn new(ctx: CoordContext) -> CoordState {
+    CoordState { ctx, statuses: Default::default() }
   }
 
   pub fn handle_input<IO: CoreIOCtx>(&mut self, io_ctx: &mut IO, coord_input: CoordForwardMsg) {
-    self.coord_context.handle_input(io_ctx, &mut self.statuses, coord_input);
+    self.ctx.handle_input(io_ctx, &mut self.statuses, coord_input);
   }
 }
 

@@ -1,5 +1,5 @@
 use crate::col_usage::ColUsageNode;
-use crate::coord::CoordForwardMsg;
+use crate::coord::{CoordContext, CoordForwardMsg, CoordState};
 use crate::master::MasterTimerInput;
 use crate::model::common::{
   proc, CTNodePath, ColName, ColType, ColVal, ColValN, CoordGroupId, EndpointId, Gen, LeadershipId,
@@ -7,9 +7,10 @@ use crate::model::common::{
   TabletKeyRange, TierMap,
 };
 use crate::model::message as msg;
+use crate::model::message::NetworkMessage;
 use crate::multiversion_map::MVM;
 use crate::slave::{SlaveBackMessage, SlaveTimerInput};
-use crate::tablet::{TabletCreateHelper, TabletForwardMsg};
+use crate::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -43,11 +44,24 @@ pub trait BasicIOCtx<NetworkMessageT = msg::NetworkMessage> {
   fn send(&mut self, eid: &EndpointId, msg: NetworkMessageT);
 
   /// This marks that the node should exit (which happens if the PaxosGroup ejects a node).
+  /// TODO: move this only to top-level state (e.g. Master and Slave).
   fn mark_exit(&mut self);
   fn did_exit(&mut self) -> bool;
 
   /// Tracer
   fn general_trace(&mut self, trace_msg: GeneralTraceMessage);
+}
+
+// -----------------------------------------------------------------------------------------------
+//  FreeNodeIOCtx
+// -----------------------------------------------------------------------------------------------
+
+pub trait FreeNodeIOCtx: BasicIOCtx {
+  // Tablet
+  fn create_tablet_full(&mut self, ctx: TabletContext);
+
+  // Coord
+  fn create_coord_full(&mut self, ctx: CoordContext);
 }
 
 // -----------------------------------------------------------------------------------------------

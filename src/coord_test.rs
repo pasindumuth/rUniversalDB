@@ -13,7 +13,7 @@ pub fn assert_coord_consistency(coord: &CoordState) {
 // Verify that every `MSCoordES` and every `FinishQueryTMES`.
 fn external_request_id_map_consistency(coord: &CoordState) {
   let statuses = &coord.statuses;
-  let ctx = &coord.coord_context;
+  let ctx = &coord.ctx;
 
   if ctx.is_leader() {
     // If this is a Leader, we make sure all RequestIds in the ESs exist in

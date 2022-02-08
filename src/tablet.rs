@@ -230,10 +230,25 @@ pub struct GRQueryESWrapper {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TabletSnapshot {
-  /// The Tablet that is sending this message
-  pub tid: TabletGroupId,
-  pub gossip: GossipData,
-  pub leader_map: BTreeMap<PaxosGroupId, LeadershipId>,
+  /// Metadata
+  pub this_sid: SlaveGroupId,
+  pub this_tid: TabletGroupId,
+  pub sub_node_path: CTSubNodePath, // Wraps `this_tablet_group_id` for expedience
+  pub this_eid: EndpointId,
+
+  // Storage
+  pub storage: GenericMVTable,
+  pub this_table_path: TablePath,
+  pub this_table_key_range: TabletKeyRange,
+  pub table_schema: TableSchema,
+  pub presence_timestamp: Timestamp,
+
+  // Region Isolation Algorithm
+  pub prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
+  pub committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
+  pub read_protected: BTreeMap<Timestamp, BTreeSet<ReadRegion>>,
+  // Statuses
+  // TODO: add
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -498,6 +513,7 @@ pub enum TabletForwardMsg {
 
 #[derive(Debug)]
 pub struct TabletCreateHelper {
+  // TODO: we no longer read this
   pub rand_seed: [u8; 16],
 
   /// Metadata
@@ -1409,7 +1425,22 @@ impl TabletContext {
           }));
         }
       }
-      TabletForwardMsg::ConstructTabletSnapshot => {}
+      TabletForwardMsg::ConstructTabletSnapshot => {
+        io_ctx.slave_forward(SlaveBackMessage::TabletSnapshot(TabletSnapshot {
+          this_sid: self.this_sid.clone(),
+          this_tid: self.this_tid.clone(),
+          sub_node_path: self.sub_node_path.clone(),
+          this_eid: self.this_eid.clone(),
+          storage: self.storage.clone(),
+          this_table_path: self.this_table_path.clone(),
+          this_table_key_range: self.this_table_key_range.clone(),
+          table_schema: self.table_schema.clone(),
+          presence_timestamp: self.presence_timestamp.clone(),
+          prepared_writes: self.prepared_writes.clone(),
+          committed_writes: self.committed_writes.clone(),
+          read_protected: self.read_protected.clone(),
+        }));
+      }
     }
   }
 

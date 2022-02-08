@@ -6,8 +6,7 @@ mod server;
 extern crate runiversal;
 
 use crate::server::{
-  handle_conn, handle_self_conn, send_msg, ProdCoreIOCtx, ProdMasterIOCtx, ProdSlaveIOCtx,
-  TIMER_INCREMENT,
+  handle_conn, handle_self_conn, send_msg, ProdCoreIOCtx, ProdIOCtx, TIMER_INCREMENT,
 };
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
@@ -108,7 +107,7 @@ pub fn amend_buffer<MessageT>(
 #[derive(Debug)]
 struct NominalSlaveState {
   state: SlaveState,
-  io_ctx: ProdSlaveIOCtx,
+  io_ctx: ProdIOCtx,
   /// Messages (which are not client messages) that came from `EndpointId`s that is not present
   /// in `state.get_eids`.
   buffered_messages: BTreeMap<EndpointId, Vec<msg::SlaveMessage>>,
@@ -120,7 +119,7 @@ struct NominalSlaveState {
 impl NominalSlaveState {
   fn init(
     state: SlaveState,
-    io_ctx: ProdSlaveIOCtx,
+    io_ctx: ProdIOCtx,
     buffered_messages: BTreeMap<EndpointId, Vec<msg::SlaveMessage>>,
   ) -> NominalSlaveState {
     // Record and maintain the current version of `get_eids`, which we use to
@@ -203,7 +202,7 @@ impl NominalSlaveState {
 #[derive(Debug)]
 struct NominalMasterState {
   state: MasterState,
-  io_ctx: ProdMasterIOCtx,
+  io_ctx: ProdIOCtx,
   /// Messages (which are not client messages) that came from `EndpointId`s that is not present
   /// in `state.get_eids`.
   buffered_messages: BTreeMap<EndpointId, Vec<msg::MasterMessage>>,
@@ -215,7 +214,7 @@ struct NominalMasterState {
 impl NominalMasterState {
   fn init(
     state: MasterState,
-    io_ctx: ProdMasterIOCtx,
+    io_ctx: ProdIOCtx,
     buffered_messages: BTreeMap<EndpointId, Vec<msg::MasterMessage>>,
   ) -> NominalMasterState {
     // Record and maintain the current version of `get_eids`, which we use to
@@ -431,14 +430,17 @@ fn main() {
                 node_state = NodeState::PostExistence;
               }
               msg::FreeNodeMessage::StartMaster(start) => {
-                // Create the ProdMasterIOCtx
+                // Create the ProdIOCtx
                 let mut rand = XorShiftRng::from_entropy();
-                let mut io_ctx = ProdMasterIOCtx {
+                let mut io_ctx = ProdIOCtx {
                   rand,
                   out_conn_map: out_conn_map.clone(),
                   exited: false,
-                  to_master: to_server_sender.clone(),
-                  tasks: Arc::new(Mutex::new(BTreeMap::default())),
+                  to_top: to_server_sender.clone(),
+                  tablet_map: Default::default(),
+                  coord_map: Default::default(),
+                  slave_tasks: Arc::new(Mutex::new(Default::default())),
+                  master_tasks: Arc::new(Mutex::new(Default::default())),
                 };
 
                 // Create the MasterState
@@ -516,7 +518,7 @@ fn main() {
                   let (to_coord_sender, to_coord_receiver) = mpsc::channel();
                   coord_map.insert(coord_group_id.clone(), to_coord_sender);
 
-                  // Create the Tablet
+                  // Create the Coord
                   let coord_context = CoordContext::new(
                     CoordConfig::default(),
                     create.sid.clone(),
@@ -529,7 +531,7 @@ fn main() {
                     out_conn_map: out_conn_map.clone(),
                     exited: false,
                     rand,
-                    to_slave: to_server_sender.clone(),
+                    to_top: to_server_sender.clone(),
                   };
                   thread::spawn(move || {
                     let mut coord = CoordState::new(coord_context);
@@ -541,14 +543,15 @@ fn main() {
                 }
 
                 // Construct the SlaveState
-                let mut io_ctx = ProdSlaveIOCtx {
+                let mut io_ctx = ProdIOCtx {
                   rand,
                   out_conn_map: out_conn_map.clone(),
                   exited: false,
-                  to_slave: to_server_sender.clone(),
+                  to_top: to_server_sender.clone(),
                   tablet_map: Default::default(),
                   coord_map,
-                  tasks: Arc::new(Mutex::new(Default::default())),
+                  slave_tasks: Arc::new(Mutex::new(Default::default())),
+                  master_tasks: Arc::new(Mutex::new(Default::default())),
                 };
                 io_ctx.start();
                 let slave_context = SlaveContext::new(
@@ -598,15 +601,20 @@ fn main() {
                 // TODO: do
               }
               FreeNodeMessage::MasterSnapshot(snapshot) => {
-                // Create the ProdMasterIOCtx
+                // Create the ProdIOCtx
                 let mut rand = XorShiftRng::from_entropy();
-                let mut io_ctx = ProdMasterIOCtx {
+                let mut io_ctx = ProdIOCtx {
                   rand,
                   out_conn_map: out_conn_map.clone(),
                   exited: false,
-                  to_master: to_server_sender.clone(),
-                  tasks: Arc::new(Mutex::new(BTreeMap::default())),
+                  to_top: to_server_sender.clone(),
+                  tablet_map: Default::default(),
+                  coord_map: Default::default(),
+                  slave_tasks: Arc::new(Mutex::new(Default::default())),
+                  master_tasks: Arc::new(Mutex::new(Default::default())),
                 };
+
+                // We need a context to create MasterIOCtx
 
                 // Create the MasterState
                 let mut master_state = MasterState::new(MasterContext::create_reconfig(
