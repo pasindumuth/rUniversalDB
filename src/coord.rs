@@ -382,84 +382,102 @@ impl CoordContext {
         }
       }
       CoordForwardMsg::GossipData(gossip, some_leader_map) => {
-        debug_assert!(self.gossip.get_gen() < gossip.get_gen());
+        // We only accept new Gossips where the generation increases.
+        if self.gossip.get_gen() < gossip.get_gen() {
+          // Amend the local LeaderMap to refect the new GossipData.
+          update_leader_map_unversioned(
+            &mut self.leader_map,
+            self.gossip.as_ref(),
+            &some_leader_map,
+            gossip.as_ref(),
+          );
 
-        // Amend the local LeaderMap to refect the new GossipData.
-        update_leader_map_unversioned(
-          &mut self.leader_map,
-          self.gossip.as_ref(),
-          &some_leader_map,
-          gossip.as_ref(),
-        );
+          // Update Gossip
+          self.gossip = gossip;
 
-        // Update Gossip
-        self.gossip = gossip;
-
-        // Inform Top-Level ESs.
-        let query_ids: Vec<QueryId> = statuses.ms_coord_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
-          let action = ms_coord.es.gossip_data_changed(self, io_ctx);
-          self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
+          // Inform Top-Level ESs.
+          let query_ids: Vec<QueryId> = statuses.ms_coord_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+            let action = ms_coord.es.gossip_data_changed(self, io_ctx);
+            self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
+          }
         }
       }
       CoordForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
         let gid = remote_leader_changed.gid.clone();
         let lid = remote_leader_changed.lid.clone();
-        if lid.gen > self.leader_map.get(&gid).unwrap().gen {
-          // Only update the LeadershipId if the new one increases the old one.
-          self.leader_map.insert(gid.clone(), lid.clone());
 
-          // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no response).
-          let query_ids: Vec<QueryId> = statuses.trans_table_read_ess.keys().cloned().collect();
-          for query_id in query_ids {
-            let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
-            if trans_read.sender_gid() == gid {
-              self.exit_and_clean_up(io_ctx, statuses, query_id);
+        // We filter `remote_leader_changed` to ensure that the `leader_map` only contains
+        // `EndpointId`s in the Current Paxos View.
+        let accept = match &gid {
+          PaxosGroupId::Master => self.gossip.get().master_address_config.contains(&lid.eid),
+          PaxosGroupId::Slave(sid) => {
+            if let Some(eids) = self.gossip.get().slave_address_config.get(&sid) {
+              eids.contains(&lid.eid)
+            } else {
+              false
             }
           }
+        };
 
-          let query_ids: Vec<QueryId> = statuses.ms_coord_ess.keys().cloned().collect();
-          for query_id in query_ids {
-            let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
-            let action =
-              ms_coord.es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-            self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
-          }
+        if accept {
+          // Only update the LeadershipId if the new one increases the old one.
+          // Note that this `leader_map` unwrap will never assert due to the above.
+          if lid.gen > self.leader_map.get(&gid).unwrap().gen {
+            self.leader_map.insert(gid.clone(), lid.clone());
 
-          let query_ids: Vec<QueryId> = statuses.finish_query_tm_ess.keys().cloned().collect();
-          for query_id in query_ids {
-            let finish_query_es = statuses.finish_query_tm_ess.get_mut(&query_id).unwrap();
-            let action =
-              finish_query_es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-            self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
-          }
-
-          // Inform TMStatus
-          if let PaxosGroupId::Slave(sid) = gid {
-            let query_ids: Vec<QueryId> = statuses.tm_statuss.keys().cloned().collect();
+            // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no response).
+            let query_ids: Vec<QueryId> = statuses.trans_table_read_ess.keys().cloned().collect();
             for query_id in query_ids {
-              let tm_status = statuses.tm_statuss.get_mut(&query_id).unwrap();
-              if let Some(cur_lid) = tm_status.leaderships.get(&sid) {
-                if cur_lid < &lid {
-                  // The new Leadership of a remote slave has changed beyond what the TMStatus
-                  // had contacted, so that RM will surely not respond. Thus we abort this whole
-                  // TMStatus and inform the MSCoordES/GRQueryES so that it can retry the stage.
-                  let orig_qid = tm_status.orig_p.query_id.clone();
-                  self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
+              let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
+              if trans_read.sender_gid() == gid {
+                self.exit_and_clean_up(io_ctx, statuses, query_id);
+              }
+            }
 
-                  // Inform the GRQueryES
-                  if let Some(gr_query) = statuses.gr_query_ess.get_mut(&orig_qid) {
-                    remove_item(&mut gr_query.child_queries, &query_id);
-                    let action =
-                      gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx(io_ctx));
-                    self.handle_gr_query_es_action(io_ctx, statuses, orig_qid, action);
-                  }
-                  // Inform the MSCoordES
-                  else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&orig_qid) {
-                    remove_item(&mut ms_coord.child_queries, &query_id);
-                    let action = ms_coord.es.handle_tm_remote_leadership_changed(self, io_ctx);
-                    self.handle_ms_coord_es_action(io_ctx, statuses, orig_qid, action);
+            let query_ids: Vec<QueryId> = statuses.ms_coord_ess.keys().cloned().collect();
+            for query_id in query_ids {
+              let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+              let action =
+                ms_coord.es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+              self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
+            }
+
+            let query_ids: Vec<QueryId> = statuses.finish_query_tm_ess.keys().cloned().collect();
+            for query_id in query_ids {
+              let finish_query_es = statuses.finish_query_tm_ess.get_mut(&query_id).unwrap();
+              let action =
+                finish_query_es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+              self.handle_finish_query_es_action(io_ctx, statuses, query_id, action);
+            }
+
+            // Inform TMStatus
+            if let PaxosGroupId::Slave(sid) = gid {
+              let query_ids: Vec<QueryId> = statuses.tm_statuss.keys().cloned().collect();
+              for query_id in query_ids {
+                let tm_status = statuses.tm_statuss.get_mut(&query_id).unwrap();
+                if let Some(cur_lid) = tm_status.leaderships.get(&sid) {
+                  if cur_lid < &lid {
+                    // The new Leadership of a remote slave has changed beyond what the TMStatus
+                    // had contacted, so that RM will surely not respond. Thus we abort this whole
+                    // TMStatus and inform the MSCoordES/GRQueryES so that it can retry the stage.
+                    let orig_qid = tm_status.orig_p.query_id.clone();
+                    self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
+
+                    // Inform the GRQueryES
+                    if let Some(gr_query) = statuses.gr_query_ess.get_mut(&orig_qid) {
+                      remove_item(&mut gr_query.child_queries, &query_id);
+                      let action =
+                        gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx(io_ctx));
+                      self.handle_gr_query_es_action(io_ctx, statuses, orig_qid, action);
+                    }
+                    // Inform the MSCoordES
+                    else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&orig_qid) {
+                      remove_item(&mut ms_coord.child_queries, &query_id);
+                      let action = ms_coord.es.handle_tm_remote_leadership_changed(self, io_ctx);
+                      self.handle_ms_coord_es_action(io_ctx, statuses, orig_qid, action);
+                    }
                   }
                 }
               }

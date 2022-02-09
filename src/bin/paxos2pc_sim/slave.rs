@@ -248,7 +248,7 @@ impl SlaveContext {
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     leader_map: LeaderMap,
   ) -> SlaveContext {
-    let leader_map = VersionedValue::new(Gen(0), leader_map);
+    let leader_map = VersionedValue::new(leader_map);
     let network_driver = NetworkDriver::new(&leader_map);
     SlaveContext {
       this_sid: this_sid.clone(),

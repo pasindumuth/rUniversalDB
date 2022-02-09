@@ -1,7 +1,7 @@
 use crate::common::{
-  mk_t, update_leader_map, BasicIOCtx, GossipData, LeaderMap, RemoteLeaderChangedPLm, SlaveIOCtx,
-  SlaveTraceMessage, Timestamp, VersionedValue, CHECK_UNCONFIRMED_EIDS_PERIOD_MS,
-  FAILURE_DETECTOR_PERIOD_MS, REMOTE_LEADER_CHANGED_PERIOD_MS,
+  lookup, mk_t, update_all_eids, update_leader_map, BasicIOCtx, GossipData, LeaderMap,
+  RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp, VersionedValue,
+  CHECK_UNCONFIRMED_EIDS_PERIOD_MS, FAILURE_DETECTOR_PERIOD_MS, REMOTE_LEADER_CHANGED_PERIOD_MS,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::CreateTableRMES;
@@ -242,11 +242,20 @@ pub struct SlaveContext {
   pub this_gid: PaxosGroupId, // self.this_sid.to_gid()
   pub this_eid: EndpointId,
 
+  /// Between calls to `handle_input`, we should maintain the following properties:
+  /// 1. `leader_map` should contain an entry for every `PaxosGroupId` in the
+  ///     Current PaxosGroup View.
+  /// 2. The Leaderships in `leader_map` should be in the Current PaxosGroup View.  
+  /// 3. `all_eids` should contain all `EndpointId` in Current PaxosGroup View.
+  ///
+  /// See the out-of-line docs for the definition of Current PaxosGroup View.
+
   /// Gossip
   pub gossip: Arc<GossipData>,
-
   /// LeaderMap. We use a `VerionedValue` primarily for the `NetworkDriver`
   pub leader_map: VersionedValue<LeaderMap>,
+  /// The set `EndpointId` that this Slave is accepting delivery of messages from.
+  pub all_eids: VersionedValue<BTreeSet<EndpointId>>,
 
   /// NetworkDriver
   pub network_driver: NetworkDriver<msg::SlaveRemotePayload>,
@@ -321,9 +330,8 @@ impl SlaveState {
     }
   }
 
-  pub fn get_eids(&self) -> VersionedValue<BTreeSet<EndpointId>> {
-    // TODO: do this properly
-    panic!();
+  pub fn get_eids(&self) -> &VersionedValue<BTreeSet<EndpointId>> {
+    &self.ctx.all_eids
   }
 }
 
@@ -338,8 +346,16 @@ impl SlaveContext {
     paxos_config: PaxosConfig,
   ) -> SlaveContext {
     let paxos_nodes = gossip.get().slave_address_config.get(&this_sid).unwrap().clone();
-    let leader_map = VersionedValue::new(Gen(0), leader_map);
+    let leader_map = VersionedValue::new(leader_map);
     let network_driver = NetworkDriver::new(&leader_map);
+
+    // Recall that here, `paxos_nodes` for this group what is in `gossip`.
+    let mut all_eids = BTreeSet::<EndpointId>::new();
+    for (_, eids) in gossip.get().slave_address_config {
+      all_eids.extend(eids.clone());
+    }
+    all_eids.extend(gossip.get().master_address_config.clone());
+
     SlaveContext {
       coord_positions,
       slave_config,
@@ -348,6 +364,7 @@ impl SlaveContext {
       this_eid,
       gossip,
       leader_map,
+      all_eids: VersionedValue::new(all_eids),
       network_driver,
       slave_bundle: Default::default(),
       tablet_bundles: Default::default(),
@@ -397,10 +414,13 @@ impl SlaveContext {
       }
       msg::SlaveMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip { gid, lid }) => {
         if self.is_leader() {
-          if &lid.gen > &self.leader_map.value().get(&gid).unwrap().gen {
+          // We filter out messages for PaxosGroupIds urecongnized by this node.
+          if let Some(cur_lid) = self.leader_map.value().get(&gid) {
             // If the incoming RemoteLeaderChanged would increase the generation
             // in LeaderMap, then persist it.
-            self.slave_bundle.remote_leader_changes.push(RemoteLeaderChangedPLm { gid, lid })
+            if &lid.gen > &cur_lid.gen {
+              self.slave_bundle.remote_leader_changes.push(RemoteLeaderChangedPLm { gid, lid })
+            }
           }
         }
       }
@@ -458,6 +478,9 @@ impl SlaveContext {
                 let remote_leader_changed = reconfig.bundle.slave.remote_leader_changes.clone();
                 self.process_bundle(io_ctx, statuses, reconfig.bundle);
 
+                // Update the `all_eids`
+                update_all_eids(&mut self.all_eids, &reconfig.rem_eids, reconfig.new_eids);
+
                 // If this is a Leader, we try to start building a SlaveSnapshot. Note that there
                 // might already one being constructed (from an unfortunately timed
                 // `CheckUnconfirmedEids`), in which case we do nothing. This is okay; we will
@@ -513,18 +536,16 @@ impl SlaveContext {
 
     // Dispatch GossipData
     if let Some((gossip_data, some_leader_map)) = slave_bundle.gossip_data {
-      if self.gossip.get_gen() < gossip_data.get_gen() {
-        let gossip = Arc::new(gossip_data);
-        for tid in &all_tids {
-          let forward_msg = TabletForwardMsg::GossipData(gossip.clone(), some_leader_map.clone());
-          io_ctx.tablet_forward(&tid, forward_msg);
-        }
-        for cid in &all_cids {
-          let forward_msg = CoordForwardMsg::GossipData(gossip.clone(), some_leader_map.clone());
-          io_ctx.coord_forward(&cid, forward_msg);
-        }
-        slave_forward_msgs.push(SlaveForwardMsg::GossipData(gossip, some_leader_map));
+      let gossip = Arc::new(gossip_data);
+      for tid in &all_tids {
+        let forward_msg = TabletForwardMsg::GossipData(gossip.clone(), some_leader_map.clone());
+        io_ctx.tablet_forward(&tid, forward_msg);
       }
+      for cid in &all_cids {
+        let forward_msg = CoordForwardMsg::GossipData(gossip.clone(), some_leader_map.clone());
+        io_ctx.coord_forward(&cid, forward_msg);
+      }
+      slave_forward_msgs.push(SlaveForwardMsg::GossipData(gossip, some_leader_map));
     }
 
     // Dispatch the PaxosBundles
@@ -730,25 +751,56 @@ impl SlaveContext {
         }
       }
       SlaveForwardMsg::GossipData(gossip, some_leader_map) => {
-        // Amend the local LeaderMap to refect the new GossipData.
-        update_leader_map(
-          &mut self.leader_map,
-          self.gossip.as_ref(),
-          &some_leader_map,
-          gossip.as_ref(),
-        );
+        // We only accept new Gossips where the generation increases.
+        if self.gossip.get_gen() < gossip.get_gen() {
+          // Amend the local LeaderMap to refect the new GossipData.
+          update_leader_map(
+            &mut self.leader_map,
+            self.gossip.as_ref(),
+            &some_leader_map,
+            gossip.as_ref(),
+          );
 
-        // Update Gossip
-        self.gossip = gossip;
+          // Update `all_eids` by fully recomputing it.
+          let mut all_eids = BTreeSet::<EndpointId>::new();
+          for (sid, eids) in gossip.get().slave_address_config {
+            if sid != &self.this_sid {
+              all_eids.extend(eids.clone());
+            }
+          }
+          all_eids.extend(self.paxos_driver.paxos_nodes().clone());
+          all_eids.extend(gossip.get().master_address_config.clone());
+          self.all_eids.set(all_eids);
+
+          // Update Gossip
+          self.gossip = gossip;
+        }
       }
       SlaveForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
-        let gid = remote_leader_changed.gid.clone();
-        let lid = remote_leader_changed.lid.clone();
-        if lid.gen > self.leader_map.value().get(&gid).unwrap().gen {
+        let gid = remote_leader_changed.gid;
+        let lid = remote_leader_changed.lid;
+
+        // We filter `remote_leader_changed` to ensure that the `leader_map` only contains
+        // `EndpointId`s in the Current Paxos View.
+        let accept = match &gid {
+          PaxosGroupId::Master => self.gossip.get().master_address_config.contains(&lid.eid),
+          PaxosGroupId::Slave(sid) => {
+            if let Some(eids) = self.gossip.get().slave_address_config.get(&sid) {
+              eids.contains(&lid.eid)
+            } else {
+              false
+            }
+          }
+        };
+
+        if accept {
           // Only update the LeadershipId if the new one increases the old one.
-          self.leader_map.update(|leader_map| {
-            leader_map.insert(gid, lid);
-          });
+          // Note that this `leader_map` unwrap will never assert due to the above.
+          if lid.gen > self.leader_map.value().get(&gid).unwrap().gen {
+            self.leader_map.update(|leader_map| {
+              leader_map.insert(gid, lid);
+            });
+          }
         }
       }
       SlaveForwardMsg::LeaderChanged(leader_changed) => {

@@ -1,4 +1,4 @@
-use crate::common::{mk_cid, mk_sid, MasterIOCtx, NUM_COORDS};
+use crate::common::{mk_cid, mk_sid, update_all_eids, MasterIOCtx, NUM_COORDS};
 use crate::master::plm::ConfirmCreateGroup;
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
@@ -101,6 +101,9 @@ impl SlaveGroupCreateES {
         ctx.leader_map.update(move |leader_map| {
           leader_map.insert(sid.to_gid(), lid);
         });
+
+        // Update the `all_eids`
+        update_all_eids(&mut ctx.all_eids, &vec![], self.create_msg.paxos_nodes.clone());
 
         if ctx.is_leader() {
           // Broadcast the GossipData.

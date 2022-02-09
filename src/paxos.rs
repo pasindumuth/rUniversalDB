@@ -284,6 +284,11 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
     maybe_dead_eids
   }
 
+  /// Get the send of PaxosNodes
+  pub fn paxos_nodes(&self) -> &Vec<EndpointId> {
+    &self.paxos_nodes
+  }
+
   /// Compute the minimum of `remote_next_indices`
   fn min_complete_index(&self) -> u128 {
     // We start with `next_index` since the minimum in `remote_next_indices`

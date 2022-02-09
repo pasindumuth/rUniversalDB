@@ -1,4 +1,4 @@
-use crate::common::{remove_item, MasterIOCtx, RemoteLeaderChangedPLm};
+use crate::common::{remove_item, update_all_eids, MasterIOCtx, RemoteLeaderChangedPLm};
 use crate::master::plm::{ReconfigSlaveGroupPLm, SlaveGroupReconfiguredPLm};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{EndpointId, PaxosGroupIdTrait, SlaveGroupId};
@@ -116,17 +116,16 @@ impl SlaveReconfigES {
         // Update the GossipData
         ctx.gossip.update(|gossip| {
           let paxos_nodes = gossip.slave_address_config.get_mut(&self.sid).unwrap();
-
-          // Add new nodes
           for eid in new_eids {
             paxos_nodes.push(eid.clone());
           }
-
-          // Remove olds nodes
           for eid in &self.rem_eids {
             remove_item(paxos_nodes, eid);
           }
         });
+
+        // Update the `all_eids`
+        update_all_eids(&mut ctx.all_eids, &self.rem_eids, new_eids.clone());
 
         if ctx.is_leader() {
           // Broadcast GossipData

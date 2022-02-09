@@ -2,8 +2,8 @@ use crate::alter_table_tm_es::{
   AlterTablePayloadTypes, AlterTableTMES, AlterTableTMInner, ResponseData,
 };
 use crate::common::{
-  lookup_pos, map_insert, mk_qid, mk_t, mk_tid, GeneralTraceMessage, GossipData, LeaderMap,
-  MasterIOCtx, MasterTraceMessage, TableSchema, Timestamp, VersionedValue,
+  lookup_pos, map_insert, mk_qid, mk_t, mk_tid, remove_item, update_all_eids, GeneralTraceMessage,
+  GossipData, LeaderMap, MasterIOCtx, MasterTraceMessage, TableSchema, Timestamp, VersionedValue,
   CHECK_UNCONFIRMED_EIDS_PERIOD_MS, FAILURE_DETECTOR_PERIOD_MS, FREE_NODE_HEARTBEAT_TIMER_MS,
   GOSSIP_DATA_PERIOD_MS, REMOTE_LEADER_CHANGED_PERIOD_MS,
 };
@@ -347,11 +347,21 @@ pub struct MasterContext {
   pub master_config: MasterConfig,
   pub this_eid: EndpointId,
 
+  /// Between calls to `handle_input`, we should maintain the following properties:
+  /// 1. `leader_map` should contain an entry for every `PaxosGroupId` in the
+  ///     Current PaxosGroup View.
+  /// 2. The Leaderships in `leader_map` should be in the Current PaxosGroup View.  
+  /// 3. `all_eids` should contain all `EndpointId` in Current PaxosGroup View.
+  ///
+  /// See the out-of-line docs for the definition of Current PaxosGroup View. For the
+  /// Master, this is the same as what is in `gossip`.
+
   /// Metadata that is Gossiped out to the Slaves
   pub gossip: GossipData,
-
   /// LeaderMap. We use a `VerionedValue` primarily for the `NetworkDriver`
   pub leader_map: VersionedValue<LeaderMap>,
+  /// The set `EndpointId` that this Slave is accepting delivery of messages from.
+  pub all_eids: VersionedValue<BTreeSet<EndpointId>>,
 
   /// NetworkDriver
   pub network_driver: NetworkDriver<msg::MasterRemotePayload>,
@@ -422,9 +432,8 @@ impl MasterState {
     }
   }
 
-  pub fn get_eids(&self) -> VersionedValue<BTreeSet<EndpointId>> {
-    // TODO: do this properly
-    panic!();
+  pub fn get_eids(&self) -> &VersionedValue<BTreeSet<EndpointId>> {
+    &self.ctx.all_eids
   }
 }
 
@@ -438,13 +447,22 @@ impl MasterContext {
     leader_map: LeaderMap,
     paxos_config: PaxosConfig,
   ) -> MasterContext {
-    let leader_map = VersionedValue::new(Gen(0), leader_map);
+    let leader_map = VersionedValue::new(leader_map);
     let network_driver = NetworkDriver::new(&leader_map);
+
+    // Recall that here, `paxos_nodes` for this group what is in `gossip`.
+    let mut all_eids = BTreeSet::<EndpointId>::new();
+    for (_, eids) in &slave_address_config {
+      all_eids.extend(eids.clone());
+    }
+    all_eids.extend(master_address_config.clone());
+
     MasterContext {
       master_config,
       this_eid,
       gossip: GossipData::new(slave_address_config.clone(), master_address_config.clone()),
       leader_map,
+      all_eids: VersionedValue::new(all_eids),
       network_driver,
       free_node_manager: FreeNodeManager::new(),
       external_request_id_map: Default::default(),
@@ -461,13 +479,22 @@ impl MasterContext {
     snapshot: MasterSnapshot,
     paxos_config: PaxosConfig,
   ) -> MasterContext {
-    let leader_map = VersionedValue::new(Gen(0), snapshot.leader_map);
+    let leader_map = VersionedValue::new(snapshot.leader_map);
     let network_driver = NetworkDriver::new(&leader_map);
+
+    // Recall that here, `paxos_nodes` for this group what is in `gossip`.
+    let mut all_eids = BTreeSet::<EndpointId>::new();
+    for (_, eids) in snapshot.gossip.get().slave_address_config {
+      all_eids.extend(eids.clone());
+    }
+    all_eids.extend(snapshot.gossip.get().master_address_config.clone());
+
     MasterContext {
       master_config,
       this_eid: this_eid.clone(),
       gossip: snapshot.gossip,
       leader_map,
+      all_eids: VersionedValue::new(all_eids),
       network_driver,
       free_node_manager: FreeNodeManager::create_reconfig(snapshot.free_nodes),
       external_request_id_map: Default::default(),
@@ -516,10 +543,13 @@ impl MasterContext {
       }
       MasterMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip { gid, lid }) => {
         if self.is_leader() {
-          if &lid.gen > &self.leader_map.value().get(&gid).unwrap().gen {
+          // We filter out messages for PaxosGroupIds urecongnized by this node.
+          if let Some(cur_lid) = self.leader_map.value().get(&gid) {
             // If the incoming RemoteLeaderChanged would increase the generation
             // in LeaderMap, then persist it.
-            self.master_bundle.remote_leader_changes.push(RemoteLeaderChangedPLm { gid, lid })
+            if &lid.gen > &cur_lid.gen {
+              self.master_bundle.remote_leader_changes.push(RemoteLeaderChangedPLm { gid, lid })
+            }
           }
         }
       }
@@ -587,7 +617,23 @@ impl MasterContext {
                 let remote_leader_changed = reconfig.bundle.remote_leader_changes.clone();
                 self.process_bundle(io_ctx, statuses, reconfig.bundle);
 
-                // If this is the leader, swe send a MasterSnapshot.
+                // Update GossipData.
+                let rem_eids = reconfig.rem_eids;
+                let new_eids = reconfig.new_eids;
+                self.gossip.update(|gossip| {
+                  // `master_address_config` should become equal to `paxos_driver.paxos_nodes`.
+                  for rem_eid in &rem_eids {
+                    remove_item(gossip.master_address_config, rem_eid);
+                  }
+                  for new_eid in &new_eids {
+                    gossip.master_address_config.push(new_eid.clone());
+                  }
+                });
+
+                // Update the `all_eids`
+                update_all_eids(&mut self.all_eids, &rem_eids, new_eids);
+
+                // If this is the leader, we send a MasterSnapshot.
                 if self.is_leader() {
                   self.start_snapshot(io_ctx);
                 }
@@ -1084,48 +1130,65 @@ impl MasterContext {
       MasterForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
         let gid = remote_leader_changed.gid.clone();
         let lid = remote_leader_changed.lid.clone();
-        if lid.gen > self.leader_map.value().get(&gid).unwrap().gen {
+
+        // We filter `remote_leader_changed` to ensure that the `leader_map` only contains
+        // `EndpointId`s in the Current Paxos View.
+        let accept = match &gid {
+          PaxosGroupId::Master => self.gossip.get().master_address_config.contains(&lid.eid),
+          PaxosGroupId::Slave(sid) => {
+            if let Some(eids) = self.gossip.get().slave_address_config.get(&sid) {
+              eids.contains(&lid.eid)
+            } else {
+              false
+            }
+          }
+        };
+
+        if accept {
           // Only update the LeadershipId if the new one increases the old one.
-          self.leader_map.update(|leader_map| {
-            leader_map.insert(gid.clone(), lid.clone());
-          });
+          // Note that this `leader_map` unwrap will never assert due to the above.
+          if lid.gen > self.leader_map.value().get(&gid).unwrap().gen {
+            self.leader_map.update(|leader_map| {
+              leader_map.insert(gid.clone(), lid.clone());
+            });
 
-          // CreateTable
-          let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
-          for query_id in query_ids {
-            let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-            self.handle_create_table_es_action(statuses, query_id, action);
-          }
+            // CreateTable
+            let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
+            for query_id in query_ids {
+              let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
+              let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+              self.handle_create_table_es_action(statuses, query_id, action);
+            }
 
-          // AlterTable
-          let query_ids: Vec<QueryId> = statuses.alter_table_tm_ess.keys().cloned().collect();
-          for query_id in query_ids {
-            let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-            self.handle_alter_table_es_action(statuses, query_id, action);
-          }
+            // AlterTable
+            let query_ids: Vec<QueryId> = statuses.alter_table_tm_ess.keys().cloned().collect();
+            for query_id in query_ids {
+              let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
+              let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+              self.handle_alter_table_es_action(statuses, query_id, action);
+            }
 
-          // DropTable
-          let query_ids: Vec<QueryId> = statuses.drop_table_tm_ess.keys().cloned().collect();
-          for query_id in query_ids {
-            let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-            self.handle_drop_table_es_action(statuses, query_id, action);
-          }
+            // DropTable
+            let query_ids: Vec<QueryId> = statuses.drop_table_tm_ess.keys().cloned().collect();
+            for query_id in query_ids {
+              let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
+              let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+              self.handle_drop_table_es_action(statuses, query_id, action);
+            }
 
-          // SlaveReconfigES
-          for (_, es) in &mut statuses.slave_reconfig_ess {
-            es.remote_leader_changed(self, io_ctx, &remote_leader_changed);
-          }
+            // SlaveReconfigES
+            for (_, es) in &mut statuses.slave_reconfig_ess {
+              es.remote_leader_changed(self, io_ctx, &remote_leader_changed);
+            }
 
-          // For MasterQueryPlanningESs, if the sending PaxosGroup's Leadership changed,
-          // we ECU (no response).
-          let query_ids: Vec<QueryId> = statuses.planning_ess.keys().cloned().collect();
-          for query_id in query_ids {
-            let es = statuses.planning_ess.get_mut(&query_id).unwrap();
-            if es.sender_path.node_path.sid.to_gid() == gid {
-              statuses.planning_ess.remove(&query_id);
+            // For MasterQueryPlanningESs, if the sending PaxosGroup's Leadership changed,
+            // we ECU (no response).
+            let query_ids: Vec<QueryId> = statuses.planning_ess.keys().cloned().collect();
+            for query_id in query_ids {
+              let es = statuses.planning_ess.get_mut(&query_id).unwrap();
+              if es.sender_path.node_path.sid.to_gid() == gid {
+                statuses.planning_ess.remove(&query_id);
+              }
             }
           }
         }

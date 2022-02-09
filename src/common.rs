@@ -417,6 +417,25 @@ pub fn update_leader_map_unversioned(
 }
 
 // -----------------------------------------------------------------------------------------------
+//  All EndpointIds
+// -----------------------------------------------------------------------------------------------
+
+pub fn update_all_eids(
+  all_eids: &mut VersionedValue<BTreeSet<EndpointId>>,
+  rem_eids: &Vec<EndpointId>,
+  new_eids: Vec<EndpointId>,
+) {
+  all_eids.update(|all_eids| {
+    for rem_eid in rem_eids {
+      all_eids.remove(rem_eid);
+    }
+    for new_eid in new_eids {
+      all_eids.insert(new_eid);
+    }
+  });
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Common Paxos Messages
 // -----------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -527,8 +546,8 @@ pub struct VersionedValue<T> {
 }
 
 impl<T> VersionedValue<T> {
-  pub fn new(gen: Gen, value: T) -> VersionedValue<T> {
-    VersionedValue { gen, value }
+  pub fn new(value: T) -> VersionedValue<T> {
+    VersionedValue { gen: Gen(0), value }
   }
 
   pub fn set(&mut self, value: T) {
