@@ -293,11 +293,16 @@ pub struct MasterConfig {
   /// a random `u64` and take the remainder after dividing by `timestamp_suffix_divisor`.
   /// This cannot be 0; the default value is 1, making the suffix always be 0.
   pub timestamp_suffix_divisor: u64,
+
+  /// The size that PaxosGroups should be.
+  pub slave_group_size: u32,
+  /// Number of coords each Slave should have.
+  pub num_coord: u32,
 }
 
 impl Default for MasterConfig {
   fn default() -> Self {
-    MasterConfig { timestamp_suffix_divisor: 1 }
+    MasterConfig { timestamp_suffix_divisor: 1, slave_group_size: 5, num_coord: 3 }
   }
 }
 
@@ -418,6 +423,10 @@ impl MasterState {
     ] {
       self.ctx.handle_input(io_ctx, &mut self.statuses, MasterForwardMsg::MasterTimerInput(event));
     }
+
+    // Trace the creation for testing
+    let lid = LeadershipId::mk_first(self.ctx.paxos_driver.paxos_nodes().get(0).unwrap().clone());
+    io_ctx.trace(MasterTraceMessage::MasterCreation(lid));
   }
 
   pub fn handle_input<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, input: FullMasterInput) {
@@ -565,6 +574,7 @@ impl MasterContext {
                   this_eid: &self.this_eid,
                   leader_map: self.leader_map.value(),
                   master_bundle: &mut self.master_bundle,
+                  master_config: &self.master_config,
                 },
                 heartbeat,
               );
@@ -728,13 +738,9 @@ impl MasterContext {
             // Only do PaxosGroup failure detection if we are not already trying to reconfigure.
             if statuses.do_reconfig.is_none() {
               let maybe_dead_eids = self.paxos_driver.get_maybe_dead();
-              // If there are nodes that might be dead, we take only the first and then
-              // attempt a Reconfiguration. Recall we only reconfigure one-at-a-time to
-              // preserve our liveness properties.
-              if let Some(eid) = maybe_dead_eids.into_iter().next() {
-                self.free_node_manager.request_new_eids(PaxosGroupId::Master, 1);
-                statuses.do_reconfig = Some(vec![eid]);
-              }
+              // Recall that the above returns only as much as we are capable of reconfiguring.
+              self.free_node_manager.request_new_eids(PaxosGroupId::Master, maybe_dead_eids.len());
+              statuses.do_reconfig = Some(maybe_dead_eids);
             }
           }
 
@@ -761,6 +767,7 @@ impl MasterContext {
               this_eid: &self.this_eid,
               leader_map: self.leader_map.value(),
               master_bundle: &mut self.master_bundle,
+              master_config: &self.master_config,
             });
           }
 
@@ -818,6 +825,7 @@ impl MasterContext {
                   this_eid: &self.this_eid,
                   leader_map: self.leader_map.value(),
                   master_bundle: &mut self.master_bundle,
+                  master_config: &self.master_config,
                 },
                 io_ctx,
                 plm,
@@ -886,6 +894,7 @@ impl MasterContext {
               this_eid: &self.this_eid,
               leader_map: self.leader_map.value(),
               master_bundle: &mut self.master_bundle,
+              master_config: &self.master_config,
             },
             io_ctx,
           );
@@ -1236,7 +1245,7 @@ impl MasterContext {
         let sids: Vec<SlaveGroupId> = statuses.slave_reconfig_ess.keys().cloned().collect();
         for sid in sids {
           let es = statuses.slave_reconfig_ess.get_mut(&sid).unwrap();
-          if !es.leader_changed(self, io_ctx) {
+          if es.leader_changed(self, io_ctx) {
             statuses.slave_reconfig_ess.remove(&sid);
           }
         }
@@ -1249,6 +1258,7 @@ impl MasterContext {
           this_eid: &self.this_eid,
           leader_map: self.leader_map.value(),
           master_bundle: &mut self.master_bundle,
+          master_config: &self.master_config,
         });
 
         // NetworkDriver

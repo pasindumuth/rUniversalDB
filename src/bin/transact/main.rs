@@ -25,7 +25,7 @@ use runiversal::model::common::{
 use runiversal::model::message as msg;
 use runiversal::model::message::FreeNodeMessage;
 use runiversal::net::{recv, send_bytes};
-use runiversal::node::{GenericInput, NodeContainer};
+use runiversal::node::{GenericInput, NodeState};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
@@ -187,7 +187,7 @@ fn main() {
     master_tasks: Arc::new(Mutex::new(Default::default())),
   };
 
-  let mut node = NodeContainer::new(
+  let mut node = NodeState::new(
     this_eid,
     PaxosConfig::prod(),
     CoordConfig::default(),

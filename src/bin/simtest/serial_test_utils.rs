@@ -1,8 +1,12 @@
 use crate::simulation::Simulation;
-use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId, TableView};
+use runiversal::common::RangeEnds;
+use runiversal::coord::CoordConfig;
+use runiversal::master::MasterConfig;
+use runiversal::model::common::{EndpointId, PaxosGroupId, RequestId, SlaveGroupId, TableView};
 use runiversal::model::message as msg;
 use runiversal::paxos::PaxosConfig;
-use runiversal::simulation_utils::{mk_master_eid, mk_slave_eid};
+use runiversal::simulation_utils::{mk_client_eid, mk_node_eid};
+use runiversal::slave::SlaveConfig;
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid};
 use std::collections::BTreeMap;
 
@@ -13,7 +17,7 @@ use std::collections::BTreeMap;
 pub struct TestContext {
   next_request_idx: u32,
   /// The client that we always use.
-  pub sender_eid: EndpointId,
+  sender_eid: EndpointId,
   /// The master node that we always use.
   master_eid: EndpointId,
   /// The slave node that we always use.
@@ -24,15 +28,43 @@ pub struct TestContext {
 }
 
 impl TestContext {
-  pub fn new() -> TestContext {
+  /// This takes in the simulation that will be used in the other methods in this class.
+  /// Importantly, there should be a Master and at least one SlaveGroup already. There
+  /// should also at least be client in `sim`.
+  pub fn new(sim: &Simulation) -> TestContext {
+    // Extract a `master_eid`
+    let gossip = sim.full_db_schema();
+    let master_eid = gossip.master_address_config.get(0).unwrap().clone();
+
+    // Extract a `slave_eid`
+    let mut it = gossip.slave_address_config.iter();
+    let (_, slave_eids) = it.next().unwrap();
+    let slave_eid = slave_eids.get(0).unwrap().clone();
+
     TestContext {
       next_request_idx: 0,
-      sender_eid: mk_eid("ce0"),
-      master_eid: mk_eid("me0"),
-      slave_eid: mk_eid("se0"),
+      sender_eid: mk_client_eid(0),
+      master_eid,
+      slave_eid,
       next_response_idx: 0,
     }
   }
+
+  // -----------------------------------------------------------------------------------------------
+  //  Const Getters
+  // -----------------------------------------------------------------------------------------------
+
+  pub fn sender_eid(&self) -> &EndpointId {
+    &self.sender_eid
+  }
+
+  pub fn slave_eid(&self) -> &EndpointId {
+    &self.slave_eid
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  //  Execution Methods
+  // -----------------------------------------------------------------------------------------------
 
   /// Executes the DDL `query` using `sim` with a time limit of `time_limit`. If the query
   /// finishes, we check that it succeeded.
@@ -202,21 +234,10 @@ pub fn simulate_until_clean(sim: &mut Simulation, time_limit: u32) -> bool {
   false
 }
 
+/// Simple common setup with a PaxosGroup size of 1.
 pub fn setup(seed: [u8; 16]) -> (Simulation, TestContext) {
-  let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
-  let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
-    (mk_sid("s0"), vec![mk_slave_eid(0)]),
-    (mk_sid("s1"), vec![mk_slave_eid(1)]),
-    (mk_sid("s2"), vec![mk_slave_eid(2)]),
-    (mk_sid("s3"), vec![mk_slave_eid(3)]),
-    (mk_sid("s4"), vec![mk_slave_eid(4)]),
-  ]
-  .into_iter()
-  .collect();
-
-  let sim =
-    Simulation::new(seed, 1, slave_address_config, master_address_config, PaxosConfig::test(), 1);
-  let context = TestContext::new();
+  let sim = mk_general_sim(seed, 1, 5, 1, 1);
+  let context = TestContext::new(&sim);
   (sim, context)
 }
 
@@ -289,33 +310,71 @@ pub fn populate_user_table_basic(sim: &mut Simulation, context: &mut TestContext
 //  Parallel Utils
 // -----------------------------------------------------------------------------------------------
 
+/// Constructs a `Simulation` an instantiates the rUniversalDB by creating a MasterGroup,
+/// then `num_slave_groups` number of SlaveGroups, and `num_clients` number of clients.
 pub fn mk_general_sim(
   seed: [u8; 16],
   num_clients: u32,
-  num_paxos_groups: u32,
+  num_slave_groups: u32,
   num_paxos_nodes: u32,
   timestamp_suffix_divisor: u64,
 ) -> Simulation {
-  // Create one Slave Paxos Group to test Leader change logic with.
-  let mut master_address_config = Vec::<EndpointId>::new();
-  for i in 0..num_paxos_nodes {
-    master_address_config.push(mk_master_eid(i));
-  }
-  let mut slave_address_config = BTreeMap::<SlaveGroupId, Vec<EndpointId>>::new();
-  for i in 0..num_paxos_groups {
-    let mut eids = Vec::<EndpointId>::new();
-    for j in 0..num_paxos_nodes {
-      eids.push(mk_slave_eid(i * num_paxos_nodes + j));
-    }
-    slave_address_config.insert(SlaveGroupId(format!("s{}", i)), eids);
-  }
-
-  Simulation::new(
+  // Create the sim
+  let num_count = (num_slave_groups + 1) * num_paxos_nodes;
+  let mut sim = Simulation::new(
     seed,
     num_clients,
-    slave_address_config.clone(),
-    master_address_config.clone(),
+    num_count,
     PaxosConfig::test(),
-    timestamp_suffix_divisor,
-  )
+    CoordConfig { timestamp_suffix_divisor },
+    MasterConfig { timestamp_suffix_divisor, slave_group_size: num_paxos_nodes, num_coord: 3 },
+    SlaveConfig { timestamp_suffix_divisor },
+  );
+
+  // Construct the Master PaxosGroup to initiate the system.
+  let master_eids: Vec<_> =
+    RangeEnds::rvec(0, num_paxos_nodes).iter().map(|i| mk_node_eid(*i)).collect();
+
+  // We take the first client as the admin client which starts the Master group.
+  let admin_client = mk_client_eid(0);
+  for eid in &master_eids {
+    sim.add_msg(
+      msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::StartMaster(msg::StartMaster {
+        master_eids: master_eids.clone(),
+      })),
+      &admin_client,
+      eid,
+    );
+  }
+
+  // Simulate until all Master nodes come into Existence.
+  for _ in 0..10000 {
+    sim.simulate1ms();
+    if sim.do_nodes_exist(&master_eids) {
+      break;
+    }
+  }
+
+  // Assert that the above managed to create the Master.
+  assert!(sim.do_nodes_exist(&master_eids));
+
+  // Next, we need to register as many nodes as necessary as FreeNodes to the new Master
+  // so that there requested number of SlaveGroups can be created.
+  for i in num_paxos_nodes..(num_paxos_nodes * (num_slave_groups + 1)) {
+    let eid = mk_node_eid(i);
+    sim.register_free_node(&eid);
+  }
+
+  // Simulate to start all of these SlaveGroups.
+  for _ in 0..10000 {
+    sim.simulate1ms();
+    if sim.full_db_schema().slave_address_config.len() as u32 == num_slave_groups {
+      break;
+    }
+  }
+
+  // Assert that the above managed to create the Slaves and have the Master know about it.
+  assert_eq!(sim.full_db_schema().slave_address_config.len() as u32, num_slave_groups);
+
+  sim
 }

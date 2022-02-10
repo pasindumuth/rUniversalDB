@@ -5,7 +5,7 @@ use crate::serial_test_utils::{
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_t, TableSchema, Timestamp};
+use runiversal::common::{mk_t, remove_item, TableSchema, Timestamp};
 use runiversal::model::common::{
   ColName, ColType, EndpointId, Gen, LeadershipId, PaxosGroupIdTrait, PrimaryKey, RequestId,
   SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
@@ -13,7 +13,6 @@ use runiversal::model::common::{
 use runiversal::model::message as msg;
 use runiversal::model::message::{ExternalAbortedData, NetworkMessage};
 use runiversal::paxos::PaxosConfig;
-use runiversal::simulation_utils::{mk_master_eid, mk_slave_eid};
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_seed, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
 
@@ -1605,7 +1604,7 @@ fn paxos_leader_change_test(seed: [u8; 16]) {
   sim.simulate_n_ms(100);
 
   // Block the current leader of the SlaveGroup
-  let sid = sim.slave_address_config().first_key_value().unwrap().0.clone();
+  let sid = sim.full_db_schema().slave_address_config.first_key_value().unwrap().0.clone();
   let lid = sim.leader_map.get(&sid.to_gid()).unwrap().clone();
   sim.start_leadership_change(sid.to_gid());
 
@@ -1644,7 +1643,7 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
   'outer: for i in 0..NUM_ITERATIONS {
     println!("    iteration {:?}", i);
     let mut sim = mk_general_sim(seed, 1, 5, 5, 1);
-    let mut ctx = TestContext::new();
+    let mut ctx = TestContext::new(&sim);
 
     // Test Simple Update-Select
     setup_inventory_table(&mut sim, &mut ctx);
@@ -1665,10 +1664,18 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
       mk_t((i * (EXPECTED_TIME_PER_ITERATION / NUM_ITERATIONS / 2)) as u128);
 
     // Choose a random Slave to be the target of the Leadership change
-    let mut sids: Vec<SlaveGroupId> = sim.slave_address_config().keys().cloned().collect();
-    // TODO: avoid needing to remove the s0 Slave (which we to avoid the
-    //  coordinator node dying, making it difficult to execute queries).
-    sids.remove(0);
+    let mut sids: Vec<_> = sim.full_db_schema().slave_address_config.keys().cloned().collect();
+
+    // Remove the `sid` contains the Slave EndpointId that queries are sent to in order to
+    // avoid changing its Leadership.
+    // TODO: avoid needing to this (e.g. use the sim.leader_map to send queries)
+    for (sid, eids) in sim.full_db_schema().slave_address_config {
+      if eids.contains(&ctx.slave_eid()) {
+        remove_item(&mut sids, sid);
+        break;
+      }
+    }
+
     let target_change_sid = sids.get(sim.rand.next_u32() as usize % sids.len()).unwrap().clone();
 
     let mut change_state = Some((target_change_sid, target_change_timestamp));
@@ -1685,11 +1692,11 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
       }
 
       // Simulate 1ms
-      let response_count = sim.get_responses(&ctx.sender_eid).len();
+      let response_count = sim.get_responses(&ctx.sender_eid()).len();
       sim.simulate1ms();
 
       // If we get a response, act accordingly
-      if response_count < sim.get_responses(&ctx.sender_eid).len() {
+      if response_count < sim.get_responses(&ctx.sender_eid()).len() {
         // Ensure we are not blocking any queues by this point so SELECT below will succeed.
         sim.stop_leadership_change();
 

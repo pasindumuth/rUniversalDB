@@ -1,7 +1,9 @@
-use crate::common::{MasterIOCtx, NodeIOCtx, SlaveIOCtx};
+use crate::common::{GossipDataView, MasterIOCtx, NodeIOCtx, SlaveIOCtx};
 use crate::coord::{CoordConfig, CoordContext};
 use crate::master::{FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput};
-use crate::model::common::{CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId};
+use crate::model::common::{
+  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
+};
 use crate::model::message as msg;
 use crate::model::message::FreeNodeMessage;
 use crate::paxos::PaxosConfig;
@@ -10,6 +12,9 @@ use crate::slave::{
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+#[path = "./node_test.rs"]
+pub mod node_test;
 
 const SERVER_PORT: u32 = 1610;
 
@@ -249,11 +254,11 @@ impl NominalMasterState {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  NodeState
+//  State
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
-enum NodeState {
+enum State {
   DNEState(BTreeMap<EndpointId, Vec<msg::NetworkMessage>>),
   FreeNodeState(LeadershipId, BTreeMap<EndpointId, Vec<msg::NetworkMessage>>),
   NominalSlaveState(NominalSlaveState),
@@ -262,7 +267,7 @@ enum NodeState {
 }
 
 #[derive(Debug)]
-pub struct NodeContainer {
+pub struct NodeState {
   this_eid: EndpointId,
 
   // The configs that should be used when constructing various state (e.g. `SlaveState`)
@@ -271,25 +276,24 @@ pub struct NodeContainer {
   master_config: MasterConfig,
   slave_config: SlaveConfig,
 
-  // The `NodeState`
-  state: NodeState,
+  state: State,
 }
 
-impl NodeContainer {
+impl NodeState {
   pub fn new(
     this_eid: EndpointId,
     paxos_config: PaxosConfig,
     coord_config: CoordConfig,
     master_config: MasterConfig,
     slave_config: SlaveConfig,
-  ) -> NodeContainer {
-    NodeContainer {
+  ) -> NodeState {
+    NodeState {
       this_eid,
       paxos_config,
       coord_config,
       master_config,
       slave_config,
-      state: NodeState::DNEState(BTreeMap::default()),
+      state: State::DNEState(BTreeMap::default()),
     }
   }
 
@@ -299,17 +303,17 @@ impl NodeContainer {
     generic_input: GenericInput,
   ) {
     match &mut self.state {
-      NodeState::DNEState(buffered_messages) => match generic_input {
+      State::DNEState(buffered_messages) => match generic_input {
         GenericInput::Message(eid, message) => {
           // Handle FreeNode messages
           if let msg::NetworkMessage::FreeNode(free_node_msg) = message {
             match free_node_msg {
               msg::FreeNodeMessage::FreeNodeRegistered(registered) => {
                 self.state =
-                  NodeState::FreeNodeState(registered.cur_lid, std::mem::take(buffered_messages));
+                  State::FreeNodeState(registered.cur_lid, std::mem::take(buffered_messages));
               }
               msg::FreeNodeMessage::ShutdownNode => {
-                self.state = NodeState::PostExistence;
+                self.state = State::PostExistence;
               }
               msg::FreeNodeMessage::StartMaster(start) => {
                 // Create the MasterState
@@ -341,7 +345,7 @@ impl NodeContainer {
                 }
 
                 // Advance
-                self.state = NodeState::NominalMasterState(NominalMasterState::init(
+                self.state = State::NominalMasterState(NominalMasterState::init(
                   io_ctx,
                   master_state,
                   master_buffered_msgs,
@@ -356,7 +360,7 @@ impl NodeContainer {
         }
         _ => {}
       },
-      NodeState::FreeNodeState(lid, buffered_messages) => match generic_input {
+      State::FreeNodeState(lid, buffered_messages) => match generic_input {
         GenericInput::Message(eid, message) => {
           // Handle FreeNode messages
           if let msg::NetworkMessage::FreeNode(free_node_msg) = message {
@@ -371,17 +375,17 @@ impl NodeContainer {
                 // Create GossipData
                 let gossip = Arc::new(create.gossip);
 
-                // Create the Coord
+                // Create the Coords
                 let mut coord_positions: Vec<CoordGroupId> = Vec::new();
                 for cid in create.coord_ids {
-                  // Create the Coord
                   let coord_context = CoordContext::new(
-                    CoordConfig::default(),
+                    self.coord_config.clone(),
                     create.sid.clone(),
                     cid.clone(),
                     self.this_eid.clone(),
                     gossip.clone(),
                     create.leader_map.clone(),
+                    create.paxos_nodes.clone(),
                   );
                   io_ctx.create_coord_full(coord_context);
                   coord_positions.push(cid);
@@ -395,6 +399,7 @@ impl NodeContainer {
                   self.this_eid.clone(),
                   gossip,
                   create.leader_map,
+                  create.paxos_nodes,
                   self.paxos_config.clone(),
                 );
                 let mut slave_state = SlaveState::new(slave_context);
@@ -413,7 +418,7 @@ impl NodeContainer {
                 }
 
                 // Advance
-                self.state = NodeState::NominalSlaveState(NominalSlaveState::init(
+                self.state = State::NominalSlaveState(NominalSlaveState::init(
                   io_ctx,
                   slave_state,
                   slave_buffered_msgs,
@@ -458,14 +463,14 @@ impl NodeContainer {
                 }
 
                 // Advance
-                self.state = NodeState::NominalMasterState(NominalMasterState::init(
+                self.state = State::NominalMasterState(NominalMasterState::init(
                   io_ctx,
                   master_state,
                   master_buffered_msgs,
                 ));
               }
               FreeNodeMessage::ShutdownNode => {
-                self.state = NodeState::PostExistence;
+                self.state = State::PostExistence;
               }
               _ => {}
             }
@@ -488,7 +493,7 @@ impl NodeContainer {
         }
         _ => {}
       },
-      NodeState::NominalSlaveState(nominal_state) => {
+      State::NominalSlaveState(nominal_state) => {
         match generic_input {
           GenericInput::Message(eid, message) => {
             // Handle FreeNode messages
@@ -540,10 +545,10 @@ impl NodeContainer {
 
         // Check the IOCtx and see if we should go to post existence.
         if io_ctx.did_exit() {
-          self.state = NodeState::PostExistence;
+          self.state = State::PostExistence;
         }
       }
-      NodeState::NominalMasterState(nominal_state) => {
+      State::NominalMasterState(nominal_state) => {
         match generic_input {
           GenericInput::Message(eid, message) => {
             // Handle FreeNode messages
@@ -581,10 +586,26 @@ impl NodeContainer {
 
         // Check the IOCtx and see if we should go to post existence.
         if io_ctx.did_exit() {
-          self.state = NodeState::PostExistence;
+          self.state = State::PostExistence;
         }
       }
-      NodeState::PostExistence => {}
+      State::PostExistence => {}
+    }
+  }
+
+  /// This method should only be called if this node is a Master. it will
+  /// return the the GossipData underneath.
+  pub fn full_db_schema(&self) -> GossipDataView {
+    let master = cast!(State::NominalMasterState, &self.state).unwrap();
+    master.state.ctx.gossip.get()
+  }
+
+  /// Returns `true` iff this node is beyond DNEState
+  pub fn does_exist(&self) -> bool {
+    if let State::DNEState(_) = &self.state {
+      false
+    } else {
+      true
     }
   }
 }

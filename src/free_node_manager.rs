@@ -1,6 +1,6 @@
-use crate::common::{mk_cid, mk_sid, LeaderMap, MasterIOCtx, NUM_COORDS, PAXOS_GROUP_SIZE};
+use crate::common::{mk_cid, mk_sid, LeaderMap, MasterIOCtx, MasterTraceMessage, NUM_COORDS};
 use crate::master::plm::FreeNodeManagerPLm;
-use crate::master::{MasterBundle, MasterContext, MasterPLm};
+use crate::master::{MasterBundle, MasterConfig, MasterContext, MasterPLm};
 use crate::model::common::{CoordGroupId, EndpointId, LeadershipId, PaxosGroupId, SlaveGroupId};
 use crate::model::message as msg;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ pub struct FreeNodeManagerContext<'a> {
   pub this_eid: &'a EndpointId,
   pub leader_map: &'a LeaderMap,
   pub master_bundle: &'a mut MasterBundle,
+  pub master_config: &'a MasterConfig,
 }
 
 impl<'a> FreeNodeManagerContext<'a> {
@@ -157,7 +158,12 @@ impl FreeNodeManager {
     }
 
     // Remove free nodes that were given off for creating new SlaveGroups
-    for (_, (eids, _)) in plm.new_slave_groups.clone() {
+    for (sid, (eids, _)) in plm.new_slave_groups.clone() {
+      // Trace the creation for testing
+      let lid = LeadershipId::mk_first(eids.get(0).unwrap().clone());
+      io_ctx.trace(MasterTraceMessage::SlaveCreated(sid.clone(), lid));
+
+      // Remove the EndpointId as a FreeNode.
       for eid in eids {
         self.free_nodes.remove(&eid);
         self.free_node_heartbeat.remove(&eid);
@@ -241,7 +247,7 @@ impl FreeNodeManager {
     let mut it = available_slave_nodes.into_iter();
     'outer: loop {
       let mut new_slave_eids = Vec::<EndpointId>::new();
-      for _ in 0..PAXOS_GROUP_SIZE {
+      for _ in 0..ctx.master_config.slave_group_size {
         if let Some(eid) = it.next() {
           new_slave_eids.push(eid);
         } else {

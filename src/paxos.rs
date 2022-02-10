@@ -76,6 +76,12 @@ pub struct PaxosConfig {
   /// The threshold for how far back the `remote_next_index` of a PaxosNode
   /// can be before it might be suspected of being dead.
   pub remote_next_index_thresh: u32,
+
+  /// The number of PaxosNodes that we assume can die at a time in the system.
+  /// Although technically there is no upper bound, we assume there is for the purpose
+  /// of reasoning about liveness (i.e. if more than this many fail, then we do not
+  /// guarantee liveness).
+  pub max_failable: u32,
 }
 
 impl PaxosConfig {
@@ -88,6 +94,7 @@ impl PaxosConfig {
       retry_defer_time_ms: mk_t(1000),
       proposal_increment: 1000,
       remote_next_index_thresh: 100,
+      max_failable: 1,
     }
   }
 
@@ -100,6 +107,7 @@ impl PaxosConfig {
       retry_defer_time_ms: mk_t(5),
       proposal_increment: 1000,
       remote_next_index_thresh: 5,
+      max_failable: 1,
     }
   }
 }
@@ -271,19 +279,6 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
     }
   }
 
-  /// This returns the set of `EndpointId`s that might be dead, based on how far
-  /// back the `remote_next_index` is.
-  pub fn get_maybe_dead(&self) -> Vec<EndpointId> {
-    let mut maybe_dead_eids = Vec::<EndpointId>::new();
-    for (eid, index) in &self.remote_next_indices {
-      if *index + (self.paxos_config.remote_next_index_thresh as u128) < self.next_index {
-        maybe_dead_eids.push(eid.clone())
-      }
-    }
-
-    maybe_dead_eids
-  }
-
   /// Get the send of PaxosNodes
   pub fn paxos_nodes(&self) -> &Vec<EndpointId> {
     &self.paxos_nodes
@@ -305,6 +300,49 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
     ctx: &PaxosContextBaseT,
   ) -> bool {
     &self.leader.eid == ctx.this_eid()
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  //  Reconfiguration Utils
+  // -----------------------------------------------------------------------------------------------
+
+  pub fn max_failable(&self) -> u32 {
+    self.paxos_config.max_failable
+  }
+
+  /// We derive this value from the `max_failable` and `paxos_group_size`.
+  pub fn max_reconfig_size(&self) -> u32 {
+    let strict_minority = if self.paxos_group_size() % 2 == 0 {
+      self.paxos_group_size() / 2 - 1
+    } else {
+      self.paxos_group_size() / 2
+    };
+
+    if self.max_failable() <= strict_minority {
+      strict_minority - self.max_failable()
+    } else {
+      // Here, we cannot afford any reconfiguration at all without losing liveness.
+      0
+    }
+  }
+
+  pub fn paxos_group_size(&self) -> u32 {
+    self.paxos_nodes.len() as u32
+  }
+
+  /// This returns the set of `EndpointId`s that might be dead, based on how far
+  /// back the `remote_next_index` is. We return only at most `max_reconfig_size`.
+  pub fn get_maybe_dead(&self) -> Vec<EndpointId> {
+    let mut maybe_dead_eids = Vec::<EndpointId>::new();
+    for (eid, index) in &self.remote_next_indices {
+      if (maybe_dead_eids.len() as u32) < self.max_reconfig_size() {
+        if *index + (self.paxos_config.remote_next_index_thresh as u128) < self.next_index {
+          maybe_dead_eids.push(eid.clone())
+        }
+      }
+    }
+
+    maybe_dead_eids
   }
 
   // -----------------------------------------------------------------------------------------------

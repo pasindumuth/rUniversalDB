@@ -291,6 +291,7 @@ impl SlaveState {
   /// This should be called at the very start of the life of a Master node. This
   /// will start the timer events, paxos insertion, etc.
   pub fn bootstrap<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
+    // TODO: this debug assert doesn't work if this is a Reconfigured Slave.
     debug_assert_eq!(io_ctx.num_tablets(), 0);
     let ctx = &mut SlavePaxosContext { io_ctx, this_eid: &self.ctx.this_eid };
     if self.ctx.is_leader() {
@@ -336,26 +337,33 @@ impl SlaveState {
 }
 
 impl SlaveContext {
+  /// This is used to first create a Slave node. The `gossip` and `leader_map` are
+  /// exactly what would come in a `CreateSlaveGroup`; i.e. they do not contain
+  /// `paxos_nodes`.
   pub fn new(
     coord_positions: Vec<CoordGroupId>,
     slave_config: SlaveConfig,
     this_sid: SlaveGroupId,
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
-    leader_map: LeaderMap,
+    mut leader_map: LeaderMap,
+    paxos_nodes: Vec<EndpointId>,
     paxos_config: PaxosConfig,
   ) -> SlaveContext {
-    let paxos_nodes = gossip.get().slave_address_config.get(&this_sid).unwrap().clone();
+    // Amend the LeaderMap to include this new Slave.
+    let lid = LeadershipId::mk_first(paxos_nodes.get(0).unwrap().clone());
+    leader_map.insert(this_sid.to_gid(), lid);
     let leader_map = VersionedValue::new(leader_map);
-    let network_driver = NetworkDriver::new(&leader_map);
 
-    // Recall that here, `paxos_nodes` for this group what is in `gossip`.
+    // Recall that `gossip` does not contain `paxos_nodes`.
     let mut all_eids = BTreeSet::<EndpointId>::new();
     for (_, eids) in gossip.get().slave_address_config {
       all_eids.extend(eids.clone());
     }
     all_eids.extend(gossip.get().master_address_config.clone());
+    all_eids.extend(paxos_nodes.clone());
 
+    let network_driver = NetworkDriver::new(&leader_map);
     SlaveContext {
       coord_positions,
       slave_config,
@@ -454,7 +462,8 @@ impl SlaveContext {
               );
 
               // Trace for testing
-              io_ctx.trace(SlaveTraceMessage::LeaderChanged(leader_changed.lid));
+              io_ctx
+                .trace(SlaveTraceMessage::LeaderChanged(self.this_gid.clone(), leader_changed.lid));
             }
             msg::PLEntry::Bundle(shared_bundle) => {
               // Process the persisted data only first.
@@ -639,15 +648,13 @@ impl SlaveContext {
         }
         SlaveTimerInput::PaxosGroupFailureDetector => {
           if self.is_leader() {
-            // Only do PaxosGroup failure detection if we are not already trying to reconfigure.
             let maybe_dead_eids = self.paxos_driver.get_maybe_dead();
-            if let Some(eid) = maybe_dead_eids.into_iter().next() {
-              // Here, we send the Master a `NodesDead` message indicating that we
-              // want to reconfigure. Recall we only reconfigure one-at-a-time to
-              // preserve our liveness properties.
-              let nodes_dead = msg::NodesDead { sid: self.this_sid.clone(), eids: vec![eid] };
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::NodesDead(nodes_dead))
-            }
+            // Recall that the above returns only as much as we are capable of reconfiguring.
+            let nodes_dead = msg::NodesDead { sid: self.this_sid.clone(), eids: maybe_dead_eids };
+            // Here, we send the Master a `NodesDead` message indicating that we
+            // want to reconfigure. Recall we only reconfigure one-at-a-time to
+            // preserve our liveness properties.
+            self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::NodesDead(nodes_dead));
           }
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower

@@ -127,21 +127,24 @@ impl<PayloadT: Clone> NetworkDriver<PayloadT> {
     from_gid: PaxosGroupId,
     from_lid: LeadershipId,
   ) -> Vec<PayloadT> {
-    let buffer = self.network_buffer.get_mut(&from_gid).unwrap();
-    if !buffer.is_empty() {
-      // Recall that the `from_lid.gen` of all bufferred messages should be the same.
-      let new_from_lid = &buffer.get(0).unwrap().from_lid;
-      if from_lid.gen > new_from_lid.gen {
-        // Here, the new RemoteLeaderChangedPLm is beyond all buffered messages, so we drop them.
-        buffer.clear();
-        Vec::new()
-      } else if from_lid.gen == new_from_lid.gen {
-        // Deliver all messages from the buffer.
-        let remote_messages = std::mem::replace(buffer, Vec::new());
-        remote_messages.into_iter().map(|m| m.payload).collect()
+    if let Some(buffer) = self.network_buffer.get_mut(&from_gid) {
+      if !buffer.is_empty() {
+        // Recall that the `from_lid.gen` of all bufferred messages should be the same.
+        let new_from_lid = &buffer.get(0).unwrap().from_lid;
+        if from_lid.gen > new_from_lid.gen {
+          // Here, the new RemoteLeaderChangedPLm is beyond all buffered messages, so we drop them.
+          buffer.clear();
+          Vec::new()
+        } else if from_lid.gen == new_from_lid.gen {
+          // Deliver all messages from the buffer.
+          let remote_messages = std::mem::replace(buffer, Vec::new());
+          remote_messages.into_iter().map(|m| m.payload).collect()
+        } else {
+          // Here, the newly inserted RemoteLeaderChangedPLm will have no affect. Note that from
+          // `recieve`, an appropriate one is still scheduled for insertion.
+          Vec::new()
+        }
       } else {
-        // Here, the newly inserted RemoteLeaderChangedPLm will have no affect. Note that from
-        // `recieve`, an appropriate one is still scheduled for insertion.
         Vec::new()
       }
     } else {

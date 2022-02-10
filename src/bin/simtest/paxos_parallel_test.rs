@@ -721,7 +721,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
 
   // Run the simulation
   let client_eids: Vec<_> = sim.get_all_responses().keys().cloned().collect();
-  let sids: Vec<_> = sim.slave_address_config().keys().cloned().collect();
+  let sids: Vec<_> = sim.full_db_schema().slave_address_config.keys().cloned().collect();
   let gids: Vec<_> = sim.leader_map.keys().cloned().collect();
 
   // These 2 are kept in sync, where the set of RequestIds in each map are always the same.

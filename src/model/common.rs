@@ -266,6 +266,12 @@ pub struct LeadershipId {
   pub eid: EndpointId,
 }
 
+impl LeadershipId {
+  pub fn mk_first(eid: EndpointId) -> LeadershipId {
+    LeadershipId { gen: Gen(0), eid }
+  }
+}
+
 /// Used to identify a PaxosGroup in the system.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PaxosGroupId {

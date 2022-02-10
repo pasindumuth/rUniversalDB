@@ -70,7 +70,7 @@ pub trait FreeNodeIOCtx: BasicIOCtx {
 // -----------------------------------------------------------------------------------------------
 
 pub enum SlaveTraceMessage {
-  LeaderChanged(LeadershipId),
+  LeaderChanged(PaxosGroupId, LeadershipId),
 }
 
 pub trait SlaveIOCtx: BasicIOCtx {
@@ -106,6 +106,11 @@ pub trait CoreIOCtx: BasicIOCtx {
 
 pub enum MasterTraceMessage {
   LeaderChanged(LeadershipId),
+  /// This is traced when the Master is first created.
+  MasterCreation(LeadershipId),
+  /// This is traced when a new SlaveGroup is created, where we also
+  /// include the first `LeadershipId`.
+  SlaveCreated(SlaveGroupId, LeadershipId),
 }
 
 pub trait MasterIOCtx: BasicIOCtx {
@@ -572,8 +577,6 @@ impl<T> VersionedValue<T> {
 // -----------------------------------------------------------------------------------------------
 //  Node Creation
 // -----------------------------------------------------------------------------------------------
-
-pub const PAXOS_GROUP_SIZE: u32 = 5;
 
 pub const NUM_COORDS: u32 = 3;
 

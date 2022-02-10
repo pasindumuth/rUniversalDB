@@ -105,7 +105,7 @@ impl paxos2pc::TMServerContext<FinishQueryPayloadTypes> for CoordContext {
 //  CoordConfig
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CoordConfig {
   /// This is used for generate the `suffix` of a Timestamp, where we just generate
   /// a random `u64` and take the remainder after dividing by `timestamp_suffix_divisor`.
@@ -162,14 +162,30 @@ impl CoordState {
 }
 
 impl CoordContext {
+  /// This is used to first create a Slave node. The `gossip` and `leader_map` are
+  /// exactly what would come in a `CreateSlaveGroup`; i.e. they do not contain
+  /// `paxos_nodes`.
   pub fn new(
     coord_config: CoordConfig,
     this_sid: SlaveGroupId,
     this_cid: CoordGroupId,
     this_eid: EndpointId,
     gossip: Arc<GossipData>,
-    leader_map: LeaderMap,
+    mut leader_map: LeaderMap,
+    paxos_nodes: Vec<EndpointId>,
   ) -> CoordContext {
+    // Amend the LeaderMap to include this new Slave.
+    let lid = LeadershipId::mk_first(paxos_nodes.get(0).unwrap().clone());
+    leader_map.insert(this_sid.to_gid(), lid);
+
+    // Recall that `gossip` does not contain `paxos_nodes`.
+    let mut all_eids = BTreeSet::<EndpointId>::new();
+    for (_, eids) in gossip.get().slave_address_config {
+      all_eids.extend(eids.clone());
+    }
+    all_eids.extend(gossip.get().master_address_config.clone());
+    all_eids.extend(paxos_nodes.clone());
+
     CoordContext {
       coord_config,
       this_sid,

@@ -9,14 +9,14 @@ pub fn mk_paxos_eid(i: u32) -> EndpointId {
   EndpointId(format!("pe{}", i))
 }
 
-// Construct the Master EndpointId of the Master at the given index.
-pub fn mk_master_eid(i: u32) -> EndpointId {
-  EndpointId(format!("me{}", i))
-}
-
 // Construct the Slave EndpointId of the Slave at the given index.
 pub fn mk_slave_eid(i: u32) -> EndpointId {
   EndpointId(format!("se{}", i))
+}
+
+// Construct the EndpointId of a Node.
+pub fn mk_node_eid(i: u32) -> EndpointId {
+  EndpointId(format!("ne{}", i))
 }
 
 // Construct the Client id of the slave at the given index.

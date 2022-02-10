@@ -54,6 +54,7 @@ impl MasterMessage {
     match self {
       Self::PaxosDriverMessage(PaxosDriverMessage::InformLearned(_)) => true,
       Self::PaxosDriverMessage(PaxosDriverMessage::LogSyncResponse(_)) => true,
+      Self::FreeNodeAssoc(_) => true,
       _ => false,
     }
   }
@@ -120,7 +121,7 @@ pub struct FreeNodeRegistered {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CreateSlaveGroup {
-  // Note that leader_map and gossip_data here will correspond exactly.
+  /// Note that `gossip` and `leader_map` here will correspond exactly.
   pub gossip: GossipData,
   pub leader_map: LeaderMap,
 

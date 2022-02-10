@@ -1,9 +1,11 @@
-use crate::serial_test_utils::{setup, TestContext};
+use crate::serial_test_utils::{mk_general_sim, setup, TestContext};
 use crate::simulation::Simulation;
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_rid, mk_t, read_index, TableSchema, Timestamp};
+use runiversal::coord::CoordConfig;
+use runiversal::master::MasterConfig;
 use runiversal::model::common::{
   ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TableView,
 };
@@ -11,6 +13,7 @@ use runiversal::model::message as msg;
 use runiversal::model::message::ExternalAbortedData;
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::mk_slave_eid;
+use runiversal::slave::SlaveConfig;
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_seed, mk_sid};
 use sqlformat;
 use std::collections::BTreeMap;
@@ -737,22 +740,9 @@ pub fn test_all_advanced_parallel(rand: &mut XorShiftRng) {
 }
 
 pub fn advanced_parallel_test(seed: [u8; 16]) {
-  let master_address_config: Vec<EndpointId> = vec![mk_eid("me0")];
-  let slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>> = vec![
-    (mk_sid("s0"), vec![mk_slave_eid(0)]),
-    (mk_sid("s1"), vec![mk_slave_eid(1)]),
-    (mk_sid("s2"), vec![mk_slave_eid(2)]),
-    (mk_sid("s3"), vec![mk_slave_eid(3)]),
-    (mk_sid("s4"), vec![mk_slave_eid(4)]),
-  ]
-  .into_iter()
-  .collect();
-
   // We create 3 clients.
-  let mut sim =
-    Simulation::new(seed, 3, slave_address_config, master_address_config, PaxosConfig::test(), 1);
-
-  let mut ctx = TestContext::new();
+  let mut sim = mk_general_sim(seed, 3, 5, 1, 1);
+  let mut ctx = TestContext::new(&sim);
 
   // Setup Tables
   setup_tables(&mut sim, &mut ctx);
