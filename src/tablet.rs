@@ -514,9 +514,6 @@ pub enum TabletForwardMsg {
 
 #[derive(Debug)]
 pub struct TabletCreateHelper {
-  // TODO: we no longer read this
-  pub rand_seed: [u8; 16],
-
   /// Metadata
   pub tablet_config: TabletConfig,
   pub this_sid: SlaveGroupId,

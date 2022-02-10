@@ -186,14 +186,6 @@ impl BasicIOCtx for ProdIOCtx {
     send_msg(&self.out_conn_map, eid, msg);
   }
 
-  fn mark_exit(&mut self) {
-    self.exited = true;
-  }
-
-  fn did_exit(&mut self) -> bool {
-    self.exited
-  }
-
   fn general_trace(&mut self, _: GeneralTraceMessage) {}
 }
 
@@ -206,7 +198,6 @@ impl FreeNodeIOCtx for ProdIOCtx {
     // Spawn a new thread and create the Tablet.
     let mut io_ctx = ProdCoreIOCtx {
       out_conn_map: self.out_conn_map.clone(),
-      exited: false,
       rand: XorShiftRng::from_entropy(),
       to_top: self.to_top.clone(),
     };
@@ -227,7 +218,6 @@ impl FreeNodeIOCtx for ProdIOCtx {
     // Spawn a new thread and create the Coord.
     let mut io_ctx = ProdCoreIOCtx {
       out_conn_map: self.out_conn_map.clone(),
-      exited: false,
       rand: XorShiftRng::from_entropy(),
       to_top: self.to_top.clone(),
     };
@@ -242,10 +232,15 @@ impl FreeNodeIOCtx for ProdIOCtx {
 }
 
 impl SlaveIOCtx for ProdIOCtx {
-  fn create_tablet(&mut self, helper: TabletCreateHelper) {
-    // Create an RNG using the random seed provided by the Slave.
-    let rand = XorShiftRng::from_seed(helper.rand_seed);
+  fn mark_exit(&mut self) {
+    self.exited = true;
+  }
 
+  fn did_exit(&mut self) -> bool {
+    self.exited
+  }
+
+  fn create_tablet(&mut self, helper: TabletCreateHelper) {
     // Create mpsc queue for Slave-Tablet communication.
     let (to_tablet_sender, to_tablet_receiver) = mpsc::channel::<TabletForwardMsg>();
     self.tablet_map.insert(helper.this_tid.clone(), to_tablet_sender);
@@ -254,8 +249,7 @@ impl SlaveIOCtx for ProdIOCtx {
     let tablet_context = TabletContext::new(helper);
     let mut io_ctx = ProdCoreIOCtx {
       out_conn_map: self.out_conn_map.clone(),
-      exited: false,
-      rand,
+      rand: XorShiftRng::from_entropy(),
       to_top: self.to_top.clone(),
     };
     thread::spawn(move || {
@@ -301,6 +295,14 @@ impl SlaveIOCtx for ProdIOCtx {
 }
 
 impl MasterIOCtx for ProdIOCtx {
+  fn mark_exit(&mut self) {
+    self.exited = true;
+  }
+
+  fn did_exit(&mut self) -> bool {
+    self.exited
+  }
+
   fn defer(&mut self, defer_time: Timestamp, timer_input: MasterTimerInput) {
     let timestamp = self.now().add(defer_time);
     let mut master_tasks = self.master_tasks.lock().unwrap();
@@ -331,7 +333,6 @@ pub struct ProdCoreIOCtx {
   // Basic
   pub rand: XorShiftRng,
   pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
-  pub exited: bool,
 
   // Slave
   pub to_top: Sender<GenericInput>,
@@ -352,14 +353,6 @@ impl BasicIOCtx for ProdCoreIOCtx {
     let out_conn_map = self.out_conn_map.lock().unwrap();
     let sender = out_conn_map.get(eid).unwrap();
     sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
-  }
-
-  fn mark_exit(&mut self) {
-    self.exited = true;
-  }
-
-  fn did_exit(&mut self) -> bool {
-    self.exited
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}

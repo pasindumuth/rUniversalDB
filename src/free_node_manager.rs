@@ -272,11 +272,10 @@ impl FreeNodeManager {
   }
 
   // -----------------------------------------------------------------------------------------------
-  //  Utilities
+  //  Const Accessors
   // -----------------------------------------------------------------------------------------------
 
-  /// This is used to get a copy of all FreeNodes, which is useful for Reconfiguration.
-  pub fn mk_free_nodes(&self) -> BTreeMap<EndpointId, FreeNodeType> {
-    self.free_nodes.clone()
+  pub fn free_nodes(&self) -> &BTreeMap<EndpointId, FreeNodeType> {
+    &self.free_nodes
   }
 }

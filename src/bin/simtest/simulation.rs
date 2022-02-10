@@ -87,14 +87,6 @@ impl<'a> BasicIOCtx for TestIOCtx<'a> {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
 
-  fn mark_exit(&mut self) {
-    *self.exited = true;
-  }
-
-  fn did_exit(&mut self) -> bool {
-    *self.exited
-  }
-
   fn general_trace(&mut self, trace_msg: GeneralTraceMessage) {
     self.success_tracer.process(trace_msg);
   }
@@ -113,6 +105,14 @@ impl<'a> FreeNodeIOCtx for TestIOCtx<'a> {
 }
 
 impl<'a> SlaveIOCtx for TestIOCtx<'a> {
+  fn mark_exit(&mut self) {
+    *self.exited = true;
+  }
+
+  fn did_exit(&mut self) -> bool {
+    *self.exited
+  }
+
   fn create_tablet(&mut self, helper: TabletCreateHelper) {
     let tid = helper.this_tid.clone();
     self.tablet_states.insert(tid, TabletState::new(TabletContext::new(helper)));
@@ -173,6 +173,14 @@ impl<'a> SlaveIOCtx for TestIOCtx<'a> {
 }
 
 impl<'a> MasterIOCtx for TestIOCtx<'a> {
+  fn mark_exit(&mut self) {
+    *self.exited = true;
+  }
+
+  fn did_exit(&mut self) -> bool {
+    *self.exited
+  }
+
   fn defer(&mut self, defer_time: Timestamp, timer_input: MasterTimerInput) {
     let deferred_time = self.now().add(defer_time);
     if let Some(timer_inputs) = self.master_tasks.get_mut(&deferred_time) {
@@ -221,16 +229,6 @@ impl<'a> BasicIOCtx for TestCoreIOCtx<'a> {
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
-  }
-
-  fn mark_exit(&mut self) {
-    // TODO: remove
-    unimplemented!()
-  }
-
-  fn did_exit(&mut self) -> bool {
-    // TODO: remove
-    unimplemented!()
   }
 
   fn general_trace(&mut self, trace_msg: GeneralTraceMessage) {

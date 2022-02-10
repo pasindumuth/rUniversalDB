@@ -1444,6 +1444,8 @@ impl MasterContext {
   /// PaxosGroups to help maintain their LeaderMaps.
   fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
     let this_lid = self.leader_map.value().get(&PaxosGroupId::Master).unwrap().clone();
+
+    // Send to SlaveGroups
     for (_, eids) in self.gossip.get().slave_address_config {
       for eid in eids {
         io_ctx.send(
@@ -1453,6 +1455,14 @@ impl MasterContext {
           )),
         )
       }
+    }
+
+    // Send to FreeNodes
+    for (eid, _) in self.free_node_manager.free_nodes() {
+      io_ctx.send(
+        eid,
+        msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::MasterLeadershipId(this_lid.clone())),
+      )
     }
   }
 
@@ -1649,7 +1659,7 @@ impl MasterContext {
     let snapshot = MasterSnapshot {
       gossip: self.gossip.clone(),
       leader_map: self.leader_map.value().clone(),
-      free_nodes: self.free_node_manager.mk_free_nodes(),
+      free_nodes: self.free_node_manager.free_nodes().clone(),
       paxos_driver_start,
     };
 
@@ -1669,7 +1679,6 @@ impl MasterContext {
   }
 
   /// Broadcast GossipData
-  // TODO: broadcast to free nodes
   pub fn broadcast_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO) {
     let sids: Vec<SlaveGroupId> = self.gossip.get().slave_address_config.keys().cloned().collect();
     for sid in sids {

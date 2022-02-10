@@ -44,11 +44,6 @@ pub trait BasicIOCtx<NetworkMessageT = msg::NetworkMessage> {
   fn now(&mut self) -> Timestamp;
   fn send(&mut self, eid: &EndpointId, msg: NetworkMessageT);
 
-  /// This marks that the node should exit (which happens if the PaxosGroup ejects a node).
-  /// TODO: move this only to top-level state (e.g. Master and Slave).
-  fn mark_exit(&mut self);
-  fn did_exit(&mut self) -> bool;
-
   /// Tracer
   fn general_trace(&mut self, trace_msg: GeneralTraceMessage);
 }
@@ -74,6 +69,10 @@ pub enum SlaveTraceMessage {
 }
 
 pub trait SlaveIOCtx: BasicIOCtx {
+  /// This marks that the node should exit (which happens if the PaxosGroup ejects a node).
+  fn mark_exit(&mut self);
+  fn did_exit(&mut self) -> bool;
+
   // Tablet
   fn create_tablet(&mut self, helper: TabletCreateHelper);
   fn tablet_forward(&mut self, tablet_group_id: &TabletGroupId, forward_msg: TabletForwardMsg);
@@ -114,6 +113,10 @@ pub enum MasterTraceMessage {
 }
 
 pub trait MasterIOCtx: BasicIOCtx {
+  /// This marks that the node should exit (which happens if the PaxosGroup ejects a node).
+  fn mark_exit(&mut self);
+  fn did_exit(&mut self) -> bool;
+
   // Timer
   fn defer(&mut self, defer_time: Timestamp, timer_input: MasterTimerInput);
 

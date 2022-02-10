@@ -523,7 +523,7 @@ impl NodeState {
                   );
                 }
                 FreeNodeMessage::ShutdownNode => {
-                  io_ctx.mark_exit();
+                  SlaveIOCtx::mark_exit(io_ctx);
                 }
                 _ => {}
               }
@@ -544,7 +544,7 @@ impl NodeState {
         }
 
         // Check the IOCtx and see if we should go to post existence.
-        if io_ctx.did_exit() {
+        if SlaveIOCtx::did_exit(io_ctx) {
           self.state = State::PostExistence;
         }
       }
@@ -566,7 +566,7 @@ impl NodeState {
                   );
                 }
                 FreeNodeMessage::ShutdownNode => {
-                  io_ctx.mark_exit();
+                  MasterIOCtx::mark_exit(io_ctx);
                 }
                 _ => {}
               }
@@ -585,7 +585,7 @@ impl NodeState {
         }
 
         // Check the IOCtx and see if we should go to post existence.
-        if io_ctx.did_exit() {
+        if MasterIOCtx::did_exit(io_ctx) {
           self.state = State::PostExistence;
         }
       }
