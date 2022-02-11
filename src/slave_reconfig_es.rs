@@ -4,22 +4,22 @@ use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{EndpointId, PaxosGroupIdTrait, SlaveGroupId};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
+use serde::{Deserialize, Serialize};
 
 // -----------------------------------------------------------------------------------------------
 //  SlaveReconfigES
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 enum State {
   Follower { new_eids: Vec<EndpointId> },
   WaitingRequestedNodes,
   InsertingReconfig { new_eids: Vec<EndpointId> },
   Reconfig { new_eids: Vec<EndpointId> },
   InsertingCompletion { new_eids: Vec<EndpointId> },
-  Done,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SlaveReconfigES {
   sid: SlaveGroupId,
   rem_eids: Vec<EndpointId>,
@@ -136,8 +136,6 @@ impl SlaveReconfigES {
             io_ctx.send(eid, msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::ShutdownNode));
           }
         }
-
-        self.state = State::Done;
       }
       _ => debug_assert!(false),
     }
@@ -177,15 +175,27 @@ impl SlaveReconfigES {
         }
         false
       }
-      State::WaitingRequestedNodes | State::InsertingReconfig { .. } => {
-        self.state = State::Done;
-        true
-      }
+      State::WaitingRequestedNodes | State::InsertingReconfig { .. } => true,
       State::Reconfig { new_eids } | State::InsertingCompletion { new_eids } => {
         self.state = State::Follower { new_eids: std::mem::take(new_eids) };
         false
       }
-      State::Done => true,
+    }
+  }
+
+  /// If this node is a Follower, a copy of this `SlaveReconfigES` is returned. If this
+  /// node is a Leader, then the value of this `SlaveReconfigES` that would result from
+  /// losing Leadership is returned (i.e. after calling `leader_changed`).
+  pub fn reconfig_snapshot(&self) -> Option<SlaveReconfigES> {
+    match &self.state {
+      State::WaitingRequestedNodes | State::InsertingReconfig { .. } => None,
+      State::Follower { new_eids }
+      | State::Reconfig { new_eids }
+      | State::InsertingCompletion { new_eids } => Some(SlaveReconfigES {
+        sid: self.sid.clone(),
+        rem_eids: self.rem_eids.clone(),
+        state: State::Follower { new_eids: new_eids.clone() },
+      }),
     }
   }
 

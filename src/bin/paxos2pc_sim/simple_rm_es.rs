@@ -93,4 +93,8 @@ impl Paxos2PCRMInner<SimplePayloadTypes> for SimpleRMInner {
     _: &mut IO,
   ) {
   }
+
+  fn reconfig_snapshot(&self) -> Self {
+    unimplemented!()
+  }
 }

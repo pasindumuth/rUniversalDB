@@ -4,6 +4,7 @@ use crate::paxos2pc_tm::{
   Aborted, CheckPrepared, Commit, InformPrepared, Paxos2PCContainer, PayloadTypes, Prepared,
   RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm, RMPreparedPLm, RMServerContext, TMMessage, Wait,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
@@ -80,18 +81,23 @@ pub trait Paxos2PCRMInner<T: PayloadTypes>: Sized {
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   );
+
+  /// If this node is a Follower, a copy of this `Inner` is returned. If this node is
+  /// a Leader, then the value of this `Paxos2PCRMInner` that would result from losing
+  /// Leadership is returned (i.e. after the `Outer` calls `leader_changed`).
+  fn reconfig_snapshot(&self) -> Self;
 }
 
 // -----------------------------------------------------------------------------------------------
 //  Paxos2PCRMOuter
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct OrigTMLeadership {
   pub orig_tm_lid: LeadershipId,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum State {
   Follower,
   WaitingInsertingPrepared(OrigTMLeadership),
@@ -102,7 +108,7 @@ pub enum State {
   InsertingAborted,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Paxos2PCRMExecOuter<T: PayloadTypes, InnerT> {
   pub query_id: QueryId,
   pub tm: T::TMPath,
@@ -112,7 +118,7 @@ pub struct Paxos2PCRMExecOuter<T: PayloadTypes, InnerT> {
   pub inner: InnerT,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Paxos2PCRMOuter<T: PayloadTypes, InnerT> {
   Committed,
   Aborted,
@@ -412,6 +418,30 @@ impl<T: PayloadTypes, InnerT: Paxos2PCRMInner<T>> Paxos2PCRMOuter<T, InnerT> {
         }
       },
       _ => Paxos2PCRMAction::Wait,
+    }
+  }
+
+  /// If this node is a Follower, a copy of this node is returned. If this node is
+  /// a Leader, then the value of this `Paxos2PCRMOuter` that would result from losing
+  /// Leadership is returned (i.e. after calling `leader_changed`).
+  pub fn reconfig_snapshot(&self) -> Option<Paxos2PCRMOuter<T, InnerT>> {
+    match self {
+      Paxos2PCRMOuter::Committed => Some(Paxos2PCRMOuter::Committed),
+      Paxos2PCRMOuter::Aborted => Some(Paxos2PCRMOuter::Aborted),
+      Paxos2PCRMOuter::Paxos2PCRMExecOuter(es) => match &es.state {
+        State::WaitingInsertingPrepared(_)
+        | State::InsertingPreparedAborted
+        | State::InsertingPrepared(_) => None,
+        State::Follower | State::Prepared | State::InsertingCommitted | State::InsertingAborted => {
+          Some(Paxos2PCRMOuter::Paxos2PCRMExecOuter(Paxos2PCRMExecOuter {
+            query_id: es.query_id.clone(),
+            tm: es.tm.clone(),
+            rms: es.rms.clone(),
+            state: State::Follower,
+            inner: es.inner.reconfig_snapshot(),
+          }))
+        }
+      },
     }
   }
 }

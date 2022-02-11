@@ -8,13 +8,14 @@ use crate::paxos2pc_rm::{Paxos2PCRMInner, Paxos2PCRMOuter};
 use crate::paxos2pc_tm::PayloadTypes;
 use crate::storage::{commit_to_storage, compress_updates_views, GenericTable};
 use crate::tablet::{MSQueryES, ReadWriteRegion, TabletContext};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
 //  FinishQueryRMES
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FinishQueryRMInner {
   pub region_lock: ReadWriteRegion,
   pub timestamp: Timestamp,
@@ -129,5 +130,9 @@ impl Paxos2PCRMInner<FinishQueryPayloadTypes> for FinishQueryRMInner {
 
   fn aborted_plm_inserted<IO: BasicIOCtx>(&mut self, ctx: &mut TabletContext, _: &mut IO) {
     ctx.prepared_writes.remove(&self.timestamp).unwrap();
+  }
+
+  fn reconfig_snapshot(&self) -> FinishQueryRMInner {
+    self.clone()
   }
 }

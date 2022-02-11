@@ -933,9 +933,9 @@ impl SlaveContext {
       };
 
       // Add in the CreateTableRMES that have at least been Prepared.
-      for (sid, es) in &statuses.create_table_ess {
+      for (qid, es) in &statuses.create_table_ess {
         if let Some(es) = es.reconfig_snapshot() {
-          snapshot.create_table_ess.insert(sid.clone(), es);
+          snapshot.create_table_ess.insert(qid.clone(), es);
         }
       }
 

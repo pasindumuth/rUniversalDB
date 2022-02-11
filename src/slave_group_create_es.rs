@@ -5,20 +5,21 @@ use crate::model::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupIdTrait, SlaveGroupId,
 };
 use crate::model::message as msg;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 // -----------------------------------------------------------------------------------------------
 //  SlaveGroupCreateES
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum State {
   Follower,
   WaitingConfirmed(BTreeSet<EndpointId>),
   InsertingConfirmed,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SlaveGroupCreateES {
   create_msg: msg::CreateSlaveGroup,
   paxos_nodes: Vec<EndpointId>,
@@ -134,6 +135,17 @@ impl SlaveGroupCreateES {
       State::WaitingConfirmed(_) | State::InsertingConfirmed => {
         self.state = State::Follower;
       }
+    }
+  }
+
+  /// If this node is a Follower, a copy of this `SlaveGroupCreateES` is returned. If this
+  /// node is a Leader, then the value of this `SlaveGroupCreateES` that would result from
+  /// losing Leadership is returned (i.e. after calling `leader_changed`).
+  pub fn reconfig_snapshot(&self) -> SlaveGroupCreateES {
+    SlaveGroupCreateES {
+      create_msg: self.create_msg.clone(),
+      paxos_nodes: self.paxos_nodes.clone(),
+      state: State::Follower,
     }
   }
 }

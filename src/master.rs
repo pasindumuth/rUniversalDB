@@ -324,7 +324,8 @@ pub struct MasterSnapshot {
   pub create_table_tm_ess: BTreeMap<QueryId, CreateTableTMES>,
   pub alter_table_tm_ess: BTreeMap<QueryId, AlterTableTMES>,
   pub drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
-  // TODO: `slave_group_create_ess` and `slave_reconfig_ess`.
+  pub slave_group_create_ess: BTreeMap<SlaveGroupId, SlaveGroupCreateES>,
+  pub slave_reconfig_ess: BTreeMap<SlaveGroupId, SlaveReconfigES>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1663,8 +1664,6 @@ impl MasterContext {
     let (paxos_driver_start, non_started_eids) =
       self.paxos_driver.mk_start_new_node(&MasterPaxosContext { io_ctx, this_eid: &self.this_eid });
 
-    // TODO: Handle the persisted state in `statuses`.
-
     // Construct the snapshot
     let mut snapshot = MasterSnapshot {
       gossip: self.gossip.clone(),
@@ -1674,26 +1673,41 @@ impl MasterContext {
       create_table_tm_ess: Default::default(),
       alter_table_tm_ess: Default::default(),
       drop_table_tm_ess: Default::default(),
+      slave_group_create_ess: Default::default(),
+      slave_reconfig_ess: Default::default(),
     };
 
     // Add in the CreateTableTMES that have at least been Prepared.
-    for (sid, es) in &statuses.create_table_tm_ess {
+    for (qid, es) in &statuses.create_table_tm_ess {
       if let Some(es) = es.reconfig_snapshot() {
-        snapshot.create_table_tm_ess.insert(sid.clone(), es);
+        snapshot.create_table_tm_ess.insert(qid.clone(), es);
       }
     }
 
     // Add in the AlterTableTMES that have at least been Prepared.
-    for (sid, es) in &statuses.alter_table_tm_ess {
+    for (qid, es) in &statuses.alter_table_tm_ess {
       if let Some(es) = es.reconfig_snapshot() {
-        snapshot.alter_table_tm_ess.insert(sid.clone(), es);
+        snapshot.alter_table_tm_ess.insert(qid.clone(), es);
       }
     }
 
     // Add in the DropTableTMES that have at least been Prepared.
-    for (sid, es) in &statuses.drop_table_tm_ess {
+    for (qid, es) in &statuses.drop_table_tm_ess {
       if let Some(es) = es.reconfig_snapshot() {
-        snapshot.drop_table_tm_ess.insert(sid.clone(), es);
+        snapshot.drop_table_tm_ess.insert(qid.clone(), es);
+      }
+    }
+
+    // Add in the SlaveGroupCreateES.
+    for (qid, es) in &statuses.slave_group_create_ess {
+      let es = es.reconfig_snapshot();
+      snapshot.slave_group_create_ess.insert(qid.clone(), es);
+    }
+
+    // Add in the SlaveReconfigES where at least ReconfigSlaveGroupPLm has been inserted.
+    for (qid, es) in &statuses.slave_reconfig_ess {
+      if let Some(es) = es.reconfig_snapshot() {
+        snapshot.slave_reconfig_ess.insert(qid.clone(), es);
       }
     }
 

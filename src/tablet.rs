@@ -253,8 +253,8 @@ pub struct TabletSnapshot {
   /// If this is a Follower, we copy over the ESs in `Statuses` to the below. If this
   /// is the Leader, we compute the ESs that would result as a result of a Leadership
   /// change and populate the below.
+  pub finish_query_ess: BTreeMap<QueryId, FinishQueryRMES>,
   pub ddl_es: DDLES,
-  // TODO: add finish_query_ess
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1474,8 +1474,16 @@ impl TabletContext {
           prepared_writes: self.prepared_writes.clone(),
           committed_writes: self.committed_writes.clone(),
           read_protected: self.read_protected.clone(),
+          finish_query_ess: Default::default(),
           ddl_es: DDLES::None,
         };
+
+        // Add in the FinishQueryRMES that have at least been Prepared.
+        for (qid, es) in &statuses.finish_query_ess {
+          if let Some(es) = es.reconfig_snapshot() {
+            snapshot.finish_query_ess.insert(qid.clone(), es);
+          }
+        }
 
         // Only use a DDLES if it has been Prepared.
         snapshot.ddl_es = match &statuses.ddl_es {
