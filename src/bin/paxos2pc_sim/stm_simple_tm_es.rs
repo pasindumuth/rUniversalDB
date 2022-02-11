@@ -79,6 +79,9 @@ impl PayloadTypes for STMSimplePayloadTypes {
   type RMContext = SlaveContext;
   type TMContext = SlaveContext;
 
+  // Actions
+  type RMCommitActionData = ();
+
   // TM PLm
   type TMPreparedPLm = STMSimpleTMPrepared;
   type TMCommittedPLm = STMSimpleTMCommitted;

@@ -5,6 +5,7 @@ use crate::stmpaxos2pc_tm::{
   Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm,
   RMPreparedPLm, RMServerContext, TMMessage,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
@@ -62,7 +63,7 @@ pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
     committed_plm: &RMCommittedPLm<T>,
-  );
+  ) -> T::RMCommitActionData;
 
   /// Called if one of the RMs returned Aborted.
   fn mk_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
@@ -83,7 +84,7 @@ pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
 //  STMPaxos2PCRMOuter
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum State<T: PayloadTypes> {
   Follower,
   WaitingInsertingPrepared,
@@ -94,12 +95,12 @@ pub enum State<T: PayloadTypes> {
   InsertingAborted,
 }
 
-pub enum STMPaxos2PCRMAction {
+pub enum STMPaxos2PCRMAction<T: PayloadTypes> {
   Wait,
-  Exit,
+  Exit(Option<T::RMCommitActionData>),
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct STMPaxos2PCRMOuter<T: PayloadTypes, InnerT> {
   pub query_id: QueryId,
   pub tm: T::TMPath,
@@ -135,7 +136,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCRMAction {
+  ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
       State::Prepared(prepared) => {
         // Populate with TM. Hold it here in the RM.
@@ -151,7 +152,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
     commit: Commit<T>,
-  ) -> STMPaxos2PCRMAction {
+  ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
       State::Prepared(_) => {
         let committed_plm = T::rm_plm(RMPLm::Committed(RMCommittedPLm {
@@ -170,11 +171,11 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCRMAction {
+  ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
       State::WaitingInsertingPrepared => {
         self.send_closed(ctx, io_ctx);
-        STMPaxos2PCRMAction::Exit
+        STMPaxos2PCRMAction::Exit(None)
       }
       State::InsertingPrepared => {
         self.state = State::InsertingPreparedAborted;
@@ -216,7 +217,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCRMAction {
+  ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
       State::InsertingPrepared => {
         let prepared = self._handle_prepared_plm(ctx, io_ctx);
@@ -242,16 +243,16 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
     committed_plm: RMCommittedPLm<T>,
-  ) -> STMPaxos2PCRMAction {
+  ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
       State::Follower => {
-        self.inner.committed_plm_inserted(ctx, io_ctx, &committed_plm);
-        STMPaxos2PCRMAction::Exit
+        let action = self.inner.committed_plm_inserted(ctx, io_ctx, &committed_plm);
+        STMPaxos2PCRMAction::Exit(Some(action))
       }
       State::InsertingCommitted => {
-        self.inner.committed_plm_inserted(ctx, io_ctx, &committed_plm);
+        let action = self.inner.committed_plm_inserted(ctx, io_ctx, &committed_plm);
         self.send_closed(ctx, io_ctx);
-        STMPaxos2PCRMAction::Exit
+        STMPaxos2PCRMAction::Exit(Some(action))
       }
       _ => STMPaxos2PCRMAction::Wait,
     }
@@ -261,16 +262,16 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCRMAction {
+  ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
       State::Follower => {
         self.inner.aborted_plm_inserted(ctx, io_ctx);
-        STMPaxos2PCRMAction::Exit
+        STMPaxos2PCRMAction::Exit(None)
       }
       State::InsertingAborted => {
         self.inner.aborted_plm_inserted(ctx, io_ctx);
         self.send_closed(ctx, io_ctx);
-        STMPaxos2PCRMAction::Exit
+        STMPaxos2PCRMAction::Exit(None)
       }
       _ => STMPaxos2PCRMAction::Wait,
     }
@@ -282,7 +283,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-  ) -> STMPaxos2PCRMAction {
+  ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
       State::WaitingInsertingPrepared => {
         let prepared_plm = RMPreparedPLm {
@@ -298,7 +299,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     STMPaxos2PCRMAction::Wait
   }
 
-  pub fn leader_changed(&mut self, ctx: &mut T::RMContext) -> STMPaxos2PCRMAction {
+  pub fn leader_changed(&mut self, ctx: &mut T::RMContext) -> STMPaxos2PCRMAction<T> {
     match &self.state {
       State::Follower => {
         if ctx.is_leader() {
@@ -309,7 +310,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
       }
       State::WaitingInsertingPrepared
       | State::InsertingPrepared
-      | State::InsertingPreparedAborted => STMPaxos2PCRMAction::Exit,
+      | State::InsertingPreparedAborted => STMPaxos2PCRMAction::Exit(None),
       State::Prepared(_) | State::InsertingCommitted | State::InsertingAborted => {
         self.state = State::Follower;
         STMPaxos2PCRMAction::Wait
@@ -350,7 +351,7 @@ pub fn handle_rm_plm<
   io_ctx: &mut IO,
   con: &mut ConT,
   plm: RMPLm<T>,
-) -> (QueryId, STMPaxos2PCRMAction) {
+) -> (QueryId, STMPaxos2PCRMAction<T>) {
   match plm {
     RMPLm::Prepared(prepared) => {
       if ctx.is_leader() {
@@ -392,7 +393,7 @@ pub fn handle_rm_msg<
   io_ctx: &mut IO,
   con: &mut ConT,
   msg: RMMessage<T>,
-) -> (QueryId, STMPaxos2PCRMAction) {
+) -> (QueryId, STMPaxos2PCRMAction<T>) {
   match msg {
     RMMessage::Prepare(prepare) => {
       if let Some(es) = con.get_mut(&prepare.query_id) {

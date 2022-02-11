@@ -1,4 +1,4 @@
-use crate::alter_table_rm_es::{AlterTableRMES, AlterTableRMInner};
+use crate::alter_table_rm_es::{AlterTableRMAction, AlterTableRMES, AlterTableRMInner};
 use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
 use crate::common::{
@@ -7,7 +7,7 @@ use crate::common::{
   KeyBound, LeaderMap, OrigP, ReadRegion, RemoteLeaderChangedPLm, TMStatus, TableSchema, Timestamp,
   VersionedValue, WriteRegion,
 };
-use crate::drop_table_rm_es::{DropTableRMES, DropTableRMInner};
+use crate::drop_table_rm_es::{DropTableRMAction, DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;
 use crate::expression::{
   compute_key_region, is_surely_isolated_multiread, is_surely_isolated_multiwrite, EvalError,
@@ -611,7 +611,7 @@ impl paxos2pc_tm::RMServerContext<FinishQueryPayloadTypes> for TabletContext {
 //  TabletConfig
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TabletConfig {
   /// This is used for generate the `suffix` of a Timestamp, where we just generate
   /// a random `u64` and take the remainder after dividing by `timestamp_suffix_divisor`.
@@ -2318,13 +2318,12 @@ impl TabletContext {
     &mut self,
     statuses: &mut Statuses,
     _: QueryId,
-    action: STMPaxos2PCRMAction,
+    action: DropTableRMAction,
   ) {
     match action {
-      STMPaxos2PCRMAction::Wait => {}
-      STMPaxos2PCRMAction::Exit => {
-        let es = cast!(DDLES::Drop, &statuses.ddl_es).unwrap();
-        if let Some(committed_timestamp) = &es.inner.committed_timestamp {
+      DropTableRMAction::Wait => {}
+      DropTableRMAction::Exit(maybe_commit_action) => {
+        if let Some(committed_timestamp) = maybe_commit_action {
           // The ES Committed, and so we should mark this Tablet as dropped.
           statuses.ddl_es = DDLES::Dropped(committed_timestamp.clone());
         } else {
@@ -2340,11 +2339,11 @@ impl TabletContext {
     &mut self,
     statuses: &mut Statuses,
     _: QueryId,
-    action: STMPaxos2PCRMAction,
+    action: AlterTableRMAction,
   ) {
     match action {
-      STMPaxos2PCRMAction::Wait => {}
-      STMPaxos2PCRMAction::Exit => {
+      AlterTableRMAction::Wait => {}
+      AlterTableRMAction::Exit(_) => {
         statuses.ddl_es = DDLES::None;
       }
     }

@@ -6,16 +6,17 @@ use crate::create_table_tm_es::{
 use crate::model::common::{ColName, ColType, Gen, TablePath, TabletGroupId, TabletKeyRange};
 use crate::multiversion_map::MVM;
 use crate::slave::SlaveContext;
-use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
+use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::{TabletConfig, TabletCreateHelper};
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 
 // -----------------------------------------------------------------------------------------------
 //  CreateTableES Implementation
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CreateTableRMInner {
   pub tablet_group_id: TabletGroupId,
   pub table_path: TablePath,
@@ -24,13 +25,10 @@ pub struct CreateTableRMInner {
   pub key_range: TabletKeyRange,
   pub key_cols: Vec<(ColName, ColType)>,
   pub val_cols: Vec<(ColName, ColType)>,
-
-  /// This is populated if this ES completes with a Success. We cannot construct the
-  /// new Tablet in here (since the IO type is BasicIOCtx), so we do this in the Slave node.
-  pub committed_helper: Option<TabletCreateHelper>,
 }
 
 pub type CreateTableRMES = STMPaxos2PCRMOuter<CreateTablePayloadTypes, CreateTableRMInner>;
+pub type CreateTableRMAction = STMPaxos2PCRMAction<CreateTablePayloadTypes>;
 
 impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
   fn new<IO: BasicIOCtx>(
@@ -45,7 +43,6 @@ impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
       key_range: payload.key_range,
       key_cols: payload.key_cols,
       val_cols: payload.val_cols,
-      committed_helper: None,
     }
   }
 
@@ -61,7 +58,6 @@ impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
       key_range: payload.key_range,
       key_cols: payload.key_cols,
       val_cols: payload.val_cols,
-      committed_helper: None,
     }
   }
 
@@ -107,11 +103,10 @@ impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
     ctx: &mut SlaveContext,
     io_ctx: &mut IO,
     _: &RMCommittedPLm<CreateTablePayloadTypes>,
-  ) {
+  ) -> TabletCreateHelper {
     let mut rand_seed = [0; 16];
     io_ctx.rand().fill_bytes(&mut rand_seed);
-    self.committed_helper = Some(TabletCreateHelper {
-      rand_seed,
+    TabletCreateHelper {
       tablet_config: TabletConfig {
         timestamp_suffix_divisor: ctx.slave_config.timestamp_suffix_divisor,
       },
@@ -126,7 +121,7 @@ impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
         key_cols: self.key_cols.clone(),
         val_cols: MVM::init(self.val_cols.clone().into_iter().collect()),
       },
-    });
+    }
   }
 
   fn mk_aborted_plm<IO: BasicIOCtx>(

@@ -68,6 +68,12 @@ pub trait PayloadTypes: Clone {
   type RMContext: RMServerContext<Self>;
   type TMContext: TMServerContext<Self>;
 
+  // Actions
+  /// These are sent out from the `Inner` and propagated out of the `Outer`. We
+  /// sometimes need this for when the `Inner` would otherwise need to access a
+  /// more specific `IOCtx` than `BasicIOCtx` (which it cannot).
+  type RMCommitActionData;
+
   // TM PLm
   type TMPreparedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
   type TMCommittedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
@@ -302,30 +308,30 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
 //  STMPaxos2PCTMOuter
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PreparingSt<T: PayloadTypes> {
   rms_remaining: BTreeSet<T::RMPath>,
   prepared: BTreeMap<T::RMPath, T::Prepared>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CommittedSt<T: PayloadTypes> {
   rms_remaining: BTreeSet<T::RMPath>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AbortedSt<T: PayloadTypes> {
   rms_remaining: BTreeSet<T::RMPath>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum FollowerState<T: PayloadTypes> {
   Preparing(BTreeMap<T::RMPath, T::Prepare>),
   Committed(BTreeMap<T::RMPath, T::Commit>),
   Aborted(BTreeMap<T::RMPath, T::Abort>),
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum State<T: PayloadTypes> {
   Following,
   Start,
@@ -344,7 +350,7 @@ pub enum STMPaxos2PCTMAction {
   Exit,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct STMPaxos2PCTMOuter<T: PayloadTypes, InnerT> {
   pub query_id: QueryId,
   /// This is only `None` when no related paxos messages have been inserted.

@@ -97,6 +97,9 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type RMContext = TabletContext;
   type TMContext = MasterContext;
 
+  // Actions
+  type RMCommitActionData = ();
+
   // TM PLm
   type TMPreparedPLm = AlterTableTMPrepared;
   type TMCommittedPLm = AlterTableTMCommitted;

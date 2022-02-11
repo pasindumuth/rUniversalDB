@@ -5,7 +5,7 @@ use crate::stm_simple_tm_es::{
   STMSimpleRMAborted, STMSimpleRMCommitted, STMSimpleRMPrepared,
 };
 use runiversal::common::BasicIOCtx;
-use runiversal::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
+use runiversal::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use runiversal::stmpaxos2pc_tm::RMCommittedPLm;
 
 // -----------------------------------------------------------------------------------------------
@@ -16,6 +16,7 @@ use runiversal::stmpaxos2pc_tm::RMCommittedPLm;
 pub struct STMSimpleRMInner {}
 
 pub type STMSimpleRMES = STMPaxos2PCRMOuter<STMSimplePayloadTypes, STMSimpleRMInner>;
+pub type STMSimpleRMAction = STMPaxos2PCRMAction<STMSimplePayloadTypes>;
 
 impl STMPaxos2PCRMInner<STMSimplePayloadTypes> for STMSimpleRMInner {
   fn new<IO: BasicIOCtx<msg::NetworkMessage>>(

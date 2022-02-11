@@ -4,7 +4,7 @@ use crate::alter_table_tm_es::{
 };
 use crate::common::{cur_timestamp, mk_t, BasicIOCtx, Timestamp};
 use crate::model::common::proc;
-use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
+use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::TabletContext;
 use std::cmp::max;
@@ -20,6 +20,7 @@ pub struct AlterTableRMInner {
 }
 
 pub type AlterTableRMES = STMPaxos2PCRMOuter<AlterTablePayloadTypes, AlterTableRMInner>;
+pub type AlterTableRMAction = STMPaxos2PCRMAction<AlterTablePayloadTypes>;
 
 impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
   fn new<IO: BasicIOCtx>(

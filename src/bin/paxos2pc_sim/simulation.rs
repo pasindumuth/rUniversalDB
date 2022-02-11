@@ -55,16 +55,6 @@ impl<'a> BasicIOCtx<msg::NetworkMessage> for SlaveIOCtx<'a> {
     add_msg(self.queues, self.nonempty_queues, msg, &self.this_eid, eid);
   }
 
-  fn mark_exit(&mut self) {
-    // Nodes do not exit for this simulation
-    panic!()
-  }
-
-  fn did_exit(&mut self) -> bool {
-    // Nodes do not exit for this simulation
-    panic!()
-  }
-
   fn general_trace(&mut self, _: GeneralTraceMessage) {
     unimplemented!()
   }

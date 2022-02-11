@@ -3,7 +3,7 @@ use crate::message::{ExternalMessage, SlaveMessage, SlaveRemotePayload};
 use crate::simple_rm_es::SimpleRMES;
 use crate::simple_tm_es::{SimplePayloadTypes, SimplePrepare, SimpleTMES, SimpleTMInner};
 use crate::simulation::ISlaveIOCtx;
-use crate::stm_simple_rm_es::STMSimpleRMES;
+use crate::stm_simple_rm_es::{STMSimpleRMAction, STMSimpleRMES};
 use crate::stm_simple_tm_es::{
   STMSimpleAborted, STMSimplePayloadTypes, STMSimpleTMES, STMSimpleTMInner,
 };
@@ -591,11 +591,11 @@ impl SlaveContext {
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: STMPaxos2PCRMAction,
+    action: STMSimpleRMAction,
   ) {
     match action {
-      STMPaxos2PCRMAction::Wait => {}
-      STMPaxos2PCRMAction::Exit => {
+      STMSimpleRMAction::Wait => {}
+      STMSimpleRMAction::Exit(_) => {
         statuses.stm_simple_rm_ess.remove(&query_id).unwrap();
       }
     }

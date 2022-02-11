@@ -4,7 +4,7 @@ use crate::drop_table_tm_es::{
   DropTableClosed, DropTableCommit, DropTablePayloadTypes, DropTablePrepare, DropTablePrepared,
   DropTableRMAborted, DropTableRMCommitted, DropTableRMPrepared,
 };
-use crate::stmpaxos2pc_rm::{STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
+use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::TabletContext;
 use std::cmp::max;
@@ -16,13 +16,10 @@ use std::cmp::max;
 #[derive(Debug)]
 pub struct DropTableRMInner {
   pub prepared_timestamp: Timestamp,
-
-  /// This is populated if this ES completes with a Success. The Tablet will mark itself as
-  /// deleted when this ES is Exits.
-  pub committed_timestamp: Option<Timestamp>,
 }
 
 pub type DropTableRMES = STMPaxos2PCRMOuter<DropTablePayloadTypes, DropTableRMInner>;
+pub type DropTableRMAction = STMPaxos2PCRMAction<DropTablePayloadTypes>;
 
 impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
   fn new<IO: BasicIOCtx>(
@@ -39,7 +36,7 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
     }
     timestamp = timestamp.add(mk_t(1));
 
-    DropTableRMInner { prepared_timestamp: timestamp, committed_timestamp: None }
+    DropTableRMInner { prepared_timestamp: timestamp }
   }
 
   fn new_follower<IO: BasicIOCtx>(
@@ -47,7 +44,7 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
     _: &mut IO,
     payload: DropTableRMPrepared,
   ) -> DropTableRMInner {
-    DropTableRMInner { prepared_timestamp: payload.timestamp, committed_timestamp: None }
+    DropTableRMInner { prepared_timestamp: payload.timestamp }
   }
 
   fn mk_closed() -> DropTableClosed {
@@ -85,8 +82,8 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
     _: &mut TabletContext,
     _: &mut IO,
     committed_plm: &RMCommittedPLm<DropTablePayloadTypes>,
-  ) {
-    self.committed_timestamp = Some(committed_plm.payload.timestamp.clone());
+  ) -> Timestamp {
+    committed_plm.payload.timestamp.clone()
   }
 
   fn mk_aborted_plm<IO: BasicIOCtx>(

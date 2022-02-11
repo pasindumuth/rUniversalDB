@@ -92,6 +92,9 @@ impl PayloadTypes for DropTablePayloadTypes {
   type RMContext = TabletContext;
   type TMContext = MasterContext;
 
+  // Actions
+  type RMCommitActionData = Timestamp;
+
   // TM PLm
   type TMPreparedPLm = DropTableTMPrepared;
   type TMCommittedPLm = DropTableTMCommitted;

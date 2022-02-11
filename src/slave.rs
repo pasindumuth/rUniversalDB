@@ -4,7 +4,7 @@ use crate::common::{
   CHECK_UNCONFIRMED_EIDS_PERIOD_MS, FAILURE_DETECTOR_PERIOD_MS, REMOTE_LEADER_CHANGED_PERIOD_MS,
 };
 use crate::coord::CoordForwardMsg;
-use crate::create_table_rm_es::CreateTableRMES;
+use crate::create_table_rm_es::{CreateTableRMAction, CreateTableRMES};
 use crate::create_table_tm_es::CreateTablePayloadTypes;
 use crate::model::common::{
   CoordGroupId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TabletGroupId,
@@ -152,8 +152,9 @@ pub struct SlaveSnapshot {
   pub gossip: GossipData,
   pub leader_map: LeaderMap,
   pub paxos_driver_start: msg::StartNewNode<SharedPaxosBundle>,
+  pub create_table_ess: BTreeMap<QueryId, CreateTableRMES>,
 
-  /// We remember the set of Tablets to wait for here so that
+  /// We remember the set of Tablets to wait for here so that.
   pub tablet_snapshots: BTreeMap<TabletGroupId, TabletSnapshot>,
 }
 
@@ -923,6 +924,8 @@ impl SlaveContext {
         // primarily used as an optimization by the NetworkDriver.
         leader_map: self.leader_map.value().clone(),
         paxos_driver_start,
+        // TODO: togle `create_table_ess` to follower before sending out.
+        create_table_ess: statuses.create_table_ess.clone(),
         tablet_snapshots: Default::default(),
       };
 
@@ -953,13 +956,13 @@ impl SlaveContext {
     io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: STMPaxos2PCRMAction,
+    action: CreateTableRMAction,
   ) {
     match action {
-      STMPaxos2PCRMAction::Wait => {}
-      STMPaxos2PCRMAction::Exit => {
-        let es = statuses.create_table_ess.remove(&query_id).unwrap();
-        if let Some(helper) = es.inner.committed_helper {
+      CreateTableRMAction::Wait => {}
+      CreateTableRMAction::Exit(maybe_commit_action) => {
+        statuses.create_table_ess.remove(&query_id);
+        if let Some(helper) = maybe_commit_action {
           // This means the ES had Committed, and we should use this `helper`
           // to construct the Tablet.
           let this_tid = helper.this_tid.clone();

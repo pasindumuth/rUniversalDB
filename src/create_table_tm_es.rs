@@ -13,6 +13,7 @@ use crate::stmpaxos2pc_tm::{
   PayloadTypes, RMMessage, RMPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm,
   TMCommittedPLm, TMMessage, TMPLm,
 };
+use crate::tablet::TabletCreateHelper;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::BTreeMap;
@@ -112,6 +113,9 @@ impl PayloadTypes for CreateTablePayloadTypes {
   type NetworkMessageT = msg::NetworkMessage;
   type RMContext = SlaveContext;
   type TMContext = MasterContext;
+
+  // Actions
+  type RMCommitActionData = TabletCreateHelper;
 
   // TM PLm
   type TMPreparedPLm = CreateTableTMPrepared;
