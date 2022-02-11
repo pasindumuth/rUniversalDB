@@ -411,6 +411,56 @@ impl MasterState {
     MasterState { ctx, statuses: Default::default() }
   }
 
+  /// Handles a `MasterSnapshot` to initiate a reconfigured `MasterState` properly.
+  pub fn create_reconfig<IO: MasterIOCtx>(
+    io_ctx: &mut IO,
+    snapshot: MasterSnapshot,
+    master_config: MasterConfig,
+    paxos_config: PaxosConfig,
+    this_eid: EndpointId,
+  ) -> MasterState {
+    // Create Statuses
+    let statuses = Statuses {
+      create_table_tm_ess: snapshot.create_table_tm_ess,
+      alter_table_tm_ess: snapshot.alter_table_tm_ess,
+      drop_table_tm_ess: snapshot.drop_table_tm_ess,
+      planning_ess: Default::default(),
+      slave_group_create_ess: snapshot.slave_group_create_ess,
+      slave_reconfig_ess: snapshot.slave_reconfig_ess,
+      do_reconfig: None,
+    };
+
+    // Create the MasterCtx
+    let leader_map = VersionedValue::new(snapshot.leader_map);
+
+    // Recall that here, `paxos_nodes` for this group what is in `gossip`.
+    let mut all_eids = BTreeSet::<EndpointId>::new();
+    for (_, eids) in snapshot.gossip.get().slave_address_config {
+      all_eids.extend(eids.clone());
+    }
+    all_eids.extend(snapshot.gossip.get().master_address_config.clone());
+
+    let network_driver = NetworkDriver::new(&leader_map);
+    let ctx = MasterContext {
+      master_config,
+      this_eid: this_eid.clone(),
+      gossip: snapshot.gossip,
+      leader_map,
+      all_eids: VersionedValue::new(all_eids),
+      network_driver,
+      free_node_manager: FreeNodeManager::create_reconfig(snapshot.free_nodes),
+      external_request_id_map: Default::default(),
+      master_bundle: Default::default(),
+      paxos_driver: PaxosDriver::create_reconfig(
+        &mut MasterPaxosContext { io_ctx, this_eid: &this_eid },
+        snapshot.paxos_driver_start,
+        paxos_config,
+      ),
+    };
+
+    MasterState { ctx, statuses }
+  }
+
   /// This should be called at the very start of the life of a Master node. This
   /// will start the timer events, paxos insertion, etc.
   pub fn bootstrap<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
@@ -460,27 +510,23 @@ impl MasterState {
 impl MasterContext {
   /// Constructs a `MasterContext` for a node in the initial PaxosGroup.
   pub fn create_initial(
-    master_config: MasterConfig,
-    this_eid: EndpointId,
-    slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     master_address_config: Vec<EndpointId>,
     leader_map: LeaderMap,
+    this_eid: EndpointId,
+    master_config: MasterConfig,
     paxos_config: PaxosConfig,
   ) -> MasterContext {
     let leader_map = VersionedValue::new(leader_map);
-    let network_driver = NetworkDriver::new(&leader_map);
 
     // Recall that here, `paxos_nodes` for this group what is in `gossip`.
     let mut all_eids = BTreeSet::<EndpointId>::new();
-    for (_, eids) in &slave_address_config {
-      all_eids.extend(eids.clone());
-    }
     all_eids.extend(master_address_config.clone());
 
+    let network_driver = NetworkDriver::new(&leader_map);
     MasterContext {
       master_config,
       this_eid,
-      gossip: GossipData::new(slave_address_config.clone(), master_address_config.clone()),
+      gossip: GossipData::new(BTreeMap::default(), master_address_config.clone()),
       leader_map,
       all_eids: VersionedValue::new(all_eids),
       network_driver,
@@ -488,42 +534,6 @@ impl MasterContext {
       external_request_id_map: Default::default(),
       master_bundle: MasterBundle::default(),
       paxos_driver: PaxosDriver::create_initial(master_address_config, paxos_config),
-    }
-  }
-
-  /// Handles a `MasterSnapshot` to initiate a reconfigured node properly
-  pub fn create_reconfig<IO: MasterIOCtx>(
-    io_ctx: &mut IO,
-    master_config: MasterConfig,
-    this_eid: EndpointId,
-    snapshot: MasterSnapshot,
-    paxos_config: PaxosConfig,
-  ) -> MasterContext {
-    let leader_map = VersionedValue::new(snapshot.leader_map);
-    let network_driver = NetworkDriver::new(&leader_map);
-
-    // Recall that here, `paxos_nodes` for this group what is in `gossip`.
-    let mut all_eids = BTreeSet::<EndpointId>::new();
-    for (_, eids) in snapshot.gossip.get().slave_address_config {
-      all_eids.extend(eids.clone());
-    }
-    all_eids.extend(snapshot.gossip.get().master_address_config.clone());
-
-    MasterContext {
-      master_config,
-      this_eid: this_eid.clone(),
-      gossip: snapshot.gossip,
-      leader_map,
-      all_eids: VersionedValue::new(all_eids),
-      network_driver,
-      free_node_manager: FreeNodeManager::create_reconfig(snapshot.free_nodes),
-      external_request_id_map: Default::default(),
-      master_bundle: Default::default(),
-      paxos_driver: PaxosDriver::create_reconfig(
-        &mut MasterPaxosContext { io_ctx, this_eid: &this_eid },
-        snapshot.paxos_driver_start,
-        paxos_config,
-      ),
     }
   }
 

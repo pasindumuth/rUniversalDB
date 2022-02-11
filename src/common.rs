@@ -10,7 +10,9 @@ use crate::model::message as msg;
 use crate::model::message::NetworkMessage;
 use crate::multiversion_map::MVM;
 use crate::slave::{SlaveBackMessage, SlaveTimerInput};
-use crate::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
+use crate::tablet::{
+  TabletConfig, TabletContext, TabletCreateHelper, TabletForwardMsg, TabletSnapshot, TabletState,
+};
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -54,7 +56,12 @@ pub trait BasicIOCtx<NetworkMessageT = msg::NetworkMessage> {
 
 pub trait FreeNodeIOCtx: BasicIOCtx {
   // Tablet
-  fn create_tablet_full(&mut self, ctx: TabletContext);
+  fn create_tablet_full(
+    &mut self,
+    gossip: Arc<GossipData>,
+    snapshot: TabletSnapshot,
+    tablet_config: TabletConfig,
+  );
 
   // Coord
   fn create_coord_full(&mut self, ctx: CoordContext);

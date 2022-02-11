@@ -166,13 +166,13 @@ impl CoordContext {
   /// exactly what would come in a `CreateSlaveGroup`; i.e. they do not contain
   /// `paxos_nodes`.
   pub fn new(
-    coord_config: CoordConfig,
     this_sid: SlaveGroupId,
     this_cid: CoordGroupId,
-    this_eid: EndpointId,
     gossip: Arc<GossipData>,
     mut leader_map: LeaderMap,
     paxos_nodes: Vec<EndpointId>,
+    this_eid: EndpointId,
+    coord_config: CoordConfig,
   ) -> CoordContext {
     // Amend the LeaderMap to include this new Slave.
     let lid = LeadershipId::mk_first(paxos_nodes.get(0).unwrap().clone());

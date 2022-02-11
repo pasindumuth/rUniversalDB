@@ -149,6 +149,8 @@ pub enum FullSlaveInput {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SlaveSnapshot {
+  pub this_sid: SlaveGroupId,
+  pub coord_positions: Vec<CoordGroupId>,
   pub gossip: GossipData,
   pub leader_map: LeaderMap,
   pub paxos_driver_start: msg::StartNewNode<SharedPaxosBundle>,
@@ -295,11 +297,62 @@ impl SlaveState {
     SlaveState { ctx, statuses: Default::default() }
   }
 
-  /// This should be called at the very start of the life of a Master node. This
+  /// Handles a `MasterSnapshot` to initiate a reconfigured `MasterState` properly.
+  pub fn create_reconfig<IO: SlaveIOCtx>(
+    io_ctx: &mut IO,
+    this_sid: SlaveGroupId,
+    coord_positions: Vec<CoordGroupId>,
+    gossip: Arc<GossipData>,
+    mut leader_map: LeaderMap,
+    paxos_driver_start: msg::StartNewNode<SharedPaxosBundle>,
+    create_table_ess: BTreeMap<QueryId, CreateTableRMES>,
+    this_eid: EndpointId,
+    slave_config: SlaveConfig,
+    paxos_config: PaxosConfig,
+  ) -> SlaveState {
+    // Create Statuses
+    let statuses = Statuses { create_table_ess, do_reconfig: None, pending_snapshot: None };
+
+    // Create the SlaveCtx
+    let paxos_nodes = paxos_driver_start.paxos_nodes.clone();
+    let lid = LeadershipId::mk_first(paxos_nodes.get(0).unwrap().clone());
+    leader_map.insert(this_sid.to_gid(), lid);
+    let leader_map = VersionedValue::new(leader_map);
+
+    // Recall that `gossip` does not contain `paxos_nodes`.
+    let mut all_eids = BTreeSet::<EndpointId>::new();
+    for (_, eids) in gossip.get().slave_address_config {
+      all_eids.extend(eids.clone());
+    }
+    all_eids.extend(gossip.get().master_address_config.clone());
+    all_eids.extend(paxos_nodes.clone());
+
+    let network_driver = NetworkDriver::new(&leader_map);
+    let ctx = SlaveContext {
+      coord_positions,
+      slave_config,
+      this_sid: this_sid.clone(),
+      this_gid: this_sid.to_gid(),
+      this_eid: this_eid.clone(),
+      gossip,
+      leader_map,
+      all_eids: VersionedValue::new(all_eids),
+      network_driver,
+      slave_bundle: Default::default(),
+      tablet_bundles: Default::default(),
+      paxos_driver: PaxosDriver::create_reconfig(
+        &mut SlavePaxosContext { io_ctx, this_eid: &this_eid },
+        paxos_driver_start,
+        paxos_config,
+      ),
+    };
+
+    SlaveState { ctx, statuses }
+  }
+
+  /// This should be called at the very start of the life of a Slave node. This
   /// will start the timer events, paxos insertion, etc.
   pub fn bootstrap<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
-    // TODO: this debug assert doesn't work if this is a Reconfigured Slave.
-    debug_assert_eq!(io_ctx.num_tablets(), 0);
     let ctx = &mut SlavePaxosContext { io_ctx, this_eid: &self.ctx.this_eid };
     if self.ctx.is_leader() {
       // Start the Paxos insertion cycle with an empty bundle. Recall that since Slaves
@@ -348,13 +401,13 @@ impl SlaveContext {
   /// exactly what would come in a `CreateSlaveGroup`; i.e. they do not contain
   /// `paxos_nodes`.
   pub fn new(
-    coord_positions: Vec<CoordGroupId>,
-    slave_config: SlaveConfig,
     this_sid: SlaveGroupId,
-    this_eid: EndpointId,
+    coord_positions: Vec<CoordGroupId>,
     gossip: Arc<GossipData>,
     mut leader_map: LeaderMap,
     paxos_nodes: Vec<EndpointId>,
+    this_eid: EndpointId,
+    slave_config: SlaveConfig,
     paxos_config: PaxosConfig,
   ) -> SlaveContext {
     // Amend the LeaderMap to include this new Slave.
@@ -923,6 +976,8 @@ impl SlaveContext {
 
       // Construct the snapshot.
       let mut snapshot = SlaveSnapshot {
+        this_sid: self.this_sid.clone(),
+        coord_positions: io_ctx.all_cids(),
         gossip: self.gossip.as_ref().clone(),
         // We do not need to transer the version of the LeaderMap, since that is
         // primarily used as an optimization by the NetworkDriver.

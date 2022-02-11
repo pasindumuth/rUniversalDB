@@ -29,7 +29,9 @@ use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
 };
 use runiversal::tablet::tablet_test::{assert_tablet_consistency, check_tablet_clean};
-use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
+use runiversal::tablet::{
+  TabletConfig, TabletContext, TabletCreateHelper, TabletForwardMsg, TabletSnapshot, TabletState,
+};
 use runiversal::test_utils::CheckCtx;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Debug, Formatter};
@@ -93,9 +95,14 @@ impl<'a> BasicIOCtx for TestIOCtx<'a> {
 }
 
 impl<'a> FreeNodeIOCtx for TestIOCtx<'a> {
-  fn create_tablet_full(&mut self, ctx: TabletContext) {
-    let tid = ctx.this_tid.clone();
-    self.tablet_states.insert(tid, TabletState::new(ctx));
+  fn create_tablet_full(
+    &mut self,
+    gossip: Arc<GossipData>,
+    snapshot: TabletSnapshot,
+    tablet_config: TabletConfig,
+  ) {
+    let tid = snapshot.this_tid.clone();
+    self.tablet_states.insert(tid, TabletState::create_reconfig(gossip, snapshot, tablet_config));
   }
 
   fn create_coord_full(&mut self, ctx: CoordContext) {
@@ -360,6 +367,7 @@ impl Simulation {
     coord_config: CoordConfig,
     master_config: MasterConfig,
     slave_config: SlaveConfig,
+    tablet_config: TabletConfig,
   ) -> Simulation {
     let mut sim = Simulation {
       rand: XorShiftRng::from_seed(seed),
@@ -402,6 +410,7 @@ impl Simulation {
             coord_config.clone(),
             master_config.clone(),
             slave_config.clone(),
+            tablet_config.clone(),
           ),
           exited: false,
           tablet_states: Default::default(),

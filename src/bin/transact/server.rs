@@ -19,7 +19,9 @@ use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
 };
-use runiversal::tablet::{TabletContext, TabletCreateHelper, TabletForwardMsg, TabletState};
+use runiversal::tablet::{
+  TabletConfig, TabletContext, TabletCreateHelper, TabletForwardMsg, TabletSnapshot, TabletState,
+};
 use runiversal::test_utils::mk_seed;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
@@ -190,10 +192,15 @@ impl BasicIOCtx for ProdIOCtx {
 }
 
 impl FreeNodeIOCtx for ProdIOCtx {
-  fn create_tablet_full(&mut self, mut ctx: TabletContext) {
+  fn create_tablet_full(
+    &mut self,
+    gossip: Arc<GossipData>,
+    snapshot: TabletSnapshot,
+    tablet_config: TabletConfig,
+  ) {
     // Create mpsc queue for Slave-Tablet communication.
     let (to_tablet_sender, to_tablet_receiver) = mpsc::channel::<TabletForwardMsg>();
-    self.tablet_map.insert(ctx.this_tid.clone(), to_tablet_sender);
+    self.tablet_map.insert(snapshot.this_tid.clone(), to_tablet_sender);
 
     // Spawn a new thread and create the Tablet.
     let mut io_ctx = ProdCoreIOCtx {
@@ -202,7 +209,7 @@ impl FreeNodeIOCtx for ProdIOCtx {
       to_top: self.to_top.clone(),
     };
     thread::spawn(move || {
-      let mut tablet = TabletState::new(ctx);
+      let mut tablet = TabletState::create_reconfig(gossip, snapshot, tablet_config);
       loop {
         let tablet_msg = to_tablet_receiver.recv().unwrap();
         tablet.handle_input(&mut io_ctx, tablet_msg);

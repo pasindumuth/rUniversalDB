@@ -10,6 +10,7 @@ use crate::paxos::PaxosConfig;
 use crate::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
 };
+use crate::tablet::TabletConfig;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -275,6 +276,7 @@ pub struct NodeState {
   coord_config: CoordConfig,
   master_config: MasterConfig,
   slave_config: SlaveConfig,
+  tablet_config: TabletConfig,
 
   state: State,
 }
@@ -286,6 +288,7 @@ impl NodeState {
     coord_config: CoordConfig,
     master_config: MasterConfig,
     slave_config: SlaveConfig,
+    tablet_config: TabletConfig,
   ) -> NodeState {
     NodeState {
       this_eid,
@@ -293,6 +296,7 @@ impl NodeState {
       coord_config,
       master_config,
       slave_config,
+      tablet_config,
       state: State::DNEState(BTreeMap::default()),
     }
   }
@@ -322,11 +326,10 @@ impl NodeState {
                 let mut leader_map = BTreeMap::<PaxosGroupId, LeadershipId>::new();
                 leader_map.insert(PaxosGroupId::Master, master_lid);
                 let mut master_state = MasterState::new(MasterContext::create_initial(
-                  self.master_config.clone(),
-                  self.this_eid.clone(),
-                  BTreeMap::default(),
                   start.master_eids,
                   leader_map.clone(),
+                  self.this_eid.clone(),
+                  self.master_config.clone(),
                   self.paxos_config.clone(),
                 ));
 
@@ -379,13 +382,13 @@ impl NodeState {
                 let mut coord_positions: Vec<CoordGroupId> = Vec::new();
                 for cid in create.coord_ids {
                   let coord_context = CoordContext::new(
-                    self.coord_config.clone(),
                     create.sid.clone(),
                     cid.clone(),
-                    self.this_eid.clone(),
                     gossip.clone(),
                     create.leader_map.clone(),
                     create.paxos_nodes.clone(),
+                    self.this_eid.clone(),
+                    self.coord_config.clone(),
                   );
                   io_ctx.create_coord_full(coord_context);
                   coord_positions.push(cid);
@@ -393,13 +396,13 @@ impl NodeState {
 
                 // Construct the SlaveState
                 let slave_context = SlaveContext::new(
-                  coord_positions,
-                  self.slave_config.clone(),
                   create.sid.clone(),
-                  self.this_eid.clone(),
+                  coord_positions,
                   gossip,
                   create.leader_map,
                   create.paxos_nodes,
+                  self.this_eid.clone(),
+                  self.slave_config.clone(),
                   self.paxos_config.clone(),
                 );
                 let mut slave_state = SlaveState::new(slave_context);
@@ -435,18 +438,75 @@ impl NodeState {
                   )),
                 );
               }
-              FreeNodeMessage::SlaveSnapshot(_) => {
-                // TODO: do
+              FreeNodeMessage::SlaveSnapshot(snapshot) => {
+                let gossip = Arc::new(snapshot.gossip);
+
+                // Create the Coords
+                for cid in snapshot.coord_positions.clone() {
+                  let coord_context = CoordContext::new(
+                    snapshot.this_sid.clone(),
+                    cid.clone(),
+                    gossip.clone(),
+                    snapshot.leader_map.clone(),
+                    snapshot.paxos_driver_start.paxos_nodes.clone(),
+                    self.this_eid.clone(),
+                    self.coord_config.clone(),
+                  );
+                  io_ctx.create_coord_full(coord_context);
+                }
+
+                // Create the Tablets
+                for (_, tablet_snapshot) in snapshot.tablet_snapshots {
+                  io_ctx.create_tablet_full(
+                    gossip.clone(),
+                    tablet_snapshot,
+                    self.tablet_config.clone(),
+                  );
+                }
+
+                // Create the SlaveState
+                let mut slave_state = SlaveState::create_reconfig(
+                  io_ctx,
+                  snapshot.this_sid.clone(),
+                  snapshot.coord_positions,
+                  gossip.clone(),
+                  snapshot.leader_map.clone(),
+                  snapshot.paxos_driver_start.clone(),
+                  snapshot.create_table_ess,
+                  self.this_eid.clone(),
+                  self.slave_config.clone(),
+                  self.paxos_config.clone(),
+                );
+
+                // Bootstrap the slave
+                slave_state.bootstrap(io_ctx);
+
+                // Convert all buffered messages to SlaveMessages, since those should be all
+                // that is present.
+                let mut slave_buffered_msgs = BTreeMap::<EndpointId, Vec<msg::SlaveMessage>>::new();
+                for (eid, buffer) in std::mem::take(buffered_messages) {
+                  for message in buffer {
+                    let slave_msg = cast!(msg::NetworkMessage::Slave, message).unwrap();
+                    amend_buffer(&mut slave_buffered_msgs, &eid, slave_msg);
+                  }
+                }
+
+                // Advance
+                self.state = State::NominalSlaveState(NominalSlaveState::init(
+                  io_ctx,
+                  slave_state,
+                  slave_buffered_msgs,
+                ));
               }
               FreeNodeMessage::MasterSnapshot(snapshot) => {
                 // Create the MasterState
-                let mut master_state = MasterState::new(MasterContext::create_reconfig(
+                let mut master_state = MasterState::create_reconfig(
                   io_ctx,
-                  self.master_config.clone(),
-                  self.this_eid.clone(),
                   snapshot,
+                  self.master_config.clone(),
                   self.paxos_config.clone(),
-                ));
+                  self.this_eid.clone(),
+                );
 
                 // Bootstrap the Master
                 master_state.bootstrap(io_ctx);

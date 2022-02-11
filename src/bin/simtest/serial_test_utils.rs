@@ -7,6 +7,7 @@ use runiversal::model::message as msg;
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::{mk_client_eid, mk_node_eid};
 use runiversal::slave::SlaveConfig;
+use runiversal::tablet::TabletConfig;
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid};
 use std::collections::BTreeMap;
 
@@ -329,6 +330,7 @@ pub fn mk_general_sim(
     CoordConfig { timestamp_suffix_divisor },
     MasterConfig { timestamp_suffix_divisor, slave_group_size: num_paxos_nodes, num_coord: 3 },
     SlaveConfig { timestamp_suffix_divisor },
+    TabletConfig { timestamp_suffix_divisor },
   );
 
   // Construct the Master PaxosGroup to initiate the system.

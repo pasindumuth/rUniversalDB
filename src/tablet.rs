@@ -236,6 +236,7 @@ pub struct TabletSnapshot {
   pub this_tid: TabletGroupId,
   pub sub_node_path: CTSubNodePath, // Wraps `this_tablet_group_id` for expedience
   pub this_eid: EndpointId,
+  pub leader_map: LeaderMap,
 
   // Storage
   pub storage: GenericMVTable,
@@ -689,6 +690,56 @@ pub struct TabletContext {
 impl TabletState {
   pub fn new(ctx: TabletContext) -> TabletState {
     TabletState { ctx, statuses: Default::default() }
+  }
+
+  pub fn create_reconfig(
+    gossip: Arc<GossipData>,
+    snapshot: TabletSnapshot,
+    tablet_config: TabletConfig,
+  ) -> TabletState {
+    // Create Statuses
+    let statuses = Statuses {
+      finish_query_ess: snapshot.finish_query_ess,
+      gr_query_ess: Default::default(),
+      table_read_ess: Default::default(),
+      trans_table_read_ess: Default::default(),
+      tm_statuss: Default::default(),
+      ms_query_ess: Default::default(),
+      ms_table_read_ess: Default::default(),
+      ms_table_write_ess: Default::default(),
+      ms_table_insert_ess: Default::default(),
+      ms_table_delete_ess: Default::default(),
+      ddl_es: snapshot.ddl_es,
+    };
+
+    // Create the TabletCtx
+    let ctx = TabletContext {
+      tablet_config,
+      this_sid: snapshot.this_sid,
+      this_tid: snapshot.this_tid,
+      sub_node_path: snapshot.sub_node_path,
+      this_eid: snapshot.this_eid,
+      gossip,
+      leader_map: snapshot.leader_map,
+      storage: snapshot.storage,
+      this_table_path: snapshot.this_table_path,
+      this_table_key_range: snapshot.this_table_key_range,
+      table_schema: snapshot.table_schema,
+      presence_timestamp: snapshot.presence_timestamp,
+      verifying_writes: Default::default(),
+      inserting_prepared_writes: Default::default(),
+      prepared_writes: snapshot.prepared_writes,
+      committed_writes: snapshot.committed_writes,
+      waiting_read_protected: Default::default(),
+      inserting_read_protected: Default::default(),
+      read_protected: snapshot.read_protected,
+      waiting_locked_cols: Default::default(),
+      inserting_locked_cols: Default::default(),
+      ms_root_query_map: Default::default(),
+      tablet_bundle: Default::default(),
+    };
+
+    TabletState { ctx, statuses }
   }
 
   pub fn handle_input<IO: CoreIOCtx>(&mut self, io_ctx: &mut IO, coord_input: TabletForwardMsg) {
@@ -1466,6 +1517,7 @@ impl TabletContext {
           this_tid: self.this_tid.clone(),
           sub_node_path: self.sub_node_path.clone(),
           this_eid: self.this_eid.clone(),
+          leader_map: self.leader_map.clone(),
           storage: self.storage.clone(),
           this_table_path: self.this_table_path.clone(),
           this_table_key_range: self.this_table_key_range.clone(),

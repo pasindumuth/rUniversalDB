@@ -30,6 +30,7 @@ use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
 };
+use runiversal::tablet::TabletConfig;
 use runiversal::test_utils as tu;
 use runiversal::test_utils::mk_seed;
 use std::collections::{BTreeMap, LinkedList};
@@ -193,6 +194,7 @@ fn main() {
     CoordConfig::default(),
     MasterConfig::default(),
     SlaveConfig::default(),
+    TabletConfig::default(),
   );
 
   loop {
