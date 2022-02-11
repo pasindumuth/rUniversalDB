@@ -139,7 +139,7 @@ impl PayloadTypes for DropTablePayloadTypes {
 
 pub type DropTableTMES = STMPaxos2PCTMOuter<DropTablePayloadTypes, DropTableTMInner>;
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DropTableTMInner {
   // Response data
   pub response_data: Option<ResponseData>,
@@ -303,5 +303,9 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
 
   fn node_died<IO: BasicIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
+  }
+
+  fn reconfig_snapshot(&self) -> DropTableTMInner {
+    DropTableTMInner { response_data: None, table_path: self.table_path.clone() }
   }
 }

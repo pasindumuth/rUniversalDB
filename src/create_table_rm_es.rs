@@ -133,4 +133,8 @@ impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
   }
 
   fn aborted_plm_inserted<IO: BasicIOCtx>(&mut self, _: &mut SlaveContext, _: &mut IO) {}
+
+  fn reconfig_snapshot(&self) -> CreateTableRMInner {
+    self.clone()
+  }
 }

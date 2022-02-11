@@ -161,7 +161,7 @@ impl PayloadTypes for CreateTablePayloadTypes {
 
 pub type CreateTableTMES = STMPaxos2PCTMOuter<CreateTablePayloadTypes, CreateTableTMInner>;
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CreateTableTMInner {
   // Response data
   pub response_data: Option<ResponseData>,
@@ -397,6 +397,17 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
 
   fn node_died<IO: BasicIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
+  }
+
+  fn reconfig_snapshot(&self) -> CreateTableTMInner {
+    CreateTableTMInner {
+      response_data: None,
+      table_path: self.table_path.clone(),
+      key_cols: self.key_cols.clone(),
+      val_cols: self.val_cols.clone(),
+      shards: self.shards.clone(),
+      did_commit: self.did_commit.clone(),
+    }
   }
 }
 

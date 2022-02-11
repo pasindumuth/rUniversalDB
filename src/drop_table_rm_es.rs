@@ -7,13 +7,14 @@ use crate::drop_table_tm_es::{
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::TabletContext;
+use serde::{Deserialize, Serialize};
 use std::cmp::max;
 
 // -----------------------------------------------------------------------------------------------
 //  DropTableES Implementation
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DropTableRMInner {
   pub prepared_timestamp: Timestamp,
 }
@@ -95,4 +96,8 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
   }
 
   fn aborted_plm_inserted<IO: BasicIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {}
+
+  fn reconfig_snapshot(&self) -> DropTableRMInner {
+    self.clone()
+  }
 }

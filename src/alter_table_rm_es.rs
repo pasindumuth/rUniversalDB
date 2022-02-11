@@ -7,13 +7,14 @@ use crate::model::common::proc;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
 use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::TabletContext;
+use serde::{Deserialize, Serialize};
 use std::cmp::max;
 
 // -----------------------------------------------------------------------------------------------
 //  AlterTableES Implementation
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableRMInner {
   pub alter_op: proc::AlterOp,
   pub prepared_timestamp: Timestamp,
@@ -105,4 +106,8 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
   }
 
   fn aborted_plm_inserted<IO: BasicIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {}
+
+  fn reconfig_snapshot(&self) -> AlterTableRMInner {
+    self.clone()
+  }
 }

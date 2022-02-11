@@ -152,6 +152,11 @@ pub struct SlaveSnapshot {
   pub gossip: GossipData,
   pub leader_map: LeaderMap,
   pub paxos_driver_start: msg::StartNewNode<SharedPaxosBundle>,
+
+  // Statuses
+  /// If this is a Follower, we copy over the ESs in `Statuses` to the below. If this
+  /// is the Leader, we compute the ESs that would result as a result of a Leadership
+  /// change and populate the below.
   pub create_table_ess: BTreeMap<QueryId, CreateTableRMES>,
 
   /// We remember the set of Tablets to wait for here so that.
@@ -164,6 +169,7 @@ pub struct SlaveSnapshot {
 
 /// This contains every Slave Status. Every QueryId here is unique across all
 /// other members here.
+/// NOTE: When adding a new element here, amend the `SlaveSnapshot` accordingly.
 #[derive(Debug, Default)]
 pub struct Statuses {
   create_table_ess: BTreeMap<QueryId, CreateTableRMES>,
@@ -915,19 +921,23 @@ impl SlaveContext {
         .paxos_driver
         .mk_start_new_node(&SlavePaxosContext { io_ctx, this_eid: &self.this_eid });
 
-      // TODO: handle CreateTableES persisted state.
-
       // Construct the snapshot.
-      let snapshot = SlaveSnapshot {
+      let mut snapshot = SlaveSnapshot {
         gossip: self.gossip.as_ref().clone(),
         // We do not need to transer the version of the LeaderMap, since that is
         // primarily used as an optimization by the NetworkDriver.
         leader_map: self.leader_map.value().clone(),
         paxos_driver_start,
-        // TODO: togle `create_table_ess` to follower before sending out.
-        create_table_ess: statuses.create_table_ess.clone(),
+        create_table_ess: Default::default(),
         tablet_snapshots: Default::default(),
       };
+
+      // Add in the CreateTableRMES that have at least been Prepared.
+      for (sid, es) in &statuses.create_table_ess {
+        if let Some(es) = es.reconfig_snapshot() {
+          snapshot.create_table_ess.insert(sid.clone(), es);
+        }
+      }
 
       // Request the Tablets to send back a TabletSnapshot
       for tid in io_ctx.all_tids() {

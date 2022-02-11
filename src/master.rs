@@ -316,12 +316,22 @@ pub struct MasterSnapshot {
   pub leader_map: LeaderMap,
   pub free_nodes: BTreeMap<EndpointId, FreeNodeType>,
   pub paxos_driver_start: msg::StartNewNode<MasterBundle>,
+
+  // Statuses
+  /// If this is a Follower, we copy over the ESs in `Statuses` to the below. If this
+  /// is the Leader, we compute the ESs that would result as a result of a Leadership
+  /// change and populate the below.
+  pub create_table_tm_ess: BTreeMap<QueryId, CreateTableTMES>,
+  pub alter_table_tm_ess: BTreeMap<QueryId, AlterTableTMES>,
+  pub drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
+  // TODO: `slave_group_create_ess` and `slave_reconfig_ess`.
 }
 
 // -----------------------------------------------------------------------------------------------
 //  Master State
 // -----------------------------------------------------------------------------------------------
 
+/// NOTE: When adding a new element here, amend the `MasterSnapshot` accordingly.
 #[derive(Debug, Default)]
 pub struct Statuses {
   pub create_table_tm_ess: BTreeMap<QueryId, CreateTableTMES>,
@@ -645,7 +655,7 @@ impl MasterContext {
 
                 // If this is the leader, we send a MasterSnapshot.
                 if self.is_leader() {
-                  self.start_snapshot(io_ctx);
+                  self.start_snapshot(io_ctx, statuses);
                 }
 
                 // Then, deliver any messages that were blocked.
@@ -753,7 +763,7 @@ impl MasterContext {
           // We do this for both the Leader and Followers. If there are `unconfirmed_eids` in
           // the PaxosDriver, then we attempt to send a `MasterSnapshot`.
           if self.paxos_driver.has_unsent_unconfirmed() {
-            self.start_snapshot(io_ctx);
+            self.start_snapshot(io_ctx, statuses);
           }
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
@@ -1648,7 +1658,7 @@ impl MasterContext {
   }
 
   /// Creates and sends a `MasterSnapshot` to all `unconfirmed_eids` that map to `false.
-  fn start_snapshot<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
+  fn start_snapshot<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, statuses: &Statuses) {
     // Next, send the new `EndpointId`s a MasterSnapshot so that they can start up.
     let (paxos_driver_start, non_started_eids) =
       self.paxos_driver.mk_start_new_node(&MasterPaxosContext { io_ctx, this_eid: &self.this_eid });
@@ -1656,15 +1666,39 @@ impl MasterContext {
     // TODO: Handle the persisted state in `statuses`.
 
     // Construct the snapshot
-    let snapshot = MasterSnapshot {
+    let mut snapshot = MasterSnapshot {
       gossip: self.gossip.clone(),
       leader_map: self.leader_map.value().clone(),
       free_nodes: self.free_node_manager.free_nodes().clone(),
       paxos_driver_start,
+      create_table_tm_ess: Default::default(),
+      alter_table_tm_ess: Default::default(),
+      drop_table_tm_ess: Default::default(),
     };
 
+    // Add in the CreateTableTMES that have at least been Prepared.
+    for (sid, es) in &statuses.create_table_tm_ess {
+      if let Some(es) = es.reconfig_snapshot() {
+        snapshot.create_table_tm_ess.insert(sid.clone(), es);
+      }
+    }
+
+    // Add in the AlterTableTMES that have at least been Prepared.
+    for (sid, es) in &statuses.alter_table_tm_ess {
+      if let Some(es) = es.reconfig_snapshot() {
+        snapshot.alter_table_tm_ess.insert(sid.clone(), es);
+      }
+    }
+
+    // Add in the DropTableTMES that have at least been Prepared.
+    for (sid, es) in &statuses.drop_table_tm_ess {
+      if let Some(es) = es.reconfig_snapshot() {
+        snapshot.drop_table_tm_ess.insert(sid.clone(), es);
+      }
+    }
+
+    // Send the Snapshot.
     for new_eid in &non_started_eids {
-      // Send the Snapshot.
       io_ctx.send(
         new_eid,
         msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::MasterSnapshot(snapshot.clone())),

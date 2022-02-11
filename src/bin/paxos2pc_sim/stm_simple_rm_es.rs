@@ -86,4 +86,8 @@ impl STMPaxos2PCRMInner<STMSimplePayloadTypes> for STMSimpleRMInner {
     _: &mut IO,
   ) {
   }
+
+  fn reconfig_snapshot(&self) -> Self {
+    unimplemented!()
+  }
 }

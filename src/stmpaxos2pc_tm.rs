@@ -296,12 +296,17 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
     closed_plm: &TMClosedPLm<T>,
   );
 
-  // This is called when the node died.
+  /// This is called when the node died.
   fn node_died<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
   );
+
+  /// If this node is a Follower, a copy of this `Inner` is returned. If this node is
+  /// a Leader, then the value of this `STMPaxos2PCTMInner` that would result from losing
+  /// Leadership is returned (i.e. after the `Outer` calls `leader_changed`).
+  fn reconfig_snapshot(&self) -> Self;
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -638,6 +643,28 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     }
   }
 
+  /// If this node is a Follower, a copy of this `Outer` is returned. If this node is
+  /// a Leader, then the value of this `STMPaxos2PCTMOuter` that would result from losing
+  /// Leadership is returned (i.e. after calling `leader_changed`).
+  pub fn reconfig_snapshot(&self) -> Option<STMPaxos2PCTMOuter<T, InnerT>> {
+    match &self.state {
+      State::Start | State::WaitingInsertTMPrepared | State::InsertTMPreparing => None,
+      State::Following
+      | State::Preparing(_)
+      | State::InsertingTMCommitted
+      | State::Committed(_)
+      | State::InsertingTMAborted
+      | State::Aborted(_)
+      | State::InsertingTMClosed => Some(STMPaxos2PCTMOuter {
+        query_id: self.query_id.clone(),
+        follower: self.follower.clone(),
+        state: State::Following,
+        inner: self.inner.reconfig_snapshot(),
+      }),
+    }
+  }
+
+  /// Called when a `RemoteLeaderChangedPLm` is inserted in the.
   pub fn remote_leader_changed<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,

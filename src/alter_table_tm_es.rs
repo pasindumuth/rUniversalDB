@@ -141,7 +141,7 @@ impl PayloadTypes for AlterTablePayloadTypes {
 // -----------------------------------------------------------------------------------------------
 //  General STMPaxos2PC TM Types
 // -----------------------------------------------------------------------------------------------
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ResponseData {
   pub request_id: RequestId,
   pub sender_eid: EndpointId,
@@ -153,7 +153,7 @@ pub struct ResponseData {
 
 pub type AlterTableTMES = STMPaxos2PCTMOuter<AlterTablePayloadTypes, AlterTableTMInner>;
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableTMInner {
   // Response data
   pub response_data: Option<ResponseData>,
@@ -330,6 +330,14 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
 
   fn node_died<IO: BasicIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
+  }
+
+  fn reconfig_snapshot(&self) -> AlterTableTMInner {
+    AlterTableTMInner {
+      response_data: None,
+      table_path: self.table_path.clone(),
+      alter_op: self.alter_op.clone(),
+    }
   }
 }
 

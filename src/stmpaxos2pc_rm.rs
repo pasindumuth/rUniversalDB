@@ -78,6 +78,11 @@ pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   );
+
+  /// If this node is a Follower, a copy of this `Inner` is returned. If this node is
+  /// a Leader, then the value of this `STMPaxos2PCRMInner` that would result from losing
+  /// Leadership is returned (i.e. after the `Outer` calls `leader_changed`).
+  fn reconfig_snapshot(&self) -> Self;
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -315,6 +320,27 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
         self.state = State::Follower;
         STMPaxos2PCRMAction::Wait
       }
+    }
+  }
+
+  /// If this node is a Follower, a copy of this node is returned. If this node is
+  /// a Leader, then the value of this `STMPaxos2PCRMOuter` that would result from losing
+  /// Leadership is returned (i.e. after calling `leader_changed`).
+  pub fn reconfig_snapshot(&self) -> Option<STMPaxos2PCRMOuter<T, InnerT>> {
+    match &self.state {
+      State::WaitingInsertingPrepared
+      | State::InsertingPreparedAborted
+      | State::InsertingPrepared => None,
+      State::Follower
+      | State::Prepared(_)
+      | State::InsertingCommitted
+      | State::InsertingAborted => Some(STMPaxos2PCRMOuter {
+        query_id: self.query_id.clone(),
+        tm: self.tm.clone(),
+        follower: self.follower.clone(),
+        state: State::Follower,
+        inner: self.inner.reconfig_snapshot(),
+      }),
     }
   }
 

@@ -248,8 +248,13 @@ pub struct TabletSnapshot {
   pub prepared_writes: BTreeMap<Timestamp, ReadWriteRegion>,
   pub committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
   pub read_protected: BTreeMap<Timestamp, BTreeSet<ReadRegion>>,
+
   // Statuses
-  // TODO: add
+  /// If this is a Follower, we copy over the ESs in `Statuses` to the below. If this
+  /// is the Leader, we compute the ESs that would result as a result of a Leadership
+  /// change and populate the below.
+  pub ddl_es: DDLES,
+  // TODO: add finish_query_ess
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -258,6 +263,7 @@ pub struct TabletSnapshot {
 
 /// This contains every TabletStatus. Every QueryId here is unique across all
 /// other members here.
+/// NOTE: When adding a new element here, amend the `TabletSnapshot` accordingly.
 #[derive(Debug, Default)]
 pub struct Statuses {
   // Paxos2PC
@@ -278,7 +284,7 @@ pub struct Statuses {
   ddl_es: DDLES,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum DDLES {
   None,
   Alter(AlterTableRMES),
@@ -1455,7 +1461,7 @@ impl TabletContext {
         }
       }
       TabletForwardMsg::ConstructTabletSnapshot => {
-        io_ctx.slave_forward(SlaveBackMessage::TabletSnapshot(TabletSnapshot {
+        let mut snapshot = TabletSnapshot {
           this_sid: self.this_sid.clone(),
           this_tid: self.this_tid.clone(),
           sub_node_path: self.sub_node_path.clone(),
@@ -1468,7 +1474,30 @@ impl TabletContext {
           prepared_writes: self.prepared_writes.clone(),
           committed_writes: self.committed_writes.clone(),
           read_protected: self.read_protected.clone(),
-        }));
+          ddl_es: DDLES::None,
+        };
+
+        // Only use a DDLES if it has been Prepared.
+        snapshot.ddl_es = match &statuses.ddl_es {
+          DDLES::None => DDLES::None,
+          DDLES::Alter(es) => {
+            if let Some(es) = es.reconfig_snapshot() {
+              DDLES::Alter(es)
+            } else {
+              DDLES::None
+            }
+          }
+          DDLES::Drop(es) => {
+            if let Some(es) = es.reconfig_snapshot() {
+              DDLES::Drop(es)
+            } else {
+              DDLES::None
+            }
+          }
+          DDLES::Dropped(timestamp) => DDLES::Dropped(timestamp.clone()),
+        };
+
+        io_ctx.slave_forward(SlaveBackMessage::TabletSnapshot(snapshot));
       }
     }
   }
