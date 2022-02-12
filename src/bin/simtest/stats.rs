@@ -71,14 +71,12 @@ impl Stats {
         },
         MasterMessage::RemoteMessage(m) => match m {
           RemoteMessage { payload: m, .. } => match m {
-            MasterRemotePayload::PerformMasterQueryPlanning(_) => {}
-            MasterRemotePayload::CancelMasterQueryPlanning(_) => {}
+            MasterRemotePayload::MasterQueryPlanning(_) => {}
             MasterRemotePayload::CreateTable(_) => self.master_ddl += 1,
             MasterRemotePayload::AlterTable(_) => self.master_ddl += 1,
             MasterRemotePayload::DropTable(_) => self.master_ddl += 1,
             MasterRemotePayload::MasterGossipRequest(_) => {}
-            MasterRemotePayload::NodesDead(_) => {}
-            MasterRemotePayload::SlaveGroupReconfigured(_) => {}
+            MasterRemotePayload::SlaveReconfig(_) => {}
           },
         },
         MasterMessage::RemoteLeaderChangedGossip(_) => self.master_remote_leader_changed += 1,

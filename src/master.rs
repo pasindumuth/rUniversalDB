@@ -11,13 +11,9 @@ use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
 use crate::drop_table_tm_es::{DropTablePayloadTypes, DropTableTMES, DropTableTMInner};
 use crate::free_node_manager::{FreeNodeManager, FreeNodeManagerContext, FreeNodeType};
-use crate::master::plm::{
-  ConfirmCreateGroup, FreeNodeManagerPLm, ReconfigSlaveGroupPLm, SlaveGroupReconfiguredPLm,
-};
-use crate::master_query_planning_es::{
-  master_query_planning_post, master_query_planning_pre, MasterQueryPlanningAction,
-  MasterQueryPlanningES,
-};
+use crate::master::plm::{ConfirmCreateGroup, FreeNodeManagerPLm};
+use crate::master_query_planning_es as master_planning;
+use crate::master_query_planning_es::{MasterQueryPlanningAction, MasterQueryPlanningES};
 use crate::model::common::{
   proc, ColName, ColType, ColVal, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
   PrimaryKey, QueryId, RequestId, SlaveGroupId, TNodePath, TablePath, TabletGroupId,
@@ -33,7 +29,8 @@ use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use crate::server::{contains_col_latest, MasterServerContext, ServerContextBase};
 use crate::slave_group_create_es::SlaveGroupCreateES;
-use crate::slave_reconfig_es::SlaveReconfigES;
+use crate::slave_reconfig_es as slave_reconfig;
+use crate::slave_reconfig_es::{SlaveReconfigES, SlaveReconfigPLm};
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::{
@@ -87,18 +84,6 @@ pub mod plm {
   pub struct ConfirmCreateGroup {
     pub sid: SlaveGroupId,
   }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct ReconfigSlaveGroupPLm {
-    pub sid: SlaveGroupId,
-    pub new_eids: Vec<EndpointId>,
-    pub rem_eids: Vec<EndpointId>,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct SlaveGroupReconfiguredPLm {
-    pub sid: SlaveGroupId,
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -123,8 +108,7 @@ pub enum MasterPLm {
   // FreeNode
   FreeNodeManagerPLm(FreeNodeManagerPLm),
   ConfirmCreateGroup(ConfirmCreateGroup),
-  ReconfigSlaveGroupPLm(ReconfigSlaveGroupPLm),
-  SlaveGroupReconfiguredPLm(SlaveGroupReconfiguredPLm),
+  SlaveConfigPLm(SlaveReconfigPLm),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -805,25 +789,9 @@ impl MasterContext {
       MasterForwardMsg::MasterBundle(bundle) => {
         for paxos_log_msg in bundle {
           match paxos_log_msg {
+            // MasterQueryPlanning
             MasterPLm::MasterQueryPlanning(planning_plm) => {
-              let query_id = planning_plm.query_id.clone();
-              let result = master_query_planning_post(self, planning_plm);
-
-              if self.is_leader() {
-                if let Some(es) = statuses.planning_ess.remove(&query_id) {
-                  // If the ES still exists, we respond.
-                  self.ctx(io_ctx).send_to_c(
-                    es.sender_path.node_path,
-                    msg::CoordMessage::MasterQueryPlanningSuccess(
-                      msg::MasterQueryPlanningSuccess {
-                        return_qid: es.sender_path.query_id,
-                        query_id: es.query_id,
-                        result,
-                      },
-                    ),
-                  );
-                }
-              }
+              master_planning::handle_plm(self, io_ctx, &mut statuses.planning_ess, planning_plm);
             }
             // CreateTable
             MasterPLm::CreateTable(plm) => {
@@ -869,21 +837,8 @@ impl MasterContext {
               let mut es = statuses.slave_group_create_ess.remove(&confirm_create.sid).unwrap();
               es.handle_confirm_plm(self, io_ctx);
             }
-            MasterPLm::ReconfigSlaveGroupPLm(reconfig) => {
-              let sid = reconfig.sid.clone();
-              if self.is_leader() {
-                let es = statuses.slave_reconfig_ess.get_mut(&sid).unwrap();
-                es.handle_reconfig_plm(self, io_ctx, reconfig);
-              } else {
-                // This is a backup, so we should make a `SlaveReconfigES`.
-                let es = SlaveReconfigES::new_follower(self, reconfig);
-                statuses.slave_reconfig_ess.insert(sid, es);
-              }
-            }
-            MasterPLm::SlaveGroupReconfiguredPLm(reconfigured) => {
-              // Here, we remove the ES and then finish it off.
-              let mut es = statuses.slave_reconfig_ess.remove(&reconfigured.sid).unwrap();
-              es.handle_reconfigured_plm(self, io_ctx, reconfigured);
+            MasterPLm::SlaveConfigPLm(reconfig) => {
+              slave_reconfig::handle_plm(self, io_ctx, &mut statuses.slave_reconfig_ess, reconfig);
             }
           }
         }
@@ -903,16 +858,8 @@ impl MasterContext {
             es.start_inserting(self, io_ctx);
           }
 
-          // For every MasterQueryPlanningES, we add a PLm
-          for (_, es) in &mut statuses.planning_ess {
-            self.master_bundle.plms.push(MasterPLm::MasterQueryPlanning(
-              plm::MasterQueryPlanning {
-                query_id: es.query_id.clone(),
-                timestamp: es.timestamp.clone(),
-                ms_query: es.ms_query.clone(),
-              },
-            ));
-          }
+          // MasterQueryPlanningES
+          master_planning::handle_bundle_processed(self, &mut statuses.planning_ess);
 
           // Construct PLms related to FreeNode management.
           let granted_reconfig_eids = self.free_node_manager.process(
@@ -1092,35 +1039,9 @@ impl MasterContext {
       }
       MasterForwardMsg::MasterRemotePayload(payload) => {
         match payload {
-          MasterRemotePayload::PerformMasterQueryPlanning(query_planning) => {
-            let action = master_query_planning_pre(self, query_planning.clone());
-            match action {
-              MasterQueryPlanningAction::Wait => {
-                map_insert(
-                  &mut statuses.planning_ess,
-                  &query_planning.query_id.clone(),
-                  MasterQueryPlanningES {
-                    sender_path: query_planning.sender_path,
-                    query_id: query_planning.query_id,
-                    timestamp: query_planning.timestamp,
-                    ms_query: query_planning.ms_query,
-                  },
-                );
-              }
-              MasterQueryPlanningAction::Respond(result) => {
-                self.ctx(io_ctx).send_to_c(
-                  query_planning.sender_path.node_path,
-                  msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
-                    return_qid: query_planning.sender_path.query_id,
-                    query_id: query_planning.query_id,
-                    result,
-                  }),
-                );
-              }
-            }
-          }
-          MasterRemotePayload::CancelMasterQueryPlanning(cancel_query_planning) => {
-            statuses.planning_ess.remove(&cancel_query_planning.query_id);
+          // MasterQueryPlanning
+          MasterRemotePayload::MasterQueryPlanning(request) => {
+            master_planning::handle_msg(self, io_ctx, &mut statuses.planning_ess, request);
           }
           // CreateTable
           MasterRemotePayload::CreateTable(message) => {
@@ -1140,22 +1061,13 @@ impl MasterContext {
               handle_tm_msg(self, io_ctx, &mut statuses.drop_table_tm_ess, message);
             self.handle_drop_table_es_action(statuses, query_id, action);
           }
+          // MasterGossipRequest
           MasterRemotePayload::MasterGossipRequest(gossip_req) => {
             self.send_gossip(io_ctx, gossip_req.sender_path);
           }
-          MasterRemotePayload::NodesDead(nodes_dead) => {
-            // Construct an `SlaveReconfigES` if it does not already exist.
-            let sid = nodes_dead.sid;
-            if !statuses.slave_reconfig_ess.contains_key(&sid) {
-              statuses
-                .slave_reconfig_ess
-                .insert(sid.clone(), SlaveReconfigES::new(self, sid, nodes_dead.eids));
-            }
-          }
-          MasterRemotePayload::SlaveGroupReconfigured(reconfigured) => {
-            if let Some(es) = statuses.slave_reconfig_ess.get_mut(&reconfigured.sid) {
-              es.handle_reconfigured_msg(self, io_ctx, reconfigured);
-            }
+          // SlaveReconfig
+          MasterRemotePayload::SlaveReconfig(reconfig) => {
+            slave_reconfig::handle_msg(self, io_ctx, &mut statuses.slave_reconfig_ess, reconfig);
           }
         }
 
@@ -1212,19 +1124,11 @@ impl MasterContext {
             }
 
             // SlaveReconfigES
-            for (_, es) in &mut statuses.slave_reconfig_ess {
-              es.remote_leader_changed(self, io_ctx, &remote_leader_changed);
-            }
+            let ess = &mut statuses.slave_reconfig_ess;
+            slave_reconfig::handle_remote_leader_changed(self, io_ctx, ess, &gid);
 
-            // For MasterQueryPlanningESs, if the sending PaxosGroup's Leadership changed,
-            // we ECU (no response).
-            let query_ids: Vec<QueryId> = statuses.planning_ess.keys().cloned().collect();
-            for query_id in query_ids {
-              let es = statuses.planning_ess.get_mut(&query_id).unwrap();
-              if es.sender_path.node_path.sid.to_gid() == gid {
-                statuses.planning_ess.remove(&query_id);
-              }
-            }
+            // MasterQueryPlanningES
+            master_planning::handle_remote_leader_changed(&mut statuses.planning_ess, &gid);
           }
         }
       }
@@ -1268,13 +1172,10 @@ impl MasterContext {
         }
 
         // SlaveReconfig
-        let sids: Vec<SlaveGroupId> = statuses.slave_reconfig_ess.keys().cloned().collect();
-        for sid in sids {
-          let es = statuses.slave_reconfig_ess.get_mut(&sid).unwrap();
-          if es.leader_changed(self, io_ctx) {
-            statuses.slave_reconfig_ess.remove(&sid);
-          }
-        }
+        slave_reconfig::handle_leader_changed(self, io_ctx, &mut statuses.slave_reconfig_ess);
+
+        // MasterQueryPlanningES
+        master_planning::handle_leader_changed(self, &mut statuses.planning_ess);
 
         // MasterReconfig
         statuses.do_reconfig = None;
@@ -1290,11 +1191,8 @@ impl MasterContext {
         // NetworkDriver
         self.network_driver.leader_changed();
 
-        // Check if this node just lost Leadership
-        if !self.is_leader() {
-          // Wink away all MasterQueryPlanningESs.
-          statuses.planning_ess.clear();
-        } else {
+        // Check if this node just gained Leadership
+        if self.is_leader() {
           // TODO: should we be running the main loop here?
           // Run Main Loop
           self.run_main_loop(io_ctx, statuses);
@@ -1689,7 +1587,7 @@ impl MasterContext {
       alter_table_tm_ess: Default::default(),
       drop_table_tm_ess: Default::default(),
       slave_group_create_ess: Default::default(),
-      slave_reconfig_ess: Default::default(),
+      slave_reconfig_ess: slave_reconfig::handle_reconfig_snapshot(&statuses.slave_reconfig_ess),
     };
 
     // Add in the CreateTableTMES that have at least been Prepared.
@@ -1717,13 +1615,6 @@ impl MasterContext {
     for (qid, es) in &statuses.slave_group_create_ess {
       let es = es.reconfig_snapshot();
       snapshot.slave_group_create_ess.insert(qid.clone(), es);
-    }
-
-    // Add in the SlaveReconfigES where at least ReconfigSlaveGroupPLm has been inserted.
-    for (qid, es) in &statuses.slave_reconfig_ess {
-      if let Some(es) = es.reconfig_snapshot() {
-        snapshot.slave_reconfig_ess.insert(qid.clone(), es);
-      }
     }
 
     // Send the Snapshot.

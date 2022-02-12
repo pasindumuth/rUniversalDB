@@ -765,13 +765,13 @@ impl QueryPlanningES {
   ) -> QueryPlanningAction {
     let master_query_id = mk_qid(io_ctx.rand());
     let sender_path = ctx.mk_query_path(self.query_id.clone());
-    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::PerformMasterQueryPlanning(
-      msg::PerformMasterQueryPlanning {
+    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterQueryPlanning(
+      msg::MasterQueryPlanningRequest::Perform(msg::PerformMasterQueryPlanning {
         sender_path,
         query_id: master_query_id.clone(),
         timestamp: self.timestamp.clone(),
         ms_query: self.sql_query.clone(),
-      },
+      }),
     ));
 
     // Advance Planning State.
@@ -923,8 +923,10 @@ impl QueryPlanningES {
     match &self.state {
       QueryPlanningS::Start => {}
       QueryPlanningS::MasterQueryPlanning(MasterQueryPlanning { master_query_id }) => {
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::CancelMasterQueryPlanning(
-          msg::CancelMasterQueryPlanning { query_id: master_query_id.clone() },
+        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterQueryPlanning(
+          msg::MasterQueryPlanningRequest::Cancel(msg::CancelMasterQueryPlanning {
+            query_id: master_query_id.clone(),
+          }),
         ));
       }
       QueryPlanningS::GossipDataWaiting(_) => {}

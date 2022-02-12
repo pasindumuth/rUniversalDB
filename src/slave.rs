@@ -565,11 +565,11 @@ impl SlaveContext {
                   self.maybe_start_snapshot(io_ctx, statuses);
 
                   // Inform the Master that the Reconfiguration was a success.
-                  self.ctx(io_ctx).send_to_master(
-                    msg::MasterRemotePayload::SlaveGroupReconfigured(msg::SlaveGroupReconfigured {
+                  self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::SlaveReconfig(
+                    msg::SlaveReconfig::SlaveGroupReconfigured(msg::SlaveGroupReconfigured {
                       sid: self.this_sid.clone(),
                     }),
-                  );
+                  ));
                 }
 
                 // Then, deliver any messages that were blocked.
@@ -722,7 +722,9 @@ impl SlaveContext {
               // Here, we send the Master a `NodesDead` message indicating that we
               // want to reconfigure. Recall we only reconfigure one-at-a-time to
               // preserve our liveness properties.
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::NodesDead(nodes_dead));
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::SlaveReconfig(
+                msg::SlaveReconfig::NodesDead(nodes_dead),
+              ));
             }
           }
 
@@ -810,8 +812,10 @@ impl SlaveContext {
           msg::SlaveRemotePayload::ReconfigSlaveGroup(reconfig) => {
             // Respond affirmative immeidately if this node has already completed this reconfig.
             if self.paxos_driver.contains_nodes(&reconfig.new_eids) {
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::SlaveGroupReconfigured(
-                msg::SlaveGroupReconfigured { sid: self.this_sid.clone() },
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::SlaveReconfig(
+                msg::SlaveReconfig::SlaveGroupReconfigured(msg::SlaveGroupReconfigured {
+                  sid: self.this_sid.clone(),
+                }),
               ));
             } else {
               // Otherwise, do nothing if we are already going to do this reconfig.

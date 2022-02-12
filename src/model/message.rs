@@ -190,19 +190,24 @@ pub struct RemoteMessage<PayloadT> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterRemotePayload {
   // Master FrozenColUsageAlgorithm
-  PerformMasterQueryPlanning(PerformMasterQueryPlanning),
-  CancelMasterQueryPlanning(CancelMasterQueryPlanning),
+  MasterQueryPlanning(MasterQueryPlanningRequest),
 
+  // DDL STMPaxos2PC
   CreateTable(stmpaxos2pc_tm::TMMessage<CreateTablePayloadTypes>),
   AlterTable(stmpaxos2pc_tm::TMMessage<AlterTablePayloadTypes>),
   DropTable(stmpaxos2pc_tm::TMMessage<DropTablePayloadTypes>),
 
   // Reconfig
-  NodesDead(NodesDead),
-  SlaveGroupReconfigured(SlaveGroupReconfigured),
+  SlaveReconfig(SlaveReconfig),
 
   // Gossip
   MasterGossipRequest(MasterGossipRequest),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum SlaveReconfig {
+  NodesDead(NodesDead),
+  SlaveGroupReconfigured(SlaveGroupReconfigured),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -608,6 +613,12 @@ pub struct ExternalQueryAborted {
 //  MasterQueryPlanning messages
 // -------------------------------------------------------------------------------------------------
 // PCSA Messages
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum MasterQueryPlanningRequest {
+  Perform(PerformMasterQueryPlanning),
+  Cancel(CancelMasterQueryPlanning),
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PerformMasterQueryPlanning {
