@@ -68,7 +68,7 @@ impl SlaveReconfigES {
   }
 
   /// This is called `FreeNodeManager` provides the necessary `EndpointId`s
-  pub fn handle_eids_granted(&mut self, ctx: &mut MasterContext, new_eids: Vec<EndpointId>) {
+  fn handle_eids_granted(&mut self, ctx: &mut MasterContext, new_eids: Vec<EndpointId>) {
     match &self.state {
       State::WaitingRequestedNodes => {
         // Amend MasterBundle
@@ -261,6 +261,17 @@ pub fn handle_msg<IO: MasterIOCtx>(
   }
 }
 
+/// This is a local granting of the `EndpointId`s; it has not been persisted yet.
+pub fn handle_eids_granted(
+  ctx: &mut MasterContext,
+  slave_reconfig_ess: &mut BTreeMap<SlaveGroupId, SlaveReconfigES>,
+  sid: &SlaveGroupId,
+  new_eids: Vec<EndpointId>,
+) {
+  let es = slave_reconfig_ess.get_mut(sid).unwrap();
+  es.handle_eids_granted(ctx, new_eids);
+}
+
 // Leader and Follower
 
 pub fn handle_plm<IO: MasterIOCtx>(
@@ -289,18 +300,18 @@ pub fn handle_plm<IO: MasterIOCtx>(
   }
 }
 
-pub fn handle_remote_leader_changed<IO: MasterIOCtx>(
+pub fn handle_rlc<IO: MasterIOCtx>(
   ctx: &mut MasterContext,
   io_ctx: &mut IO,
   slave_reconfig_ess: &mut BTreeMap<SlaveGroupId, SlaveReconfigES>,
-  gid: &PaxosGroupId,
+  remote_leader_changed: RemoteLeaderChangedPLm,
 ) {
   for (_, es) in slave_reconfig_ess {
-    es.remote_leader_changed(ctx, io_ctx, gid);
+    es.remote_leader_changed(ctx, io_ctx, &remote_leader_changed.gid);
   }
 }
 
-pub fn handle_leader_changed<IO: MasterIOCtx>(
+pub fn handle_lc<IO: MasterIOCtx>(
   ctx: &mut MasterContext,
   io_ctx: &mut IO,
   slave_reconfig_ess: &mut BTreeMap<SlaveGroupId, SlaveReconfigES>,

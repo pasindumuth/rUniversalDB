@@ -2,7 +2,7 @@ use crate::col_usage::{
   free_external_cols, iterate_stage_ms_query, ColUsageError, ColUsageNode, ColUsagePlanner,
   GeneralStage,
 };
-use crate::common::{lookup, MasterIOCtx, TableSchema, Timestamp};
+use crate::common::{lookup, MasterIOCtx, RemoteLeaderChangedPLm, TableSchema, Timestamp};
 use crate::master::{plm, MasterContext, MasterPLm};
 use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
@@ -560,21 +560,21 @@ pub fn handle_plm<IO: MasterIOCtx>(
 
 /// For `MasterQueryPlanningES`s, if the sending PaxosGroup's Leadership
 /// changed, we ECU (no response).
-pub fn handle_remote_leader_changed(
+pub fn handle_rlc(
   planning_ess: &mut BTreeMap<QueryId, MasterQueryPlanningES>,
-  gid: &PaxosGroupId,
+  remote_leader_changed: RemoteLeaderChangedPLm,
 ) {
   let query_ids: Vec<QueryId> = planning_ess.keys().cloned().collect();
   for query_id in query_ids {
     let es = planning_ess.get_mut(&query_id).unwrap();
-    if &es.sender_path.node_path.sid.to_gid() == gid {
+    if es.sender_path.node_path.sid.to_gid() == remote_leader_changed.gid {
       planning_ess.remove(&query_id);
     }
   }
 }
 
 /// Wink away all `MasterQueryPlanningES`s if we lost Leadership.
-pub fn handle_leader_changed(
+pub fn handle_lc(
   ctx: &mut MasterContext,
   planning_ess: &mut BTreeMap<QueryId, MasterQueryPlanningES>,
 ) {

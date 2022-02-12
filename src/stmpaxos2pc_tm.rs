@@ -584,7 +584,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
 
   // Other
 
-  pub fn start_inserting<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn start_inserting<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -603,7 +603,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
     STMPaxos2PCTMAction::Wait
   }
 
-  pub fn leader_changed<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn leader_changed<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -646,7 +646,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   /// If this node is a Follower, a copy of this `Outer` is returned. If this node is
   /// a Leader, then the value of this `STMPaxos2PCTMOuter` that would result from losing
   /// Leadership is returned (i.e. after calling `leader_changed`).
-  pub fn reconfig_snapshot(&self) -> Option<STMPaxos2PCTMOuter<T, InnerT>> {
+  fn reconfig_snapshot(&self) -> Option<STMPaxos2PCTMOuter<T, InnerT>> {
     match &self.state {
       State::Start | State::WaitingInsertTMPrepared | State::InsertTMPreparing => None,
       State::Following
@@ -665,7 +665,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
   }
 
   /// Called when a `RemoteLeaderChangedPLm` is inserted in the.
-  pub fn remote_leader_changed<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn remote_leader_changed<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -719,19 +719,85 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
 // -----------------------------------------------------------------------------------------------
 //  Aggregate STM ES Management
 // -----------------------------------------------------------------------------------------------
-/// Function to handle the insertion of an `TMPLm` for a given `AggregateContainer`.
-pub fn handle_tm_plm<
+
+// Utilities
+
+/// Handles the actions specified by a AlterTableES.
+fn handle_action<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>>(
+  query_id: &QueryId,
+  con: &mut BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>,
+  action: STMPaxos2PCTMAction,
+) {
+  match action {
+    STMPaxos2PCTMAction::Wait => {}
+    STMPaxos2PCTMAction::Exit => {
+      con.remove(&query_id);
+    }
+  }
+}
+
+// Leader-only
+
+/// Function to handle the arrive of an `TMMessage` for a given `AggregateContainer`.
+pub fn handle_msg<
   T: PayloadTypes,
   InnerT: STMPaxos2PCTMInner<T>,
-  ConT: Paxos2PCContainer<STMPaxos2PCTMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
   ctx: &mut T::TMContext,
   io_ctx: &mut IO,
-  con: &mut ConT,
+  con: &mut BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>,
+  msg: TMMessage<T>,
+) {
+  let (query_id, action) = match msg {
+    TMMessage::Prepared(prepared) => {
+      // We can `unwrap` here because in order for the ES to disappear, all `Closed` messages
+      // must arrive, meaning all Prepared messages sent back to the TM must also arrive before.
+      let es = con.get_mut(&prepared.query_id).unwrap();
+      (prepared.query_id.clone(), es.handle_prepared(ctx, io_ctx, prepared))
+    }
+    TMMessage::Aborted(aborted) => {
+      // We can `unwrap` here because in order for the ES to disappear, all `Closed` messages
+      // must arrive, meaning all Aborted messages sent back to the TM must also arrive before.
+      let es = con.get_mut(&aborted.query_id).unwrap();
+      (aborted.query_id, es.handle_aborted(ctx, io_ctx))
+    }
+    TMMessage::Closed(closed) => {
+      let es = con.get_mut(&closed.query_id).unwrap();
+      (closed.query_id.clone(), es.handle_closed(ctx, io_ctx, closed))
+    }
+  };
+  handle_action(&query_id, con, action);
+}
+
+pub fn handle_bundle_processed<
+  T: PayloadTypes,
+  InnerT: STMPaxos2PCTMInner<T>,
+  IO: BasicIOCtx<T::NetworkMessageT>,
+>(
+  ctx: &mut T::TMContext,
+  io_ctx: &mut IO,
+  con: &mut BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>,
+) {
+  for (_, es) in con {
+    es.start_inserting(ctx, io_ctx);
+  }
+}
+
+// Leader and Follower
+
+/// Function to handle the insertion of an `TMPLm` for a given `AggregateContainer`.
+pub fn handle_plm<
+  T: PayloadTypes,
+  InnerT: STMPaxos2PCTMInner<T>,
+  IO: BasicIOCtx<T::NetworkMessageT>,
+>(
+  ctx: &mut T::TMContext,
+  io_ctx: &mut IO,
+  con: &mut BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>,
   plm: TMPLm<T>,
-) -> (QueryId, STMPaxos2PCTMAction) {
-  match plm {
+) {
+  let (query_id, action) = match plm {
     TMPLm::Prepared(prepared) => {
       if ctx.is_leader() {
         let es = con.get_mut(&prepared.query_id).unwrap();
@@ -761,37 +827,54 @@ pub fn handle_tm_plm<
       let es = con.get_mut(&closed.query_id).unwrap();
       (closed.query_id.clone(), es.handle_closed_plm(ctx, io_ctx, closed))
     }
-  }
+  };
+  handle_action(&query_id, con, action);
 }
 
-/// Function to handle the arrive of an `TMMessage` for a given `AggregateContainer`.
-pub fn handle_tm_msg<
+pub fn handle_rlc<
   T: PayloadTypes,
   InnerT: STMPaxos2PCTMInner<T>,
-  ConT: Paxos2PCContainer<STMPaxos2PCTMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
   ctx: &mut T::TMContext,
   io_ctx: &mut IO,
-  con: &mut ConT,
-  msg: TMMessage<T>,
-) -> (QueryId, STMPaxos2PCTMAction) {
-  match msg {
-    TMMessage::Prepared(prepared) => {
-      // We can `unwrap` here because in order for the ES to disappear, all `Closed` messages
-      // must arrive, meaning all Prepared messages sent back to the TM must also arrive before.
-      let es = con.get_mut(&prepared.query_id).unwrap();
-      (prepared.query_id.clone(), es.handle_prepared(ctx, io_ctx, prepared))
-    }
-    TMMessage::Aborted(aborted) => {
-      // We can `unwrap` here because in order for the ES to disappear, all `Closed` messages
-      // must arrive, meaning all Aborted messages sent back to the TM must also arrive before.
-      let es = con.get_mut(&aborted.query_id).unwrap();
-      (aborted.query_id, es.handle_aborted(ctx, io_ctx))
-    }
-    TMMessage::Closed(closed) => {
-      let es = con.get_mut(&closed.query_id).unwrap();
-      (closed.query_id.clone(), es.handle_closed(ctx, io_ctx, closed))
+  con: &mut BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>,
+  remote_leader_changed: RemoteLeaderChangedPLm,
+) {
+  let query_ids: Vec<_> = con.keys().cloned().collect();
+  for query_id in query_ids {
+    let es = con.get_mut(&query_id).unwrap();
+    let action = es.remote_leader_changed(ctx, io_ctx, remote_leader_changed.clone());
+    handle_action(&query_id, con, action);
+  }
+}
+
+pub fn handle_lc<
+  T: PayloadTypes,
+  InnerT: STMPaxos2PCTMInner<T>,
+  IO: BasicIOCtx<T::NetworkMessageT>,
+>(
+  ctx: &mut T::TMContext,
+  io_ctx: &mut IO,
+  con: &mut BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>,
+) {
+  let query_ids: Vec<_> = con.keys().cloned().collect();
+  for query_id in query_ids {
+    let es = con.get_mut(&query_id).unwrap();
+    let action = es.leader_changed(ctx, io_ctx);
+    handle_action(&query_id, con, action);
+  }
+}
+
+/// Add in the `STMPaxos2PCTMOuter`s that have at least been Prepared.
+pub fn handle_reconfig_snapshot<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>>(
+  con: &BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>,
+) -> BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>> {
+  let mut ess = BTreeMap::<QueryId, STMPaxos2PCTMOuter<T, InnerT>>::new();
+  for (qid, es) in con {
+    if let Some(es) = es.reconfig_snapshot() {
+      ess.insert(qid.clone(), es);
     }
   }
+  ess
 }

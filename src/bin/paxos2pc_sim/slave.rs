@@ -366,9 +366,7 @@ impl SlaveContext {
               self.handle_stm_simple_rm_es_action(statuses, query_id, action);
             }
             SlavePLm::SimpleSTMTM(plm) => {
-              let (query_id, action) =
-                stmpaxos2pc_tm::handle_tm_plm(self, io_ctx, &mut statuses.stm_simple_tm_ess, plm);
-              self.handle_stm_simple_tm_es_action(statuses, query_id, action);
+              stmpaxos2pc_tm::handle_plm(self, io_ctx, &mut statuses.stm_simple_tm_ess, plm);
             }
             SlavePLm::SimpleRM(plm) => {
               let (query_id, action) =
@@ -383,9 +381,7 @@ impl SlaveContext {
           for (_, es) in &mut statuses.stm_simple_rm_ess {
             es.start_inserting(self, io_ctx);
           }
-          for (_, es) in &mut statuses.stm_simple_tm_ess {
-            es.start_inserting(self, io_ctx);
-          }
+          stmpaxos2pc_tm::handle_bundle_processed(self, io_ctx, &mut statuses.stm_simple_tm_ess);
           for (_, es) in &mut statuses.simple_rm_ess {
             es.start_inserting(self, io_ctx);
           }
@@ -451,9 +447,7 @@ impl SlaveContext {
           self.handle_stm_simple_rm_es_action(statuses, query_id, action);
         }
         SlaveRemotePayload::STMTMMessage(message) => {
-          let (query_id, action) =
-            stmpaxos2pc_tm::handle_tm_msg(self, io_ctx, &mut statuses.stm_simple_tm_ess, message);
-          self.handle_stm_simple_tm_es_action(statuses, query_id, action);
+          stmpaxos2pc_tm::handle_msg(self, io_ctx, &mut statuses.stm_simple_tm_ess, message);
         }
         SlaveRemotePayload::RMMessage(message) => {
           let (query_id, action) =
@@ -466,9 +460,9 @@ impl SlaveContext {
           self.handle_simple_tm_es_action(statuses, query_id, action);
         }
       },
-      SlaveForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
-        let gid = remote_leader_changed.gid.clone();
-        let lid = remote_leader_changed.lid.clone();
+      SlaveForwardMsg::RemoteLeaderChanged(rlc) => {
+        let gid = rlc.gid.clone();
+        let lid = rlc.lid.clone();
         if lid.gen > self.leader_map.value().get(&gid).unwrap().gen {
           // Only update the LeadershipId if the new one increases the old one.
           self.leader_map.update(|leader_map| {
@@ -476,18 +470,13 @@ impl SlaveContext {
           });
 
           // Inform STMSimpleTM
-          let query_ids: Vec<QueryId> = statuses.stm_simple_tm_ess.keys().cloned().collect();
-          for query_id in query_ids {
-            let es = statuses.stm_simple_tm_ess.get_mut(&query_id).unwrap();
-            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-            self.handle_stm_simple_tm_es_action(statuses, query_id, action);
-          }
+          stmpaxos2pc_tm::handle_rlc(self, io_ctx, &mut statuses.stm_simple_tm_ess, rlc.clone());
 
           // Inform SimpleTM
           let query_ids: Vec<QueryId> = statuses.simple_tm_ess.keys().cloned().collect();
           for query_id in query_ids {
             let es = statuses.simple_tm_ess.get_mut(&query_id).unwrap();
-            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+            let action = es.remote_leader_changed(self, io_ctx, rlc.clone());
             self.handle_simple_tm_es_action(statuses, query_id, action);
           }
 
@@ -495,7 +484,7 @@ impl SlaveContext {
           let query_ids: Vec<QueryId> = statuses.simple_rm_ess.keys().cloned().collect();
           for query_id in query_ids {
             let es = statuses.simple_rm_ess.get_mut(&query_id).unwrap();
-            let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
+            let action = es.remote_leader_changed(self, io_ctx, rlc.clone());
             self.handle_simple_rm_es_action(statuses, query_id, action);
           }
         }
@@ -513,12 +502,7 @@ impl SlaveContext {
         }
 
         // Inform STMSimpleTM
-        let query_ids: Vec<QueryId> = statuses.stm_simple_tm_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let es = statuses.stm_simple_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.leader_changed(self, io_ctx);
-          self.handle_stm_simple_tm_es_action(statuses, query_id.clone(), action);
-        }
+        stmpaxos2pc_tm::handle_lc(self, io_ctx, &mut statuses.stm_simple_tm_ess);
 
         // Inform STMSimpleRM
         let query_ids: Vec<QueryId> = statuses.stm_simple_rm_ess.keys().cloned().collect();
@@ -597,21 +581,6 @@ impl SlaveContext {
       STMSimpleRMAction::Wait => {}
       STMSimpleRMAction::Exit(_) => {
         statuses.stm_simple_rm_ess.remove(&query_id).unwrap();
-      }
-    }
-  }
-
-  /// Handles the actions produced by a STMSimpleTM.
-  fn handle_stm_simple_tm_es_action(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: QueryId,
-    action: STMPaxos2PCTMAction,
-  ) {
-    match action {
-      STMPaxos2PCTMAction::Wait => {}
-      STMPaxos2PCTMAction::Exit => {
-        statuses.stm_simple_tm_ess.remove(&query_id).unwrap();
       }
     }
   }

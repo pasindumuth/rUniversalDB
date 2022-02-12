@@ -33,9 +33,7 @@ use crate::slave_reconfig_es as slave_reconfig;
 use crate::slave_reconfig_es::{SlaveReconfigES, SlaveReconfigPLm};
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
-use crate::stmpaxos2pc_tm::{
-  handle_tm_msg, handle_tm_plm, STMPaxos2PCTMAction, State, TMServerContext,
-};
+use crate::stmpaxos2pc_tm::{STMPaxos2PCTMAction, State, TMServerContext};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
@@ -790,26 +788,20 @@ impl MasterContext {
         for paxos_log_msg in bundle {
           match paxos_log_msg {
             // MasterQueryPlanning
-            MasterPLm::MasterQueryPlanning(planning_plm) => {
-              master_planning::handle_plm(self, io_ctx, &mut statuses.planning_ess, planning_plm);
+            MasterPLm::MasterQueryPlanning(plm) => {
+              master_planning::handle_plm(self, io_ctx, &mut statuses.planning_ess, plm);
             }
             // CreateTable
             MasterPLm::CreateTable(plm) => {
-              let (query_id, action) =
-                handle_tm_plm(self, io_ctx, &mut statuses.create_table_tm_ess, plm);
-              self.handle_create_table_es_action(statuses, query_id, action);
+              paxos2pc::handle_plm(self, io_ctx, &mut statuses.create_table_tm_ess, plm);
             }
             // AlterTable
             MasterPLm::AlterTable(plm) => {
-              let (query_id, action) =
-                handle_tm_plm(self, io_ctx, &mut statuses.alter_table_tm_ess, plm);
-              self.handle_alter_table_es_action(statuses, query_id, action);
+              paxos2pc::handle_plm(self, io_ctx, &mut statuses.alter_table_tm_ess, plm);
             }
             // DropTable
             MasterPLm::DropTable(plm) => {
-              let (query_id, action) =
-                handle_tm_plm(self, io_ctx, &mut statuses.drop_table_tm_ess, plm);
-              self.handle_drop_table_es_action(statuses, query_id, action);
+              paxos2pc::handle_plm(self, io_ctx, &mut statuses.drop_table_tm_ess, plm);
             }
             // FreeNode PLms
             MasterPLm::FreeNodeManagerPLm(plm) => {
@@ -837,8 +829,8 @@ impl MasterContext {
               let mut es = statuses.slave_group_create_ess.remove(&confirm_create.sid).unwrap();
               es.handle_confirm_plm(self, io_ctx);
             }
-            MasterPLm::SlaveConfigPLm(reconfig) => {
-              slave_reconfig::handle_plm(self, io_ctx, &mut statuses.slave_reconfig_ess, reconfig);
+            MasterPLm::SlaveConfigPLm(plm) => {
+              slave_reconfig::handle_plm(self, io_ctx, &mut statuses.slave_reconfig_ess, plm);
             }
           }
         }
@@ -847,17 +839,12 @@ impl MasterContext {
           // Run the Main Loop
           self.run_main_loop(io_ctx, statuses);
 
-          // Inform all DDL ESs in WaitingInserting and start inserting a PLm.
-          for (_, es) in &mut statuses.create_table_tm_ess {
-            es.start_inserting(self, io_ctx);
-          }
-          for (_, es) in &mut statuses.alter_table_tm_ess {
-            es.start_inserting(self, io_ctx);
-          }
-          for (_, es) in &mut statuses.drop_table_tm_ess {
-            es.start_inserting(self, io_ctx);
-          }
-
+          // CreateTable
+          paxos2pc::handle_bundle_processed(self, io_ctx, &mut statuses.create_table_tm_ess);
+          // AlterTable
+          paxos2pc::handle_bundle_processed(self, io_ctx, &mut statuses.alter_table_tm_ess);
+          // DropTable
+          paxos2pc::handle_bundle_processed(self, io_ctx, &mut statuses.drop_table_tm_ess);
           // MasterQueryPlanningES
           master_planning::handle_bundle_processed(self, &mut statuses.planning_ess);
 
@@ -882,8 +869,8 @@ impl MasterContext {
                 do_reconfig = Some((rem_eids, new_eids));
               }
               PaxosGroupId::Slave(sid) => {
-                let es = statuses.slave_reconfig_ess.get_mut(&sid).unwrap();
-                es.handle_eids_granted(self, new_eids);
+                let ess = &mut statuses.slave_reconfig_ess;
+                slave_reconfig::handle_eids_granted(self, ess, &sid, new_eids);
               }
             }
           }
@@ -1045,21 +1032,15 @@ impl MasterContext {
           }
           // CreateTable
           MasterRemotePayload::CreateTable(message) => {
-            let (query_id, action) =
-              handle_tm_msg(self, io_ctx, &mut statuses.create_table_tm_ess, message);
-            self.handle_create_table_es_action(statuses, query_id, action);
+            paxos2pc::handle_msg(self, io_ctx, &mut statuses.create_table_tm_ess, message);
           }
           // AlterTable
           MasterRemotePayload::AlterTable(message) => {
-            let (query_id, action) =
-              handle_tm_msg(self, io_ctx, &mut statuses.alter_table_tm_ess, message);
-            self.handle_alter_table_es_action(statuses, query_id, action);
+            paxos2pc::handle_msg(self, io_ctx, &mut statuses.alter_table_tm_ess, message);
           }
           // DropTable
           MasterRemotePayload::DropTable(message) => {
-            let (query_id, action) =
-              handle_tm_msg(self, io_ctx, &mut statuses.drop_table_tm_ess, message);
-            self.handle_drop_table_es_action(statuses, query_id, action);
+            paxos2pc::handle_msg(self, io_ctx, &mut statuses.drop_table_tm_ess, message);
           }
           // MasterGossipRequest
           MasterRemotePayload::MasterGossipRequest(gossip_req) => {
@@ -1074,11 +1055,11 @@ impl MasterContext {
         // Run Main Loop
         self.run_main_loop(io_ctx, statuses);
       }
-      MasterForwardMsg::RemoteLeaderChanged(remote_leader_changed) => {
-        let gid = remote_leader_changed.gid.clone();
-        let lid = remote_leader_changed.lid.clone();
+      MasterForwardMsg::RemoteLeaderChanged(rlc) => {
+        let gid = rlc.gid.clone();
+        let lid = rlc.lid.clone();
 
-        // We filter `remote_leader_changed` to ensure that the `leader_map` only contains
+        // We filter `rlc` to ensure that the `leader_map` only contains
         // `EndpointId`s in the Current Paxos View.
         let accept = match &gid {
           PaxosGroupId::Master => self.gossip.get().master_address_config.contains(&lid.eid),
@@ -1100,35 +1081,15 @@ impl MasterContext {
             });
 
             // CreateTable
-            let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
-            for query_id in query_ids {
-              let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-              self.handle_create_table_es_action(statuses, query_id, action);
-            }
-
+            paxos2pc::handle_rlc(self, io_ctx, &mut statuses.create_table_tm_ess, rlc.clone());
             // AlterTable
-            let query_ids: Vec<QueryId> = statuses.alter_table_tm_ess.keys().cloned().collect();
-            for query_id in query_ids {
-              let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-              self.handle_alter_table_es_action(statuses, query_id, action);
-            }
-
+            paxos2pc::handle_rlc(self, io_ctx, &mut statuses.alter_table_tm_ess, rlc.clone());
             // DropTable
-            let query_ids: Vec<QueryId> = statuses.drop_table_tm_ess.keys().cloned().collect();
-            for query_id in query_ids {
-              let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-              let action = es.remote_leader_changed(self, io_ctx, remote_leader_changed.clone());
-              self.handle_drop_table_es_action(statuses, query_id, action);
-            }
-
+            paxos2pc::handle_rlc(self, io_ctx, &mut statuses.drop_table_tm_ess, rlc.clone());
             // SlaveReconfigES
-            let ess = &mut statuses.slave_reconfig_ess;
-            slave_reconfig::handle_remote_leader_changed(self, io_ctx, ess, &gid);
-
+            slave_reconfig::handle_rlc(self, io_ctx, &mut statuses.slave_reconfig_ess, rlc.clone());
             // MasterQueryPlanningES
-            master_planning::handle_remote_leader_changed(&mut statuses.planning_ess, &gid);
+            master_planning::handle_rlc(&mut statuses.planning_ess, rlc.clone());
           }
         }
       }
@@ -1143,39 +1104,19 @@ impl MasterContext {
         }
 
         // CreateTable
-        let query_ids: Vec<QueryId> = statuses.create_table_tm_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let es = statuses.create_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.leader_changed(self, io_ctx);
-          self.handle_create_table_es_action(statuses, query_id, action);
-        }
-
+        paxos2pc::handle_lc(self, io_ctx, &mut statuses.create_table_tm_ess);
         // AlterTable
-        let query_ids: Vec<QueryId> = statuses.alter_table_tm_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let es = statuses.alter_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.leader_changed(self, io_ctx);
-          self.handle_alter_table_es_action(statuses, query_id, action);
-        }
-
+        paxos2pc::handle_lc(self, io_ctx, &mut statuses.alter_table_tm_ess);
         // DropTable
-        let query_ids: Vec<QueryId> = statuses.drop_table_tm_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let es = statuses.drop_table_tm_ess.get_mut(&query_id).unwrap();
-          let action = es.leader_changed(self, io_ctx);
-          self.handle_drop_table_es_action(statuses, query_id, action);
-        }
-
+        paxos2pc::handle_lc(self, io_ctx, &mut statuses.drop_table_tm_ess);
         // SlaveGroupCreate
         for (_, es) in &mut statuses.slave_group_create_ess {
           es.leader_changed(self, io_ctx);
         }
-
         // SlaveReconfig
-        slave_reconfig::handle_leader_changed(self, io_ctx, &mut statuses.slave_reconfig_ess);
-
+        slave_reconfig::handle_lc(self, io_ctx, &mut statuses.slave_reconfig_ess);
         // MasterQueryPlanningES
-        master_planning::handle_leader_changed(self, &mut statuses.planning_ess);
+        master_planning::handle_lc(self, &mut statuses.planning_ess);
 
         // MasterReconfig
         statuses.do_reconfig = None;
@@ -1526,51 +1467,6 @@ impl MasterContext {
     }
   }
 
-  /// Handles the actions specified by a CreateTableES.
-  fn handle_create_table_es_action(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: QueryId,
-    action: STMPaxos2PCTMAction,
-  ) {
-    match action {
-      STMPaxos2PCTMAction::Wait => {}
-      STMPaxos2PCTMAction::Exit => {
-        statuses.create_table_tm_ess.remove(&query_id);
-      }
-    }
-  }
-
-  /// Handles the actions specified by a AlterTableES.
-  fn handle_alter_table_es_action(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: QueryId,
-    action: STMPaxos2PCTMAction,
-  ) {
-    match action {
-      STMPaxos2PCTMAction::Wait => {}
-      STMPaxos2PCTMAction::Exit => {
-        statuses.alter_table_tm_ess.remove(&query_id);
-      }
-    }
-  }
-
-  /// Handles the actions specified by a AlterTableES.
-  fn handle_drop_table_es_action(
-    &mut self,
-    statuses: &mut Statuses,
-    query_id: QueryId,
-    action: STMPaxos2PCTMAction,
-  ) {
-    match action {
-      STMPaxos2PCTMAction::Wait => {}
-      STMPaxos2PCTMAction::Exit => {
-        statuses.drop_table_tm_ess.remove(&query_id);
-      }
-    }
-  }
-
   /// Creates and sends a `MasterSnapshot` to all `unconfirmed_eids` that map to `false.
   fn start_snapshot<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, statuses: &Statuses) {
     // Next, send the new `EndpointId`s a MasterSnapshot so that they can start up.
@@ -1583,33 +1479,12 @@ impl MasterContext {
       leader_map: self.leader_map.value().clone(),
       free_nodes: self.free_node_manager.free_nodes().clone(),
       paxos_driver_start,
-      create_table_tm_ess: Default::default(),
-      alter_table_tm_ess: Default::default(),
-      drop_table_tm_ess: Default::default(),
+      create_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.create_table_tm_ess),
+      alter_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.alter_table_tm_ess),
+      drop_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.drop_table_tm_ess),
       slave_group_create_ess: Default::default(),
       slave_reconfig_ess: slave_reconfig::handle_reconfig_snapshot(&statuses.slave_reconfig_ess),
     };
-
-    // Add in the CreateTableTMES that have at least been Prepared.
-    for (qid, es) in &statuses.create_table_tm_ess {
-      if let Some(es) = es.reconfig_snapshot() {
-        snapshot.create_table_tm_ess.insert(qid.clone(), es);
-      }
-    }
-
-    // Add in the AlterTableTMES that have at least been Prepared.
-    for (qid, es) in &statuses.alter_table_tm_ess {
-      if let Some(es) = es.reconfig_snapshot() {
-        snapshot.alter_table_tm_ess.insert(qid.clone(), es);
-      }
-    }
-
-    // Add in the DropTableTMES that have at least been Prepared.
-    for (qid, es) in &statuses.drop_table_tm_ess {
-      if let Some(es) = es.reconfig_snapshot() {
-        snapshot.drop_table_tm_ess.insert(qid.clone(), es);
-      }
-    }
 
     // Add in the SlaveGroupCreateES.
     for (qid, es) in &statuses.slave_group_create_ess {
