@@ -101,6 +101,8 @@ impl FreeNodeManager {
   pub fn leader_changed(&mut self, ctx: FreeNodeManagerContext) {
     // Check if we lost Leadership.
     if !ctx.is_leader() {
+      self.pending_new_free_nodes.clear();
+
       // Set the heartbeats to a steady but non-zero value.
       for (_, count) in &mut self.free_node_heartbeat {
         *count = HEARTBEAT_BACKUP_VALUE;

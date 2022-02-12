@@ -351,13 +351,20 @@ impl SlaveState {
   }
 
   /// This should be called at the very start of the life of a Slave node. This
-  /// will start the timer events, paxos insertion, etc.
-  pub fn bootstrap<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
+  /// will start the timer events, paxos insertion, etc. Here, `tids` is the initial
+  /// set of Tablets.
+  pub fn bootstrap<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO, tids: Vec<TabletGroupId>) {
     let ctx = &mut SlavePaxosContext { io_ctx, this_eid: &self.ctx.this_eid };
     if self.ctx.is_leader() {
-      // Start the Paxos insertion cycle with an empty bundle. Recall that since Slaves
-      // start with no Tablets, the SharedPaxosBundle is trivially constructible.
-      self.ctx.paxos_driver.insert_bundle(ctx, UserPLEntry::Bundle(SharedPaxosBundle::default()));
+      // Start the Paxos insertion cycle with an empty bundle. Note that we create
+      // the TabletBundles as well.
+      self.ctx.paxos_driver.insert_bundle(
+        ctx,
+        UserPLEntry::Bundle(SharedPaxosBundle {
+          slave: Default::default(),
+          tablet: tids.into_iter().map(|tid| (tid, TabletBundle::default())).collect(),
+        }),
+      );
     }
 
     // Start Paxos Timer Events
@@ -709,12 +716,14 @@ impl SlaveContext {
         SlaveTimerInput::PaxosGroupFailureDetector => {
           if self.is_leader() {
             let maybe_dead_eids = self.paxos_driver.get_maybe_dead();
-            // Recall that the above returns only as much as we are capable of reconfiguring.
-            let nodes_dead = msg::NodesDead { sid: self.this_sid.clone(), eids: maybe_dead_eids };
-            // Here, we send the Master a `NodesDead` message indicating that we
-            // want to reconfigure. Recall we only reconfigure one-at-a-time to
-            // preserve our liveness properties.
-            self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::NodesDead(nodes_dead));
+            if !maybe_dead_eids.is_empty() {
+              // Recall that the above returns only as much as we are capable of reconfiguring.
+              let nodes_dead = msg::NodesDead { sid: self.this_sid.clone(), eids: maybe_dead_eids };
+              // Here, we send the Master a `NodesDead` message indicating that we
+              // want to reconfigure. Recall we only reconfigure one-at-a-time to
+              // preserve our liveness properties.
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::NodesDead(nodes_dead));
+            }
           }
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower

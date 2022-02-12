@@ -313,6 +313,7 @@ pub struct ReconfigBundle<BundleT> {
   pub new_eids: Vec<EndpointId>,
   pub bundle: BundleT,
 }
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LeaderChanged {
   pub lid: LeadershipId,

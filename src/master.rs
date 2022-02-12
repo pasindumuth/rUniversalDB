@@ -759,9 +759,13 @@ impl MasterContext {
             // Only do PaxosGroup failure detection if we are not already trying to reconfigure.
             if statuses.do_reconfig.is_none() {
               let maybe_dead_eids = self.paxos_driver.get_maybe_dead();
-              // Recall that the above returns only as much as we are capable of reconfiguring.
-              self.free_node_manager.request_new_eids(PaxosGroupId::Master, maybe_dead_eids.len());
-              statuses.do_reconfig = Some(maybe_dead_eids);
+              if !maybe_dead_eids.is_empty() {
+                // Recall that the above returns only as much as we are capable of reconfiguring.
+                self
+                  .free_node_manager
+                  .request_new_eids(PaxosGroupId::Master, maybe_dead_eids.len());
+                statuses.do_reconfig = Some(maybe_dead_eids);
+              }
             }
           }
 
@@ -866,13 +870,14 @@ impl MasterContext {
               es.handle_confirm_plm(self, io_ctx);
             }
             MasterPLm::ReconfigSlaveGroupPLm(reconfig) => {
-              if let Some(es) = statuses.slave_reconfig_ess.get_mut(&reconfig.sid) {
+              let sid = reconfig.sid.clone();
+              if self.is_leader() {
+                let es = statuses.slave_reconfig_ess.get_mut(&sid).unwrap();
                 es.handle_reconfig_plm(self, io_ctx, reconfig);
               } else {
-                // If there is not a `SlaveReconfigES`, this is a backup and we should make one.
-                statuses
-                  .slave_reconfig_ess
-                  .insert(reconfig.sid.clone(), SlaveReconfigES::new_follower(self, reconfig));
+                // This is a backup, so we should make a `SlaveReconfigES`.
+                let es = SlaveReconfigES::new_follower(self, reconfig);
+                statuses.slave_reconfig_ess.insert(sid, es);
               }
             }
             MasterPLm::SlaveGroupReconfiguredPLm(reconfigured) => {

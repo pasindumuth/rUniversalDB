@@ -413,15 +413,6 @@ impl<T: PayloadTypes, InnerT: Paxos2PCTMInner<T>> Paxos2PCTMOuter<T, InnerT> {
     }
     Paxos2PCTMAction::Wait
   }
-
-  // Utilities
-
-  pub fn all_rms(&self) -> &Vec<T::RMPath> {
-    match &self.state {
-      State::Preparing(PreparingSt { all_rms, .. })
-      | State::CheckingPrepared(CheckingPreparedSt { all_rms, .. }) => all_rms,
-    }
-  }
 }
 
 // -----------------------------------------------------------------------------------------------

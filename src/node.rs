@@ -408,7 +408,7 @@ impl NodeState {
                 let mut slave_state = SlaveState::new(slave_context);
 
                 // Bootstrap the slave
-                slave_state.bootstrap(io_ctx);
+                slave_state.bootstrap(io_ctx, vec![]);
 
                 // Convert all buffered messages to SlaveMessages, since those should be all
                 // that is present.
@@ -456,6 +456,7 @@ impl NodeState {
                 }
 
                 // Create the Tablets
+                let mut tids: Vec<_> = snapshot.tablet_snapshots.keys().cloned().collect();
                 for (_, tablet_snapshot) in snapshot.tablet_snapshots {
                   io_ctx.create_tablet_full(
                     gossip.clone(),
@@ -479,7 +480,7 @@ impl NodeState {
                 );
 
                 // Bootstrap the slave
-                slave_state.bootstrap(io_ctx);
+                slave_state.bootstrap(io_ctx, tids);
 
                 // Convert all buffered messages to SlaveMessages, since those should be all
                 // that is present.
