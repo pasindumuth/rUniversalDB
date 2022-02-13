@@ -11,7 +11,7 @@ default-run = "transact"
 serde = { version = "1.0.117", features = ["derive"] }
 sqlparser = "0.9.0"
 sqlformat = "0.1.8"
-rmp-serde = "0.14.4"
+rmp-serde = "1.0.0"
 rand = "0.7.3"
 rand_xorshift = "0.2.0"
 byteorder = "1.3.4"

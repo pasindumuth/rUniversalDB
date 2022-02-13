@@ -1,4 +1,4 @@
-FROM rust:1.48.0
+FROM rustlang/rust:nightly
 WORKDIR /home
 COPY ./ ./
-RUN cargo build
+RUN cargo build --bin transact; cargo build --bin client;

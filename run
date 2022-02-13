@@ -1,40 +1,46 @@
 #!/bin/bash
 
+readonly NUM_SLAVES_GROUPS=1 # Tune this
+readonly NUM_SLAVES=$((5 * $NUM_SLAVES_GROUPS))
+
 if [ "$1" = "build" ]; then
   docker build -t runiversal .
 elif [ "$1" = "client" ]; then
   # Start the image by running the client, and start an interactive terminal.
-  docker run -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal target/debug/client -i 172.19.0.2;
+  docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal scripts/client -i 172.19.0.2;
   # After we exit the terminal, clean up the container.
   docker container rm rclient;
 elif [ "$1" = "masters" ]; then
   # Start the image by running transact, and have it be in the background.
-  for i in {10..14}
-  do
+  for ((i = 10; i < 15; i++)); do
     CONTAINER_NAME="runiversal${i}";
-    docker run -d --name="${CONTAINER_NAME}" --ip 172.19.0."${i}" --network=runiversal-net runiversal target/debug/transact -i 172.19.0."${i}" -t masterbootup;
+    docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.19.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.19.0."${i}" -t masterbootup;
   done
 elif [ "$1" = "slaves" ]; then
   # Start the image by running transact, and have it be in the background.
-  for i in {15..34}
-  do
+  for ((i = 15; i < $((15 + $NUM_SLAVES)); i++)); do
     CONTAINER_NAME="runiversal${i}";
-    docker run -d --name="${CONTAINER_NAME}" --ip 172.19.0."${i}" --network=runiversal-net runiversal target/debug/transact -i 172.19.0."${i}" -t freenode -f newslave;
+    docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.19.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.19.0."${i}" -t freenode -f newslave -e 172.19.0.10;
   done
 elif [ "$1" = "clean" ]; then
   CONTAINERS="rclient";
-  for i in {10..34}
-  do
+  for ((i = 10; i < $((15 + $NUM_SLAVES)); i++)); do
     CONTAINERS="${CONTAINERS} runiversal${i}";
   done
-  docker kill "${CONTAINERS}" 2>/dev/null;
-  docker container rm "${CONTAINERS}" 2>/dev/null;
+  docker kill ${CONTAINERS} 2>/dev/null;
+  docker container rm ${CONTAINERS} 2>/dev/null;
 elif [ "$1" = "mclean" ]; then
   CONTAINERS="";
-  for i in {10..14}
-  do
+  for ((i = 10; i < 15; i++)); do
     CONTAINERS="${CONTAINERS} runiversal${i}";
   done
-  docker kill "${CONTAINERS}" 2>/dev/null;
-  docker container rm "${CONTAINERS}" 2>/dev/null;
+  docker kill ${CONTAINERS} 2>/dev/null;
+  docker container rm ${CONTAINERS} 2>/dev/null;
+elif [ "$1" = "sclean" ]; then
+  CONTAINERS="";
+  for ((i = 15; i < $((15 + $NUM_SLAVES)); i++)); do
+    CONTAINERS="${CONTAINERS} runiversal${i}";
+  done
+  docker kill ${CONTAINERS} 2>/dev/null;
+  docker container rm ${CONTAINERS} 2>/dev/null;
 fi

@@ -93,36 +93,40 @@ fn main() {
           );
         }
       }
+      Some(("target", rest)) => {
+        opt_target_eid = Some(EndpointId(rest.to_string()));
+      }
       _ => {
         if input == "exit" {
           break;
         } else {
           if let Some(target_eid) = &opt_target_eid {
-            match input.split_once(" ") {
-              Some(("target", rest)) => {
-                opt_target_eid = Some(EndpointId(rest.to_string()));
-              }
-              _ => {
-                // Send the message.
-                let request_id = mk_rid(&mut rand);
-                send_msg(
-                  &out_conn_map,
-                  &target_eid,
-                  msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
-                    msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
-                      sender_eid: this_eid.clone(),
-                      request_id,
-                      query: input,
-                    }),
-                  )),
-                );
+            let request_id = mk_rid(&mut rand);
+            let network_msg = if master_eids.contains(&target_eid) {
+              // Send this message as a  DDL Query, since the target is set for the Master.
+              msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+                msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
+                  sender_eid: this_eid.clone(),
+                  request_id,
+                  query: input,
+                }),
+              ))
+            } else {
+              // Otherwise, send this message as a DQL Query, since the Target is a Slave.
+              msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+                msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
+                  sender_eid: this_eid.clone(),
+                  request_id,
+                  query: input,
+                }),
+              ))
+            };
+            send_msg(&out_conn_map, &target_eid, network_msg);
 
-                // Wait for a response. We assume the first response is for the
-                // request we just sent above.
-                let (_, message) = to_server_receiver.recv().unwrap();
-                print!("{:#?}", message);
-              }
-            }
+            // Wait for a response. We assume the first response is for the
+            // request we just sent above.
+            let (_, message) = to_server_receiver.recv().unwrap();
+            print!("{:#?}", message);
           } else {
             print!("A target address is not set. Do that by typing 'target <hostname>'.\n");
           }

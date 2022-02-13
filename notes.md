@@ -21,15 +21,19 @@ cargo run --bin client 2>/dev/null
 
 ## Run & Stop
 docker run -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal target/debug/client -i 172.19.0.2
-docker run -d --name=runiversal10 --ip 172.19.0.10 --network=runiversal-net runiversal target/debug/transact -i 172.19.0.10 -t masterbootup 
+docker run -d --name=runiversal10 --ip 172.19.0.10 --network=runiversal-net runiversal target/debug/transact -i 172.19.0.10 -t masterbootup
 docker run -d --name=runiversal15 --ip 172.19.0.15 --network=runiversal-net runiversal target/debug/transact -i 172.19.0.15 -t freenode -f newslave -e 172.19.0.10
 
 docker kill rclient; docker container rm rclient;
 docker kill runiversal10; docker container rm runiversal10;
 docker kill runiversal15; docker container rm runiversal15;
 
-startmaster 172.19.0.10 172.19.0.11 172.19.0.12 172.19.0.13 172.19.0.14 172.19.0.15
+startmaster 172.19.0.10 172.19.0.11 172.19.0.12 172.19.0.13 172.19.0.14
 target 172.19.0.15
+
+CREATE TABLE users(id INT PRIMARY KEY);
+INSERT INTO users(id) VALUES (1), (2), (3)
+SELECT id FROM users
 
 ## Code
 Example of implementing Debug for a struct:
