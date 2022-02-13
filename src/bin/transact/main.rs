@@ -5,9 +5,7 @@ mod server;
 #[macro_use]
 extern crate runiversal;
 
-use crate::server::{
-  handle_conn, handle_self_conn, send_msg, ProdCoreIOCtx, ProdIOCtx, SERVER_PORT, TIMER_INCREMENT,
-};
+use crate::server::{handle_conn, handle_self_conn, ProdCoreIOCtx, ProdIOCtx, TIMER_INCREMENT};
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -24,7 +22,7 @@ use runiversal::model::common::{
 };
 use runiversal::model::message as msg;
 use runiversal::model::message::FreeNodeMessage;
-use runiversal::net::{recv, send_bytes};
+use runiversal::net::{recv, send_bytes, send_msg, SERVER_PORT};
 use runiversal::node::{GenericInput, NodeState};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{

@@ -13,9 +13,11 @@ docker build -t runiversal .
 
 ## Local Build and Test
 cargo build --release &&
-cargo run --release --bin paxos &&
-cargo run --release --bin paxos2pc_sim &&
-cargo run --release --bin simtest
+cargo run --release --bin paxos 2>/dev/null &&
+cargo run --release --bin paxos2pc_sim 2>/dev/null &&
+cargo run --release --bin simtest 2>/dev/null
+
+cargo run --bin client 2>/dev/null
 
 ## Run & Stop
 ### Only Slaves
