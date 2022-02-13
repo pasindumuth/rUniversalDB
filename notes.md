@@ -20,23 +20,18 @@ cargo run --release --bin simtest 2>/dev/null
 cargo run --bin client 2>/dev/null
 
 ## Run & Stop
-### Only Slaves
-docker kill universal0; docker container rm universal0;
-docker kill universal1; docker container rm universal1;
-docker kill universal2; docker container rm universal2;
-docker kill universal3; docker container rm universal3;
-docker kill universal4; docker container rm universal4;
-docker kill client; docker container rm client;
+docker run -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal target/debug/client -i 172.19.0.2
+docker run -d --name=runiversal10 --ip 172.19.0.10 --network=runiversal-net runiversal target/debug/transact -i 172.19.0.10 -t masterbootup 
+docker run -d --name=runiversal15 --ip 172.19.0.15 --network=runiversal-net runiversal target/debug/transact -i 172.19.0.15 -t freenode -f newslave -e 172.19.0.10
 
-docker run -it --name=universal0 --ip 172.19.0.3 --network=runiversal-net runiversal cargo run 0 172.19.0.3
-docker run -it --name=universal1 --ip 172.19.0.4 --network=runiversal-net runiversal cargo run 1 172.19.0.4 172.19.0.3
-docker run -it --name=universal2 --ip 172.19.0.5 --network=runiversal-net runiversal cargo run 2 172.19.0.5 172.19.0.3 172.19.0.4
-docker run -it --name=universal3 --ip 172.19.0.6 --network=runiversal-net runiversal cargo run 3 172.19.0.6 172.19.0.3 172.19.0.4 172.19.0.5
-docker run -it --name=universal4 --ip 172.19.0.7 --network=runiversal-net runiversal cargo run 4 172.19.0.7 172.19.0.3 172.19.0.4 172.19.0.5 172.19.0.6
+docker kill rclient; docker container rm rclient;
+docker kill runiversal10; docker container rm runiversal10;
+docker kill runiversal15; docker container rm runiversal15;
 
-docker run -it --name=client --network=runiversal-net runiversal cargo run --bin client 172.19.0.3 1610
+startmaster 172.19.0.10 172.19.0.11 172.19.0.12 172.19.0.13 172.19.0.14 172.19.0.15
+target 172.19.0.15
 
-
+## Code
 Example of implementing Debug for a struct:
 
 ```rust

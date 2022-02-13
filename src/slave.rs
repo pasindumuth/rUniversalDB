@@ -24,7 +24,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
-use std::os::macos::raw::stat;
 use std::sync::Arc;
 
 #[path = "./slave_test.rs"]
