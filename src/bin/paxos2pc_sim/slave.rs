@@ -8,10 +8,7 @@ use crate::stm_simple_tm_es::{
   STMSimpleAborted, STMSimplePayloadTypes, STMSimpleTMES, STMSimpleTMInner,
 };
 use rand::RngCore;
-use runiversal::common::{
-  mk_t, BasicIOCtx, LeaderMap, RemoteLeaderChangedPLm, VersionedValue,
-  REMOTE_LEADER_CHANGED_PERIOD_MS,
-};
+use runiversal::common::{mk_t, BasicIOCtx, LeaderMap, RemoteLeaderChangedPLm, VersionedValue};
 use runiversal::model::common::{EndpointId, Gen, PaxosGroupIdTrait, QueryId};
 use runiversal::model::common::{LeadershipId, PaxosGroupId, SlaveGroupId};
 use runiversal::network_driver::{NetworkDriver, NetworkDriverContext};
@@ -19,6 +16,7 @@ use runiversal::paxos2pc_rm;
 use runiversal::paxos2pc_rm::Paxos2PCRMAction;
 use runiversal::paxos2pc_tm;
 use runiversal::paxos2pc_tm::Paxos2PCTMAction;
+use runiversal::slave::SlaveConfig;
 use runiversal::stmpaxos2pc_rm;
 use runiversal::stmpaxos2pc_rm::STMPaxos2PCRMAction;
 use runiversal::stmpaxos2pc_tm;
@@ -197,7 +195,7 @@ impl paxos2pc_tm::RMServerContext<SimplePayloadTypes> for SlaveContext {
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct SlaveState {
-  pub context: SlaveContext,
+  pub ctx: SlaveContext,
   pub statuses: Statuses,
 }
 
@@ -205,6 +203,7 @@ pub struct SlaveState {
 #[derive(Debug)]
 pub struct SlaveContext {
   // Metadata
+  pub slave_config: SlaveConfig,
   pub this_sid: SlaveGroupId,
   pub this_gid: PaxosGroupId, // self.this_sid.to_gid()
   pub this_eid: EndpointId,
@@ -224,17 +223,19 @@ pub struct SlaveContext {
 
 impl SlaveState {
   pub fn new(slave_context: SlaveContext) -> SlaveState {
-    SlaveState { context: slave_context, statuses: Default::default() }
+    SlaveState { ctx: slave_context, statuses: Default::default() }
   }
 
   pub fn handle_full_input<IO: ISlaveIOCtx>(&mut self, io_ctx: &mut IO, input: FullSlaveInput) {
-    self.context.handle_full_input(io_ctx, &mut self.statuses, input);
+    self.ctx.handle_full_input(io_ctx, &mut self.statuses, input);
   }
 
-  pub fn initialize<IO: ISlaveIOCtx>(&mut self, io_ctx: &mut IO) {
-    // Start the RemoteLeaderChange dispatch cycle
-    io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD_MS), SlaveTimerInput::RemoteLeaderChanged);
-    if self.context.is_leader() {
+  pub fn bootstrap<IO: ISlaveIOCtx>(&mut self, io_ctx: &mut IO) {
+    // Start timer events
+    let timer_event = SlaveForwardMsg::SlaveTimerInput(SlaveTimerInput::RemoteLeaderChanged);
+    self.ctx.handle_input(io_ctx, &mut self.statuses, timer_event);
+
+    if self.ctx.is_leader() {
       // Start the bundle insertion cycle for this PaxosGroup.
       io_ctx.insert_bundle(SlaveBundle::default());
     }
@@ -245,12 +246,14 @@ impl SlaveContext {
   pub fn new(
     this_sid: SlaveGroupId,
     this_eid: EndpointId,
+    slave_config: SlaveConfig,
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
     leader_map: LeaderMap,
   ) -> SlaveContext {
     let leader_map = VersionedValue::new(leader_map);
     let network_driver = NetworkDriver::new(&leader_map);
     SlaveContext {
+      slave_config,
       this_sid: this_sid.clone(),
       this_gid: this_sid.to_gid(),
       this_eid,
@@ -542,8 +545,8 @@ impl SlaveContext {
             }
 
             // Do this again 5 ms later.
-            io_ctx
-              .defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD_MS), SlaveTimerInput::RemoteLeaderChanged);
+            let defer_time = mk_t(self.slave_config.remote_leader_changed_period_ms);
+            io_ctx.defer(defer_time, SlaveTimerInput::RemoteLeaderChanged);
           }
         }
       }

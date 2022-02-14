@@ -323,15 +323,34 @@ fn get_test_configs(num_paxos_groups: u32, timestamp_suffix_divisor: u64) -> Nod
     remote_next_index_thresh: 5,
     max_failable: 1,
   };
+
+  let free_node_heartbeat_timer_ms = 5;
+  let remote_leader_changed_period_ms = 5;
+  let failure_detector_period_ms = 5;
+  let check_unconfirmed_eids_period_ms = 15;
+  let master_config = MasterConfig {
+    timestamp_suffix_divisor,
+    slave_group_size: num_paxos_groups,
+    remote_leader_changed_period_ms,
+    failure_detector_period_ms,
+    check_unconfirmed_eids_period_ms,
+    gossip_data_period_ms: 5,
+    num_coords: 3,
+    free_node_heartbeat_timer_ms,
+  };
+  let slave_config = SlaveConfig {
+    timestamp_suffix_divisor,
+    remote_leader_changed_period_ms,
+    failure_detector_period_ms,
+    check_unconfirmed_eids_period_ms,
+  };
+
   let coord_config = CoordConfig { timestamp_suffix_divisor };
-  let master_config =
-    MasterConfig { timestamp_suffix_divisor, slave_group_size: num_paxos_groups, num_coord: 3 };
-  let slave_config = SlaveConfig { timestamp_suffix_divisor };
   let tablet_config = TabletConfig { timestamp_suffix_divisor };
 
   // Combine the above
   NodeConfig {
-    free_node_timer_ms: 1,
+    free_node_heartbeat_timer_ms,
     paxos_config,
     coord_config,
     master_config,

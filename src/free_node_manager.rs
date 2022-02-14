@@ -1,4 +1,4 @@
-use crate::common::{mk_cid, mk_sid, LeaderMap, MasterIOCtx, MasterTraceMessage, NUM_COORDS};
+use crate::common::{mk_cid, mk_sid, LeaderMap, MasterIOCtx, MasterTraceMessage};
 use crate::master::plm::FreeNodeManagerPLm;
 use crate::master::{MasterBundle, MasterConfig, MasterContext, MasterPLm};
 use crate::model::common::{CoordGroupId, EndpointId, LeadershipId, PaxosGroupId, SlaveGroupId};
@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 // -----------------------------------------------------------------------------------------------
 
 pub struct FreeNodeManagerContext<'a> {
+  pub config: &'a MasterConfig,
   pub this_eid: &'a EndpointId,
   pub leader_map: &'a LeaderMap,
   pub master_bundle: &'a mut MasterBundle,
@@ -259,7 +260,7 @@ impl FreeNodeManager {
       }
       let sid = mk_sid(&mut io_ctx.rand());
       let mut coord_ids = Vec::<CoordGroupId>::new();
-      for _ in 0..NUM_COORDS {
+      for _ in 0..ctx.config.num_coords {
         coord_ids.push(mk_cid(&mut io_ctx.rand()));
       }
       plm.new_slave_groups.insert(sid, (new_slave_eids, coord_ids));

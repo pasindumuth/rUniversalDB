@@ -4,8 +4,6 @@ use crate::alter_table_tm_es::{
 use crate::common::{
   lookup_pos, map_insert, mk_qid, mk_t, mk_tid, remove_item, update_all_eids, GeneralTraceMessage,
   GossipData, LeaderMap, MasterIOCtx, MasterTraceMessage, TableSchema, Timestamp, VersionedValue,
-  CHECK_UNCONFIRMED_EIDS_PERIOD_MS, FAILURE_DETECTOR_PERIOD_MS, FREE_NODE_HEARTBEAT_TIMER_MS,
-  GOSSIP_DATA_PERIOD_MS, REMOTE_LEADER_CHANGED_PERIOD_MS,
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
@@ -278,8 +276,16 @@ pub struct MasterConfig {
 
   /// The size that PaxosGroups should be.
   pub slave_group_size: u32,
-  /// Number of coords each Slave should have.
-  pub num_coord: u32,
+
+  /// Timer events
+  pub remote_leader_changed_period_ms: u128,
+  pub failure_detector_period_ms: u128,
+  pub check_unconfirmed_eids_period_ms: u128,
+  pub gossip_data_period_ms: u128,
+
+  /// FreeNodeManager
+  pub num_coords: u32,
+  pub free_node_heartbeat_timer_ms: u128,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -568,6 +574,7 @@ impl MasterContext {
             FreeNodeAssoc::FreeNodeHeartbeat(heartbeat) => {
               self.free_node_manager.handle_heartbeat(
                 FreeNodeManagerContext {
+                  config: &self.master_config,
                   this_eid: &self.this_eid,
                   leader_map: self.leader_map.value(),
                   master_bundle: &mut self.master_bundle,
@@ -717,8 +724,8 @@ impl MasterContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx
-            .defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD_MS), MasterTimerInput::RemoteLeaderChanged);
+          let defer_time = mk_t(self.master_config.remote_leader_changed_period_ms);
+          io_ctx.defer(defer_time, MasterTimerInput::RemoteLeaderChanged);
         }
         MasterTimerInput::BroadcastGossip => {
           if self.is_leader() {
@@ -728,7 +735,8 @@ impl MasterContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx.defer(mk_t(GOSSIP_DATA_PERIOD_MS), MasterTimerInput::BroadcastGossip);
+          let defer_time = mk_t(self.master_config.gossip_data_period_ms);
+          io_ctx.defer(defer_time, MasterTimerInput::BroadcastGossip);
         }
         MasterTimerInput::PaxosGroupFailureDetector => {
           if self.is_leader() {
@@ -747,8 +755,8 @@ impl MasterContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx
-            .defer(mk_t(FAILURE_DETECTOR_PERIOD_MS), MasterTimerInput::PaxosGroupFailureDetector);
+          let defer_time = mk_t(self.master_config.failure_detector_period_ms);
+          io_ctx.defer(defer_time, MasterTimerInput::PaxosGroupFailureDetector);
         }
         MasterTimerInput::CheckUnconfirmedEids => {
           // We do this for both the Leader and Followers. If there are `unconfirmed_eids` in
@@ -759,12 +767,13 @@ impl MasterContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx
-            .defer(mk_t(CHECK_UNCONFIRMED_EIDS_PERIOD_MS), MasterTimerInput::CheckUnconfirmedEids);
+          let defer_time = mk_t(self.master_config.check_unconfirmed_eids_period_ms);
+          io_ctx.defer(defer_time, MasterTimerInput::CheckUnconfirmedEids);
         }
         MasterTimerInput::FreeNodeHeartbeatTimer => {
           if self.is_leader() {
             self.free_node_manager.handle_timer(FreeNodeManagerContext {
+              config: &self.master_config,
               this_eid: &self.this_eid,
               leader_map: self.leader_map.value(),
               master_bundle: &mut self.master_bundle,
@@ -774,8 +783,8 @@ impl MasterContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx
-            .defer(mk_t(FREE_NODE_HEARTBEAT_TIMER_MS), MasterTimerInput::FreeNodeHeartbeatTimer);
+          let defer_time = mk_t(self.master_config.failure_detector_period_ms);
+          io_ctx.defer(defer_time, MasterTimerInput::FreeNodeHeartbeatTimer);
         }
       },
       MasterForwardMsg::MasterBundle(bundle) => {
@@ -801,6 +810,7 @@ impl MasterContext {
             MasterPLm::FreeNodeManagerPLm(plm) => {
               let new_slave_groups = self.free_node_manager.handle_plm(
                 FreeNodeManagerContext {
+                  config: &self.master_config,
                   this_eid: &self.this_eid,
                   leader_map: self.leader_map.value(),
                   master_bundle: &mut self.master_bundle,
@@ -845,6 +855,7 @@ impl MasterContext {
           // Construct PLms related to FreeNode management.
           let granted_reconfig_eids = self.free_node_manager.process(
             FreeNodeManagerContext {
+              config: &self.master_config,
               this_eid: &self.this_eid,
               leader_map: self.leader_map.value(),
               master_bundle: &mut self.master_bundle,
@@ -1117,6 +1128,7 @@ impl MasterContext {
 
         // FreeNodeManager
         self.free_node_manager.leader_changed(FreeNodeManagerContext {
+          config: &self.master_config,
           this_eid: &self.this_eid,
           leader_map: self.leader_map.value(),
           master_bundle: &mut self.master_bundle,

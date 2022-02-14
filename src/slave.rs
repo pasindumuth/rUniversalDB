@@ -1,7 +1,6 @@
 use crate::common::{
   lookup, mk_t, update_all_eids, update_leader_map, BasicIOCtx, GossipData, LeaderMap,
   RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp, VersionedValue,
-  CHECK_UNCONFIRMED_EIDS_PERIOD_MS, FAILURE_DETECTOR_PERIOD_MS, REMOTE_LEADER_CHANGED_PERIOD_MS,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::{CreateTableRMAction, CreateTableRMES};
@@ -222,6 +221,11 @@ pub struct SlaveConfig {
   /// a random `u64` and take the remainder after dividing by `timestamp_suffix_divisor`.
   /// This cannot be 0; the default value is 1, making the suffix always be 0.
   pub timestamp_suffix_divisor: u64,
+
+  /// Timer events
+  pub remote_leader_changed_period_ms: u128,
+  pub failure_detector_period_ms: u128,
+  pub check_unconfirmed_eids_period_ms: u128,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -704,7 +708,8 @@ impl SlaveContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx.defer(mk_t(REMOTE_LEADER_CHANGED_PERIOD_MS), SlaveTimerInput::RemoteLeaderChanged);
+          let defer_time = mk_t(self.slave_config.remote_leader_changed_period_ms);
+          io_ctx.defer(defer_time, SlaveTimerInput::RemoteLeaderChanged);
         }
         SlaveTimerInput::PaxosGroupFailureDetector => {
           if self.is_leader() {
@@ -723,8 +728,8 @@ impl SlaveContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx
-            .defer(mk_t(FAILURE_DETECTOR_PERIOD_MS), SlaveTimerInput::PaxosGroupFailureDetector);
+          let defer_time = mk_t(self.slave_config.failure_detector_period_ms);
+          io_ctx.defer(defer_time, SlaveTimerInput::PaxosGroupFailureDetector);
         }
         SlaveTimerInput::CheckUnconfirmedEids => {
           // We do this for both the Leader and Followers. If there are `unconfirmed_eids` in
@@ -735,8 +740,8 @@ impl SlaveContext {
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
-          io_ctx
-            .defer(mk_t(CHECK_UNCONFIRMED_EIDS_PERIOD_MS), SlaveTimerInput::CheckUnconfirmedEids);
+          let defer_time = mk_t(self.slave_config.check_unconfirmed_eids_period_ms);
+          io_ctx.defer(defer_time, SlaveTimerInput::CheckUnconfirmedEids);
         }
       },
       SlaveForwardMsg::SlaveBundle(bundle) => {

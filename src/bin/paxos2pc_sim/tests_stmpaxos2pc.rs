@@ -7,6 +7,7 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::mk_qid;
 use runiversal::model::common::{EndpointId, SlaveGroupId};
 use runiversal::simulation_utils::{mk_client_eid, mk_slave_eid};
+use runiversal::slave::SlaveConfig;
 use runiversal::stmpaxos2pc_tm::{RMPLm, TMPLm};
 use runiversal::test_utils::mk_sid;
 use std::collections::BTreeMap;
@@ -102,7 +103,15 @@ pub fn test_single(test_num: u32, seed: [u8; 16]) {
   }
 
   let client_eid = mk_client_eid(0);
-  let mut sim = Simulation::new(seed, 1, slave_address_config.clone());
+
+  let slave_config = SlaveConfig {
+    timestamp_suffix_divisor: 1,
+    remote_leader_changed_period_ms: 5,
+    // The below are not needed
+    failure_detector_period_ms: 0,
+    check_unconfirmed_eids_period_ms: 0,
+  };
+  let mut sim = Simulation::new(seed, 1, slave_config, slave_address_config.clone());
 
   // Run the simulation to warm it up. Activity here consists of Leadership changes,
   // Gossip, Paxos Insertions, etc.

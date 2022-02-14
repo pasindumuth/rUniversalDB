@@ -25,7 +25,7 @@ const SERVER_PORT: u32 = 1610;
 
 #[derive(Debug)]
 pub enum GenericTimerInput {
-  FreeNodeTimerInput,
+  FreeNodeHeartbeat,
   SlaveTimerInput(SlaveTimerInput),
   MasterTimerInput(MasterTimerInput),
 }
@@ -262,18 +262,16 @@ impl NominalMasterState {
 // -----------------------------------------------------------------------------------------------
 //  Node Config
 // -----------------------------------------------------------------------------------------------
-
-/// The granularity in which Timer events are executed, in microseconds
-// TODO: bring this into a confic object. Bring all timer event timers and things that might
-//  massively impact the chatter in the system into the dynamically configurable Config objects.
-//  That way, I can have a central location for tuning parameters.
+// Generally, the primary things that we put into `NodeConfig` are things that might vary between
+// testing and production. This largely includes timer-based things (since testing typically
+// would like to accelerate things), but also includes other things (e.g. PaxosGroup size).
 
 /// Config that holds all configs that a Node would need (for both Master, Slave, and other
 /// threads (e.g. Coord and Tablet)).
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
   // Configs for the Top Level
-  pub free_node_timer_ms: u128,
+  pub free_node_heartbeat_timer_ms: u128,
 
   // Sub Configs
   pub paxos_config: PaxosConfig,
@@ -286,6 +284,7 @@ pub struct NodeConfig {
 /// Build the `NodeConfig` we should use for production.
 pub fn get_prod_configs() -> NodeConfig {
   let timestamp_suffix_divisor = 5;
+
   let paxos_config = PaxosConfig {
     heartbeat_threshold: 5,
     heartbeat_period_ms: mk_t(1000),
@@ -295,14 +294,34 @@ pub fn get_prod_configs() -> NodeConfig {
     remote_next_index_thresh: 100,
     max_failable: 1,
   };
+
+  let remote_leader_changed_period_ms = 1000;
+  let failure_detector_period_ms = 1000;
+  let check_unconfirmed_eids_period_ms = 5000;
+  let free_node_heartbeat_timer_ms = 1000;
+  let master_config = MasterConfig {
+    timestamp_suffix_divisor,
+    slave_group_size: 5,
+    remote_leader_changed_period_ms,
+    failure_detector_period_ms,
+    check_unconfirmed_eids_period_ms,
+    gossip_data_period_ms: 5000,
+    num_coords: 3,
+    free_node_heartbeat_timer_ms,
+  };
+  let slave_config = SlaveConfig {
+    timestamp_suffix_divisor,
+    remote_leader_changed_period_ms,
+    failure_detector_period_ms,
+    check_unconfirmed_eids_period_ms,
+  };
+
   let coord_config = CoordConfig { timestamp_suffix_divisor };
-  let master_config = MasterConfig { timestamp_suffix_divisor, slave_group_size: 5, num_coord: 3 };
-  let slave_config = SlaveConfig { timestamp_suffix_divisor };
   let tablet_config = TabletConfig { timestamp_suffix_divisor };
 
   // Combine the above
   NodeConfig {
-    free_node_timer_ms: 1, // TODO: change after we make Master node kill a free node so fast.
+    free_node_heartbeat_timer_ms,
     paxos_config,
     coord_config,
     master_config,
@@ -341,7 +360,7 @@ impl NodeState {
   /// This should be called at the very start of the life of a Master node. This
   /// will start the timer events, etc.
   pub fn bootstrap<IOCtx: NodeIOCtx>(&mut self, io_ctx: &mut IOCtx) {
-    self.process_input(io_ctx, GenericInput::TimerInput(GenericTimerInput::FreeNodeTimerInput));
+    self.process_input(io_ctx, GenericInput::TimerInput(GenericTimerInput::FreeNodeHeartbeat));
   }
 
   /// The main input entrypoint for a top-level node (i.e. Master and Slave). `GenericInput`
@@ -407,10 +426,10 @@ impl NodeState {
             amend_buffer(buffered_messages, &eid, message);
           }
         }
-        GenericInput::TimerInput(GenericTimerInput::FreeNodeTimerInput) => {
+        GenericInput::TimerInput(GenericTimerInput::FreeNodeHeartbeat) => {
           // Schedule the next FreeNodeTimerInput.
-          let defer_time = mk_t(self.node_config.free_node_timer_ms);
-          FreeNodeIOCtx::defer(io_ctx, defer_time, GenericTimerInput::FreeNodeTimerInput);
+          let defer_time = mk_t(self.node_config.free_node_heartbeat_timer_ms);
+          FreeNodeIOCtx::defer(io_ctx, defer_time, GenericTimerInput::FreeNodeHeartbeat);
         }
         _ => {}
       },
@@ -591,7 +610,7 @@ impl NodeState {
             amend_buffer(buffered_messages, &eid, message);
           }
         }
-        GenericInput::TimerInput(GenericTimerInput::FreeNodeTimerInput) => {
+        GenericInput::TimerInput(GenericTimerInput::FreeNodeHeartbeat) => {
           // Send out `FreeNodeHeartbeat`
           io_ctx.send(
             &lid.eid,
@@ -604,8 +623,8 @@ impl NodeState {
           );
 
           // Schedule the next FreeNodeTimerInput.
-          let defer_time = mk_t(self.node_config.free_node_timer_ms);
-          FreeNodeIOCtx::defer(io_ctx, defer_time, GenericTimerInput::FreeNodeTimerInput);
+          let defer_time = mk_t(self.node_config.free_node_heartbeat_timer_ms);
+          FreeNodeIOCtx::defer(io_ctx, defer_time, GenericTimerInput::FreeNodeHeartbeat);
         }
         _ => {}
       },

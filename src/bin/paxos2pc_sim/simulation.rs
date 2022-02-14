@@ -8,6 +8,7 @@ use runiversal::model::common::{
 };
 use runiversal::model::message::LeaderChanged;
 use runiversal::simulation_utils::{add_msg, mk_client_eid};
+use runiversal::slave::SlaveConfig;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 // -------------------------------------------------------------------------------------------------
@@ -141,6 +142,7 @@ impl Simulation {
   pub fn new(
     seed: [u8; 16],
     num_clients: u32,
+    slave_config: SlaveConfig,
     slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
   ) -> Simulation {
     let mut sim = Simulation {
@@ -192,6 +194,7 @@ impl Simulation {
             slave_state: SlaveState::new(SlaveContext::new(
               sid.clone(),
               eid.clone(),
+              slave_config.clone(),
               slave_address_config.clone(),
               leader_map.clone(),
             )),
@@ -231,14 +234,14 @@ impl Simulation {
         current_time: sim.true_timestamp.clone(), // TODO: simulate clock skew
         queues: &mut sim.queues,
         nonempty_queues: &mut sim.nonempty_queues,
-        this_sid: &slave_data.slave_state.context.this_sid.clone(),
+        this_sid: &slave_data.slave_state.ctx.this_sid.clone(),
         this_eid,
         pending_insert: &mut sim.pending_insert,
         insert_queues: &mut sim.insert_queues,
         tasks: &mut slave_data.tasks,
       };
 
-      slave_data.slave_state.initialize(&mut io_ctx);
+      slave_data.slave_state.bootstrap(&mut io_ctx);
     }
 
     // Metadata
@@ -285,7 +288,7 @@ impl Simulation {
       current_time: current_time.clone(), // TODO: simulate clock skew
       queues: &mut self.queues,
       nonempty_queues: &mut self.nonempty_queues,
-      this_sid: &slave_data.slave_state.context.this_sid.clone(),
+      this_sid: &slave_data.slave_state.ctx.this_sid.clone(),
       this_eid: to_eid,
       pending_insert: &mut self.pending_insert,
       insert_queues: &mut self.insert_queues,

@@ -4,7 +4,7 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::{
   mk_cid, mk_t, BasicIOCtx, CoreIOCtx, FreeNodeIOCtx, GeneralTraceMessage, GossipData,
   GossipDataView, LeaderMap, MasterIOCtx, MasterTraceMessage, NodeIOCtx, RangeEnds, SlaveIOCtx,
-  SlaveTraceMessage, Timestamp, NUM_COORDS,
+  SlaveTraceMessage, Timestamp,
 };
 use runiversal::coord::coord_test::{assert_coord_consistency, check_coord_clean};
 use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};

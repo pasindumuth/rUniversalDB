@@ -1,4 +1,4 @@
-use crate::common::{mk_cid, mk_sid, update_all_eids, MasterIOCtx, NUM_COORDS};
+use crate::common::{mk_cid, mk_sid, update_all_eids, MasterIOCtx};
 use crate::master::plm::ConfirmCreateGroup;
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
