@@ -928,6 +928,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
           msg::ExternalMessage::ExternalQueryAborted(aborted) => &aborted.request_id,
           msg::ExternalMessage::ExternalDDLQuerySuccess(success) => &success.request_id,
           msg::ExternalMessage::ExternalDDLQueryAborted(aborted) => &aborted.request_id,
+          msg::ExternalMessage::ExternalDebugResponse(_) => panic!(),
         };
 
         let req = req_map.get_mut(&eid).unwrap().remove(request_id).unwrap();
@@ -967,6 +968,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
             msg::ExternalMessage::ExternalQueryAborted(aborted) => &aborted.request_id,
             msg::ExternalMessage::ExternalDDLQuerySuccess(success) => &success.request_id,
             msg::ExternalMessage::ExternalDDLQueryAborted(aborted) => &aborted.request_id,
+            msg::ExternalMessage::ExternalDebugResponse(_) => panic!(),
           };
 
           let req = req_map.get_mut(&eid).unwrap().remove(request_id).unwrap();

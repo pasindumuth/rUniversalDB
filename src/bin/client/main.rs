@@ -1,6 +1,7 @@
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
+use runiversal::cast;
 use runiversal::common::mk_rid;
 use runiversal::model::common::{EndpointId, RequestId};
 use runiversal::model::message as msg;
@@ -101,34 +102,55 @@ fn main() {
           break;
         } else {
           if let Some(target_eid) = &opt_target_eid {
-            let request_id = mk_rid(&mut rand);
-            let network_msg = if master_eids.contains(&target_eid) {
-              // Send this message as a  DDL Query, since the target is set for the Master.
-              msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
-                msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
+            // Check if this is a debug request, making sure to print using {} (not {:#?}).
+            if input == "debug" {
+              let request_id = mk_rid(&mut rand);
+              let network_msg = msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+                msg::MasterExternalReq::ExternalDebugRequest(msg::ExternalDebugRequest {
                   sender_eid: this_eid.clone(),
                   request_id,
-                  query: input,
                 }),
-              ))
-            } else {
-              // Otherwise, send this message as a DQL Query, since the Target is a Slave.
-              msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
-                msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
-                  sender_eid: this_eid.clone(),
-                  request_id,
-                  query: input,
-                }),
-              ))
-            };
-            send_msg(&out_conn_map, &target_eid, network_msg);
+              ));
 
-            // Wait for a response. We assume the first response is for the
-            // request we just sent above.
-            let (_, message) = to_server_receiver.recv().unwrap();
-            print!("{:#?}", message);
+              // Send and wait for a response
+              send_msg(&out_conn_map, &target_eid, network_msg);
+              let (_, message) = to_server_receiver.recv().unwrap();
+
+              // Print the response
+              let external_msg = cast!(msg::NetworkMessage::External, message).unwrap();
+              let resp = cast!(msg::ExternalMessage::ExternalDebugResponse, external_msg).unwrap();
+              println!("{}", resp.debug_str);
+            } else {
+              let request_id = mk_rid(&mut rand);
+              let network_msg = if master_eids.contains(&target_eid) {
+                // Send this message as a  DDL Query, since the target is set for the Master.
+                msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+                  msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
+                    sender_eid: this_eid.clone(),
+                    request_id,
+                    query: input,
+                  }),
+                ))
+              } else {
+                // Otherwise, send this message as a DQL Query, since the Target is a Slave.
+                msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+                  msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
+                    sender_eid: this_eid.clone(),
+                    request_id,
+                    query: input,
+                  }),
+                ))
+              };
+
+              // Send and wait for a response
+              send_msg(&out_conn_map, &target_eid, network_msg);
+              let (_, message) = to_server_receiver.recv().unwrap();
+
+              // Print the respnse
+              println!("{:#?}", message);
+            }
           } else {
-            print!("A target address is not set. Do that by typing 'target <hostname>'.\n");
+            println!("A target address is not set. Do that by typing 'target <hostname>'.\n");
           }
         }
       }

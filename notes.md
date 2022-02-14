@@ -36,6 +36,12 @@ CREATE TABLE users(id INT PRIMARY KEY);
 target 172.19.0.15
 INSERT INTO users(id) VALUES (1), (2), (3);
 SELECT id FROM users;
+4. run the following
+target 172.19.0.10
+CREATE TABLE inventory(id INT PRIMARY KEY, name VARCHAR);
+target 172.19.0.15
+INSERT INTO inventory(id, name) VALUES (1, 'pasindu'), (2, 'hello');
+SELECT id, name FROM inventory;
 
 ## Code
 Example of implementing Debug for a struct:

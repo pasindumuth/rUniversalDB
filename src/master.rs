@@ -1024,6 +1024,20 @@ impl MasterContext {
               }
             }
           }
+          msg::MasterExternalReq::ExternalDebugRequest(request) => {
+            // Send back debug data.
+            let debug_str = format!("{:#?}", self);
+            io_ctx.send(
+              &request.sender_eid.clone(),
+              msg::NetworkMessage::External(msg::ExternalMessage::ExternalDebugResponse(
+                msg::ExternalDebugResponse {
+                  sender_eid: request.sender_eid,
+                  request_id: request.request_id,
+                  debug_str,
+                },
+              )),
+            );
+          }
         }
 
         // Run Main Loop

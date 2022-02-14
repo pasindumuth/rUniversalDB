@@ -63,11 +63,13 @@ impl Stats {
         ExternalMessage::ExternalQueryAborted(_) => self.external_query_aborted += 1,
         ExternalMessage::ExternalDDLQuerySuccess(_) => self.external_ddl_query_success += 1,
         ExternalMessage::ExternalDDLQueryAborted(_) => self.external_ddl_query_aborted += 1,
+        ExternalMessage::ExternalDebugResponse(_) => {}
       },
       NetworkMessage::Master(m) => match m {
         MasterMessage::MasterExternalReq(m) => match m {
           MasterExternalReq::PerformExternalDDLQuery(_) => self.perform_ddl_external_query += 1,
           MasterExternalReq::CancelExternalDDLQuery(_) => self.cancel_ddl_external_query += 1,
+          MasterExternalReq::ExternalDebugRequest(_) => {}
         },
         MasterMessage::RemoteMessage(m) => match m {
           RemoteMessage { payload: m, .. } => match m {

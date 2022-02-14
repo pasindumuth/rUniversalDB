@@ -38,6 +38,8 @@ pub enum NetworkMessage {
 pub enum MasterExternalReq {
   PerformExternalDDLQuery(PerformExternalDDLQuery),
   CancelExternalDDLQuery(CancelExternalDDLQuery),
+  /// This is used for debugging purposes during development.
+  ExternalDebugRequest(ExternalDebugRequest),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -170,6 +172,8 @@ pub enum ExternalMessage {
   ExternalQueryAborted(ExternalQueryAborted),
   ExternalDDLQuerySuccess(ExternalDDLQuerySuccess),
   ExternalDDLQueryAborted(ExternalDDLQueryAborted),
+  /// This is used for debugging purposes during development.
+  ExternalDebugResponse(ExternalDebugResponse),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -732,4 +736,22 @@ pub struct ExternalDDLQueryAborted {
 pub struct ExternalDDLQuerySuccess {
   pub request_id: RequestId,
   pub timestamp: Timestamp,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  External Debug
+// -------------------------------------------------------------------------------------------------
+/// This is used for debugging purposes during development.
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ExternalDebugRequest {
+  pub sender_eid: EndpointId,
+  pub request_id: RequestId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ExternalDebugResponse {
+  pub sender_eid: EndpointId,
+  pub request_id: RequestId,
+  pub debug_str: String,
 }
