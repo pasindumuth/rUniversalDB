@@ -123,6 +123,8 @@ impl ProdIOCtx {
           for timer_input in tasks.remove(&next_timestamp).unwrap() {
             to_top.send(GenericInput::TimerInput(timer_input));
           }
+        } else {
+          break;
         }
       }
     });
@@ -311,9 +313,7 @@ impl BasicIOCtx for ProdCoreIOCtx {
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    let out_conn_map = self.out_conn_map.lock().unwrap();
-    let sender = out_conn_map.get(eid).unwrap();
-    sender.send(rmp_serde::to_vec(&msg).unwrap()).unwrap();
+    send_msg(&self.out_conn_map, eid, msg);
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}

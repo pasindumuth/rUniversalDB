@@ -171,6 +171,7 @@ fn main() {
     coord_map: Default::default(),
     tasks: Arc::new(Mutex::new(Default::default())),
   };
+  io_ctx.start();
 
   let mut node = NodeState::new(this_eid, get_prod_configs());
   node.bootstrap(&mut io_ctx);

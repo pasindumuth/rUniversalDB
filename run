@@ -43,4 +43,6 @@ elif [ "$1" = "sclean" ]; then
   done
   docker kill ${CONTAINERS} 2>/dev/null;
   docker container rm ${CONTAINERS} 2>/dev/null;
+else
+  echo "unrecognized command: ${1}"
 fi
