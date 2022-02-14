@@ -3,6 +3,7 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_t, RangeEnds, Timestamp};
 use runiversal::model::common::EndpointId;
 use runiversal::model::message as msg;
+use runiversal::node::get_prod_configs;
 use runiversal::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use runiversal::simulation_utils::{add_msg, mk_paxos_eid};
 use std::cmp::min;
@@ -154,12 +155,16 @@ impl Simulation {
     }
     sim.address_config = eids.clone();
 
+    // Get the PaxosConfig used in production
+    let node_config = get_prod_configs();
+    let paxos_config = node_config.paxos_config;
+
     // Construct PaxosDrivers
     for eid in eids.clone() {
       sim.paxos_data.insert(
         eid.clone(),
         PaxosNodeData {
-          paxos_driver: PaxosDriver::create_initial(eids.clone(), PaxosConfig::prod()),
+          paxos_driver: PaxosDriver::create_initial(eids.clone(), paxos_config.clone()),
           tasks: Default::default(),
           paxos_log: Default::default(),
         },

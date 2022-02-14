@@ -14,7 +14,7 @@ use runiversal::model::common::{
 use runiversal::model::message as msg;
 use runiversal::multiversion_map::MVM;
 use runiversal::net::{recv, send_bytes, send_msg};
-use runiversal::node::GenericInput;
+use runiversal::node::{GenericInput, GenericTimerInput};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
@@ -97,8 +97,7 @@ pub struct ProdIOCtx {
   pub coord_map: BTreeMap<CoordGroupId, Sender<CoordForwardMsg>>,
 
   // Timer Tasks
-  pub slave_tasks: Arc<Mutex<BTreeMap<Timestamp, Vec<SlaveTimerInput>>>>,
-  pub master_tasks: Arc<Mutex<BTreeMap<Timestamp, Vec<MasterTimerInput>>>>,
+  pub tasks: Arc<Mutex<BTreeMap<Timestamp, Vec<GenericTimerInput>>>>,
 }
 
 impl ProdIOCtx {
@@ -106,8 +105,7 @@ impl ProdIOCtx {
   /// to the top via `to_top`.
   pub fn start(&mut self) {
     let to_top = self.to_top.clone();
-    let master_tasks = self.master_tasks.clone();
-    let slave_tasks = self.slave_tasks.clone();
+    let tasks = self.tasks.clone();
     thread::spawn(move || loop {
       // Sleep
       let increment = std::time::Duration::from_micros(TIMER_INCREMENT);
@@ -116,26 +114,14 @@ impl ProdIOCtx {
       // Poll all tasks from `tasks` prior to the current time, and push them to the Slave.
       let now = mk_t(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
 
-      // Process master tasks
-      let mut master_tasks = master_tasks.lock().unwrap();
-      while let Some((next_timestamp, _)) = master_tasks.first_key_value() {
+      // Process tasks
+      let mut tasks = tasks.lock().unwrap();
+      while let Some((next_timestamp, _)) = tasks.first_key_value() {
         if next_timestamp <= &now {
           // All data in this first entry should be dispatched.
           let next_timestamp = next_timestamp.clone();
-          for timer_input in master_tasks.remove(&next_timestamp).unwrap() {
-            to_top.send(GenericInput::MasterTimerInput(timer_input));
-          }
-        }
-      }
-
-      // Process slave tasks
-      let mut slave_tasks = slave_tasks.lock().unwrap();
-      while let Some((next_timestamp, _)) = slave_tasks.first_key_value() {
-        if next_timestamp <= &now {
-          // All data in this first entry should be dispatched.
-          let next_timestamp = next_timestamp.clone();
-          for timer_input in slave_tasks.remove(&next_timestamp).unwrap() {
-            to_top.send(GenericInput::SlaveTimerInput(timer_input));
+          for timer_input in tasks.remove(&next_timestamp).unwrap() {
+            to_top.send(GenericInput::TimerInput(timer_input));
           }
         }
       }
@@ -206,6 +192,16 @@ impl FreeNodeIOCtx for ProdIOCtx {
       }
     });
   }
+
+  fn defer(&mut self, defer_time: Timestamp, timer_input: GenericTimerInput) {
+    let timestamp = self.now().add(defer_time);
+    let mut tasks = self.tasks.lock().unwrap();
+    if let Some(timer_inputs) = tasks.get_mut(&timestamp) {
+      timer_inputs.push(timer_input);
+    } else {
+      tasks.insert(timestamp.clone(), vec![timer_input]);
+    }
+  }
 }
 
 impl SlaveIOCtx for ProdIOCtx {
@@ -259,13 +255,7 @@ impl SlaveIOCtx for ProdIOCtx {
   }
 
   fn defer(&mut self, defer_time: Timestamp, timer_input: SlaveTimerInput) {
-    let timestamp = self.now().add(defer_time);
-    let mut slave_tasks = self.slave_tasks.lock().unwrap();
-    if let Some(timer_inputs) = slave_tasks.get_mut(&timestamp) {
-      timer_inputs.push(timer_input);
-    } else {
-      slave_tasks.insert(timestamp.clone(), vec![timer_input]);
-    }
+    FreeNodeIOCtx::defer(self, defer_time, GenericTimerInput::SlaveTimerInput(timer_input));
   }
 
   fn trace(&mut self, _: SlaveTraceMessage) {}
@@ -281,13 +271,7 @@ impl MasterIOCtx for ProdIOCtx {
   }
 
   fn defer(&mut self, defer_time: Timestamp, timer_input: MasterTimerInput) {
-    let timestamp = self.now().add(defer_time);
-    let mut master_tasks = self.master_tasks.lock().unwrap();
-    if let Some(timer_inputs) = master_tasks.get_mut(&timestamp) {
-      timer_inputs.push(timer_input);
-    } else {
-      master_tasks.insert(timestamp.clone(), vec![timer_input]);
-    }
+    FreeNodeIOCtx::defer(self, defer_time, GenericTimerInput::MasterTimerInput(timer_input));
   }
 
   fn trace(&mut self, _: MasterTraceMessage) {}

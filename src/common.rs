@@ -9,6 +9,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::model::message::NetworkMessage;
 use crate::multiversion_map::MVM;
+use crate::node::{GenericInput, GenericTimerInput};
 use crate::slave::{SlaveBackMessage, SlaveTimerInput};
 use crate::tablet::{
   TabletConfig, TabletContext, TabletCreateHelper, TabletForwardMsg, TabletSnapshot, TabletState,
@@ -65,6 +66,9 @@ pub trait FreeNodeIOCtx: BasicIOCtx {
 
   // Coord
   fn create_coord_full(&mut self, ctx: CoordContext);
+
+  // Timer
+  fn defer(&mut self, defer_time: Timestamp, deferred_time: GenericTimerInput);
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -599,10 +603,6 @@ pub const FAILURE_DETECTOR_PERIOD_MS: u128 = 5;
 pub const CHECK_UNCONFIRMED_EIDS_PERIOD_MS: u128 = 15;
 pub const GOSSIP_DATA_PERIOD_MS: u128 = 5;
 pub const FREE_NODE_HEARTBEAT_TIMER_MS: u128 = 5;
-
-// -----------------------------------------------------------------------------------------------
-//  Constants
-// -----------------------------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------------------------
 //  Timestamp

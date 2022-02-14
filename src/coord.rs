@@ -113,12 +113,6 @@ pub struct CoordConfig {
   pub timestamp_suffix_divisor: u64,
 }
 
-impl Default for CoordConfig {
-  fn default() -> Self {
-    CoordConfig { timestamp_suffix_divisor: 1 }
-  }
-}
-
 // -----------------------------------------------------------------------------------------------
 //  Coord State
 // -----------------------------------------------------------------------------------------------

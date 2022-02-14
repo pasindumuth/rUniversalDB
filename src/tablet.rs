@@ -626,12 +626,6 @@ pub struct TabletConfig {
   pub timestamp_suffix_divisor: u64,
 }
 
-impl Default for TabletConfig {
-  fn default() -> Self {
-    TabletConfig { timestamp_suffix_divisor: 1 }
-  }
-}
-
 // -----------------------------------------------------------------------------------------------
 //  Tablet State
 // -----------------------------------------------------------------------------------------------

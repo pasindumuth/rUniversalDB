@@ -1,9 +1,10 @@
 use crate::simulation::Simulation;
-use runiversal::common::RangeEnds;
+use runiversal::common::{mk_t, RangeEnds};
 use runiversal::coord::CoordConfig;
 use runiversal::master::MasterConfig;
 use runiversal::model::common::{EndpointId, PaxosGroupId, RequestId, SlaveGroupId, TableView};
 use runiversal::model::message as msg;
+use runiversal::node::NodeConfig;
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::{mk_client_eid, mk_node_eid};
 use runiversal::slave::SlaveConfig;
@@ -311,6 +312,34 @@ pub fn populate_user_table_basic(sim: &mut Simulation, context: &mut TestContext
 //  Parallel Utils
 // -----------------------------------------------------------------------------------------------
 
+/// Build the `NodeConfig` we should use for testing
+fn get_test_configs(num_paxos_groups: u32, timestamp_suffix_divisor: u64) -> NodeConfig {
+  let paxos_config = PaxosConfig {
+    heartbeat_threshold: 3,
+    heartbeat_period_ms: mk_t(5),
+    next_index_period_ms: mk_t(10),
+    retry_defer_time_ms: mk_t(5),
+    proposal_increment: 1000,
+    remote_next_index_thresh: 5,
+    max_failable: 1,
+  };
+  let coord_config = CoordConfig { timestamp_suffix_divisor };
+  let master_config =
+    MasterConfig { timestamp_suffix_divisor, slave_group_size: num_paxos_groups, num_coord: 3 };
+  let slave_config = SlaveConfig { timestamp_suffix_divisor };
+  let tablet_config = TabletConfig { timestamp_suffix_divisor };
+
+  // Combine the above
+  NodeConfig {
+    free_node_timer_ms: 1,
+    paxos_config,
+    coord_config,
+    master_config,
+    slave_config,
+    tablet_config,
+  }
+}
+
 /// Constructs a `Simulation` an instantiates the rUniversalDB by creating a MasterGroup,
 /// then `num_slave_groups` number of SlaveGroups, and `num_clients` number of clients.
 pub fn mk_general_sim(
@@ -322,16 +351,8 @@ pub fn mk_general_sim(
 ) -> Simulation {
   // Create the sim
   let num_count = (num_slave_groups + 1) * num_paxos_nodes;
-  let mut sim = Simulation::new(
-    seed,
-    num_clients,
-    num_count,
-    PaxosConfig::test(),
-    CoordConfig { timestamp_suffix_divisor },
-    MasterConfig { timestamp_suffix_divisor, slave_group_size: num_paxos_nodes, num_coord: 3 },
-    SlaveConfig { timestamp_suffix_divisor },
-    TabletConfig { timestamp_suffix_divisor },
-  );
+  let node_config = get_test_configs(num_paxos_nodes, timestamp_suffix_divisor);
+  let mut sim = Simulation::new(seed, num_clients, num_count, node_config);
 
   // Construct the Master PaxosGroup to initiate the system.
   let master_eids: Vec<_> =

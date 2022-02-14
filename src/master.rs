@@ -282,12 +282,6 @@ pub struct MasterConfig {
   pub num_coord: u32,
 }
 
-impl Default for MasterConfig {
-  fn default() -> Self {
-    MasterConfig { timestamp_suffix_divisor: 1, slave_group_size: 5, num_coord: 3 }
-  }
-}
-
 // -----------------------------------------------------------------------------------------------
 //  MasterSnapshot
 // -----------------------------------------------------------------------------------------------

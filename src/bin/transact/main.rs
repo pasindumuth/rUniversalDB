@@ -23,7 +23,7 @@ use runiversal::model::common::{
 use runiversal::model::message as msg;
 use runiversal::model::message::FreeNodeMessage;
 use runiversal::net::{recv, send_bytes, send_msg, SERVER_PORT};
-use runiversal::node::{GenericInput, NodeState};
+use runiversal::node::{get_prod_configs, GenericInput, NodeConfig, NodeState};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
@@ -162,19 +162,6 @@ fn main() {
     _ => unreachable!(),
   }
 
-  // Setup FreeNode timer
-  {
-    // We use a simple approach for now, where we just generate
-    // FreeNodeTimerInput periodically forever.
-    let to_server_sender = to_server_sender.clone();
-    thread::spawn(move || loop {
-      // Sleep and then dispatch
-      let increment = std::time::Duration::from_micros(TIMER_INCREMENT);
-      thread::sleep(increment);
-      to_server_sender.send(GenericInput::FreeNodeTimerInput);
-    });
-  }
-
   let mut io_ctx = ProdIOCtx {
     rand: XorShiftRng::from_entropy(),
     out_conn_map,
@@ -182,19 +169,13 @@ fn main() {
     to_top: to_server_sender,
     tablet_map: Default::default(),
     coord_map: Default::default(),
-    slave_tasks: Arc::new(Mutex::new(Default::default())),
-    master_tasks: Arc::new(Mutex::new(Default::default())),
+    tasks: Arc::new(Mutex::new(Default::default())),
   };
 
-  let mut node = NodeState::new(
-    this_eid,
-    PaxosConfig::prod(),
-    CoordConfig::default(),
-    MasterConfig::default(),
-    SlaveConfig::default(),
-    TabletConfig::default(),
-  );
+  let mut node = NodeState::new(this_eid, get_prod_configs());
+  node.bootstrap(&mut io_ctx);
 
+  // Enter the main loop forever.
   loop {
     let generic_input = to_server_receiver.recv().unwrap();
     node.process_input(&mut io_ctx, generic_input);

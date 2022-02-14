@@ -224,12 +224,6 @@ pub struct SlaveConfig {
   pub timestamp_suffix_divisor: u64,
 }
 
-impl Default for SlaveConfig {
-  fn default() -> Self {
-    SlaveConfig { timestamp_suffix_divisor: 1 }
-  }
-}
-
 // -----------------------------------------------------------------------------------------------
 //  Slave State
 // -----------------------------------------------------------------------------------------------

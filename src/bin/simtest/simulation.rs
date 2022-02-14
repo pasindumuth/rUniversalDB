@@ -21,7 +21,7 @@ use runiversal::model::message as msg;
 use runiversal::model::message::NetworkMessage;
 use runiversal::multiversion_map::MVM;
 use runiversal::node::node_test::check_node_clean;
-use runiversal::node::{GenericInput, NodeState};
+use runiversal::node::{GenericInput, GenericTimerInput, NodeConfig, NodeState};
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::{add_msg, mk_client_eid, mk_node_eid};
 use runiversal::slave::slave_test::check_slave_clean;
@@ -65,8 +65,7 @@ pub struct TestIOCtx<'a> {
   coord_states: &'a mut BTreeMap<CoordGroupId, CoordState>,
 
   /// Deferred timer tasks
-  slave_tasks: &'a mut BTreeMap<Timestamp, Vec<SlaveTimerInput>>,
-  master_tasks: &'a mut BTreeMap<Timestamp, Vec<MasterTimerInput>>,
+  tasks: &'a mut BTreeMap<Timestamp, Vec<GenericTimerInput>>,
 
   /// Collection of trace messages
   success_tracer: &'a mut RequestSuccessTracer,
@@ -108,6 +107,15 @@ impl<'a> FreeNodeIOCtx for TestIOCtx<'a> {
   fn create_coord_full(&mut self, ctx: CoordContext) {
     let cid = ctx.this_cid.clone();
     self.coord_states.insert(cid, CoordState::new(ctx));
+  }
+
+  fn defer(&mut self, defer_time: Timestamp, timer_input: GenericTimerInput) {
+    let defer_time = self.now().add(defer_time);
+    if let Some(timer_inputs) = self.tasks.get_mut(&defer_time) {
+      timer_inputs.push(timer_input);
+    } else {
+      self.tasks.insert(defer_time, vec![timer_input]);
+    }
   }
 }
 
@@ -166,12 +174,7 @@ impl<'a> SlaveIOCtx for TestIOCtx<'a> {
   }
 
   fn defer(&mut self, defer_time: Timestamp, timer_input: SlaveTimerInput) {
-    let deferred_time = self.now().add(defer_time);
-    if let Some(timer_inputs) = self.slave_tasks.get_mut(&deferred_time) {
-      timer_inputs.push(timer_input);
-    } else {
-      self.slave_tasks.insert(deferred_time, vec![timer_input]);
-    }
+    FreeNodeIOCtx::defer(self, defer_time, GenericTimerInput::SlaveTimerInput(timer_input));
   }
 
   fn trace(&mut self, trace_msg: SlaveTraceMessage) {
@@ -189,12 +192,7 @@ impl<'a> MasterIOCtx for TestIOCtx<'a> {
   }
 
   fn defer(&mut self, defer_time: Timestamp, timer_input: MasterTimerInput) {
-    let deferred_time = self.now().add(defer_time);
-    if let Some(timer_inputs) = self.master_tasks.get_mut(&deferred_time) {
-      timer_inputs.push(timer_input);
-    } else {
-      self.master_tasks.insert(deferred_time, vec![timer_input]);
-    }
+    FreeNodeIOCtx::defer(self, defer_time, GenericTimerInput::MasterTimerInput(timer_input));
   }
 
   fn trace(&mut self, trace_msg: MasterTraceMessage) {
@@ -308,8 +306,7 @@ pub struct NodeData {
   exited: bool,
   tablet_states: BTreeMap<TabletGroupId, TabletState>,
   coord_states: BTreeMap<CoordGroupId, CoordState>,
-  slave_tasks: BTreeMap<Timestamp, Vec<SlaveTimerInput>>,
-  master_tasks: BTreeMap<Timestamp, Vec<MasterTimerInput>>,
+  tasks: BTreeMap<Timestamp, Vec<GenericTimerInput>>,
   to_node: VecDeque<GenericInput>,
 }
 
@@ -320,8 +317,7 @@ impl Debug for NodeData {
     let _ = debug_trait_builder.field("exited", &self.exited);
     let _ = debug_trait_builder.field("tablet_states", &self.tablet_states);
     let _ = debug_trait_builder.field("coord_states", &self.coord_states);
-    let _ = debug_trait_builder.field("slave_tasks", &self.slave_tasks);
-    let _ = debug_trait_builder.field("master_tasks", &self.master_tasks);
+    let _ = debug_trait_builder.field("tasks", &self.tasks);
     let _ = debug_trait_builder.field("to_node", &self.to_node);
     debug_trait_builder.finish()
   }
@@ -363,11 +359,7 @@ impl Simulation {
     seed: [u8; 16],
     num_clients: u32,
     num_nodes: u32,
-    paxos_config: PaxosConfig,
-    coord_config: CoordConfig,
-    master_config: MasterConfig,
-    slave_config: SlaveConfig,
-    tablet_config: TabletConfig,
+    node_config: NodeConfig,
   ) -> Simulation {
     let mut sim = Simulation {
       rand: XorShiftRng::from_seed(seed),
@@ -404,19 +396,11 @@ impl Simulation {
       sim.node_datas.insert(
         eid.clone(),
         NodeData {
-          node: NodeState::new(
-            eid.clone(),
-            paxos_config.clone(),
-            coord_config.clone(),
-            master_config.clone(),
-            slave_config.clone(),
-            tablet_config.clone(),
-          ),
+          node: NodeState::new(eid.clone(), node_config.clone()),
           exited: false,
           tablet_states: Default::default(),
           coord_states: Default::default(),
-          slave_tasks: Default::default(),
-          master_tasks: Default::default(),
+          tasks: Default::default(),
           to_node: Default::default(),
         },
       );
@@ -430,7 +414,31 @@ impl Simulation {
     // Metadata
     sim.true_timestamp = mk_t(0);
 
+    sim.bootstrap();
     return sim;
+  }
+
+  /// Call `bootstrap` on all nodes.
+  pub fn bootstrap(&mut self) {
+    for (eid, node_data) in &mut self.node_datas {
+      let current_time = self.true_timestamp.clone();
+      let mut io_ctx = TestIOCtx {
+        rand: &mut self.rand,
+        current_time: current_time.clone(), // TODO: simulate clock skew
+        queues: &mut self.queues,
+        nonempty_queues: &mut self.nonempty_queues,
+        this_eid: eid,
+        exited: &mut node_data.exited,
+        to_node: &mut node_data.to_node,
+        tablet_states: &mut node_data.tablet_states,
+        coord_states: &mut node_data.coord_states,
+        tasks: &mut node_data.tasks,
+        success_tracer: &mut self.success_tracer,
+        slave_trace_msgs: &mut Default::default(),
+        master_trace_msgs: &mut Default::default(),
+      };
+      node_data.node.bootstrap(&mut io_ctx);
+    }
   }
 
   // -----------------------------------------------------------------------------------------------
@@ -600,8 +608,7 @@ impl Simulation {
       to_node: &mut node_data.to_node,
       tablet_states: &mut node_data.tablet_states,
       coord_states: &mut node_data.coord_states,
-      slave_tasks: &mut node_data.slave_tasks,
-      master_tasks: &mut node_data.master_tasks,
+      tasks: &mut node_data.tasks,
       success_tracer: &mut self.success_tracer,
       slave_trace_msgs: &mut slave_trace_msgs,
       master_trace_msgs: &mut master_trace_msgs,
@@ -720,8 +727,7 @@ impl Simulation {
         to_node: &mut node_data.to_node,
         tablet_states: &mut node_data.tablet_states,
         coord_states: &mut node_data.coord_states,
-        slave_tasks: &mut node_data.slave_tasks,
-        master_tasks: &mut node_data.master_tasks,
+        tasks: &mut node_data.tasks,
         success_tracer: &mut self.success_tracer,
         slave_trace_msgs: &mut Default::default(),
         master_trace_msgs: &mut Default::default(),
@@ -736,27 +742,13 @@ impl Simulation {
           continue;
         }
 
-        // Process slave timer inputs
-        if let Some((next_timestamp, _)) = io_ctx.slave_tasks.first_key_value() {
+        // Process timer inputs
+        if let Some((next_timestamp, _)) = io_ctx.tasks.first_key_value() {
           if next_timestamp <= &current_time {
             // All data in this first entry should be dispatched.
             let next_timestamp = next_timestamp.clone();
-            for timer_input in io_ctx.slave_tasks.remove(&next_timestamp).unwrap() {
-              node_data.node.process_input(&mut io_ctx, GenericInput::SlaveTimerInput(timer_input));
-            }
-            continue;
-          }
-        }
-
-        // Process master timer inputs
-        if let Some((next_timestamp, _)) = io_ctx.master_tasks.first_key_value() {
-          if next_timestamp <= &current_time {
-            // All data in this first entry should be dispatched.
-            let next_timestamp = next_timestamp.clone();
-            for timer_input in io_ctx.master_tasks.remove(&next_timestamp).unwrap() {
-              node_data
-                .node
-                .process_input(&mut io_ctx, GenericInput::MasterTimerInput(timer_input));
+            for timer_input in io_ctx.tasks.remove(&next_timestamp).unwrap() {
+              node_data.node.process_input(&mut io_ctx, GenericInput::TimerInput(timer_input));
             }
             continue;
           }

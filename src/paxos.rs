@@ -84,34 +84,6 @@ pub struct PaxosConfig {
   pub max_failable: u32,
 }
 
-impl PaxosConfig {
-  /// Default config values to use in production
-  pub fn prod() -> PaxosConfig {
-    PaxosConfig {
-      heartbeat_threshold: 5,
-      heartbeat_period_ms: mk_t(1000),
-      next_index_period_ms: mk_t(1000),
-      retry_defer_time_ms: mk_t(1000),
-      proposal_increment: 1000,
-      remote_next_index_thresh: 100,
-      max_failable: 1,
-    }
-  }
-
-  /// Default config values to use in production
-  pub fn test() -> PaxosConfig {
-    PaxosConfig {
-      heartbeat_threshold: 3,
-      heartbeat_period_ms: mk_t(5),
-      next_index_period_ms: mk_t(10),
-      retry_defer_time_ms: mk_t(5),
-      proposal_increment: 1000,
-      remote_next_index_thresh: 5,
-      max_failable: 1,
-    }
-  }
-}
-
 // -----------------------------------------------------------------------------------------------
 //  PaxosContextBase
 // -----------------------------------------------------------------------------------------------

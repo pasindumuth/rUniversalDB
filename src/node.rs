@@ -1,4 +1,4 @@
-use crate::common::{GossipDataView, MasterIOCtx, NodeIOCtx, SlaveIOCtx};
+use crate::common::{mk_t, FreeNodeIOCtx, GossipDataView, MasterIOCtx, NodeIOCtx, SlaveIOCtx};
 use crate::coord::{CoordConfig, CoordContext};
 use crate::master::{FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput};
 use crate::model::common::{
@@ -24,12 +24,17 @@ const SERVER_PORT: u32 = 1610;
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
+pub enum GenericTimerInput {
+  FreeNodeTimerInput,
+  SlaveTimerInput(SlaveTimerInput),
+  MasterTimerInput(MasterTimerInput),
+}
+
+#[derive(Debug)]
 pub enum GenericInput {
   Message(EndpointId, msg::NetworkMessage),
-  SlaveTimerInput(SlaveTimerInput),
   SlaveBackMessage(SlaveBackMessage),
-  MasterTimerInput(MasterTimerInput),
-  FreeNodeTimerInput,
+  TimerInput(GenericTimerInput),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -255,6 +260,58 @@ impl NominalMasterState {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  Node Config
+// -----------------------------------------------------------------------------------------------
+
+/// The granularity in which Timer events are executed, in microseconds
+// TODO: bring this into a confic object. Bring all timer event timers and things that might
+//  massively impact the chatter in the system into the dynamically configurable Config objects.
+//  That way, I can have a central location for tuning parameters.
+
+/// Config that holds all configs that a Node would need (for both Master, Slave, and other
+/// threads (e.g. Coord and Tablet)).
+#[derive(Debug, Clone)]
+pub struct NodeConfig {
+  // Configs for the Top Level
+  pub free_node_timer_ms: u128,
+
+  // Sub Configs
+  pub paxos_config: PaxosConfig,
+  pub coord_config: CoordConfig,
+  pub master_config: MasterConfig,
+  pub slave_config: SlaveConfig,
+  pub tablet_config: TabletConfig,
+}
+
+/// Build the `NodeConfig` we should use for production.
+pub fn get_prod_configs() -> NodeConfig {
+  let timestamp_suffix_divisor = 5;
+  let paxos_config = PaxosConfig {
+    heartbeat_threshold: 5,
+    heartbeat_period_ms: mk_t(1000),
+    next_index_period_ms: mk_t(1000),
+    retry_defer_time_ms: mk_t(1000),
+    proposal_increment: 1000,
+    remote_next_index_thresh: 100,
+    max_failable: 1,
+  };
+  let coord_config = CoordConfig { timestamp_suffix_divisor };
+  let master_config = MasterConfig { timestamp_suffix_divisor, slave_group_size: 5, num_coord: 3 };
+  let slave_config = SlaveConfig { timestamp_suffix_divisor };
+  let tablet_config = TabletConfig { timestamp_suffix_divisor };
+
+  // Combine the above
+  NodeConfig {
+    free_node_timer_ms: 1, // TODO: change after we make Master node kill a free node so fast.
+    paxos_config,
+    coord_config,
+    master_config,
+    slave_config,
+    tablet_config,
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  State
 // -----------------------------------------------------------------------------------------------
 
@@ -270,37 +327,26 @@ enum State {
 #[derive(Debug)]
 pub struct NodeState {
   this_eid: EndpointId,
+  node_config: NodeConfig,
 
-  // The configs that should be used when constructing various state (e.g. `SlaveState`)
-  paxos_config: PaxosConfig,
-  coord_config: CoordConfig,
-  master_config: MasterConfig,
-  slave_config: SlaveConfig,
-  tablet_config: TabletConfig,
-
+  /// State
   state: State,
 }
 
 impl NodeState {
-  pub fn new(
-    this_eid: EndpointId,
-    paxos_config: PaxosConfig,
-    coord_config: CoordConfig,
-    master_config: MasterConfig,
-    slave_config: SlaveConfig,
-    tablet_config: TabletConfig,
-  ) -> NodeState {
-    NodeState {
-      this_eid,
-      paxos_config,
-      coord_config,
-      master_config,
-      slave_config,
-      tablet_config,
-      state: State::DNEState(BTreeMap::default()),
-    }
+  pub fn new(this_eid: EndpointId, node_config: NodeConfig) -> NodeState {
+    NodeState { this_eid, node_config, state: State::DNEState(BTreeMap::default()) }
   }
 
+  /// This should be called at the very start of the life of a Master node. This
+  /// will start the timer events, etc.
+  pub fn bootstrap<IOCtx: NodeIOCtx>(&mut self, io_ctx: &mut IOCtx) {
+    self.process_input(io_ctx, GenericInput::TimerInput(GenericTimerInput::FreeNodeTimerInput));
+  }
+
+  /// The main input entrypoint for a top-level node (i.e. Master and Slave). `GenericInput`
+  /// includes all network events, timer events, and cross-thread events for the top-level
+  /// threads (e.g. Master and Slave).
   pub fn process_input<IOCtx: NodeIOCtx>(
     &mut self,
     io_ctx: &mut IOCtx,
@@ -329,8 +375,8 @@ impl NodeState {
                   start.master_eids,
                   leader_map.clone(),
                   self.this_eid.clone(),
-                  self.master_config.clone(),
-                  self.paxos_config.clone(),
+                  self.node_config.master_config.clone(),
+                  self.node_config.paxos_config.clone(),
                 ));
 
                 // Bootstrap the Master
@@ -361,6 +407,11 @@ impl NodeState {
             amend_buffer(buffered_messages, &eid, message);
           }
         }
+        GenericInput::TimerInput(GenericTimerInput::FreeNodeTimerInput) => {
+          // Schedule the next FreeNodeTimerInput.
+          let defer_time = mk_t(self.node_config.free_node_timer_ms);
+          FreeNodeIOCtx::defer(io_ctx, defer_time, GenericTimerInput::FreeNodeTimerInput);
+        }
         _ => {}
       },
       State::FreeNodeState(lid, buffered_messages) => match generic_input {
@@ -388,7 +439,7 @@ impl NodeState {
                     create.leader_map.clone(),
                     create.paxos_nodes.clone(),
                     self.this_eid.clone(),
-                    self.coord_config.clone(),
+                    self.node_config.coord_config.clone(),
                   );
                   io_ctx.create_coord_full(coord_context);
                   coord_positions.push(cid);
@@ -402,8 +453,8 @@ impl NodeState {
                   create.leader_map,
                   create.paxos_nodes,
                   self.this_eid.clone(),
-                  self.slave_config.clone(),
-                  self.paxos_config.clone(),
+                  self.node_config.slave_config.clone(),
+                  self.node_config.paxos_config.clone(),
                 );
                 let mut slave_state = SlaveState::new(slave_context);
 
@@ -450,7 +501,7 @@ impl NodeState {
                     snapshot.leader_map.clone(),
                     snapshot.paxos_driver_start.paxos_nodes.clone(),
                     self.this_eid.clone(),
-                    self.coord_config.clone(),
+                    self.node_config.coord_config.clone(),
                   );
                   io_ctx.create_coord_full(coord_context);
                 }
@@ -461,7 +512,7 @@ impl NodeState {
                   io_ctx.create_tablet_full(
                     gossip.clone(),
                     tablet_snapshot,
-                    self.tablet_config.clone(),
+                    self.node_config.tablet_config.clone(),
                   );
                 }
 
@@ -475,8 +526,8 @@ impl NodeState {
                   snapshot.paxos_driver_start.clone(),
                   snapshot.create_table_ess,
                   self.this_eid.clone(),
-                  self.slave_config.clone(),
-                  self.paxos_config.clone(),
+                  self.node_config.slave_config.clone(),
+                  self.node_config.paxos_config.clone(),
                 );
 
                 // Bootstrap the slave
@@ -504,8 +555,8 @@ impl NodeState {
                 let mut master_state = MasterState::create_reconfig(
                   io_ctx,
                   snapshot,
-                  self.master_config.clone(),
-                  self.paxos_config.clone(),
+                  self.node_config.master_config.clone(),
+                  self.node_config.paxos_config.clone(),
                   self.this_eid.clone(),
                 );
 
@@ -540,7 +591,7 @@ impl NodeState {
             amend_buffer(buffered_messages, &eid, message);
           }
         }
-        GenericInput::FreeNodeTimerInput => {
+        GenericInput::TimerInput(GenericTimerInput::FreeNodeTimerInput) => {
           // Send out `FreeNodeHeartbeat`
           io_ctx.send(
             &lid.eid,
@@ -551,6 +602,10 @@ impl NodeState {
               }),
             )),
           );
+
+          // Schedule the next FreeNodeTimerInput.
+          let defer_time = mk_t(self.node_config.free_node_timer_ms);
+          FreeNodeIOCtx::defer(io_ctx, defer_time, GenericTimerInput::FreeNodeTimerInput);
         }
         _ => {}
       },
@@ -593,7 +648,7 @@ impl NodeState {
               nominal_state.handle_msg(io_ctx, &eid, slave_msg);
             }
           }
-          GenericInput::SlaveTimerInput(timer_input) => {
+          GenericInput::TimerInput(GenericTimerInput::SlaveTimerInput(timer_input)) => {
             // Forward the `SlaveTimerInput`
             nominal_state.state.handle_input(io_ctx, FullSlaveInput::SlaveTimerInput(timer_input));
           }
@@ -636,7 +691,7 @@ impl NodeState {
               nominal_state.handle_msg(io_ctx, &eid, master_msg);
             }
           }
-          GenericInput::MasterTimerInput(timer_input) => {
+          GenericInput::TimerInput(GenericTimerInput::MasterTimerInput(timer_input)) => {
             // Forward the `MasterTimerInput`
             nominal_state
               .state
