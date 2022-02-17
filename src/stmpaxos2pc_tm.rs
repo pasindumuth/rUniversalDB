@@ -296,8 +296,8 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
     closed_plm: &TMClosedPLm<T>,
   );
 
-  /// This is called when the node died.
-  fn node_died<IO: BasicIOCtx<T::NetworkMessageT>>(
+  /// This is called when the leader of the node changes.
+  fn leader_changed<IO: BasicIOCtx<T::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::TMContext,
     io_ctx: &mut IO,
@@ -627,7 +627,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
         STMPaxos2PCTMAction::Wait
       }
       State::Start | State::WaitingInsertTMPrepared | State::InsertTMPreparing => {
-        self.inner.node_died(ctx, io_ctx);
+        self.inner.leader_changed(ctx, io_ctx);
         STMPaxos2PCTMAction::Exit
       }
       State::Preparing(_)
@@ -637,7 +637,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
       | State::Aborted(_)
       | State::InsertingTMClosed => {
         self.state = State::Following;
-        self.inner.node_died(ctx, io_ctx);
+        self.inner.leader_changed(ctx, io_ctx);
         STMPaxos2PCTMAction::Wait
       }
     }

@@ -1,4 +1,4 @@
-use crate::alter_table_tm_es::{get_rms, maybe_respond_dead, ResponseData};
+use crate::alter_table_tm_es::{get_rms, ResponseData};
 use crate::common::{cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, Timestamp};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{TNodePath, TablePath};
@@ -300,8 +300,8 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
   ) {
   }
 
-  fn node_died<IO: BasicIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
-    maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
+  fn leader_changed<IO: BasicIOCtx>(&mut self, _: &mut MasterContext, _: &mut IO) {
+    self.response_data = None;
   }
 
   fn reconfig_snapshot(&self) -> DropTableTMInner {

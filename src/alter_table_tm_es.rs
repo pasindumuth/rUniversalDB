@@ -327,8 +327,8 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
   ) {
   }
 
-  fn node_died<IO: BasicIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
-    maybe_respond_dead(&mut self.response_data, ctx, io_ctx);
+  fn leader_changed<IO: BasicIOCtx>(&mut self, _: &mut MasterContext, _: &mut IO) {
+    self.response_data = None;
   }
 
   fn reconfig_snapshot(&self) -> AlterTableTMInner {
@@ -350,25 +350,4 @@ pub fn get_rms<IO: BasicIOCtx>(gossip: &GossipDataView, table_path: &TablePath) 
     rms.push(TNodePath { sid, sub: TSubNodePath::Tablet(tid.clone()) });
   }
   rms
-}
-
-/// Send a response back to the External, informing them that the current Master Leader died.
-pub fn maybe_respond_dead<IO: BasicIOCtx>(
-  response_data: &mut Option<ResponseData>,
-  ctx: &mut MasterContext,
-  io_ctx: &mut IO,
-) {
-  if let Some(data) = response_data {
-    ctx.external_request_id_map.remove(&data.request_id);
-    // io_ctx.send(
-    //   &data.sender_eid,
-    //   msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-    //     msg::ExternalDDLQueryAborted {
-    //       request_id: data.request_id.clone(),
-    //       payload: msg::ExternalDDLQueryAbortData::NodeDied,
-    //     },
-    //   )),
-    // );
-    *response_data = None;
-  }
 }

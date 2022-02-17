@@ -1703,6 +1703,7 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
         // Cooldown and check for cleanup
         assert!(simulate_until_clean(&mut sim, 10000));
 
+        // TODO: After removing NodeDied, see if this test holds.
         // Get the response and validate it
         let response = ctx.next_response(&mut sim);
         match response.clone() {
@@ -1730,7 +1731,6 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
           }
           msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(abort)) => {
             assert_eq!(abort.request_id, request_id.clone());
-            assert_eq!(abort.payload, msg::ExternalAbortedData::NodeDied);
             failed += 1;
           }
           _ => panic!(),

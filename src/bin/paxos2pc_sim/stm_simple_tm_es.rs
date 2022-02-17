@@ -228,7 +228,12 @@ impl STMPaxos2PCTMInner<STMSimplePayloadTypes> for STMSimpleTMInner {
   ) {
   }
 
-  fn node_died<IO: BasicIOCtx<msg::NetworkMessage>>(&mut self, _: &mut SlaveContext, _: &mut IO) {}
+  fn leader_changed<IO: BasicIOCtx<msg::NetworkMessage>>(
+    &mut self,
+    _: &mut SlaveContext,
+    _: &mut IO,
+  ) {
+  }
 
   fn reconfig_snapshot(&self) -> Self {
     unimplemented!()

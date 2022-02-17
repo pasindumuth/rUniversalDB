@@ -567,8 +567,6 @@ fn verify_req_res(
     DDLQuery(msg::PerformExternalDDLQuery, Option<msg::ExternalDDLQuerySuccess>),
   }
 
-  // TODO: remove NodeDied everywhere.
-
   // Setup some stats
   let mut queries_cancelled = 0;
   let mut ddl_queries_cancelled = 0;
@@ -726,7 +724,10 @@ pub fn test_all_basic_parallel(rand: &mut XorShiftRng) {
 
 pub fn test_all_paxos_parallel(rand: &mut XorShiftRng) {
   // TODO: We have performance problems with the following test case:
-  // parallel_test([70, 177, 210, 42, 132, 42, 124, 11, 48, 71, 242, 232, 173, 15, 129, 222], 5, 10);
+  //  parallel_test([70, 177, 210, 42, 132, 42, 124, 11, 48, 71, 242, 232, 173, 15, 129, 222], 5, 10);
+  //  To solve this, we should gather message statistics. How many of each message was sent, and
+  //  where. We have to revive the stats accumulator and periodically print out what's going on
+  //  to see if something sus is happening.
 
   // Setup performance stats.
   let mut duration = 0;
@@ -1057,19 +1058,19 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nod
     let select_stats_str = select_stats_strs.join("\n       ");
 
     println!(
-      "Test 'test_all_paxos_parallel' Passed! Replay time taken: {:?}ms.
-       Total Queries: {}, Succeeded: {}, Leadership Changes: {}, 
-       {}
-       # Multi-Stage: {},
-       # Query Cancels: {}, # DDL Query Cancels: {}",
-      res.replay_duration.time_ms,
-      res.total_queries,
-      res.successful_queries,
-      num_leadership_changes,
-      select_stats_str,
-      res.num_multi_stage,
-      res.queries_cancelled,
-      res.ddl_queries_cancelled
+      "Test 'test_all_paxos_parallel' Passed! Replay time taken: {duration:?}ms.
+       Total Queries: {total}, Succeeded: {succeeded}, Leadership Changes: {lid_changes}, 
+       {select_stats_str}
+       # Multi-Stage: {num_multi_stage},
+       # Query Cancels: {queries_cancelled}, # DDL Query Cancels: {ddl_queries_cancelled}",
+      duration = res.replay_duration.time_ms,
+      total = res.total_queries,
+      succeeded = res.successful_queries,
+      lid_changes = num_leadership_changes,
+      select_stats_str = select_stats_str,
+      num_multi_stage = res.num_multi_stage,
+      queries_cancelled = res.queries_cancelled,
+      ddl_queries_cancelled = res.ddl_queries_cancelled
     );
   } else {
     println!("Skipped Test 'test_all_paxos_parallel' due to Timestamp Conflict");

@@ -501,40 +501,13 @@ impl CoordContext {
 
         if !self.is_leader() {
           // This means this node lost Leadership.
-
-          // Wink away MSCoordESs
-          for (_, ms_coord_es) in std::mem::replace(&mut statuses.ms_coord_ess, BTreeMap::new()) {
-            // io_ctx.send(
-            //   &ms_coord_es.sender_eid,
-            //   msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
-            //     msg::ExternalQueryAborted {
-            //       request_id: ms_coord_es.request_id,
-            //       payload: msg::ExternalAbortedData::NodeDied,
-            //     },
-            //   )),
-            // )
-          }
-
-          // Wink away FinishQueryTMESs
-          for (_, finish_query_es) in
-            std::mem::replace(&mut statuses.finish_query_tm_ess, BTreeMap::new())
-          {
-            if let Some(response_data) = finish_query_es.inner.response_data {
-              // io_ctx.send(
-              //   &response_data.sender_eid,
-              //   msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
-              //     msg::ExternalQueryAborted {
-              //       request_id: response_data.request_id,
-              //       payload: msg::ExternalAbortedData::NodeDied,
-              //     },
-              //   )),
-              // )
-            }
-          }
-
           self.external_request_id_map.clear();
 
           // Wink away all TM ESs.
+          statuses.ms_coord_ess.clear();
+          statuses.finish_query_tm_ess.clear();
+
+          // Wink away all Coord TP ESs.
           statuses.gr_query_ess.clear();
           statuses.trans_table_read_ess.clear();
           statuses.tm_statuss.clear();
