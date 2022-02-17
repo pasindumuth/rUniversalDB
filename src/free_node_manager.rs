@@ -64,10 +64,14 @@ impl FreeNodeManager {
 
   /// Handles a `free_nodes` to initiate a `FreeNodeManager` for a reconfigured node properly.
   pub fn create_reconfig(free_nodes: BTreeMap<EndpointId, FreeNodeType>) -> FreeNodeManager {
+    let mut free_node_heartbeat = BTreeMap::<EndpointId, u32>::new();
+    for (eid, _) in &free_nodes {
+      free_node_heartbeat.insert(eid.clone(), 0);
+    }
     FreeNodeManager {
       free_nodes,
       pending_new_free_nodes: Default::default(),
-      free_node_heartbeat: Default::default(),
+      free_node_heartbeat,
       requested_reconfig_eids: Default::default(),
     }
   }

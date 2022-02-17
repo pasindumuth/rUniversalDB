@@ -154,6 +154,7 @@ impl FreeNodeIOCtx for ProdIOCtx {
     &mut self,
     gossip: Arc<GossipData>,
     snapshot: TabletSnapshot,
+    this_eid: EndpointId,
     tablet_config: TabletConfig,
   ) {
     // Create mpsc queue for Slave-Tablet communication.
@@ -167,7 +168,7 @@ impl FreeNodeIOCtx for ProdIOCtx {
       to_top: self.to_top.clone(),
     };
     thread::spawn(move || {
-      let mut tablet = TabletState::create_reconfig(gossip, snapshot, tablet_config);
+      let mut tablet = TabletState::create_reconfig(gossip, snapshot, this_eid, tablet_config);
       loop {
         let tablet_msg = to_tablet_receiver.recv().unwrap();
         tablet.handle_input(&mut io_ctx, tablet_msg);

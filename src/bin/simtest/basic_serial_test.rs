@@ -1598,7 +1598,7 @@ fn cancellation_test(seed: [u8; 16]) {
 
 fn paxos_leader_change_test(seed: [u8; 16]) {
   // Create one Slave Paxos Group to test Leader change logic with.
-  let mut sim = mk_general_sim(seed, 1, 1, 5, 1);
+  let mut sim = mk_general_sim(seed, 1, 1, 5, 1, 0);
 
   // Warmup the simulation
   sim.simulate_n_ms(100);
@@ -1642,7 +1642,7 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
   let mut failed = 0;
   'outer: for i in 0..NUM_ITERATIONS {
     println!("    iteration {:?}", i);
-    let mut sim = mk_general_sim(seed, 1, 5, 5, 1);
+    let mut sim = mk_general_sim(seed, 1, 5, 5, 1, 0);
     let mut ctx = TestContext::new(&sim);
 
     // Test Simple Update-Select

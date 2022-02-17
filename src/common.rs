@@ -61,6 +61,7 @@ pub trait FreeNodeIOCtx: BasicIOCtx {
     &mut self,
     gossip: Arc<GossipData>,
     snapshot: TabletSnapshot,
+    this_eid: EndpointId,
     tablet_config: TabletConfig,
   );
 
@@ -337,6 +338,7 @@ impl GossipData {
 }
 
 /// An immutable view of GossipData, useful for read-only access.
+#[derive(Debug)]
 pub struct GossipDataView<'a> {
   /// Database Schema
   pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
@@ -351,6 +353,7 @@ pub struct GossipDataView<'a> {
 
 /// A mutable view of GossipData, useful when we want to update it (and have `gen`) be
 /// automatically updated.
+#[derive(Debug)]
 pub struct GossipDataMutView<'a> {
   /// Database Schema
   pub db_schema: &'a mut BTreeMap<(TablePath, Gen), TableSchema>,

@@ -741,7 +741,7 @@ pub fn test_all_advanced_parallel(rand: &mut XorShiftRng) {
 
 pub fn advanced_parallel_test(seed: [u8; 16]) {
   // We create 3 clients.
-  let mut sim = mk_general_sim(seed, 3, 5, 1, 1);
+  let mut sim = mk_general_sim(seed, 3, 5, 1, 1, 0);
   let mut ctx = TestContext::new(&sim);
 
   // Setup Tables

@@ -531,6 +531,7 @@ impl NodeState {
                   io_ctx.create_tablet_full(
                     gossip.clone(),
                     tablet_snapshot,
+                    self.this_eid.clone(),
                     self.node_config.tablet_config.clone(),
                   );
                 }
@@ -728,11 +729,15 @@ impl NodeState {
     }
   }
 
-  /// This method should only be called if this node is a Master. it will
-  /// return the the GossipData underneath.
-  pub fn full_db_schema(&self) -> GossipDataView {
-    let master = cast!(State::NominalMasterState, &self.state).unwrap();
-    master.state.ctx.gossip.get()
+  /// This method should ideally only be called if this node is a Master. It will
+  /// return the the GossipData underneath. If this node is not the Master (i.e. it
+  /// is in `PostExistence`), then we return `None`.
+  pub fn full_db_schema(&self) -> Option<GossipDataView> {
+    if let State::NominalMasterState(master) = &self.state {
+      Some(master.state.ctx.gossip.get())
+    } else {
+      None
+    }
   }
 
   /// Returns `true` iff this node is beyond DNEState
@@ -741,6 +746,15 @@ impl NodeState {
       false
     } else {
       true
+    }
+  }
+
+  /// Returns `true` iff this node is beyond DNEState
+  pub fn did_exit(&self) -> bool {
+    if let State::PostExistence = &self.state {
+      true
+    } else {
+      false
     }
   }
 }

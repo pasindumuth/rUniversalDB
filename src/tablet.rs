@@ -235,7 +235,6 @@ pub struct TabletSnapshot {
   pub this_sid: SlaveGroupId,
   pub this_tid: TabletGroupId,
   pub sub_node_path: CTSubNodePath, // Wraps `this_tablet_group_id` for expedience
-  pub this_eid: EndpointId,
   pub leader_map: LeaderMap,
 
   // Storage
@@ -689,6 +688,7 @@ impl TabletState {
   pub fn create_reconfig(
     gossip: Arc<GossipData>,
     snapshot: TabletSnapshot,
+    this_eid: EndpointId,
     tablet_config: TabletConfig,
   ) -> TabletState {
     // Create Statuses
@@ -712,7 +712,7 @@ impl TabletState {
       this_sid: snapshot.this_sid,
       this_tid: snapshot.this_tid,
       sub_node_path: snapshot.sub_node_path,
-      this_eid: snapshot.this_eid,
+      this_eid,
       gossip,
       leader_map: snapshot.leader_map,
       storage: snapshot.storage,
@@ -1510,7 +1510,6 @@ impl TabletContext {
           this_sid: self.this_sid.clone(),
           this_tid: self.this_tid.clone(),
           sub_node_path: self.sub_node_path.clone(),
-          this_eid: self.this_eid.clone(),
           leader_map: self.leader_map.clone(),
           storage: self.storage.clone(),
           this_table_path: self.this_table_path.clone(),

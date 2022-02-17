@@ -704,20 +704,24 @@ fn verify_req_res(
 pub fn test_all_basic_parallel(rand: &mut XorShiftRng) {
   for i in 0..50 {
     println!("Running round {:?}", i);
-    parallel_test(mk_seed(rand), 1);
+    parallel_test(mk_seed(rand), 1, 0);
   }
 }
 
 pub fn test_all_paxos_parallel(rand: &mut XorShiftRng) {
-  for i in 0..100 {
+  for i in 0..50 {
     println!("Running round {:?}", i);
-    parallel_test(mk_seed(rand), 5);
+    parallel_test(mk_seed(rand), 5, 0);
+  }
+  for i in 50..100 {
+    println!("Running round {:?}", i);
+    parallel_test(mk_seed(rand), 5, 10);
   }
 }
 
-pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32) {
+pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nodes: u32) {
   println!("seed: {:?}", seed);
-  let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes, 100);
+  let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes, 100, num_reconfig_free_nodes);
 
   // Run the simulation
   let client_eids: Vec<_> = sim.get_all_responses().keys().cloned().collect();

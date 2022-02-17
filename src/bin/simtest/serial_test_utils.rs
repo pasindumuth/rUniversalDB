@@ -1,6 +1,7 @@
 use crate::simulation::Simulation;
 use runiversal::common::{mk_t, RangeEnds};
 use runiversal::coord::CoordConfig;
+use runiversal::free_node_manager::FreeNodeType;
 use runiversal::master::MasterConfig;
 use runiversal::model::common::{EndpointId, PaxosGroupId, RequestId, SlaveGroupId, TableView};
 use runiversal::model::message as msg;
@@ -238,7 +239,7 @@ pub fn simulate_until_clean(sim: &mut Simulation, time_limit: u32) -> bool {
 
 /// Simple common setup with a PaxosGroup size of 1.
 pub fn setup(seed: [u8; 16]) -> (Simulation, TestContext) {
-  let sim = mk_general_sim(seed, 1, 5, 1, 1);
+  let sim = mk_general_sim(seed, 1, 5, 1, 1, 0);
   let context = TestContext::new(&sim);
   (sim, context)
 }
@@ -367,9 +368,10 @@ pub fn mk_general_sim(
   num_slave_groups: u32,
   num_paxos_nodes: u32,
   timestamp_suffix_divisor: u64,
+  num_reconfig_free_nodes: u32,
 ) -> Simulation {
   // Create the sim
-  let num_count = (num_slave_groups + 1) * num_paxos_nodes;
+  let num_count = (num_slave_groups + 1) * num_paxos_nodes + num_reconfig_free_nodes;
   let node_config = get_test_configs(num_paxos_nodes, timestamp_suffix_divisor);
   let mut sim = Simulation::new(seed, num_clients, num_count, node_config);
 
@@ -402,9 +404,9 @@ pub fn mk_general_sim(
 
   // Next, we need to register as many nodes as necessary as FreeNodes to the new Master
   // so that there requested number of SlaveGroups can be created.
-  for i in num_paxos_nodes..(num_paxos_nodes * (num_slave_groups + 1)) {
-    let eid = mk_node_eid(i);
-    sim.register_free_node(&eid);
+  for i in 0..(num_paxos_nodes * num_slave_groups) {
+    let eid = mk_node_eid(num_paxos_nodes + i);
+    sim.register_free_node(&eid, FreeNodeType::NewSlaveFreeNode);
   }
 
   // Simulate to start all of these SlaveGroups.
@@ -417,6 +419,13 @@ pub fn mk_general_sim(
 
   // Assert that the above managed to create the Slaves and have the Master know about it.
   assert_eq!(sim.full_db_schema().slave_address_config.len() as u32, num_slave_groups);
+
+  // Next, we need to register as many nodes as necessary as FreeNodes to the new Master
+  // so that there requested number of SlaveGroups can be created.
+  for i in 0..num_reconfig_free_nodes {
+    let eid = mk_node_eid(num_paxos_nodes * (1 + num_slave_groups) + i);
+    sim.register_free_node(&eid, FreeNodeType::ReconfigFreeNode);
+  }
 
   sim
 }

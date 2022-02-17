@@ -98,10 +98,13 @@ impl<'a> FreeNodeIOCtx for TestIOCtx<'a> {
     &mut self,
     gossip: Arc<GossipData>,
     snapshot: TabletSnapshot,
+    this_eid: EndpointId,
     tablet_config: TabletConfig,
   ) {
     let tid = snapshot.this_tid.clone();
-    self.tablet_states.insert(tid, TabletState::create_reconfig(gossip, snapshot, tablet_config));
+    self
+      .tablet_states
+      .insert(tid, TabletState::create_reconfig(gossip, snapshot, this_eid, tablet_config));
   }
 
   fn create_coord_full(&mut self, ctx: CoordContext) {
@@ -470,9 +473,24 @@ impl Simulation {
   /// This returns the `FullDBSchema` of the current Master Leader. Note that the Master
   /// Groups needs to be instantiated for this to work.
   pub fn full_db_schema(&self) -> GossipDataView {
+    // First, try the Master Leader. This is an optimization (over iterating through all nodes).
     let lid = self.leader_map.get(&PaxosGroupId::Master).unwrap();
     let node_data = self.node_datas.get(&lid.eid).unwrap();
-    node_data.node.full_db_schema()
+    if let Some(schema) = node_data.node.full_db_schema() {
+      schema
+    } else {
+      // If the Master Leader produces nothing, we iterate through all the nodes in
+      // hopes of finding a Master node.
+      for (_, node_data) in &self.node_datas {
+        if let Some(schema) = node_data.node.full_db_schema() {
+          return schema;
+        }
+      }
+
+      // If there are no Master nodes despite the MasterGroup having been
+      // started up this is unexpected.
+      panic!()
+    }
   }
 
   pub fn get_success_reqs(&self) -> BTreeMap<RequestId, Timestamp> {
@@ -505,13 +523,13 @@ impl Simulation {
 
   /// The `eid` here should only a node that is in `DNEState`. In addition, a Master
   /// groups must be instantiated by this point.
-  pub fn register_free_node(&mut self, eid: &EndpointId) {
+  pub fn register_free_node(&mut self, eid: &EndpointId, node_type: FreeNodeType) {
     let lid = self.leader_map.get(&PaxosGroupId::Master).unwrap().clone();
     self.add_msg(
       msg::NetworkMessage::Master(msg::MasterMessage::FreeNodeAssoc(
         msg::FreeNodeAssoc::RegisterFreeNode(msg::RegisterFreeNode {
           sender_eid: eid.clone(),
-          node_type: FreeNodeType::NewSlaveFreeNode,
+          node_type,
         }),
       )),
       &eid,
@@ -769,11 +787,14 @@ impl Simulation {
   /// Run various consistency checks on the system validate whether it is in a good state.
   pub fn run_consistency_check(&mut self) {
     for (_, node_data) in &self.node_datas {
-      for (_, coord) in &node_data.coord_states {
-        assert_coord_consistency(coord);
-      }
-      for (_, tablet) in &node_data.tablet_states {
-        assert_tablet_consistency(tablet);
+      // Only check nodes that have not exited yet.
+      if !node_data.node.did_exit() {
+        for (_, coord) in &node_data.coord_states {
+          assert_coord_consistency(coord);
+        }
+        for (_, tablet) in &node_data.tablet_states {
+          assert_tablet_consistency(tablet);
+        }
       }
     }
   }
@@ -783,12 +804,15 @@ impl Simulation {
   pub fn check_resources_clean(&mut self, should_assert: bool) -> bool {
     let mut check_ctx = CheckCtx::new(should_assert);
     for (_, node_data) in &self.node_datas {
-      check_node_clean(&node_data.node, &mut check_ctx);
-      for (_, coord) in &node_data.coord_states {
-        check_coord_clean(coord, &mut check_ctx);
-      }
-      for (_, tablet) in &node_data.tablet_states {
-        check_tablet_clean(tablet, &mut check_ctx);
+      // Only check nodes that have not exited yet.
+      if !node_data.node.did_exit() {
+        check_node_clean(&node_data.node, &mut check_ctx);
+        for (_, coord) in &node_data.coord_states {
+          check_coord_clean(coord, &mut check_ctx);
+        }
+        for (_, tablet) in &node_data.tablet_states {
+          check_tablet_clean(tablet, &mut check_ctx);
+        }
       }
     }
     check_ctx.get_result()
