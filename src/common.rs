@@ -34,7 +34,7 @@ pub mod common_test;
 pub enum GeneralTraceMessage {
   /// This should be called every time a `external_request_id_map` is updated.
   RequestIdQueryId(RequestId, QueryId),
-  /// This should be called every time a Query or DDLQuery is committed. There can
+  /// This should be called every time a MSQuery or DDLQuery is committed. There can
   /// be duplicates of this message.
   CommittedQueryId(QueryId, Timestamp),
 }

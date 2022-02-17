@@ -504,15 +504,15 @@ impl CoordContext {
 
           // Wink away MSCoordESs
           for (_, ms_coord_es) in std::mem::replace(&mut statuses.ms_coord_ess, BTreeMap::new()) {
-            io_ctx.send(
-              &ms_coord_es.sender_eid,
-              msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
-                msg::ExternalQueryAborted {
-                  request_id: ms_coord_es.request_id,
-                  payload: msg::ExternalAbortedData::NodeDied,
-                },
-              )),
-            )
+            // io_ctx.send(
+            //   &ms_coord_es.sender_eid,
+            //   msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+            //     msg::ExternalQueryAborted {
+            //       request_id: ms_coord_es.request_id,
+            //       payload: msg::ExternalAbortedData::NodeDied,
+            //     },
+            //   )),
+            // )
           }
 
           // Wink away FinishQueryTMESs
@@ -520,15 +520,15 @@ impl CoordContext {
             std::mem::replace(&mut statuses.finish_query_tm_ess, BTreeMap::new())
           {
             if let Some(response_data) = finish_query_es.inner.response_data {
-              io_ctx.send(
-                &response_data.sender_eid,
-                msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
-                  msg::ExternalQueryAborted {
-                    request_id: response_data.request_id,
-                    payload: msg::ExternalAbortedData::NodeDied,
-                  },
-                )),
-              )
+              // io_ctx.send(
+              //   &response_data.sender_eid,
+              //   msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+              //     msg::ExternalQueryAborted {
+              //       request_id: response_data.request_id,
+              //       payload: msg::ExternalAbortedData::NodeDied,
+              //     },
+              //   )),
+              // )
             }
           }
 

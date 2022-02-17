@@ -253,15 +253,14 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
           )),
         );
         self.response_data = None;
-      } else {
-        // This means the query succeeded but this is a backup. Thus, we
-        // record the success in a trace message.
-        io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
-          committed_plm.query_id.clone(),
-          timestamp.clone(),
-        ));
       }
     }
+
+    // Trace this commit.
+    io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
+      committed_plm.query_id.clone(),
+      timestamp.clone(),
+    ));
 
     // Send out GossipData to all Slaves.
     // TODO: should this and the other DDL TM Statuses only be doing this if this is the elader?
@@ -361,15 +360,15 @@ pub fn maybe_respond_dead<IO: BasicIOCtx>(
 ) {
   if let Some(data) = response_data {
     ctx.external_request_id_map.remove(&data.request_id);
-    io_ctx.send(
-      &data.sender_eid,
-      msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-        msg::ExternalDDLQueryAborted {
-          request_id: data.request_id.clone(),
-          payload: msg::ExternalDDLQueryAbortData::NodeDied,
-        },
-      )),
-    );
+    // io_ctx.send(
+    //   &data.sender_eid,
+    //   msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+    //     msg::ExternalDDLQueryAborted {
+    //       request_id: data.request_id.clone(),
+    //       payload: msg::ExternalDDLQueryAbortData::NodeDied,
+    //     },
+    //   )),
+    // );
     *response_data = None;
   }
 }

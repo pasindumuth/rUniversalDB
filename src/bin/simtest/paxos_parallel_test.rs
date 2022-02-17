@@ -18,6 +18,7 @@ use sqlparser::parser::Parser;
 use sqlparser::test_utils::table;
 use std::cmp::{max, min};
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // -----------------------------------------------------------------------------------------------
 //  Query Generation Utils
@@ -511,6 +512,7 @@ impl<'a> QueryGenCtx<'a> {
 //  Utils
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Debug)]
 enum Request {
   Query(msg::PerformExternalQuery),
   DDLQuery(msg::PerformExternalDDLQuery),
@@ -548,94 +550,108 @@ impl AvgCounter {
   }
 }
 
-/// Replay the requests that succeeded in timestamp order serially, and very that
-/// the results are the same.
+/// Replay the requests that succeeded in timestamp order serially, and verify that
+/// the results are the same. The `full_req_res_map` contains the set of all `Request`s
+/// sent, along with a response (if one was sent back). Recall that some requests might not get
+/// a response due to nodes dying. We also have `success_write_reqs`, which contains exactly
+/// queries that succeeded which might do some kind of write (i.e. DDL Queries and Multi-Stage
+/// Queries). Any query excluded from `success_write_reqs` cannot do any sort of write.
 fn verify_req_res(
   rand: &mut XorShiftRng,
-  req_res_map: BTreeMap<RequestId, (Request, msg::ExternalMessage)>,
-  req_success_map: BTreeMap<RequestId, Timestamp>,
+  full_req_res_map: BTreeMap<RequestId, (Request, Option<msg::ExternalMessage>)>,
+  success_write_reqs: BTreeMap<RequestId, Timestamp>,
 ) -> Option<VerifyResult> {
-  // Sort the request-responses, filter out failures, but compensate for failure due to
-  // a NodeDied whose requests succeed anyways by looking up the Timestamp in `req_success_map`.
+  // Pairs up the Query and DDLQuery request-response pairs.
   enum SuccessPair {
     Query(msg::PerformExternalQuery, Option<msg::ExternalQuerySuccess>),
     DDLQuery(msg::PerformExternalDDLQuery, Option<msg::ExternalDDLQuerySuccess>),
   }
 
+  // TODO: remove NodeDied everywhere.
+
   // Setup some stats
   let mut queries_cancelled = 0;
   let mut ddl_queries_cancelled = 0;
+  let total_queries = full_req_res_map.len() as u32;
 
-  // Sort the queries
+  // This map contains the set of queries we need to execute in the replay. Whether we check
+  // the output depends on if the result in the `SuccessPair` is Some(_) or not.
   let mut sorted_success_res = BTreeMap::<Timestamp, SuccessPair>::new();
-  let total_queries = req_res_map.len() as u32;
-  for (rid, (req, res)) in req_res_map {
-    match (req, res) {
-      (Request::Query(req), msg::ExternalMessage::ExternalQueryAborted(abort)) => {
-        if let msg::ExternalAbortedData::ParseError(parse_error) = abort.payload {
-          println!("Query Parse Error: {:?}", parse_error);
-          panic!();
+  for (rid, (req, maybe_res)) in full_req_res_map {
+    // First, handle the case we get a response.
+    if let Some(res) = maybe_res {
+      match (req, res) {
+        (Request::Query(_), msg::ExternalMessage::ExternalQueryAborted(abort)) => {
+          // For aborts, we merely ensure they did not occur trivially (i.e. ParseError).
+          match abort.payload {
+            msg::ExternalAbortedData::ParseError(parse_error) => {
+              panic!("Query Parse Error: {:?}", parse_error);
+            }
+            msg::ExternalAbortedData::CancelConfirmed => {
+              queries_cancelled += 1;
+            }
+            _ => {}
+          }
         }
-        if abort.payload == msg::ExternalAbortedData::CancelConfirmed {
-          queries_cancelled += 1;
+        (Request::Query(req), msg::ExternalMessage::ExternalQuerySuccess(success)) => {
+          // Add in the request-response pair. Abort this test if `Timestamp` already exists.
+          if !sorted_success_res
+            .insert(success.timestamp.clone(), SuccessPair::Query(req, Some(success)))
+            .is_none()
+          {
+            return None;
+          }
         }
-        if abort.payload == msg::ExternalAbortedData::NodeDied {
-          // Recall that the query could still have succeeded, so we check `req_success_map`.
-          if let Some(timestamp) = req_success_map.get(&rid) {
+        (Request::DDLQuery(_), msg::ExternalMessage::ExternalDDLQueryAborted(abort)) => {
+          // For aborts, we merely ensure they did not occur trivially (i.e. ParseError).
+          match abort.payload {
+            msg::ExternalDDLQueryAbortData::ParseError(parse_error) => {
+              panic!("Query Parse Error: {:?}", parse_error);
+            }
+            msg::ExternalDDLQueryAbortData::CancelConfirmed => {
+              queries_cancelled += 1;
+            }
+            _ => {}
+          }
+        }
+        (Request::DDLQuery(req), msg::ExternalMessage::ExternalDDLQuerySuccess(success)) => {
+          // Add in the request-response pair. Abort this test if `Timestamp` already exists.
+          if !sorted_success_res
+            .insert(success.timestamp.clone(), SuccessPair::DDLQuery(req, Some(success)))
+            .is_none()
+          {
+            return None;
+          }
+        }
+        _ => panic!(),
+      }
+    } else {
+      // If we did not get a response, the request might still have succeeded in the system.
+      // This matter if the request was a write. We use `success_write_reqs` to account for it.
+      if let Some(timestamp) = success_write_reqs.get(&rid) {
+        match req {
+          Request::Query(req) => {
+            // Add in the request with an unknown response. Abort this test if
+            // `Timestamp` already exists.
             if !sorted_success_res
               .insert(timestamp.clone(), SuccessPair::Query(req, None))
               .is_none()
             {
-              // Here, two responses had the same timestamp. We cannot replay this, so we
-              // simply skip this test.
               return None;
             }
           }
-        }
-      }
-      (Request::Query(req), msg::ExternalMessage::ExternalQuerySuccess(success)) => {
-        if !sorted_success_res
-          .insert(success.timestamp.clone(), SuccessPair::Query(req, Some(success)))
-          .is_none()
-        {
-          // Here, two responses had the same timestamp. We cannot replay this, so we
-          // simply skip this test.
-          return None;
-        }
-      }
-      (Request::DDLQuery(req), msg::ExternalMessage::ExternalDDLQueryAborted(abort)) => {
-        if let msg::ExternalDDLQueryAbortData::ParseError(parse_error) = abort.payload {
-          println!("DDLQuery Parse Error: {:?}", parse_error);
-          panic!();
-        }
-        if abort.payload == msg::ExternalDDLQueryAbortData::CancelConfirmed {
-          ddl_queries_cancelled += 1;
-        }
-        if abort.payload == msg::ExternalDDLQueryAbortData::NodeDied {
-          // Recall that the query could still have succeeded, so we check `req_success_map`.
-          if let Some(timestamp) = req_success_map.get(&rid) {
+          Request::DDLQuery(req) => {
+            // Add in the request with an unknown response. Abort this test if
+            // `Timestamp` already exists.
             if !sorted_success_res
               .insert(timestamp.clone(), SuccessPair::DDLQuery(req, None))
               .is_none()
             {
-              // Here, two responses had the same timestamp. We cannot replay this, so we
-              // simply skip this test.
               return None;
             }
           }
         }
       }
-      (Request::DDLQuery(req), msg::ExternalMessage::ExternalDDLQuerySuccess(success)) => {
-        if !sorted_success_res
-          .insert(success.timestamp.clone(), SuccessPair::DDLQuery(req, Some(success)))
-          .is_none()
-        {
-          // Here, two responses had the same timestamp. We cannot replay this, so we
-          // simply skip this test.
-          return None;
-        }
-      }
-      _ => panic!(),
     }
   }
 
@@ -709,14 +725,32 @@ pub fn test_all_basic_parallel(rand: &mut XorShiftRng) {
 }
 
 pub fn test_all_paxos_parallel(rand: &mut XorShiftRng) {
-  for i in 0..50 {
-    println!("Running round {:?}", i);
+  // TODO: We have performance problems with the following test case:
+  // parallel_test([70, 177, 210, 42, 132, 42, 124, 11, 48, 71, 242, 232, 173, 15, 129, 222], 5, 10);
+
+  // Setup performance stats.
+  let mut duration = 0;
+  let mut reconfig_duration = 0;
+
+  // Execute the rounds.
+  const NUM_ROUNDS: u32 = 50;
+  for i in 0..NUM_ROUNDS {
+    println!("Running round {:?}", 2 * i);
+    let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     parallel_test(mk_seed(rand), 5, 0);
-  }
-  for i in 50..100 {
-    println!("Running round {:?}", i);
+    let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    duration += (end_t - start_t);
+
+    println!("Running reconfig round {:?}", 2 * i + 1);
+    let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     parallel_test(mk_seed(rand), 5, 10);
+    let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    reconfig_duration += (end_t - start_t);
   }
+
+  // Print performance stats
+  println!("Avg Duration: {}", duration as u32 / NUM_ROUNDS);
+  println!("Avg Reconfig Duration: {}", reconfig_duration as u32 / NUM_ROUNDS);
 }
 
 pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nodes: u32) {
@@ -736,7 +770,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nod
     req_map.insert(eid.clone(), BTreeMap::new());
   }
 
-  // Elements from the above are moved here as responses arrive
+  // Elements from the above are moved here as responses arrive.
   let mut req_res_map = BTreeMap::<RequestId, (Request, msg::ExternalMessage)>::new();
 
   const SIM_DURATION: u128 = 5000; // The duration that we run the simulation
@@ -950,7 +984,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nod
     let mut all_old = true;
     for (_, (_, gid, lid)) in &req_lid_map {
       let cur_lid = sim.leader_map.get(&gid).unwrap();
-      if cur_lid.gen >= lid.gen {
+      if cur_lid.gen <= lid.gen {
         all_old = false;
         break;
       }
@@ -989,8 +1023,22 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nod
   }
 
   // Verify the responses are correct
-  let success_reqs = sim.get_success_reqs();
-  if let Some(res) = verify_req_res(&mut sim.rand, req_res_map, success_reqs) {
+
+  let mut full_req_res_map = BTreeMap::<RequestId, (Request, Option<msg::ExternalMessage>)>::new();
+  // Add in the request-response pairs that responded.
+  for (rid, (req, res)) in req_res_map {
+    full_req_res_map.insert(rid, (req, Some(res)));
+  }
+  // Add in the requests that did not respond.
+  for (_, rid_req_map) in req_map {
+    for (rid, req) in rid_req_map {
+      // Assert mutual exclusion.
+      assert!(!full_req_res_map.insert(rid, (req, None)).is_some());
+    }
+  }
+
+  let success_write_reqs = sim.get_success_write_reqs();
+  if let Some(res) = verify_req_res(&mut sim.rand, full_req_res_map, success_write_reqs) {
     // Count the number of Leadership changes.
     let mut num_leadership_changes = 0;
     for (_, lid) in &sim.leader_map {

@@ -493,7 +493,9 @@ impl Simulation {
     }
   }
 
-  pub fn get_success_reqs(&self) -> BTreeMap<RequestId, Timestamp> {
+  /// This returns all DDL and MS Queries that succeed in the system. Note that pure
+  /// reads do not get recorded here.
+  pub fn get_success_write_reqs(&self) -> BTreeMap<RequestId, Timestamp> {
     self.success_tracer.successful_reqs.clone()
   }
 

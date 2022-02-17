@@ -375,20 +375,19 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
             msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
               msg::ExternalDDLQuerySuccess {
                 request_id: response_data.request_id.clone(),
-                timestamp: commit_timestamp,
+                timestamp: commit_timestamp.clone(),
               },
             )),
           );
           self.response_data = None;
-        } else {
-          // This means the query succeeded but this is a backup. Thus, we
-          // record the success in a trace message.
-          io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
-            closed_plm.query_id.clone(),
-            commit_timestamp,
-          ));
         }
       }
+
+      // Trace this commit.
+      io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
+        closed_plm.query_id.clone(),
+        commit_timestamp.clone(),
+      ));
 
       // Send out GossipData to all Slaves.
       ctx.broadcast_gossip(io_ctx);

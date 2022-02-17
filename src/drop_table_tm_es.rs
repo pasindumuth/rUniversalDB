@@ -227,15 +227,14 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
           )),
         );
         self.response_data = None;
-      } else {
-        // This means the query succeeded but this is a backup. Thus, we
-        // record the success in a trace message.
-        io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
-          committed_plm.query_id.clone(),
-          timestamp.clone(),
-        ));
       }
     }
+
+    // Trace this commit.
+    io_ctx.general_trace(GeneralTraceMessage::CommittedQueryId(
+      committed_plm.query_id.clone(),
+      timestamp.clone(),
+    ));
 
     // Send out GossipData to all Slaves.
     ctx.broadcast_gossip(io_ctx);
