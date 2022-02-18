@@ -37,6 +37,9 @@ pub enum GeneralTraceMessage {
   /// This should be called every time a MSQuery or DDLQuery is committed. There can
   /// be duplicates of this message.
   CommittedQueryId(QueryId, Timestamp),
+  /// This indicates a reconfiguration happened at `PaxosGroupId`. Recall that such events can
+  /// be identified uniquely globally by the new nodes they introduced.
+  Reconfig(PaxosGroupId, Vec<EndpointId>),
 }
 
 pub trait BasicIOCtx<NetworkMessageT = msg::NetworkMessage> {

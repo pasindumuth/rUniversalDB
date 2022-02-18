@@ -645,12 +645,15 @@ impl MasterContext {
                 });
 
                 // Update the `all_eids`
-                update_all_eids(&mut self.all_eids, &rem_eids, new_eids);
+                update_all_eids(&mut self.all_eids, &rem_eids, new_eids.clone());
 
                 // If this is the leader, we send a MasterSnapshot.
                 if self.is_leader() {
                   self.start_snapshot(io_ctx, statuses);
                 }
+
+                // Trace the reconfig event.
+                io_ctx.general_trace(GeneralTraceMessage::Reconfig(PaxosGroupId::Master, new_eids));
 
                 // Then, deliver any messages that were blocked.
                 self.deliver_blocked_messages(io_ctx, statuses, remote_leader_changed);

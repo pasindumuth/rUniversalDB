@@ -1040,6 +1040,8 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nod
       num_leadership_changes += lid.gen.0;
     }
 
+    let (master_reconfig_count, slave_reconfig_count) = sim.get_num_reconfigs();
+
     let mut select_stats_strs = Vec::<String>::new();
     for (i, stat) in res.stats_ncte_1stage.into_iter().enumerate() {
       select_stats_strs.push(format!(
@@ -1054,6 +1056,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nod
     println!(
       "Test 'test_all_paxos_parallel' Passed! Replay time taken: {duration:?}ms.
        Total Queries: {total}, Succeeded: {succeeded}, Leadership Changes: {lid_changes}, 
+       # Master Reconfigs: {master_reconfig_count}, # Slave Reconfigs: {slave_reconfig_count},
        {select_stats_str}
        # Multi-Stage: {num_multi_stage},
        # Query Cancels: {queries_cancelled}, # DDL Query Cancels: {ddl_queries_cancelled}",
@@ -1061,6 +1064,8 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nod
       total = res.total_queries,
       succeeded = res.successful_queries,
       lid_changes = num_leadership_changes,
+      master_reconfig_count = master_reconfig_count,
+      slave_reconfig_count = slave_reconfig_count,
       select_stats_str = select_stats_str,
       num_multi_stage = res.num_multi_stage,
       queries_cancelled = res.queries_cancelled,

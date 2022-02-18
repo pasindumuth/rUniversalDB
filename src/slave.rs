@@ -1,6 +1,6 @@
 use crate::common::{
-  lookup, mk_t, update_all_eids, update_leader_map, BasicIOCtx, GossipData, LeaderMap,
-  RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp, VersionedValue,
+  lookup, mk_t, update_all_eids, update_leader_map, BasicIOCtx, GeneralTraceMessage, GossipData,
+  LeaderMap, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp, VersionedValue,
 };
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::{CreateTableRMAction, CreateTableRMES};
@@ -552,7 +552,9 @@ impl SlaveContext {
                 self.process_bundle(io_ctx, statuses, reconfig.bundle);
 
                 // Update the `all_eids`
-                update_all_eids(&mut self.all_eids, &reconfig.rem_eids, reconfig.new_eids);
+                let rem_eids = reconfig.rem_eids;
+                let new_eids = reconfig.new_eids;
+                update_all_eids(&mut self.all_eids, &rem_eids, new_eids.clone());
 
                 // If this is a Leader, we try to start building a SlaveSnapshot. Note that there
                 // might already one being constructed (from an unfortunately timed
@@ -568,6 +570,10 @@ impl SlaveContext {
                     }),
                   ));
                 }
+
+                // Trace the reconfig event.
+                io_ctx
+                  .general_trace(GeneralTraceMessage::Reconfig(self.this_gid.clone(), new_eids));
 
                 // Then, deliver any messages that were blocked.
                 self.deliver_blocked_messages(io_ctx, statuses, remote_leader_changed);

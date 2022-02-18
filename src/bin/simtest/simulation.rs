@@ -33,7 +33,7 @@ use runiversal::tablet::{
   TabletConfig, TabletContext, TabletCreateHelper, TabletForwardMsg, TabletSnapshot, TabletState,
 };
 use runiversal::test_utils::CheckCtx;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -68,7 +68,7 @@ pub struct TestIOCtx<'a> {
   tasks: &'a mut BTreeMap<Timestamp, Vec<GenericTimerInput>>,
 
   /// Collection of trace messages
-  success_tracer: &'a mut RequestSuccessTracer,
+  tracer: &'a mut Tracer,
   slave_trace_msgs: &'a mut VecDeque<SlaveTraceMessage>,
   master_trace_msgs: &'a mut VecDeque<MasterTraceMessage>,
 }
@@ -89,7 +89,7 @@ impl<'a> BasicIOCtx for TestIOCtx<'a> {
   }
 
   fn general_trace(&mut self, trace_msg: GeneralTraceMessage) {
-    self.success_tracer.process(trace_msg);
+    self.tracer.process(trace_msg);
   }
 }
 
@@ -144,7 +144,7 @@ impl<'a> SlaveIOCtx for TestIOCtx<'a> {
       queues: self.queues,
       nonempty_queues: self.nonempty_queues,
       this_eid: self.this_eid,
-      success_tracer: self.success_tracer,
+      tracer: self.tracer,
       to_node: self.to_node,
     };
     tablet.handle_input(&mut io_ctx, forward_msg);
@@ -166,7 +166,7 @@ impl<'a> SlaveIOCtx for TestIOCtx<'a> {
       queues: self.queues,
       nonempty_queues: self.nonempty_queues,
       this_eid: self.this_eid,
-      success_tracer: self.success_tracer,
+      tracer: self.tracer,
       to_node: self.to_node,
     };
     coord.handle_input(&mut io_ctx, forward_msg);
@@ -220,7 +220,7 @@ pub struct TestCoreIOCtx<'a> {
   this_eid: &'a EndpointId,
 
   // Tablet
-  success_tracer: &'a mut RequestSuccessTracer,
+  tracer: &'a mut Tracer,
   to_node: &'a mut VecDeque<GenericInput>,
 }
 
@@ -240,7 +240,7 @@ impl<'a> BasicIOCtx for TestCoreIOCtx<'a> {
   }
 
   fn general_trace(&mut self, trace_msg: GeneralTraceMessage) {
-    self.success_tracer.process(trace_msg);
+    self.tracer.process(trace_msg);
   }
 }
 
@@ -273,27 +273,66 @@ impl RequestSuccessTracer {
     }
   }
 
+  fn handle_rid_qid(&mut self, rid: RequestId, qid: QueryId) {
+    // First, potentially remove an existing entry if it exists.
+    if let Some(prev_qid) = self.rid_qid_map.remove(&rid) {
+      assert_eq!(rid, self.qid_rid_map.remove(&prev_qid).unwrap());
+    }
+
+    // Add in the new entry
+    self.rid_qid_map.insert(rid.clone(), qid.clone());
+    self.qid_rid_map.insert(qid.clone(), rid.clone());
+  }
+
+  fn handle_committed_qid(&mut self, qid: QueryId, timestamp: Timestamp) {
+    // Add this `qid` to `successful_reqs`. We do not remove it since other RMs can
+    // also trace this message.
+    let rid = self.qid_rid_map.get(&qid).unwrap();
+    if let Some(cur_timestamp) = self.successful_reqs.get(&rid) {
+      // If a success is already recorded, we check that the timestamps align.
+      assert_eq!(&timestamp, cur_timestamp);
+    } else {
+      self.successful_reqs.insert(rid.clone(), timestamp);
+    }
+  }
+}
+
+/// Handles `GeneralTraceMessage` send during simulation.
+#[derive(Debug)]
+struct Tracer {
+  success_tracer: RequestSuccessTracer,
+
+  // Account for reconfiguration
+  accounted_new_nodes: BTreeSet<Vec<EndpointId>>,
+  master_reconfig_count: u64,
+  slave_reconfig_count: u64,
+}
+
+impl Tracer {
+  fn new() -> Tracer {
+    Tracer {
+      success_tracer: RequestSuccessTracer::new(),
+      accounted_new_nodes: Default::default(),
+      master_reconfig_count: 0,
+      slave_reconfig_count: 0,
+    }
+  }
+
   fn process(&mut self, trace_msg: GeneralTraceMessage) {
     match trace_msg {
       GeneralTraceMessage::RequestIdQueryId(rid, qid) => {
-        // First, potentially remove an existing entry if it exists.
-        if let Some(prev_qid) = self.rid_qid_map.remove(&rid) {
-          assert_eq!(rid, self.qid_rid_map.remove(&prev_qid).unwrap());
-        }
-
-        // Add in the new entry
-        self.rid_qid_map.insert(rid.clone(), qid.clone());
-        self.qid_rid_map.insert(qid.clone(), rid.clone());
+        self.success_tracer.handle_rid_qid(rid, qid);
       }
       GeneralTraceMessage::CommittedQueryId(qid, timestamp) => {
-        // Add this `qid` to `successful_reqs`. We do not remove it since other RMs can
-        // also trace this message.
-        let rid = self.qid_rid_map.get(&qid).unwrap();
-        if let Some(cur_timestamp) = self.successful_reqs.get(&rid) {
-          // If a success is already recorded, we check that the timestamps align.
-          assert_eq!(&timestamp, cur_timestamp);
-        } else {
-          self.successful_reqs.insert(rid.clone(), timestamp);
+        self.success_tracer.handle_committed_qid(qid, timestamp);
+      }
+      GeneralTraceMessage::Reconfig(gid, new_eids) => {
+        if self.accounted_new_nodes.insert(new_eids) {
+          if let PaxosGroupId::Master = gid {
+            self.master_reconfig_count += 1;
+          } else {
+            self.slave_reconfig_count += 1;
+          }
         }
       }
     }
@@ -345,7 +384,7 @@ pub struct Simulation {
   stats: Stats,
 
   /// Tracer
-  success_tracer: RequestSuccessTracer,
+  tracer: Tracer,
 
   /// Inferred LeaderMap. `PaxosGroupId`s will be added here trace messages. Then, it
   /// will evolve continuously (there will be no jumps in LeadershipId; the `gen` will
@@ -372,7 +411,7 @@ impl Simulation {
       true_timestamp: mk_t(0),
       client_msgs_received: Default::default(),
       stats: Stats::default(),
-      success_tracer: RequestSuccessTracer::new(),
+      tracer: Tracer::new(),
       leader_map: Default::default(),
       blocked_leadership: None,
     };
@@ -436,7 +475,7 @@ impl Simulation {
         tablet_states: &mut node_data.tablet_states,
         coord_states: &mut node_data.coord_states,
         tasks: &mut node_data.tasks,
-        success_tracer: &mut self.success_tracer,
+        tracer: &mut self.tracer,
         slave_trace_msgs: &mut Default::default(),
         master_trace_msgs: &mut Default::default(),
       };
@@ -496,7 +535,12 @@ impl Simulation {
   /// This returns all DDL and MS Queries that succeed in the system. Note that pure
   /// reads do not get recorded here.
   pub fn get_success_write_reqs(&self) -> BTreeMap<RequestId, Timestamp> {
-    self.success_tracer.successful_reqs.clone()
+    self.tracer.success_tracer.successful_reqs.clone()
+  }
+
+  /// Gets the number of Master reconfig and Slave reconfigs (in that order).
+  pub fn get_num_reconfigs(&self) -> (u64, u64) {
+    (self.tracer.master_reconfig_count, self.tracer.slave_reconfig_count)
   }
 
   pub fn get_stats(&self) -> &Stats {
@@ -629,7 +673,7 @@ impl Simulation {
       tablet_states: &mut node_data.tablet_states,
       coord_states: &mut node_data.coord_states,
       tasks: &mut node_data.tasks,
-      success_tracer: &mut self.success_tracer,
+      tracer: &mut self.tracer,
       slave_trace_msgs: &mut slave_trace_msgs,
       master_trace_msgs: &mut master_trace_msgs,
     };
@@ -748,7 +792,7 @@ impl Simulation {
         tablet_states: &mut node_data.tablet_states,
         coord_states: &mut node_data.coord_states,
         tasks: &mut node_data.tasks,
-        success_tracer: &mut self.success_tracer,
+        tracer: &mut self.tracer,
         slave_trace_msgs: &mut Default::default(),
         master_trace_msgs: &mut Default::default(),
       };
