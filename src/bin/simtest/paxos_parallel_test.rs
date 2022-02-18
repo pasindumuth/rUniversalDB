@@ -723,12 +723,6 @@ pub fn test_all_basic_parallel(rand: &mut XorShiftRng) {
 }
 
 pub fn test_all_paxos_parallel(rand: &mut XorShiftRng) {
-  // TODO: We have performance problems with the following test case:
-  //  parallel_test([70, 177, 210, 42, 132, 42, 124, 11, 48, 71, 242, 232, 173, 15, 129, 222], 5, 10);
-  //  To solve this, we should gather message statistics. How many of each message was sent, and
-  //  where. We have to revive the stats accumulator and periodically print out what's going on
-  //  to see if something sus is happening.
-
   // Setup performance stats.
   let mut duration = 0;
   let mut reconfig_duration = 0;

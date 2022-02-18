@@ -119,12 +119,12 @@ impl NominalSlaveState {
     if let msg::SlaveMessage::SlaveExternalReq(_) = &slave_msg {
       self.state.handle_input(io_ctx, FullSlaveInput::SlaveMessage(slave_msg));
     }
-    // Otherwise, if it is from an EndpointId from `get_eids`, we deliver it.
-    else if self.state.get_eids().value().contains(eid) {
-      self.state.handle_input(io_ctx, FullSlaveInput::SlaveMessage(slave_msg));
-    }
     // Otherwise, if the message is a tier 1 message, we deliver it
     else if slave_msg.is_tier_1() {
+      self.state.handle_input(io_ctx, FullSlaveInput::SlaveMessage(slave_msg));
+    }
+    // Otherwise, if it is from an EndpointId from `get_eids`, we deliver it.
+    else if self.state.get_eids().value().contains(eid) {
       self.state.handle_input(io_ctx, FullSlaveInput::SlaveMessage(slave_msg));
     } else {
       // Otherwise, we buffer the message.
@@ -145,12 +145,9 @@ impl NominalSlaveState {
   fn deliver_all<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
     // Next, we see if `get_eids` have changed. If so, there might now be buffered
     // messages that need to be delivered.
-    let mut gen_did_change = &self.cur_gen != self.state.get_eids().gen();
-    while gen_did_change {
-      let cur_gen = self.state.get_eids().gen().clone();
+    while &self.cur_gen != self.state.get_eids().gen() {
+      self.cur_gen = *self.state.get_eids().gen();
       self.deliver_all_once(io_ctx);
-      // Check again whether the `get_eids` changed.
-      gen_did_change = &cur_gen != self.state.get_eids().gen();
     }
   }
 }
@@ -223,12 +220,12 @@ impl NominalMasterState {
     if let msg::MasterMessage::MasterExternalReq(_) = &master_msg {
       self.state.handle_input(io_ctx, FullMasterInput::MasterMessage(master_msg));
     }
-    // Otherwise, if it is from an EndpointId from `get_eids`, we deliver it.
-    else if self.state.get_eids().value().contains(eid) {
-      self.state.handle_input(io_ctx, FullMasterInput::MasterMessage(master_msg));
-    }
     // Otherwise, if the message is a tier 1 message, we deliver it
     else if master_msg.is_tier_1() {
+      self.state.handle_input(io_ctx, FullMasterInput::MasterMessage(master_msg));
+    }
+    // Otherwise, if it is from an EndpointId from `get_eids`, we deliver it.
+    else if self.state.get_eids().value().contains(eid) {
       self.state.handle_input(io_ctx, FullMasterInput::MasterMessage(master_msg));
     } else {
       // Otherwise, we buffer the message.
@@ -249,12 +246,9 @@ impl NominalMasterState {
   fn deliver_all<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
     // Next, we see if `get_eids` have changed. If so, there might now be buffered
     // messages that need to be delivered.
-    let mut gen_did_change = &self.cur_gen != self.state.get_eids().gen();
-    while gen_did_change {
-      let cur_gen = self.state.get_eids().gen().clone();
+    while &self.cur_gen != self.state.get_eids().gen() {
+      self.cur_gen = *self.state.get_eids().gen();
       self.deliver_all_once(io_ctx);
-      // Check again whether the `get_eids` changed.
-      gen_did_change = &cur_gen != self.state.get_eids().gen();
     }
   }
 }
