@@ -85,6 +85,7 @@ impl FreeNodeManager {
     ctx: FreeNodeManagerContext,
     heartbeat: msg::FreeNodeHeartbeat,
   ) {
+    debug_assert!(ctx.is_leader());
     // We filter the heartbeat for the current LeadershipId (this is only a formality).
     let cur_lid = ctx.leader_map.get(&PaxosGroupId::Master).unwrap();
     if &heartbeat.cur_lid == cur_lid {
@@ -180,7 +181,10 @@ impl FreeNodeManager {
     plm.new_slave_groups
   }
 
-  /// This returns the Reconfig `EndpointId`s that were granted by this manager.
+  /// This returns the requested `EndpointId`s that were granted by this manager. This
+  /// granting still needs to be persisted (i.e. by the `FreeNodeManagerPLm` that is added
+  /// to the MasterBundle here)
+  ///
   /// Note that this should only be called if this is the Leader.
   pub fn process<IO: MasterIOCtx>(
     &mut self,

@@ -269,7 +269,10 @@ pub struct Statuses {
   // Paxos2PC
   finish_query_ess: BTreeMap<QueryId, FinishQueryRMES>,
 
-  // TP
+  /// TP
+
+  /// This contains `PerformQuery`s with a `root_query_path`
+  perform_query_buffer: BTreeMap<QueryId, msg::PerformQuery>,
   gr_query_ess: BTreeMap<QueryId, GRQueryESWrapper>,
   table_read_ess: BTreeMap<QueryId, TableReadESWrapper>,
   trans_table_read_ess: BTreeMap<QueryId, TransTableReadESWrapper>,
@@ -694,6 +697,7 @@ impl TabletState {
     // Create Statuses
     let statuses = Statuses {
       finish_query_ess: snapshot.finish_query_ess,
+      perform_query_buffer: Default::default(),
       gr_query_ess: Default::default(),
       table_read_ess: Default::default(),
       trans_table_read_ess: Default::default(),

@@ -17,6 +17,7 @@ use crate::server::{
   ServerContextBase,
 };
 use crate::storage::{GenericTable, MSStorageView};
+use crate::table_read_es::check_gossip;
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColumnsLocking, Executing, MSQueryES, Pending,
   RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
@@ -146,23 +147,22 @@ impl MSTableDeleteES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
   ) -> MSTableDeleteAction {
-    for (table_path, gen) in &self.query_plan.table_location_map {
-      if !ctx.gossip.get().sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
-        // If not, we go to GossipDataWaiting
-        self.state = MSDeleteExecutionS::GossipDataWaiting;
+    // If the GossipData is valid, then act accordingly.
+    if check_gossip(&ctx.gossip.get(), &self.query_plan) {
+      // We start locking the regions.
+      self.start_ms_table_delete_es(ctx, io_ctx)
+    } else {
+      // If not, we go to GossipDataWaiting
+      self.state = MSDeleteExecutionS::GossipDataWaiting;
 
-        // Request a GossipData from the Master to help stimulate progress.
-        let sender_path = ctx.this_sid.clone();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
-          msg::MasterGossipRequest { sender_path },
-        ));
+      // Request a GossipData from the Master to help stimulate progress.
+      let sender_path = ctx.this_sid.clone();
+      ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+        msg::MasterGossipRequest { sender_path },
+      ));
 
-        return MSTableDeleteAction::Wait;
-      }
+      return MSTableDeleteAction::Wait;
     }
-
-    // We start locking the regions.
-    self.start_ms_table_delete_es(ctx, io_ctx)
   }
 
   /// Handle Columns being locked

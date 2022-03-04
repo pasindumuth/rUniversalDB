@@ -17,6 +17,7 @@ use crate::server::{
   contains_col, evaluate_update, mk_eval_error, ContextConstructor, ServerContextBase,
 };
 use crate::storage::{GenericTable, MSStorageView, StorageView, PRESENCE_VALN};
+use crate::table_read_es::check_gossip;
 use crate::tablet::{
   ColumnsLocking, Executing, MSQueryES, RequestedReadProtected, SingleSubqueryStatus,
   StorageLocalTable, SubqueryFinished, SubqueryPending, TabletContext,
@@ -150,23 +151,22 @@ impl MSTableInsertES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
   ) -> MSTableInsertAction {
-    for (table_path, gen) in &self.query_plan.table_location_map {
-      if !ctx.gossip.get().sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
-        // If not, we go to GossipDataWaiting
-        self.state = MSTableInsertExecutionS::GossipDataWaiting;
+    // If the GossipData is valid, then act accordingly.
+    if check_gossip(&ctx.gossip.get(), &self.query_plan) {
+      // We start locking the regions.
+      self.start_ms_table_insert_es(ctx, io_ctx)
+    } else {
+      // If not, we go to GossipDataWaiting
+      self.state = MSTableInsertExecutionS::GossipDataWaiting;
 
-        // Request a GossipData from the Master to help stimulate progress.
-        let sender_path = ctx.this_sid.clone();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
-          msg::MasterGossipRequest { sender_path },
-        ));
+      // Request a GossipData from the Master to help stimulate progress.
+      let sender_path = ctx.this_sid.clone();
+      ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+        msg::MasterGossipRequest { sender_path },
+      ));
 
-        return MSTableInsertAction::Wait;
-      }
+      return MSTableInsertAction::Wait;
     }
-
-    // We start locking the regions.
-    self.start_ms_table_insert_es(ctx, io_ctx)
   }
 
   /// Handle Columns being locked

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-readonly NUM_SLAVES_GROUPS=1 # Tune this
+readonly NUM_SLAVES_GROUPS=2 # Tune this
 readonly NUM_SLAVES=$((5 * $NUM_SLAVES_GROUPS))
 
 if [ "$1" = "build" ]; then

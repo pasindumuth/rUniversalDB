@@ -1,7 +1,7 @@
 use crate::col_usage::{collect_top_level_cols, compute_select_schema, free_external_cols};
 use crate::common::{
-  btree_multimap_insert, lookup, mk_qid, to_table_path, CoreIOCtx, KeyBound, OrigP, QueryESResult,
-  QueryPlan, ReadRegion, Timestamp,
+  btree_multimap_insert, lookup, mk_qid, to_table_path, CoreIOCtx, GossipData, GossipDataView,
+  KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, Timestamp,
 };
 use crate::expression::{
   compress_row_region, compute_key_region, evaluate_c_expr, is_true, CExpr, EvalError,
@@ -25,6 +25,31 @@ use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use std::ops::Deref;
 use std::rc::Rc;
+
+// -----------------------------------------------------------------------------------------------
+//  Utilities
+// -----------------------------------------------------------------------------------------------
+
+/// This checks if the `GossipData` provided is not too old and contains everything
+/// necessary to handle the `QueryPlan`.
+pub fn check_gossip<'a>(gossip: &GossipDataView<'a>, query_plan: &QueryPlan) -> bool {
+  // Check that all tables in the `table_location_map` are present.
+  for (table_path, gen) in &query_plan.table_location_map {
+    if !gossip.sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
+      return false;
+    };
+  }
+
+  // Check that the PaxosGroupIds in `query_leader_map` in the local `leader_map`,
+  // since the GRQueryES will rely on this.
+  for (sid, _) in &query_plan.query_leader_map {
+    if !gossip.slave_address_config.contains_key(sid) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
 // -----------------------------------------------------------------------------------------------
 //  TableReadES
@@ -142,23 +167,22 @@ impl TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
   ) -> TableAction {
-    for (table_path, gen) in &self.query_plan.table_location_map {
-      if !ctx.gossip.get().sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
-        // If not, we go to GossipDataWaiting
-        self.state = ExecutionS::GossipDataWaiting;
+    // If the GossipData is valid, then act accordingly.
+    if check_gossip(&ctx.gossip.get(), &self.query_plan) {
+      // We start locking the regions.
+      self.start_table_read_es(ctx, io_ctx)
+    } else {
+      // If not, we go to GossipDataWaiting
+      self.state = ExecutionS::GossipDataWaiting;
 
-        // Request a GossipData from the Master to help stimulate progress.
-        let sender_path = ctx.this_sid.clone();
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
-          msg::MasterGossipRequest { sender_path },
-        ));
+      // Request a GossipData from the Master to help stimulate progress.
+      let sender_path = ctx.this_sid.clone();
+      ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+        msg::MasterGossipRequest { sender_path },
+      ));
 
-        return TableAction::Wait;
-      }
+      return TableAction::Wait;
     }
-
-    // We start locking the regions.
-    self.start_table_read_es(ctx, io_ctx)
   }
 
   fn common_locked_cols<IO: CoreIOCtx>(
