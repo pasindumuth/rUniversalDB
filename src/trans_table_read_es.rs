@@ -11,9 +11,10 @@ use crate::model::common::{
 use crate::model::common::{CTQueryPath, Context, QueryId, TransTableLocationPrefix};
 use crate::model::message as msg;
 use crate::server::{
-  evaluate_super_simple_select, mk_eval_error, ContextConstructor, LocalTable, SlaveServerContext,
+  evaluate_super_simple_select, mk_eval_error, ContextConstructor, LocalTable, ServerContextBase,
+  SlaveServerContext,
 };
-use crate::table_read_es::fully_evaluate_select;
+use crate::table_read_es::{check_gossip, fully_evaluate_select};
 use crate::tablet::{
   compute_contexts, Executing, SingleSubqueryStatus, SubqueryFinished, SubqueryPending,
 };
@@ -161,7 +162,46 @@ impl TransTableReadES {
     ctx: &mut SlaveServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
-    self.start_trans_table_read_es(ctx, trans_table_source)
+    self.check_gossip_data(ctx, trans_table_source)
+  }
+
+  /// Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
+  fn check_gossip_data<IO: CoreIOCtx, SourceT: TransTableSource>(
+    &mut self,
+    ctx: &mut SlaveServerContext<IO>,
+    trans_table_source: &SourceT,
+  ) -> TransTableAction {
+    // If the GossipData is valid, then act accordingly.
+    if check_gossip(&ctx.gossip.get(), &self.query_plan) {
+      // We start locking the regions.
+      self.start_trans_table_read_es(ctx, trans_table_source)
+    } else {
+      // If not, we go to GossipDataWaiting
+      self.state = TransExecutionS::GossipDataWaiting;
+
+      // Request a GossipData from the Master to help stimulate progress.
+      let sender_path = ctx.this_sid.clone();
+      ctx.send_to_master(msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest {
+        sender_path,
+      }));
+
+      return TransTableAction::Wait;
+    }
+  }
+
+  /// Here, we GossipData gets delivered.
+  pub fn gossip_data_changed<IO: CoreIOCtx, SourceT: TransTableSource>(
+    &mut self,
+    ctx: &mut SlaveServerContext<IO>,
+    trans_table_source: &SourceT,
+  ) -> TransTableAction {
+    if let TransExecutionS::GossipDataWaiting = self.state {
+      // Verify is GossipData is now recent enough.
+      self.check_gossip_data(ctx, trans_table_source)
+    } else {
+      // Do nothing
+      TransTableAction::Wait
+    }
   }
 
   /// Constructs and returns subqueries.
@@ -170,9 +210,6 @@ impl TransTableReadES {
     ctx: &mut SlaveServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
-    // TODO: ... aren't we supposed to be using the GossipDataWaiting to make sure
-    //  table_location_map is high enough?
-    assert!(matches!(&self.state, &TransExecutionS::Start));
     // Here, we first construct all of the subquery Contexts using the
     // ContextConstructor, and then we construct GRQueryESs.
 

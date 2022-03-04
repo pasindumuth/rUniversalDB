@@ -1279,6 +1279,8 @@ impl TabletContext {
           self.gossip = gossip;
 
           // Inform Top-Level ESs.
+
+          // TableReadES
           let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
           for query_id in query_ids {
             let read = statuses.table_read_ess.get_mut(&query_id).unwrap();
@@ -1286,6 +1288,23 @@ impl TabletContext {
             self.handle_read_es_action(io_ctx, statuses, query_id, action);
           }
 
+          // TransTableReadES
+          let query_ids: Vec<QueryId> = statuses.trans_table_read_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
+            let prefix = trans_read.es.location_prefix();
+            let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id)
+            {
+              trans_read.es.gossip_data_changed(&mut self.ctx(io_ctx), &gr_query.es)
+            } else {
+              trans_read
+                .es
+                .handle_internal_query_error(&mut self.ctx(io_ctx), msg::QueryError::LateralError)
+            };
+            self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
+          }
+
+          // MSTableReadES
           let query_ids: Vec<QueryId> = statuses.ms_table_read_ess.keys().cloned().collect();
           for query_id in query_ids {
             let ms_read = statuses.ms_table_read_ess.get_mut(&query_id).unwrap();
@@ -1293,6 +1312,7 @@ impl TabletContext {
             self.handle_ms_read_es_action(io_ctx, statuses, query_id, action);
           }
 
+          // MSTableWriteES
           let query_ids: Vec<QueryId> = statuses.ms_table_write_ess.keys().cloned().collect();
           for query_id in query_ids {
             let ms_write = statuses.ms_table_write_ess.get_mut(&query_id).unwrap();
@@ -1300,6 +1320,7 @@ impl TabletContext {
             self.handle_ms_write_es_action(io_ctx, statuses, query_id, action);
           }
 
+          // MSTableInsertES
           let query_ids: Vec<QueryId> = statuses.ms_table_insert_ess.keys().cloned().collect();
           for query_id in query_ids {
             let ms_insert = statuses.ms_table_insert_ess.get_mut(&query_id).unwrap();
@@ -1307,6 +1328,7 @@ impl TabletContext {
             self.handle_ms_insert_es_action(io_ctx, statuses, query_id, action);
           }
 
+          // MSTableDeleteES
           let query_ids: Vec<QueryId> = statuses.ms_table_delete_ess.keys().cloned().collect();
           for query_id in query_ids {
             let ms_delete = statuses.ms_table_delete_ess.get_mut(&query_id).unwrap();

@@ -406,11 +406,31 @@ impl CoordContext {
           self.gossip = gossip;
 
           // Inform Top-Level ESs.
+
+          // TableReadES
           let query_ids: Vec<QueryId> = statuses.ms_coord_ess.keys().cloned().collect();
           for query_id in query_ids {
             let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
             let action = ms_coord.es.gossip_data_changed(self, io_ctx);
             self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
+          }
+
+          // TransTableReadES
+          let query_ids: Vec<QueryId> = statuses.trans_table_read_ess.keys().cloned().collect();
+          for query_id in query_ids {
+            let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
+            let prefix = trans_read.es.location_prefix();
+            let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id)
+            {
+              trans_read.es.gossip_data_changed(&mut self.ctx(io_ctx), &gr_query.es)
+            } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.source.query_id) {
+              trans_read.es.gossip_data_changed(&mut self.ctx(io_ctx), ms_coord.es.to_exec())
+            } else {
+              trans_read
+                .es
+                .handle_internal_query_error(&mut self.ctx(io_ctx), msg::QueryError::LateralError)
+            };
+            self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
           }
         }
       }
