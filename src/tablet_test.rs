@@ -92,6 +92,7 @@ pub fn check_tablet_clean(tablet: &TabletState, check_ctx: &mut CheckCtx) {
     }
   }
 
+  check_ctx.check(statuses.perform_query_buffer.is_empty());
   check_ctx.check(statuses.gr_query_ess.is_empty());
   check_ctx.check(statuses.table_read_ess.is_empty());
   check_ctx.check(statuses.trans_table_read_ess.is_empty());

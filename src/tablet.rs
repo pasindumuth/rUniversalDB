@@ -885,349 +885,21 @@ impl TabletContext {
       TabletForwardMsg::TabletMessage(message) => {
         match message {
           msg::TabletMessage::PerformQuery(perform_query) => {
-            match perform_query.query {
-              msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
-                // First, we check if the GRQueryES still exists in the Statuses, continuing
-                // if so and aborting if not.
-                if let Some(gr_query) =
-                  statuses.gr_query_ess.get(&query.location_prefix.source.query_id)
-                {
-                  // Construct and start the TransQueryPlanningES
-                  let trans_table = map_insert(
-                    &mut statuses.trans_table_read_ess,
-                    &perform_query.query_id,
-                    TransTableReadESWrapper {
-                      sender_path: perform_query.sender_path.clone(),
-                      child_queries: vec![],
-                      es: TransTableReadES {
-                        root_query_path: perform_query.root_query_path,
-                        location_prefix: query.location_prefix,
-                        context: Rc::new(query.context),
-                        sender_path: perform_query.sender_path,
-                        query_id: perform_query.query_id.clone(),
-                        sql_query: query.sql_query,
-                        query_plan: query.query_plan,
-                        new_rms: Default::default(),
-                        state: TransExecutionS::Start,
-                        timestamp: gr_query.es.timestamp.clone(),
-                      },
-                    },
-                  );
+            // If the `root_sid` is in the GossipData, then we move forward. Otherwise, we wait.
+            // This is needed for the `RegisterQuery` that we do with MSTable*ESs.
+            let root_sid = &perform_query.root_query_path.node_path.sid;
+            if self.gossip.get().slave_address_config.contains_key(root_sid) {
+              self.handle_perform_query(io_ctx, statuses, perform_query);
+            } else {
+              // Request a GossipData from the Master to help stimulate progress.
+              let sender_path = self.this_sid.clone();
+              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
+                msg::MasterGossipRequest { sender_path },
+              ));
 
-                  let action = trans_table.es.start(&mut self.ctx(io_ctx), &gr_query.es);
-                  self.handle_trans_read_es_action(
-                    io_ctx,
-                    statuses,
-                    perform_query.query_id,
-                    action,
-                  );
-                } else {
-                  // This means that the target GRQueryES was deleted, so we send back
-                  // an Abort with LateralError.
-                  self.ctx(io_ctx).send_query_error(
-                    perform_query.sender_path,
-                    perform_query.query_id,
-                    msg::QueryError::LateralError,
-                  );
-                  return;
-                }
-              }
-              msg::GeneralQuery::SuperSimpleTableSelectQuery(query) => {
-                // We inspect the TierMap to see what kind of ES to create
-                let table_path =
-                  cast!(proc::GeneralSourceRef::TablePath, &query.sql_query.from.source_ref)
-                    .unwrap();
-                if query.query_plan.tier_map.map.contains_key(table_path) {
-                  // Here, we create an MSTableReadES.
-                  let root_query_path = perform_query.root_query_path;
-                  match self.get_msquery_id(
-                    io_ctx,
-                    statuses,
-                    root_query_path.clone(),
-                    query.timestamp.clone(),
-                    &query.query_plan.query_leader_map,
-                  ) {
-                    Ok(ms_query_id) => {
-                      // Lookup the MSQueryES and add the new Query into `pending_queries`.
-                      let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-                      ms_query_es.pending_queries.insert(perform_query.query_id.clone());
-                      let ms_query_path = TQueryPath {
-                        node_path: self.mk_node_path(),
-                        query_id: ms_query_id.clone(),
-                      };
-
-                      // Create an MSReadTableES in the QueryPlanning state, and start it.
-                      let ms_read = map_insert(
-                        &mut statuses.ms_table_read_ess,
-                        &perform_query.query_id,
-                        MSTableReadESWrapper {
-                          sender_path: perform_query.sender_path.clone(),
-                          child_queries: vec![],
-                          es: MSTableReadES {
-                            root_query_path,
-                            timestamp: query.timestamp,
-                            tier: 0,
-                            context: Rc::new(query.context),
-                            query_id: perform_query.query_id.clone(),
-                            sql_query: query.sql_query,
-                            query_plan: query.query_plan,
-                            ms_query_id,
-                            new_rms: vec![ms_query_path].into_iter().collect(),
-                            state: MSReadExecutionS::Start,
-                          },
-                        },
-                      );
-                      let action = ms_read.es.start(self, io_ctx);
-                      self.handle_ms_read_es_action(
-                        io_ctx,
-                        statuses,
-                        perform_query.query_id,
-                        action,
-                      );
-                    }
-                    Err(query_error) => {
-                      // The MSQueryES couldn't be constructed.
-                      self.ctx(io_ctx).send_query_error(
-                        perform_query.sender_path,
-                        perform_query.query_id,
-                        query_error,
-                      );
-                    }
-                  }
-                } else {
-                  // Here, we create a standard TableReadES.
-                  let read = map_insert(
-                    &mut statuses.table_read_ess,
-                    &perform_query.query_id,
-                    TableReadESWrapper {
-                      sender_path: perform_query.sender_path.clone(),
-                      child_queries: vec![],
-                      es: TableReadES {
-                        root_query_path: perform_query.root_query_path,
-                        timestamp: query.timestamp,
-                        context: Rc::new(query.context),
-                        query_id: perform_query.query_id.clone(),
-                        sql_query: query.sql_query,
-                        query_plan: query.query_plan,
-                        new_rms: Default::default(),
-                        waiting_global_locks: Default::default(),
-                        state: ExecutionS::Start,
-                      },
-                    },
-                  );
-                  let action = read.es.start(self, io_ctx);
-                  self.handle_read_es_action(io_ctx, statuses, perform_query.query_id, action);
-                }
-              }
-              msg::GeneralQuery::UpdateQuery(query) => {
-                // We first do some basic verification of the SQL query, namely assert that
-                // the assigned columns are not Key Columns. (Recall this should be enforced
-                // by the Coord.)
-                for (col, _) in &query.sql_query.assignment {
-                  assert!(lookup(&self.table_schema.key_cols, col).is_none())
-                }
-
-                // Here, we create an MSTableWriteES.
-                let root_query_path = perform_query.root_query_path;
-                match self.get_msquery_id(
-                  io_ctx,
-                  statuses,
-                  root_query_path.clone(),
-                  query.timestamp.clone(),
-                  &query.query_plan.query_leader_map,
-                ) {
-                  Ok(ms_query_id) => {
-                    // Lookup the MSQueryES and add the new Query into `pending_queries`.
-                    let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-                    ms_query_es.pending_queries.insert(perform_query.query_id.clone());
-                    let ms_query_path =
-                      TQueryPath { node_path: self.mk_node_path(), query_id: ms_query_id.clone() };
-
-                    // First, we look up the `tier` of this Table being
-                    // written, update the `tier_map`.
-                    let sql_query = query.sql_query;
-                    let mut query_plan = query.query_plan;
-                    let tier =
-                      query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
-                    *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
-
-                    // Create an MSWriteTableES in the QueryPlanning state, and add it to
-                    // the MSQueryES.
-                    let ms_write = map_insert(
-                      &mut statuses.ms_table_write_ess,
-                      &perform_query.query_id,
-                      MSTableWriteESWrapper {
-                        sender_path: perform_query.sender_path.clone(),
-                        child_queries: vec![],
-                        es: MSTableWriteES {
-                          root_query_path,
-                          timestamp: query.timestamp,
-                          tier,
-                          context: Rc::new(query.context),
-                          query_id: perform_query.query_id.clone(),
-                          sql_query,
-                          query_plan,
-                          ms_query_id,
-                          new_rms: vec![ms_query_path].into_iter().collect(),
-                          state: MSWriteExecutionS::Start,
-                        },
-                      },
-                    );
-                    let action = ms_write.es.start(self, io_ctx);
-                    self.handle_ms_write_es_action(
-                      io_ctx,
-                      statuses,
-                      perform_query.query_id,
-                      action,
-                    );
-                  }
-                  Err(query_error) => {
-                    // The MSQueryES couldn't be constructed.
-                    self.ctx(io_ctx).send_query_error(
-                      perform_query.sender_path,
-                      perform_query.query_id,
-                      query_error,
-                    );
-                  }
-                }
-              }
-              msg::GeneralQuery::InsertQuery(query) => {
-                // We first do some basic verification of the SQL query, namely assert that
-                // the assigned all Key Column are written to. (Recall this should be enforced
-                // by the Coord.)
-                for (col, _) in &self.table_schema.key_cols {
-                  assert!(query.sql_query.columns.contains(col));
-                }
-
-                // Here, we create an MSTableWriteES.
-                let root_query_path = perform_query.root_query_path;
-                match self.get_msquery_id(
-                  io_ctx,
-                  statuses,
-                  root_query_path.clone(),
-                  query.timestamp.clone(),
-                  &query.query_plan.query_leader_map,
-                ) {
-                  Ok(ms_query_id) => {
-                    // Lookup the MSQueryES and add the new Query into `pending_queries`.
-                    let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-                    ms_query_es.pending_queries.insert(perform_query.query_id.clone());
-                    let ms_query_path =
-                      TQueryPath { node_path: self.mk_node_path(), query_id: ms_query_id.clone() };
-
-                    // First, we look up the `tier` of this Table being
-                    // written, update the `tier_map`.
-                    let sql_query = query.sql_query;
-                    let mut query_plan = query.query_plan;
-                    let tier =
-                      query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
-                    *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
-
-                    // Create an MSTableInsertTableES in the QueryPlanning state, and add it to
-                    // the MSQueryES.
-                    let ms_insert = map_insert(
-                      &mut statuses.ms_table_insert_ess,
-                      &perform_query.query_id,
-                      MSTableInsertESWrapper {
-                        sender_path: perform_query.sender_path.clone(),
-                        child_queries: vec![],
-                        es: MSTableInsertES {
-                          root_query_path,
-                          timestamp: query.timestamp,
-                          tier,
-                          context: Rc::new(query.context),
-                          query_id: perform_query.query_id.clone(),
-                          sql_query,
-                          query_plan,
-                          ms_query_id,
-                          new_rms: vec![ms_query_path].into_iter().collect(),
-                          state: MSTableInsertExecutionS::Start,
-                        },
-                      },
-                    );
-                    let action = ms_insert.es.start(self, io_ctx);
-                    self.handle_ms_insert_es_action(
-                      io_ctx,
-                      statuses,
-                      perform_query.query_id,
-                      action,
-                    );
-                  }
-                  Err(query_error) => {
-                    // The MSQueryES couldn't be constructed.
-                    self.ctx(io_ctx).send_query_error(
-                      perform_query.sender_path,
-                      perform_query.query_id,
-                      query_error,
-                    );
-                  }
-                }
-              }
-              msg::GeneralQuery::DeleteQuery(query) => {
-                // Here, we create an MSTableWriteES.
-                let root_query_path = perform_query.root_query_path;
-                match self.get_msquery_id(
-                  io_ctx,
-                  statuses,
-                  root_query_path.clone(),
-                  query.timestamp.clone(),
-                  &query.query_plan.query_leader_map,
-                ) {
-                  Ok(ms_query_id) => {
-                    // Lookup the MSQueryES and add the new Query into `pending_queries`.
-                    let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
-                    ms_query_es.pending_queries.insert(perform_query.query_id.clone());
-                    let ms_query_path =
-                      TQueryPath { node_path: self.mk_node_path(), query_id: ms_query_id.clone() };
-
-                    // First, we look up the `tier` of this Table being
-                    // written, update the `tier_map`.
-                    let sql_query = query.sql_query;
-                    let mut query_plan = query.query_plan;
-                    let tier =
-                      query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
-                    *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
-
-                    // Create an MSWriteTableES in the QueryPlanning state, and add it to
-                    // the MSQueryES.
-                    let ms_delete = map_insert(
-                      &mut statuses.ms_table_delete_ess,
-                      &perform_query.query_id,
-                      MSTableDeleteESWrapper {
-                        sender_path: perform_query.sender_path.clone(),
-                        child_queries: vec![],
-                        es: MSTableDeleteES {
-                          root_query_path,
-                          timestamp: query.timestamp,
-                          tier,
-                          context: Rc::new(query.context),
-                          query_id: perform_query.query_id.clone(),
-                          sql_query,
-                          query_plan,
-                          ms_query_id,
-                          new_rms: vec![ms_query_path].into_iter().collect(),
-                          state: MSDeleteExecutionS::Start,
-                        },
-                      },
-                    );
-                    let action = ms_delete.es.start(self, io_ctx);
-                    self.handle_ms_delete_es_action(
-                      io_ctx,
-                      statuses,
-                      perform_query.query_id,
-                      action,
-                    );
-                  }
-                  Err(query_error) => {
-                    // The MSQueryES couldn't be constructed.
-                    self.ctx(io_ctx).send_query_error(
-                      perform_query.sender_path,
-                      perform_query.query_id,
-                      query_error,
-                    );
-                  }
-                }
-              }
+              // Buffer the PerformQuery
+              let query_id = perform_query.query_id.clone();
+              statuses.perform_query_buffer.insert(query_id, perform_query);
             }
           }
           msg::TabletMessage::CancelQuery(cancel_query) => {
@@ -1277,6 +949,19 @@ impl TabletContext {
 
           // Update Gossip
           self.gossip = gossip;
+
+          // Process Bufferred PerformQuerys
+          let query_ids: Vec<QueryId> = statuses.perform_query_buffer.keys().cloned().collect();
+          for query_id in query_ids {
+            // Check if we can move the PerformQuery forward.
+            let perform_query = statuses.perform_query_buffer.get(&query_id).unwrap();
+            let root_sid = &perform_query.root_query_path.node_path.sid;
+            if self.gossip.get().slave_address_config.contains_key(root_sid) {
+              // If so, then move it forward.
+              let perform_query = statuses.perform_query_buffer.remove(&query_id).unwrap();
+              self.handle_perform_query(io_ctx, statuses, perform_query);
+            }
+          }
 
           // Inform Top-Level ESs.
 
@@ -1367,6 +1052,15 @@ impl TabletContext {
             // response). Note that although it is not critical for avoiding resource leaks, it
             // means we only end up responding to the PaxosNode that sent the request (not a
             // random subsequent one).
+
+            let query_ids: Vec<QueryId> = statuses.perform_query_buffer.keys().cloned().collect();
+            for query_id in query_ids {
+              let perform_query = statuses.perform_query_buffer.get(&query_id).unwrap();
+              if perform_query.sender_path.node_path.sid.to_gid() == gid {
+                self.exit_and_clean_up(io_ctx, statuses, query_id);
+              }
+            }
+
             let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
             for query_id in query_ids {
               let read = statuses.table_read_ess.get_mut(&query_id).unwrap();
@@ -1499,6 +1193,7 @@ impl TabletContext {
         // Check if this node just lost Leadership
         if !self.is_leader() {
           // Wink away all TM ESs.
+          statuses.perform_query_buffer.clear();
           statuses.gr_query_ess.clear();
           statuses.table_read_ess.clear();
           statuses.trans_table_read_ess.clear();
@@ -1577,6 +1272,328 @@ impl TabletContext {
         };
 
         io_ctx.slave_forward(SlaveBackMessage::TabletSnapshot(snapshot));
+      }
+    }
+  }
+
+  /// Handle `PerformQuery` accordingly. Note that the `root_query_path`'s PaxosGroupId
+  /// must be in the `gossip` by this point.
+  fn handle_perform_query<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    perform_query: msg::PerformQuery,
+  ) {
+    // Otherwise, we may process the PerformQuery
+    match perform_query.query {
+      msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
+        // First, we check if the GRQueryES still exists in the Statuses, continuing
+        // if so and aborting if not.
+        if let Some(gr_query) = statuses.gr_query_ess.get(&query.location_prefix.source.query_id) {
+          // Construct and start the TransQueryPlanningES
+          let trans_table = map_insert(
+            &mut statuses.trans_table_read_ess,
+            &perform_query.query_id,
+            TransTableReadESWrapper {
+              sender_path: perform_query.sender_path.clone(),
+              child_queries: vec![],
+              es: TransTableReadES {
+                root_query_path: perform_query.root_query_path,
+                location_prefix: query.location_prefix,
+                context: Rc::new(query.context),
+                sender_path: perform_query.sender_path,
+                query_id: perform_query.query_id.clone(),
+                sql_query: query.sql_query,
+                query_plan: query.query_plan,
+                new_rms: Default::default(),
+                state: TransExecutionS::Start,
+                timestamp: gr_query.es.timestamp.clone(),
+              },
+            },
+          );
+
+          let action = trans_table.es.start(&mut self.ctx(io_ctx), &gr_query.es);
+          self.handle_trans_read_es_action(io_ctx, statuses, perform_query.query_id, action);
+        } else {
+          // This means that the target GRQueryES was deleted, so we send back
+          // an Abort with LateralError.
+          self.ctx(io_ctx).send_query_error(
+            perform_query.sender_path,
+            perform_query.query_id,
+            msg::QueryError::LateralError,
+          );
+          return;
+        }
+      }
+      msg::GeneralQuery::SuperSimpleTableSelectQuery(query) => {
+        // We inspect the TierMap to see what kind of ES to create
+        let table_path =
+          cast!(proc::GeneralSourceRef::TablePath, &query.sql_query.from.source_ref).unwrap();
+        if query.query_plan.tier_map.map.contains_key(table_path) {
+          // Here, we create an MSTableReadES.
+          let root_query_path = perform_query.root_query_path;
+          match self.get_msquery_id(
+            io_ctx,
+            statuses,
+            root_query_path.clone(),
+            query.timestamp.clone(),
+            &query.query_plan.query_leader_map,
+          ) {
+            Ok(ms_query_id) => {
+              // Lookup the MSQueryES and add the new Query into `pending_queries`.
+              let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+              ms_query_es.pending_queries.insert(perform_query.query_id.clone());
+              let ms_query_path =
+                TQueryPath { node_path: self.mk_node_path(), query_id: ms_query_id.clone() };
+
+              // Create an MSReadTableES in the QueryPlanning state, and start it.
+              let ms_read = map_insert(
+                &mut statuses.ms_table_read_ess,
+                &perform_query.query_id,
+                MSTableReadESWrapper {
+                  sender_path: perform_query.sender_path.clone(),
+                  child_queries: vec![],
+                  es: MSTableReadES {
+                    root_query_path,
+                    timestamp: query.timestamp,
+                    tier: 0,
+                    context: Rc::new(query.context),
+                    query_id: perform_query.query_id.clone(),
+                    sql_query: query.sql_query,
+                    query_plan: query.query_plan,
+                    ms_query_id,
+                    new_rms: vec![ms_query_path].into_iter().collect(),
+                    state: MSReadExecutionS::Start,
+                  },
+                },
+              );
+              let action = ms_read.es.start(self, io_ctx);
+              self.handle_ms_read_es_action(io_ctx, statuses, perform_query.query_id, action);
+            }
+            Err(query_error) => {
+              // The MSQueryES couldn't be constructed.
+              self.ctx(io_ctx).send_query_error(
+                perform_query.sender_path,
+                perform_query.query_id,
+                query_error,
+              );
+            }
+          }
+        } else {
+          // Here, we create a standard TableReadES.
+          let read = map_insert(
+            &mut statuses.table_read_ess,
+            &perform_query.query_id,
+            TableReadESWrapper {
+              sender_path: perform_query.sender_path.clone(),
+              child_queries: vec![],
+              es: TableReadES {
+                root_query_path: perform_query.root_query_path,
+                timestamp: query.timestamp,
+                context: Rc::new(query.context),
+                query_id: perform_query.query_id.clone(),
+                sql_query: query.sql_query,
+                query_plan: query.query_plan,
+                new_rms: Default::default(),
+                waiting_global_locks: Default::default(),
+                state: ExecutionS::Start,
+              },
+            },
+          );
+          let action = read.es.start(self, io_ctx);
+          self.handle_read_es_action(io_ctx, statuses, perform_query.query_id, action);
+        }
+      }
+      msg::GeneralQuery::UpdateQuery(query) => {
+        // We first do some basic verification of the SQL query, namely assert that
+        // the assigned columns are not Key Columns. (Recall this should be enforced
+        // by the Coord.)
+        for (col, _) in &query.sql_query.assignment {
+          assert!(lookup(&self.table_schema.key_cols, col).is_none())
+        }
+
+        // Here, we create an MSTableWriteES.
+        let root_query_path = perform_query.root_query_path;
+        match self.get_msquery_id(
+          io_ctx,
+          statuses,
+          root_query_path.clone(),
+          query.timestamp.clone(),
+          &query.query_plan.query_leader_map,
+        ) {
+          Ok(ms_query_id) => {
+            // Lookup the MSQueryES and add the new Query into `pending_queries`.
+            let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+            ms_query_es.pending_queries.insert(perform_query.query_id.clone());
+            let ms_query_path =
+              TQueryPath { node_path: self.mk_node_path(), query_id: ms_query_id.clone() };
+
+            // First, we look up the `tier` of this Table being
+            // written, update the `tier_map`.
+            let sql_query = query.sql_query;
+            let mut query_plan = query.query_plan;
+            let tier = query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
+            *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
+
+            // Create an MSWriteTableES in the QueryPlanning state, and add it to
+            // the MSQueryES.
+            let ms_write = map_insert(
+              &mut statuses.ms_table_write_ess,
+              &perform_query.query_id,
+              MSTableWriteESWrapper {
+                sender_path: perform_query.sender_path.clone(),
+                child_queries: vec![],
+                es: MSTableWriteES {
+                  root_query_path,
+                  timestamp: query.timestamp,
+                  tier,
+                  context: Rc::new(query.context),
+                  query_id: perform_query.query_id.clone(),
+                  sql_query,
+                  query_plan,
+                  ms_query_id,
+                  new_rms: vec![ms_query_path].into_iter().collect(),
+                  state: MSWriteExecutionS::Start,
+                },
+              },
+            );
+            let action = ms_write.es.start(self, io_ctx);
+            self.handle_ms_write_es_action(io_ctx, statuses, perform_query.query_id, action);
+          }
+          Err(query_error) => {
+            // The MSQueryES couldn't be constructed.
+            self.ctx(io_ctx).send_query_error(
+              perform_query.sender_path,
+              perform_query.query_id,
+              query_error,
+            );
+          }
+        }
+      }
+      msg::GeneralQuery::InsertQuery(query) => {
+        // We first do some basic verification of the SQL query, namely assert that
+        // the assigned all Key Column are written to. (Recall this should be enforced
+        // by the Coord.)
+        for (col, _) in &self.table_schema.key_cols {
+          assert!(query.sql_query.columns.contains(col));
+        }
+
+        // Here, we create an MSTableWriteES.
+        let root_query_path = perform_query.root_query_path;
+        match self.get_msquery_id(
+          io_ctx,
+          statuses,
+          root_query_path.clone(),
+          query.timestamp.clone(),
+          &query.query_plan.query_leader_map,
+        ) {
+          Ok(ms_query_id) => {
+            // Lookup the MSQueryES and add the new Query into `pending_queries`.
+            let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+            ms_query_es.pending_queries.insert(perform_query.query_id.clone());
+            let ms_query_path =
+              TQueryPath { node_path: self.mk_node_path(), query_id: ms_query_id.clone() };
+
+            // First, we look up the `tier` of this Table being
+            // written, update the `tier_map`.
+            let sql_query = query.sql_query;
+            let mut query_plan = query.query_plan;
+            let tier = query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
+            *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
+
+            // Create an MSTableInsertTableES in the QueryPlanning state, and add it to
+            // the MSQueryES.
+            let ms_insert = map_insert(
+              &mut statuses.ms_table_insert_ess,
+              &perform_query.query_id,
+              MSTableInsertESWrapper {
+                sender_path: perform_query.sender_path.clone(),
+                child_queries: vec![],
+                es: MSTableInsertES {
+                  root_query_path,
+                  timestamp: query.timestamp,
+                  tier,
+                  context: Rc::new(query.context),
+                  query_id: perform_query.query_id.clone(),
+                  sql_query,
+                  query_plan,
+                  ms_query_id,
+                  new_rms: vec![ms_query_path].into_iter().collect(),
+                  state: MSTableInsertExecutionS::Start,
+                },
+              },
+            );
+            let action = ms_insert.es.start(self, io_ctx);
+            self.handle_ms_insert_es_action(io_ctx, statuses, perform_query.query_id, action);
+          }
+          Err(query_error) => {
+            // The MSQueryES couldn't be constructed.
+            self.ctx(io_ctx).send_query_error(
+              perform_query.sender_path,
+              perform_query.query_id,
+              query_error,
+            );
+          }
+        }
+      }
+      msg::GeneralQuery::DeleteQuery(query) => {
+        // Here, we create an MSTableWriteES.
+        let root_query_path = perform_query.root_query_path;
+        match self.get_msquery_id(
+          io_ctx,
+          statuses,
+          root_query_path.clone(),
+          query.timestamp.clone(),
+          &query.query_plan.query_leader_map,
+        ) {
+          Ok(ms_query_id) => {
+            // Lookup the MSQueryES and add the new Query into `pending_queries`.
+            let ms_query_es = statuses.ms_query_ess.get_mut(&ms_query_id).unwrap();
+            ms_query_es.pending_queries.insert(perform_query.query_id.clone());
+            let ms_query_path =
+              TQueryPath { node_path: self.mk_node_path(), query_id: ms_query_id.clone() };
+
+            // First, we look up the `tier` of this Table being
+            // written, update the `tier_map`.
+            let sql_query = query.sql_query;
+            let mut query_plan = query.query_plan;
+            let tier = query_plan.tier_map.map.get(&sql_query.table.source_ref).unwrap().clone();
+            *query_plan.tier_map.map.get_mut(&sql_query.table.source_ref).unwrap() += 1;
+
+            // Create an MSWriteTableES in the QueryPlanning state, and add it to
+            // the MSQueryES.
+            let ms_delete = map_insert(
+              &mut statuses.ms_table_delete_ess,
+              &perform_query.query_id,
+              MSTableDeleteESWrapper {
+                sender_path: perform_query.sender_path.clone(),
+                child_queries: vec![],
+                es: MSTableDeleteES {
+                  root_query_path,
+                  timestamp: query.timestamp,
+                  tier,
+                  context: Rc::new(query.context),
+                  query_id: perform_query.query_id.clone(),
+                  sql_query,
+                  query_plan,
+                  ms_query_id,
+                  new_rms: vec![ms_query_path].into_iter().collect(),
+                  state: MSDeleteExecutionS::Start,
+                },
+              },
+            );
+            let action = ms_delete.es.start(self, io_ctx);
+            self.handle_ms_delete_es_action(io_ctx, statuses, perform_query.query_id, action);
+          }
+          Err(query_error) => {
+            // The MSQueryES couldn't be constructed.
+            self.ctx(io_ctx).send_query_error(
+              perform_query.sender_path,
+              perform_query.query_id,
+              query_error,
+            );
+          }
+        }
       }
     }
   }
@@ -2910,8 +2927,12 @@ impl TabletContext {
     statuses: &mut Statuses,
     query_id: QueryId,
   ) {
+    // Buffered PerformQuery
+    if let Some(_) = statuses.perform_query_buffer.remove(&query_id) {
+      // No-op
+    }
     // GRQueryES
-    if let Some(mut gr_query) = statuses.gr_query_ess.remove(&query_id) {
+    else if let Some(mut gr_query) = statuses.gr_query_ess.remove(&query_id) {
       gr_query.es.exit_and_clean_up(&mut self.ctx(io_ctx));
       self.exit_all(io_ctx, statuses, gr_query.child_queries);
     }
