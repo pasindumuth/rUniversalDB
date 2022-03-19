@@ -438,23 +438,10 @@ impl CoordContext {
         let gid = remote_leader_changed.gid.clone();
         let lid = remote_leader_changed.lid.clone();
 
-        // We filter `remote_leader_changed` to ensure that the `leader_map` only contains
-        // `EndpointId`s in the Current Paxos View.
-        let accept = match &gid {
-          PaxosGroupId::Master => self.gossip.get().master_address_config.contains(&lid.eid),
-          PaxosGroupId::Slave(sid) => {
-            if let Some(eids) = self.gossip.get().slave_address_config.get(&sid) {
-              eids.contains(&lid.eid)
-            } else {
-              false
-            }
-          }
-        };
-
-        if accept {
+        // Only accept a RemoteLeaderChanged if the PaxosGroupId is already known.
+        if let Some(cur_lid) = self.leader_map.get(&gid) {
           // Only update the LeadershipId if the new one increases the old one.
-          // Note that this `leader_map` unwrap will never assert due to the above.
-          if lid.gen > self.leader_map.get(&gid).unwrap().gen {
+          if lid.gen > cur_lid.gen {
             self.leader_map.insert(gid.clone(), lid.clone());
 
             // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no response).

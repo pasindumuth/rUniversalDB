@@ -157,6 +157,17 @@ impl SlaveMessage {
     match self {
       Self::PaxosDriverMessage(PaxosDriverMessage::InformLearned(_)) => true,
       Self::PaxosDriverMessage(PaxosDriverMessage::LogSyncResponse(_)) => true,
+      Self::RemoteMessage(remote_message) => {
+        // We pass MasterGossip through to avoid the case where the Master Leadership
+        // changes to a newly reconfigured node, but the Slave never learned about it
+        // so all messages sent out by it are rejected (including MasterGossip, which
+        // is the only remedy to this situation).
+        if let SlaveRemotePayload::MasterGossip(_) = &remote_message.payload {
+          true
+        } else {
+          false
+        }
+      }
       _ => false,
     }
   }
