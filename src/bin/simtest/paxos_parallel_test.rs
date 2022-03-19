@@ -711,18 +711,26 @@ fn verify_req_res(
   })
 }
 
+/// Abstract interface for writing (useful for concurrency).
+pub trait Writer {
+  fn println(&mut self, s: String);
+
+  fn flush(&mut self);
+}
+
 // -----------------------------------------------------------------------------------------------
 //  test_all_parallel
 // -----------------------------------------------------------------------------------------------
 
-pub fn test_all_basic_parallel(rand: &mut XorShiftRng) {
+pub fn test_all_basic_parallel<WriterT: Writer>(rand: &mut XorShiftRng, w: &mut WriterT) {
   for i in 0..50 {
-    println!("Running round {:?}", i);
-    parallel_test(mk_seed(rand), 1, 0);
+    w.println(format!("Running round {:?}", i));
+    parallel_test(mk_seed(rand), 1, 0, w);
+    w.flush();
   }
 }
 
-pub fn test_all_paxos_parallel(rand: &mut XorShiftRng) {
+pub fn test_all_paxos_parallel<WriterT: Writer>(rand: &mut XorShiftRng, w: &mut WriterT) {
   // Setup performance stats.
   let mut duration = 0;
   let mut reconfig_duration = 0;
@@ -730,26 +738,34 @@ pub fn test_all_paxos_parallel(rand: &mut XorShiftRng) {
   // Execute the rounds.
   const NUM_ROUNDS: u32 = 50;
   for i in 0..NUM_ROUNDS {
-    println!("Running round {:?}", 2 * i);
     let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-    parallel_test(mk_seed(rand), 5, 0);
+    w.println(format!("Running round {:?}", 2 * i));
+    parallel_test(mk_seed(rand), 5, 0, w);
+    w.flush();
     let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     duration += (end_t - start_t);
 
-    println!("Running reconfig round {:?}", 2 * i + 1);
     let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-    parallel_test(mk_seed(rand), 5, 10);
+    w.println(format!("Running reconfig round {:?}", 2 * i + 1));
+    parallel_test(mk_seed(rand), 5, 10, w);
+    w.flush();
     let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     reconfig_duration += (end_t - start_t);
   }
 
   // Print performance stats
-  println!("Avg Duration: {}", duration as u32 / NUM_ROUNDS);
-  println!("Avg Reconfig Duration: {}", reconfig_duration as u32 / NUM_ROUNDS);
+  w.println(format!("Avg Duration: {}", duration as u32 / NUM_ROUNDS));
+  w.println(format!("Avg Reconfig Duration: {}", reconfig_duration as u32 / NUM_ROUNDS));
+  w.flush();
 }
 
-pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nodes: u32) {
-  println!("seed: {:?}", seed);
+pub fn parallel_test<WriterT: Writer>(
+  seed: [u8; 16],
+  num_paxos_nodes: u32,
+  num_reconfig_free_nodes: u32,
+  w: &mut WriterT,
+) {
+  w.println(format!("seed: {:?}", seed));
   let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes, 100, num_reconfig_free_nodes);
 
   // Run the simulation
@@ -1053,7 +1069,7 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nod
     }
     let select_stats_str = select_stats_strs.join("\n       ");
 
-    println!(
+    w.println(format!(
       "Test 'test_all_paxos_parallel' Passed! Replay time taken: {duration:?}ms.
        Total Queries: {total}, Succeeded: {succeeded}, Leadership Changes: {lid_changes}, 
        # Master Reconfigs: {master_reconfig_count}, # Slave Reconfigs: {slave_reconfig_count},
@@ -1070,8 +1086,8 @@ pub fn parallel_test(seed: [u8; 16], num_paxos_nodes: u32, num_reconfig_free_nod
       num_multi_stage = res.num_multi_stage,
       queries_cancelled = res.queries_cancelled,
       ddl_queries_cancelled = res.ddl_queries_cancelled
-    );
+    ));
   } else {
-    println!("Skipped Test 'test_all_paxos_parallel' due to Timestamp Conflict");
+    w.println(format!("Skipped Test 'test_all_paxos_parallel' due to Timestamp Conflict"));
   }
 }
