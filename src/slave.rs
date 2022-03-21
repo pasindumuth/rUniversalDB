@@ -13,7 +13,7 @@ use crate::model::message as msg;
 use crate::model::message::PLEntry;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
-use crate::server::{MainSlaveServerContext, ServerContextBase};
+use crate::server::{ServerContextBase, SlaveServerContext};
 use crate::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::RMServerContext;
@@ -444,8 +444,8 @@ impl SlaveContext {
     }
   }
 
-  pub fn ctx<'a, IO: BasicIOCtx>(&'a self, io_ctx: &'a mut IO) -> MainSlaveServerContext<'a, IO> {
-    MainSlaveServerContext {
+  pub fn ctx<'a, IO: BasicIOCtx>(&'a self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
+    SlaveServerContext {
       io_ctx,
       this_sid: &self.this_sid,
       this_eid: &self.this_eid,

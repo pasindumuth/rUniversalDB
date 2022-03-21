@@ -32,7 +32,7 @@ pub struct ColUsageNode {
 
   /// These are the ColNames used within all ValExprs outside of `Subquery` nodes.
   /// This is a convenience field used only in the ColUsagePlanner.
-  pub requested_cols: Vec<proc::ColumnRef>,
+  requested_cols: Vec<proc::ColumnRef>,
 
   /// Take the union of `requested_cols` and all `external_cols` of all `ColUsageNodes`
   /// in `children`. Call this all_cols.

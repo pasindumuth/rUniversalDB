@@ -275,10 +275,7 @@ impl MSTableWriteES {
       let protect_qid = mk_qid(io_ctx.rand());
       let val_col_region = Vec::from_iter(val_col_region.into_iter());
       let read_region = ReadRegion { val_col_region, row_region };
-      self.state = MSWriteExecutionS::Pending(Pending {
-        read_region: read_region.clone(),
-        query_id: protect_qid.clone(),
-      });
+      self.state = MSWriteExecutionS::Pending(Pending { query_id: protect_qid.clone() });
 
       // Add a ReadRegion to the `m_waiting_read_protected` and the
       // WriteRegion into `m_write_protected`.
@@ -339,11 +336,7 @@ impl MSTableWriteES {
         }
 
         // Move the ES to the Executing state.
-        self.state = MSWriteExecutionS::Executing(Executing {
-          completed: 0,
-          subqueries,
-          row_region: pending.read_region.row_region.clone(),
-        });
+        self.state = MSWriteExecutionS::Executing(Executing { completed: 0, subqueries });
 
         if gr_query_statuses.is_empty() {
           // Since there are no subqueries, we can go straight to finishing the ES.

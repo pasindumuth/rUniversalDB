@@ -307,10 +307,7 @@ impl TableReadES {
     let protect_qid = mk_qid(io_ctx.rand());
     let val_col_region = Vec::from_iter(val_col_region.into_iter());
     let read_region = ReadRegion { val_col_region, row_region };
-    self.state = ExecutionS::Pending(Pending {
-      read_region: read_region.clone(),
-      query_id: protect_qid.clone(),
-    });
+    self.state = ExecutionS::Pending(Pending { query_id: protect_qid.clone() });
 
     // Add a read protection requested
     btree_multimap_insert(
@@ -365,11 +362,7 @@ impl TableReadES {
         }
 
         // Move the ES to the Executing state.
-        self.state = ExecutionS::Executing(Executing {
-          completed: 0,
-          subqueries,
-          row_region: pending.read_region.row_region.clone(),
-        });
+        self.state = ExecutionS::Executing(Executing { completed: 0, subqueries });
 
         if gr_query_statuses.is_empty() {
           // Since there are no subqueries, we can go straight to finishing the ES.

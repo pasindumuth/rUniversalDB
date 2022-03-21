@@ -11,8 +11,8 @@ use crate::model::common::{
 use crate::model::common::{CTQueryPath, Context, QueryId, TransTableLocationPrefix};
 use crate::model::message as msg;
 use crate::server::{
-  evaluate_super_simple_select, mk_eval_error, ContextConstructor, LocalTable, ServerContextBase,
-  SlaveServerContext,
+  evaluate_super_simple_select, mk_eval_error, CTServerContext, ContextConstructor, LocalTable,
+  ServerContextBase,
 };
 use crate::table_read_es::{check_gossip, fully_evaluate_select};
 use crate::tablet::{
@@ -159,7 +159,7 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
 impl TransTableReadES {
   pub fn start<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut SlaveServerContext<IO>,
+    ctx: &mut CTServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     self.check_gossip_data(ctx, trans_table_source)
@@ -168,7 +168,7 @@ impl TransTableReadES {
   /// Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
   fn check_gossip_data<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut SlaveServerContext<IO>,
+    ctx: &mut CTServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     // If the GossipData is valid, then act accordingly.
@@ -192,7 +192,7 @@ impl TransTableReadES {
   /// Here, we GossipData gets delivered.
   pub fn gossip_data_changed<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut SlaveServerContext<IO>,
+    ctx: &mut CTServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     if let TransExecutionS::GossipDataWaiting = self.state {
@@ -207,7 +207,7 @@ impl TransTableReadES {
   /// Constructs and returns subqueries.
   fn start_trans_table_read_es<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut SlaveServerContext<IO>,
+    ctx: &mut CTServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     // Here, we first construct all of the subquery Contexts using the
@@ -260,11 +260,7 @@ impl TransTableReadES {
     }
 
     // Move the ES to the Executing state.
-    self.state = TransExecutionS::Executing(Executing {
-      completed: 0,
-      subqueries,
-      row_region: vec![], // This doesn't make sense for TransTables...
-    });
+    self.state = TransExecutionS::Executing(Executing { completed: 0, subqueries });
 
     if gr_query_ess.is_empty() {
       // Since there are no subqueries, we can go straight to finishing the ES.
@@ -280,7 +276,7 @@ impl TransTableReadES {
   /// and Exits and Clean Ups this ES.
   pub fn handle_internal_query_error<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut SlaveServerContext<IO>,
+    ctx: &mut CTServerContext<IO>,
     query_error: msg::QueryError,
   ) -> TransTableAction {
     self.exit_and_clean_up(ctx);
@@ -290,7 +286,7 @@ impl TransTableReadES {
   /// Handles a Subquery completing
   pub fn handle_subquery_done<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut SlaveServerContext<IO>,
+    ctx: &mut CTServerContext<IO>,
     trans_table_source: &SourceT,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
@@ -321,7 +317,7 @@ impl TransTableReadES {
   /// Handles a ES finishing with all subqueries results in.
   fn finish_trans_table_read_es<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    _: &mut SlaveServerContext<IO>,
+    _: &mut CTServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     let executing_state = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
@@ -373,7 +369,7 @@ impl TransTableReadES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut SlaveServerContext<IO>) {
+  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut CTServerContext<IO>) {
     self.state = TransExecutionS::Done
   }
 

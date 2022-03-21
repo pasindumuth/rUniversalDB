@@ -21,7 +21,7 @@ use crate::ms_query_coord_es::{
 use crate::paxos2pc_tm as paxos2pc;
 use crate::paxos2pc_tm::{Paxos2PCTMAction, TMMessage};
 use crate::query_converter::convert_to_msquery;
-use crate::server::{CommonQuery, ServerContextBase, SlaveServerContext};
+use crate::server::{CTServerContext, CommonQuery, ServerContextBase};
 use crate::sql_parser::convert_ast;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
@@ -192,8 +192,8 @@ impl CoordContext {
     }
   }
 
-  pub fn ctx<'a, IO: BasicIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
-    SlaveServerContext {
+  pub fn ctx<'a, IO: BasicIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> CTServerContext<'a, IO> {
+    CTServerContext {
       io_ctx,
       this_sid: &self.this_sid,
       this_eid: &self.this_eid,

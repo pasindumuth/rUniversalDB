@@ -12,7 +12,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
-use crate::server::{CommonQuery, SlaveServerContext};
+use crate::server::{CTServerContext, CommonQuery};
 use crate::table_read_es::{is_agg, perform_aggregation};
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{BTreeMap, BTreeSet};
@@ -205,14 +205,14 @@ pub enum TransTableIdx {
 
 impl GRQueryES {
   /// Starts the GRQueryES from its initial state.
-  pub fn start<IO: CoreIOCtx>(&mut self, ctx: &mut SlaveServerContext<IO>) -> GRQueryAction {
+  pub fn start<IO: CoreIOCtx>(&mut self, ctx: &mut CTServerContext<IO>) -> GRQueryAction {
     self.advance(ctx)
   }
 
   /// This is called when the TMStatus has completed successfully.
   pub fn handle_tm_success<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut SlaveServerContext<IO>,
+    ctx: &mut CTServerContext<IO>,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
     results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
@@ -256,7 +256,7 @@ impl GRQueryES {
   /// This is called when the TMStatus has completed unsuccessfully.
   pub fn handle_tm_aborted<IO: CoreIOCtx>(
     &mut self,
-    _: &mut SlaveServerContext<IO>,
+    _: &mut CTServerContext<IO>,
     aborted_data: msg::AbortedData,
   ) -> GRQueryAction {
     match aborted_data {
@@ -272,20 +272,20 @@ impl GRQueryES {
   /// LeadershipId that we had sent a PerformQuery to.
   pub fn handle_tm_remote_leadership_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut SlaveServerContext<IO>,
+    ctx: &mut CTServerContext<IO>,
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &self.state).unwrap();
     self.process_gr_query_stage(ctx, read_stage.stage_idx)
   }
 
   /// This Exits and Cleans up this GRQueryES.
-  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut SlaveServerContext<IO>) {
+  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut CTServerContext<IO>) {
     self.state = GRExecutionS::Done;
   }
 
   /// This advanced the Stage of the GRQueryES. If there is no next Stage, then we
   /// return Done, containing the result and signaling that the GRQueryES is complete.
-  fn advance<IO: CoreIOCtx>(&mut self, ctx: &mut SlaveServerContext<IO>) -> GRQueryAction {
+  fn advance<IO: CoreIOCtx>(&mut self, ctx: &mut CTServerContext<IO>) -> GRQueryAction {
     // Compute the next stage
     let next_stage_idx = match &self.state {
       GRExecutionS::Start => 0,
@@ -324,7 +324,7 @@ impl GRQueryES {
   /// (Note the index must be valid (i.e. be an actual stage)).
   fn process_gr_query_stage<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut SlaveServerContext<IO>,
+    ctx: &mut CTServerContext<IO>,
     stage_idx: usize,
   ) -> GRQueryAction {
     assert!(stage_idx < self.query_plan.col_usage_nodes.len());

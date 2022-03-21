@@ -161,12 +161,12 @@ pub trait ServerContextBase {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Slave Server Context
+//  CT Server Context
 // -----------------------------------------------------------------------------------------------
 
 /// This is used to present a consistent view of Tablets and Slave to shared ESs so
 /// that they can execute agnotisticly.
-pub struct SlaveServerContext<'a, IO: BasicIOCtx> {
+pub struct CTServerContext<'a, IO: BasicIOCtx> {
   /// IO
   pub io_ctx: &'a mut IO,
 
@@ -182,7 +182,7 @@ pub struct SlaveServerContext<'a, IO: BasicIOCtx> {
   pub gossip: &'a Arc<GossipData>,
 }
 
-impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
+impl<'a, IO: BasicIOCtx> CTServerContext<'a, IO> {
   /// Construct a `NodePath` from a `NodeGroupId`.
   /// NOTE: the `tid` must exist in the `gossip` at this point.
   pub fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
@@ -256,7 +256,7 @@ impl<'a, IO: BasicIOCtx> SlaveServerContext<'a, IO> {
   }
 }
 
-impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
+impl<'a, IO: BasicIOCtx> ServerContextBase for CTServerContext<'a, IO> {
   fn leader_map(&self) -> &LeaderMap {
     self.leader_map
   }
@@ -276,11 +276,11 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Main Slave Server Context
+//  Slave Server Context
 // -----------------------------------------------------------------------------------------------
 
 /// This is used to easily use the `ServerContextBase` methods in the Slave thread.
-pub struct MainSlaveServerContext<'a, IO: BasicIOCtx> {
+pub struct SlaveServerContext<'a, IO: BasicIOCtx> {
   /// IO
   pub io_ctx: &'a mut IO,
 
@@ -292,7 +292,7 @@ pub struct MainSlaveServerContext<'a, IO: BasicIOCtx> {
   pub leader_map: &'a LeaderMap,
 }
 
-impl<'a, IO: BasicIOCtx> ServerContextBase for MainSlaveServerContext<'a, IO> {
+impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
   fn leader_map(&self) -> &LeaderMap {
     self.leader_map
   }
@@ -315,8 +315,7 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for MainSlaveServerContext<'a, IO> {
 //  Master Server Context
 // -----------------------------------------------------------------------------------------------
 
-/// This is used to present a consistent view of Master to shared ESs so that they can
-/// execute agnotisticly.
+/// This is used to easily use the `ServerContextBase` methods in the Master thread.
 pub struct MasterServerContext<'a, IO> {
   /// IO
   pub io_ctx: &'a mut IO,

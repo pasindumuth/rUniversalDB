@@ -34,7 +34,7 @@ use crate::paxos2pc_rm::Paxos2PCRMAction;
 use crate::paxos2pc_tm;
 use crate::paxos2pc_tm::{Paxos2PCContainer, RMMessage, RMPLm};
 use crate::server::{
-  contains_col, CommonQuery, ContextConstructor, LocalTable, ServerContextBase, SlaveServerContext,
+  contains_col, CTServerContext, CommonQuery, ContextConstructor, LocalTable, ServerContextBase,
 };
 use crate::slave::{SlaveBackMessage, TabletBundleInsertion};
 use crate::stmpaxos2pc_rm;
@@ -88,7 +88,6 @@ pub struct ColumnsLocking {
 
 #[derive(Debug)]
 pub struct Pending {
-  pub read_region: ReadRegion,
   pub query_id: QueryId,
 }
 
@@ -98,9 +97,6 @@ pub struct Executing {
   /// Here, the position of every SingleSubqueryStatus corresponds to the position
   /// of the subquery in the SQL query.
   pub subqueries: Vec<SingleSubqueryStatus>,
-  /// We remember the row_region we had computed previously. If we have to protected
-  /// more ReadRegions due to InternalColumnsDNEs, the `row_region` will be the same.
-  pub row_region: Vec<KeyBound>,
 }
 
 impl Executing {
@@ -774,8 +770,8 @@ impl TabletContext {
     }
   }
 
-  pub fn ctx<'a, IO: BasicIOCtx>(&'a self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
-    SlaveServerContext {
+  pub fn ctx<'a, IO: BasicIOCtx>(&'a self, io_ctx: &'a mut IO) -> CTServerContext<'a, IO> {
+    CTServerContext {
       io_ctx,
       this_sid: &self.this_sid,
       this_eid: &self.this_eid,
