@@ -17,7 +17,7 @@ use crate::server::{
   ServerContextBase,
 };
 use crate::storage::{GenericTable, MSStorageView};
-use crate::table_read_es::check_gossip;
+use crate::table_read_es::{check_gossip, does_query_plan_align, request_lock_columns};
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColumnsLocking, Executing, MSQueryES, Pending,
   RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
@@ -86,59 +86,10 @@ impl MSTableDeleteES {
   ) -> MSTableDeleteAction {
     // First, we lock the columns that the QueryPlan requires certain properties of.
     assert!(matches!(self.state, MSDeleteExecutionS::Start));
-
-    let mut all_cols = BTreeSet::<ColName>::new();
-    all_cols.extend(free_external_cols(&self.query_plan.col_usage_node.external_cols));
-    all_cols.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
-
-    // If there are extra required cols, we add them in.
-    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(&self.sql_query.table.source_ref) {
-      all_cols.extend(extra_cols.clone());
-    }
-
-    let locked_cols_qid = ctx.add_requested_locked_columns(
-      io_ctx,
-      OrigP::new(self.query_id.clone()),
-      self.timestamp.clone(),
-      all_cols.into_iter().collect(),
-    );
-    self.state = MSDeleteExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid });
+    let qid = request_lock_columns(ctx, io_ctx, &self.query_id, &self.timestamp, &self.query_plan);
+    self.state = MSDeleteExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid: qid });
 
     MSTableDeleteAction::Wait
-  }
-
-  /// This checks that free `external_cols` are not present, and `safe_present_cols` and
-  /// `extra_req_cols` are preset.
-  ///
-  /// Note: this does *not* required columns to be globally locked, only locally.
-  fn does_query_plan_align(&self, ctx: &TabletContext) -> bool {
-    // First, check that `external_cols are absent.
-    for col in free_external_cols(&self.query_plan.col_usage_node.external_cols) {
-      // Since the `key_cols` are static, no query plan should have one of
-      // these as an External Column.
-      assert!(lookup(&ctx.table_schema.key_cols, &col).is_none());
-      if ctx.table_schema.val_cols.static_read(&col, &self.timestamp).is_some() {
-        return false;
-      }
-    }
-
-    // Next, check that `safe_present_cols` are present.
-    for col in &self.query_plan.col_usage_node.safe_present_cols {
-      if !contains_col(&ctx.table_schema, col, &self.timestamp) {
-        return false;
-      }
-    }
-
-    // Next, check that `extra_req_cols` are present.
-    if let Some(extra_cols) = self.query_plan.extra_req_cols.get(&self.sql_query.table.source_ref) {
-      for col in extra_cols {
-        if !contains_col(&ctx.table_schema, col, &self.timestamp) {
-          return false;
-        }
-      }
-    }
-
-    return true;
   }
 
   // Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
@@ -176,7 +127,7 @@ impl MSTableDeleteES {
       MSDeleteExecutionS::ColumnsLocking(locking) => {
         if locking.locked_cols_qid == locked_cols_qid {
           // Now, we check whether the TableSchema aligns with the QueryPlan.
-          if !self.does_query_plan_align(ctx) {
+          if !does_query_plan_align(ctx, &self.timestamp, &self.query_plan) {
             self.state = MSDeleteExecutionS::Done;
             MSTableDeleteAction::QueryError(msg::QueryError::InvalidQueryPlan)
           } else {

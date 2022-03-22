@@ -30,6 +30,68 @@ use std::rc::Rc;
 //  Utilities
 // -----------------------------------------------------------------------------------------------
 
+pub fn request_lock_columns<IO: CoreIOCtx>(
+  ctx: &mut TabletContext,
+  io_ctx: &mut IO,
+  query_id: &QueryId,
+  timestamp: &Timestamp,
+  query_plan: &QueryPlan,
+) -> QueryId {
+  let mut all_cols = BTreeSet::<ColName>::new();
+  all_cols.extend(free_external_cols(&query_plan.col_usage_node.external_cols));
+  all_cols.extend(query_plan.col_usage_node.safe_present_cols.clone());
+
+  // If there are extra required cols, we add them in.
+  if let Some(extra_cols) = query_plan.extra_req_cols.get(&ctx.this_table_path) {
+    all_cols.extend(extra_cols.clone());
+  }
+
+  ctx.add_requested_locked_columns(
+    io_ctx,
+    OrigP::new(query_id.clone()),
+    timestamp.clone(),
+    all_cols.into_iter().collect(),
+  )
+}
+
+/// This checks that free `external_cols` are not present, and `safe_present_cols` and
+/// `extra_req_cols` are preset.
+///
+/// Note: this does *not* required columns to be globally locked, only locally.
+pub fn does_query_plan_align(
+  ctx: &TabletContext,
+  timestamp: &Timestamp,
+  query_plan: &QueryPlan,
+) -> bool {
+  // First, check that `external_cols are absent.
+  for col in free_external_cols(&query_plan.col_usage_node.external_cols) {
+    // Since the `key_cols` are static, no query plan should have one of
+    // these as an External Column.
+    assert!(lookup(&ctx.table_schema.key_cols, &col).is_none());
+    if ctx.table_schema.val_cols.static_read(&col, timestamp).is_some() {
+      return false;
+    }
+  }
+
+  // Next, check that `safe_present_cols` are present.
+  for col in &query_plan.col_usage_node.safe_present_cols {
+    if !contains_col(&ctx.table_schema, col, timestamp) {
+      return false;
+    }
+  }
+
+  // Next, check that `extra_req_cols` are present.
+  if let Some(extra_cols) = query_plan.extra_req_cols.get(&ctx.this_table_path) {
+    for col in extra_cols {
+      if !contains_col(&ctx.table_schema, col, timestamp) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 /// This checks if the `GossipData` provided is not too old and contains everything
 /// necessary to handle the `QueryPlan`.
 pub fn check_gossip<'a>(gossip: &GossipDataView<'a>, query_plan: &QueryPlan) -> bool {
@@ -102,63 +164,10 @@ impl TableReadES {
   pub fn start<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) -> TableAction {
     // First, we lock the columns that the QueryPlan requires certain properties of.
     assert!(matches!(self.state, ExecutionS::Start));
-
-    let mut all_cols = BTreeSet::<ColName>::new();
-    all_cols.extend(free_external_cols(&self.query_plan.col_usage_node.external_cols));
-    all_cols.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
-
-    // If there are extra required cols, we add them in.
-    if let Some(extra_cols) =
-      self.query_plan.extra_req_cols.get(to_table_path(&self.sql_query.from))
-    {
-      all_cols.extend(extra_cols.clone());
-    }
-
-    let locked_cols_qid = ctx.add_requested_locked_columns(
-      io_ctx,
-      OrigP::new(self.query_id.clone()),
-      self.timestamp.clone(),
-      all_cols.into_iter().collect(),
-    );
-    self.state = ExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid });
+    let qid = request_lock_columns(ctx, io_ctx, &self.query_id, &self.timestamp, &self.query_plan);
+    self.state = ExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid: qid });
 
     TableAction::Wait
-  }
-
-  /// This checks that free `external_cols` are not present, and `safe_present_cols` and
-  /// `extra_req_cols` are preset.
-  ///
-  /// Note: this does *not* required columns to be globally locked, only locally.
-  fn does_query_plan_align(&self, ctx: &TabletContext) -> bool {
-    // First, check that `external_cols are absent.
-    for col in free_external_cols(&self.query_plan.col_usage_node.external_cols) {
-      // Since the `key_cols` are static, no query plan should have one of
-      // these as an External Column.
-      assert!(lookup(&ctx.table_schema.key_cols, &col).is_none());
-      if ctx.table_schema.val_cols.static_read(&col, &self.timestamp).is_some() {
-        return false;
-      }
-    }
-
-    // Next, check that `safe_present_cols` are present.
-    for col in &self.query_plan.col_usage_node.safe_present_cols {
-      if !contains_col(&ctx.table_schema, col, &self.timestamp) {
-        return false;
-      }
-    }
-
-    // Next, check that `extra_req_cols` are present.
-    if let Some(extra_cols) =
-      self.query_plan.extra_req_cols.get(to_table_path(&self.sql_query.from))
-    {
-      for col in extra_cols {
-        if !contains_col(&ctx.table_schema, col, &self.timestamp) {
-          return false;
-        }
-      }
-    }
-
-    return true;
   }
 
   /// Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
@@ -191,7 +200,7 @@ impl TableReadES {
     io_ctx: &mut IO,
   ) -> TableAction {
     // Now, we check whether the TableSchema aligns with the QueryPlan.
-    if !self.does_query_plan_align(ctx) {
+    if !does_query_plan_align(ctx, &self.timestamp, &self.query_plan) {
       self.state = ExecutionS::Done;
       TableAction::QueryError(msg::QueryError::InvalidQueryPlan)
     } else {
