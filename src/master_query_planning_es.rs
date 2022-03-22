@@ -15,7 +15,7 @@ use crate::model::message::MasterQueryPlan;
 use crate::multiversion_map::MVM;
 use crate::query_planning::{
   check_cols_present, collect_table_paths, compute_all_tier_maps, compute_extra_req_cols,
-  compute_table_location_map, perform_static_validations, KeyValidationError,
+  compute_table_location_map, perform_static_validations, StaticValidationError,
 };
 use crate::server::ServerContextBase;
 use sqlparser::test_utils::table;
@@ -29,8 +29,8 @@ pub trait ColUsageErrorTrait {
   fn mk_error(err: ColUsageError) -> Self;
 }
 
-pub trait KeyValidationErrorTrait {
-  fn mk_error(err: KeyValidationError) -> Self;
+pub trait StaticValidationErrorTrait {
+  fn mk_error(err: StaticValidationError) -> Self;
 }
 
 pub trait ReqTablePresenceError {
@@ -70,7 +70,7 @@ pub enum CheckingDBSchemaViewError {
   InsufficientLat,
   TableDNE(TablePath),
   ColUsageError(ColUsageError),
-  KeyValidationError(KeyValidationError),
+  StaticValidationError(StaticValidationError),
   ReqColPresenceError(ColName),
 }
 
@@ -152,9 +152,9 @@ impl ColUsageErrorTrait for CheckingDBSchemaViewError {
   }
 }
 
-impl KeyValidationErrorTrait for CheckingDBSchemaViewError {
-  fn mk_error(err: KeyValidationError) -> Self {
-    CheckingDBSchemaViewError::KeyValidationError(err)
+impl StaticValidationErrorTrait for CheckingDBSchemaViewError {
+  fn mk_error(err: StaticValidationError) -> Self {
+    CheckingDBSchemaViewError::StaticValidationError(err)
   }
 }
 
@@ -177,7 +177,7 @@ impl ReqColPresenceError for CheckingDBSchemaViewError {
 pub enum LockingDBSchemaViewError {
   TableDNE(TablePath),
   ColUsageError(ColUsageError),
-  KeyValidationError(KeyValidationError),
+  StaticValidationError(StaticValidationError),
   ReqColPresenceError(ColName),
 }
 
@@ -243,9 +243,9 @@ impl ColUsageErrorTrait for LockingDBSchemaViewError {
   }
 }
 
-impl KeyValidationErrorTrait for LockingDBSchemaViewError {
-  fn mk_error(err: KeyValidationError) -> Self {
-    LockingDBSchemaViewError::KeyValidationError(err)
+impl StaticValidationErrorTrait for LockingDBSchemaViewError {
+  fn mk_error(err: StaticValidationError) -> Self {
+    LockingDBSchemaViewError::StaticValidationError(err)
   }
 }
 
@@ -268,7 +268,7 @@ impl ReqColPresenceError for LockingDBSchemaViewError {
 pub enum StaticDBSchemaViewError {
   TableDNE(TablePath),
   ColUsageError(ColUsageError),
-  KeyValidationError(KeyValidationError),
+  StaticValidationError(StaticValidationError),
   ReqColPresenceError(ColName),
 }
 
@@ -333,9 +333,9 @@ impl ColUsageErrorTrait for StaticDBSchemaViewError {
   }
 }
 
-impl KeyValidationErrorTrait for StaticDBSchemaViewError {
-  fn mk_error(err: KeyValidationError) -> Self {
-    StaticDBSchemaViewError::KeyValidationError(err)
+impl StaticValidationErrorTrait for StaticDBSchemaViewError {
+  fn mk_error(err: StaticValidationError) -> Self {
+    StaticDBSchemaViewError::StaticValidationError(err)
   }
 }
 
@@ -362,7 +362,7 @@ pub enum MasterQueryPlanningAction {
 }
 
 pub fn master_query_planning<
-  ErrorT: ColUsageErrorTrait + KeyValidationErrorTrait + ReqTablePresenceError + ReqColPresenceError,
+  ErrorT: ColUsageErrorTrait + StaticValidationErrorTrait + ReqTablePresenceError + ReqColPresenceError,
   ViewT: DBSchemaView<ErrorT = ErrorT>,
 >(
   mut view: ViewT,
@@ -429,9 +429,9 @@ fn master_query_planning_pre(
         ColUsageError::InvalidColumnRef => msg::QueryPlanningError::InvalidColUsage,
         ColUsageError::InvalidSelectClause => msg::QueryPlanningError::InvalidSelect,
       }),
-      CheckingDBSchemaViewError::KeyValidationError(error) => respond_error(match error {
-        KeyValidationError::InvalidUpdate => msg::QueryPlanningError::InvalidUpdate,
-        KeyValidationError::InvalidInsert => msg::QueryPlanningError::InvalidInsert,
+      CheckingDBSchemaViewError::StaticValidationError(error) => respond_error(match error {
+        StaticValidationError::InvalidUpdate => msg::QueryPlanningError::InvalidUpdate,
+        StaticValidationError::InvalidInsert => msg::QueryPlanningError::InvalidInsert,
       }),
       CheckingDBSchemaViewError::ReqColPresenceError(missing_col) => {
         respond_error(msg::QueryPlanningError::RequiredColumnDNE(vec![missing_col]))
@@ -462,9 +462,9 @@ fn master_query_planning_post(
           ColUsageError::InvalidColumnRef => msg::QueryPlanningError::InvalidColUsage,
           ColUsageError::InvalidSelectClause => msg::QueryPlanningError::InvalidSelect,
         },
-        LockingDBSchemaViewError::KeyValidationError(error) => match error {
-          KeyValidationError::InvalidUpdate => msg::QueryPlanningError::InvalidUpdate,
-          KeyValidationError::InvalidInsert => msg::QueryPlanningError::InvalidInsert,
+        LockingDBSchemaViewError::StaticValidationError(error) => match error {
+          StaticValidationError::InvalidUpdate => msg::QueryPlanningError::InvalidUpdate,
+          StaticValidationError::InvalidInsert => msg::QueryPlanningError::InvalidInsert,
         },
         LockingDBSchemaViewError::ReqColPresenceError(missing_col) => {
           msg::QueryPlanningError::RequiredColumnDNE(vec![missing_col])

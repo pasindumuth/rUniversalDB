@@ -1,7 +1,7 @@
 use crate::col_usage::{iterate_stage_ms_query, GeneralStage};
 use crate::common::{lookup, TableSchema, Timestamp};
 use crate::master_query_planning_es::{
-  DBSchemaView, KeyValidationErrorTrait, ReqColPresenceError, ReqTablePresenceError,
+  DBSchemaView, ReqColPresenceError, ReqTablePresenceError, StaticValidationErrorTrait,
 };
 use crate::model::common::proc::MSQueryStage;
 use crate::model::common::TablePath;
@@ -138,7 +138,7 @@ pub fn compute_table_location_map<ViewT: DBSchemaView>(
   Ok(table_location_map)
 }
 
-pub enum KeyValidationError {
+pub enum StaticValidationError {
   InvalidUpdate,
   InvalidInsert,
 }
@@ -152,7 +152,7 @@ pub enum KeyValidationError {
 ///   2. All `(TablePath, Gen)` pairs in `table_generation` must be a key in `db_schema`
 ///      (this will be true of all `GossipData` instances).
 pub fn perform_static_validations<
-  ErrorT: KeyValidationErrorTrait,
+  ErrorT: StaticValidationErrorTrait,
   ViewT: DBSchemaView<ErrorT = ErrorT>,
 >(
   view: &mut ViewT,
@@ -162,26 +162,30 @@ pub fn perform_static_validations<
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(query) => {
-        // Check that the `stage` is not trying to modify a KeyCol.
+        // Check that the `stage` is not trying to modify a KeyCol,
+        // and all assigned columns are unique.
         let key_cols = view.key_cols(&query.table.source_ref)?;
+        let mut all_cols = BTreeSet::<&ColName>::new();
         for (col_name, _) in &query.assignment {
-          if lookup(key_cols, col_name).is_some() {
-            return Err(ErrorT::mk_error(KeyValidationError::InvalidUpdate));
+          if !all_cols.insert(col_name) || lookup(key_cols, col_name).is_some() {
+            return Err(ErrorT::mk_error(StaticValidationError::InvalidUpdate));
           }
         }
       }
       proc::MSQueryStage::Insert(query) => {
         // Check that the `stage` is inserting to all KeyCols.
+        // and all assigned columns are unique.
         let key_cols = view.key_cols(&query.table.source_ref)?;
+        let mut all_cols = BTreeSet::<&ColName>::new();
         for (col_name, _) in key_cols {
-          if !query.columns.contains(col_name) {
-            return Err(ErrorT::mk_error(KeyValidationError::InvalidInsert));
+          if !all_cols.insert(col_name) || !query.columns.contains(col_name) {
+            return Err(ErrorT::mk_error(StaticValidationError::InvalidInsert));
           }
         }
         // Check that `values` has equal length to `columns`.
         for row in &query.values {
           if row.len() != query.columns.len() {
-            return Err(ErrorT::mk_error(KeyValidationError::InvalidInsert));
+            return Err(ErrorT::mk_error(StaticValidationError::InvalidInsert));
           }
         }
       }

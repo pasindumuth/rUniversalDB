@@ -31,6 +31,7 @@ pub fn test_all_basic_serial(rand: &mut XorShiftRng) {
   trans_table_test(mk_seed(rand));
   select_projection_test(mk_seed(rand));
   insert_test(mk_seed(rand));
+  update_test(mk_seed(rand));
   multi_key_test(mk_seed(rand));
   multi_stage_test(mk_seed(rand));
   aggregation_test(mk_seed(rand));
@@ -434,7 +435,84 @@ fn insert_test(seed: [u8; 16]) {
     );
   }
 
+  // Failures cases
+
+  {
+    // Duplicate column failure
+    ctx.execute_query_failure(
+      &mut sim,
+      " INSERT INTO inventory (product_id, email, count, count)
+        VALUES (2, 'my_email_2', 35);
+      ",
+      10000,
+      |abort_data| match abort_data {
+        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidInsert) => true,
+        _ => false,
+      },
+    );
+  }
+
+  {
+    // Incomplete Keycols
+    ctx.execute_query_failure(
+      &mut sim,
+      " INSERT INTO inventory (email, count)
+        VALUES ('my_email_2', 35);
+      ",
+      10000,
+      |abort_data| match abort_data {
+        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidInsert) => true,
+        _ => false,
+      },
+    );
+  }
+
   println!("Test 'insert_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
+}
+
+// -----------------------------------------------------------------------------------------------
+//  update_test
+// -----------------------------------------------------------------------------------------------
+
+fn update_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup(seed);
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut ctx);
+
+  // Failures cases
+
+  {
+    // Duplicate column failure
+    ctx.execute_query_failure(
+      &mut sim,
+      " UPDATE inventory
+        SET email = 'my_email_2', email = 'my_email_3';
+      ",
+      10000,
+      |abort_data| match abort_data {
+        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidUpdate) => true,
+        _ => false,
+      },
+    );
+  }
+
+  {
+    // Writing to KeyCol
+    ctx.execute_query_failure(
+      &mut sim,
+      " UPDATE inventory
+        SET product_id = 1;
+      ",
+      10000,
+      |abort_data| match abort_data {
+        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidUpdate) => true,
+        _ => false,
+      },
+    );
+  }
+
+  println!("Test 'update_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
