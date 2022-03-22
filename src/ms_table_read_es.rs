@@ -19,8 +19,7 @@ use crate::table_read_es::{
 };
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColumnsLocking, Executing, MSQueryES, Pending,
-  RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
-  SubqueryPending, TabletContext,
+  RequestedReadProtected, StorageLocalTable, TabletContext,
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -235,7 +234,7 @@ impl MSTableReadES {
   ) -> MSTableReadAction {
     match &self.state {
       MSReadExecutionS::Pending(pending) if protect_qid == pending.query_id => {
-        let gr_query_statuses = compute_subqueries(
+        let gr_query_ess = compute_subqueries(
           GRQueryConstructorView {
             root_query_path: &self.root_query_path,
             timestamp: &self.timestamp,
@@ -259,24 +258,16 @@ impl MSTableReadES {
           ),
         );
 
-        // Here, we have computed all GRQueryESs, and we can now add them to Executing.
-        let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-        for gr_query_es in &gr_query_statuses {
-          subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-            context: gr_query_es.context.clone(),
-            query_id: gr_query_es.query_id.clone(),
-          }));
-        }
-
         // Move the ES to the Executing state.
-        self.state = MSReadExecutionS::Executing(Executing { completed: 0, subqueries });
+        self.state = MSReadExecutionS::Executing(Executing::create(&gr_query_ess));
+        let exec = cast!(MSReadExecutionS::Executing, &mut self.state).unwrap();
 
-        if gr_query_statuses.is_empty() {
-          // Since there are no subqueries, we can go straight to finishing the ES.
+        // See if we are already finished (due to having no subqueries).
+        if exec.is_complete() {
           self.finish_ms_table_read_es(ctx, io_ctx, ms_query_es)
         } else {
-          // Return the subqueries
-          MSTableReadAction::SendSubqueries(gr_query_statuses)
+          // Otherwise, return the subqueries.
+          MSTableReadAction::SendSubqueries(gr_query_ess)
         }
       }
       _ => {
@@ -309,22 +300,15 @@ impl MSTableReadES {
   ) -> MSTableReadAction {
     // Add the subquery results into the MSTableReadES.
     self.new_rms.extend(subquery_new_rms);
-    let executing_state = cast!(MSReadExecutionS::Executing, &mut self.state).unwrap();
-    let subquery_idx = executing_state.find_subquery(&subquery_id).unwrap();
-    let single_status = executing_state.subqueries.get_mut(subquery_idx).unwrap();
-    let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
-    *single_status = SingleSubqueryStatus::Finished(SubqueryFinished {
-      context: context.clone(),
-      result: table_views,
-    });
-    executing_state.completed += 1;
+    let exec = cast!(MSReadExecutionS::Executing, &mut self.state).unwrap();
+    exec.add_subquery_result(subquery_id, table_views);
 
-    // If there are still subqueries to compute, then we wait. Otherwise, we finish
-    // up the MSTableReadES and respond to the client.
-    if executing_state.completed < executing_state.subqueries.len() {
-      MSTableReadAction::Wait
-    } else {
+    // See if we are finished (due to computing all subqueries).
+    if exec.is_complete() {
       self.finish_ms_table_read_es(ctx, io_ctx, ms_query_es)
+    } else {
+      // Otherwise, we wait.
+      MSTableReadAction::Wait
     }
   }
 
@@ -335,18 +319,10 @@ impl MSTableReadES {
     _: &mut IO,
     ms_query_es: &MSQueryES,
   ) -> MSTableReadAction {
-    let executing_state = cast!(MSReadExecutionS::Executing, &mut self.state).unwrap();
+    let exec = cast!(MSReadExecutionS::Executing, &mut self.state).unwrap();
 
     // Compute children.
-    let mut children = Vec::<(Vec<proc::ColumnRef>, Vec<TransTableName>)>::new();
-    let mut subquery_results = Vec::<Vec<TableView>>::new();
-    for single_status in &executing_state.subqueries {
-      let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-      let context_schema = &result.context.context_schema;
-      children
-        .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
-      subquery_results.push(result.result.clone());
-    }
+    let (children, subquery_results) = std::mem::take(exec).get_results();
 
     // Create the ContextConstructor.
     let context_constructor = ContextConstructor::new(
@@ -391,33 +367,7 @@ impl MSTableReadES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, _: &mut IO) {
-    match &self.state {
-      MSReadExecutionS::Start => {}
-      MSReadExecutionS::ColumnsLocking(_) => {}
-      MSReadExecutionS::GossipDataWaiting => {}
-      MSReadExecutionS::Pending(pending) => {
-        // Here, we remove the ReadRegion from `m_waiting_read_protected`, if it still
-        // exists. Note that we leave `m_read_protected` and `m_write_protected` intact
-        // since they are inconvenient to change (since they don't have `query_id`.
-        ctx.remove_m_read_protected_request(&self.timestamp, &pending.query_id);
-      }
-      MSReadExecutionS::Executing(executing) => {
-        // Here, we need to cancel every Subquery. Depending on the state of the
-        // SingleSubqueryStatus, we either need to either clean up the column locking
-        // request or the ReadRegion from m_waiting_read_protected.
-
-        // Note that we leave `m_read_protected` and `m_write_protected` in-tact
-        // since they are inconvenient to change (since they don't have `query_id`).
-        for single_status in &executing.subqueries {
-          match single_status {
-            SingleSubqueryStatus::Pending(_) => {}
-            SingleSubqueryStatus::Finished(_) => {}
-          }
-        }
-      }
-      MSReadExecutionS::Done => {}
-    }
+  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {
     self.state = MSReadExecutionS::Done;
   }
 }

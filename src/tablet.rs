@@ -57,29 +57,7 @@ use std::sync::Arc;
 pub mod tablet_test;
 
 // -----------------------------------------------------------------------------------------------
-//  SubqueryStatus
-// -----------------------------------------------------------------------------------------------
-#[derive(Debug)]
-pub struct SubqueryPending {
-  pub context: Rc<Context>,
-  /// The QueryId of GRQueryES we are waiting for.
-  pub query_id: QueryId,
-}
-
-#[derive(Debug)]
-pub struct SubqueryFinished {
-  pub context: Rc<Context>,
-  pub result: Vec<TableView>,
-}
-
-#[derive(Debug)]
-pub enum SingleSubqueryStatus {
-  Pending(SubqueryPending),
-  Finished(SubqueryFinished),
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Common Execution States
+//  Before Subquery
 // -----------------------------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct ColumnsLocking {
@@ -91,27 +69,71 @@ pub struct Pending {
   pub query_id: QueryId,
 }
 
+// -----------------------------------------------------------------------------------------------
+//  Subquery Execution
+// -----------------------------------------------------------------------------------------------
+
 #[derive(Debug)]
+struct SubqueryPending {
+  context: Rc<Context>,
+  query_id: QueryId,
+}
+
+#[derive(Debug)]
+struct SubqueryFinished {
+  context: Rc<Context>,
+  result: Vec<TableView>,
+}
+
+#[derive(Debug, Default)]
 pub struct Executing {
-  pub completed: usize,
-  /// Here, the position of every SingleSubqueryStatus corresponds to the position
-  /// of the subquery in the SQL query.
-  pub subqueries: Vec<SingleSubqueryStatus>,
+  /// Since Subquery's have an order, we need to remember that.
+  order: Vec<QueryId>,
+  pending: BTreeMap<QueryId, SubqueryPending>,
+  finished: BTreeMap<QueryId, SubqueryFinished>,
 }
 
 impl Executing {
-  pub fn find_subquery(&self, qid: &QueryId) -> Option<usize> {
-    for (i, single_status) in self.subqueries.iter().enumerate() {
-      match single_status {
-        SingleSubqueryStatus::Pending(SubqueryPending { query_id, .. }) => {
-          if query_id == qid {
-            return Some(i);
-          }
-        }
-        SingleSubqueryStatus::Finished(_) => {}
-      }
+  pub fn create(gr_query_ess: &Vec<GRQueryES>) -> Executing {
+    let mut exec = Executing::default();
+    for es in gr_query_ess {
+      exec.order.push(es.query_id.clone());
+      exec.pending.insert(
+        es.query_id.clone(),
+        SubqueryPending { context: es.context.clone(), query_id: es.query_id.clone() },
+      );
     }
-    None
+    exec
+  }
+
+  /// Add in the results of a subquery. The given `query_id` must still be be pending.
+  pub fn add_subquery_result(&mut self, query_id: QueryId, table_views: Vec<TableView>) {
+    let pending_subquery = self.pending.remove(&query_id).unwrap();
+    self.finished.insert(
+      query_id,
+      SubqueryFinished { context: pending_subquery.context, result: table_views },
+    );
+  }
+
+  /// This should only be called when `is_complete` evalautes to true.
+  pub fn get_results(
+    self,
+  ) -> (Vec<(Vec<proc::ColumnRef>, Vec<TransTableName>)>, Vec<Vec<TableView>>) {
+    let mut children = Vec::<(Vec<proc::ColumnRef>, Vec<TransTableName>)>::new();
+    let mut subquery_results = Vec::<Vec<TableView>>::new();
+    for query_id in self.order {
+      let result = self.finished.get(&query_id).unwrap();
+      let context_schema = &result.context.context_schema;
+      children
+        .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
+      subquery_results.push(result.result.clone());
+    }
+    (children, subquery_results)
+  }
+
+  /// Return true iff all subqueries have returne dtheir result.
+  pub fn is_complete(&self) -> bool {
+    self.pending.is_empty()
   }
 }
 

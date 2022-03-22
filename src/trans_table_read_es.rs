@@ -15,9 +15,7 @@ use crate::server::{
   ServerContextBase,
 };
 use crate::table_read_es::{check_gossip, fully_evaluate_select};
-use crate::tablet::{
-  compute_contexts, Executing, SingleSubqueryStatus, SubqueryFinished, SubqueryPending,
-};
+use crate::tablet::{compute_contexts, Executing};
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use std::ops::Deref;
@@ -249,24 +247,15 @@ impl TransTableReadES {
       ));
     }
 
-    // Here, we have computed all GRQueryESs, and we can now add them to
-    // `subquery_status`.
-    let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-    for gr_query_es in &gr_query_ess {
-      subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-        context: gr_query_es.context.clone(),
-        query_id: gr_query_es.query_id.clone(),
-      }));
-    }
-
     // Move the ES to the Executing state.
-    self.state = TransExecutionS::Executing(Executing { completed: 0, subqueries });
+    self.state = TransExecutionS::Executing(Executing::create(&gr_query_ess));
+    let exec = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
 
-    if gr_query_ess.is_empty() {
-      // Since there are no subqueries, we can go straight to finishing the ES.
+    // See if we are already finished (due to having no subqueries).
+    if exec.is_complete() {
       self.finish_trans_table_read_es(ctx, trans_table_source)
     } else {
-      // Return the subqueries so that they can be driven from the parent Server.
+      // Otherwise, return the subqueries.
       TransTableAction::SendSubqueries(gr_query_ess)
     }
   }
@@ -294,23 +283,15 @@ impl TransTableReadES {
   ) -> TransTableAction {
     // Add the subquery results into the TableReadES.
     self.new_rms.extend(subquery_new_rms);
-    let executing_state = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
-    let subquery_idx = executing_state.find_subquery(&subquery_id).unwrap();
-    let single_status = executing_state.subqueries.get_mut(subquery_idx).unwrap();
-    let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context.clone();
-    *single_status = SingleSubqueryStatus::Finished(SubqueryFinished {
-      context: context.clone(),
-      result: table_views,
-    });
-    executing_state.completed += 1;
+    let exec = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
+    exec.add_subquery_result(subquery_id, table_views);
 
-    // If all subqueries have been evaluated, finish the TransTableReadES
-    // and respond to the client.
-    let num_subqueries = executing_state.subqueries.len();
-    if executing_state.completed < num_subqueries {
-      TransTableAction::Wait
-    } else {
+    // See if we are finished (due to computing all subqueries).
+    if exec.is_complete() {
       self.finish_trans_table_read_es(ctx, trans_table_source)
+    } else {
+      // Otherwise, we wait.
+      TransTableAction::Wait
     }
   }
 
@@ -320,18 +301,10 @@ impl TransTableReadES {
     _: &mut CTServerContext<IO>,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
-    let executing_state = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
+    let exec = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
 
     // Compute children.
-    let mut children = Vec::<(Vec<proc::ColumnRef>, Vec<TransTableName>)>::new();
-    let mut subquery_results = Vec::<Vec<TableView>>::new();
-    for single_status in &executing_state.subqueries {
-      let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-      let context_schema = &result.context.context_schema;
-      children
-        .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
-      subquery_results.push(result.result.clone());
-    }
+    let (children, subquery_results) = std::mem::take(exec).get_results();
 
     // Create the ContextConstructor.
     let context_constructor = ContextConstructor::new(

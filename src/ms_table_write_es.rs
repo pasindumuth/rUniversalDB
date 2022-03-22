@@ -17,8 +17,7 @@ use crate::storage::{GenericTable, MSStorageView};
 use crate::table_read_es::{check_gossip, does_query_plan_align, request_lock_columns};
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColumnsLocking, Executing, MSQueryES, Pending,
-  RequestedReadProtected, SingleSubqueryStatus, StorageLocalTable, SubqueryFinished,
-  SubqueryPending, TabletContext,
+  RequestedReadProtected, StorageLocalTable, TabletContext,
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -251,7 +250,7 @@ impl MSTableWriteES {
   ) -> MSTableWriteAction {
     match &self.state {
       MSWriteExecutionS::Pending(pending) if protect_qid == pending.query_id => {
-        let gr_query_statuses = compute_subqueries(
+        let gr_query_ess = compute_subqueries(
           GRQueryConstructorView {
             root_query_path: &self.root_query_path,
             timestamp: &self.timestamp,
@@ -276,25 +275,16 @@ impl MSTableWriteES {
           ),
         );
 
-        // Here, we have to evaluate subqueries. Thus, we go to Executing and return
-        // SendSubqueries to the parent server.
-        let mut subqueries = Vec::<SingleSubqueryStatus>::new();
-        for gr_query_es in &gr_query_statuses {
-          subqueries.push(SingleSubqueryStatus::Pending(SubqueryPending {
-            context: gr_query_es.context.clone(),
-            query_id: gr_query_es.query_id.clone(),
-          }));
-        }
-
         // Move the ES to the Executing state.
-        self.state = MSWriteExecutionS::Executing(Executing { completed: 0, subqueries });
+        self.state = MSWriteExecutionS::Executing(Executing::create(&gr_query_ess));
+        let exec = cast!(MSWriteExecutionS::Executing, &mut self.state).unwrap();
 
-        if gr_query_statuses.is_empty() {
-          // Since there are no subqueries, we can go straight to finishing the ES.
+        // See if we are already finished (due to having no subqueries).
+        if exec.is_complete() {
           self.finish_ms_table_write_es(ctx, io_ctx, ms_query_es)
         } else {
-          // Return the subqueries
-          MSTableWriteAction::SendSubqueries(gr_query_statuses)
+          // Otherwise, return the subqueries.
+          MSTableWriteAction::SendSubqueries(gr_query_ess)
         }
       }
       _ => {
@@ -327,22 +317,15 @@ impl MSTableWriteES {
   ) -> MSTableWriteAction {
     // Add the subquery results into the MSTableWriteES.
     self.new_rms.extend(subquery_new_rms);
-    let executing_state = cast!(MSWriteExecutionS::Executing, &mut self.state).unwrap();
-    let subquery_idx = executing_state.find_subquery(&subquery_id).unwrap();
-    let single_status = executing_state.subqueries.get_mut(subquery_idx).unwrap();
-    let context = &cast!(SingleSubqueryStatus::Pending, single_status).unwrap().context;
-    *single_status = SingleSubqueryStatus::Finished(SubqueryFinished {
-      context: context.clone(),
-      result: table_views,
-    });
-    executing_state.completed += 1;
+    let exec = cast!(MSWriteExecutionS::Executing, &mut self.state).unwrap();
+    exec.add_subquery_result(subquery_id, table_views);
 
-    // If there are still subqueries to compute, then we wait. Otherwise, we finish
-    // up the MSTableWriteES and respond to the client.
-    if executing_state.completed < executing_state.subqueries.len() {
-      MSTableWriteAction::Wait
-    } else {
+    // See if we are finished (due to computing all subqueries).
+    if exec.is_complete() {
       self.finish_ms_table_write_es(ctx, io_ctx, ms_query_es)
+    } else {
+      // Otherwise, we wait.
+      MSTableWriteAction::Wait
     }
   }
 
@@ -353,18 +336,10 @@ impl MSTableWriteES {
     _: &mut IO,
     ms_query_es: &mut MSQueryES,
   ) -> MSTableWriteAction {
-    let executing_state = cast!(MSWriteExecutionS::Executing, &mut self.state).unwrap();
+    let exec = cast!(MSWriteExecutionS::Executing, &mut self.state).unwrap();
 
     // Compute children.
-    let mut children = Vec::<(Vec<proc::ColumnRef>, Vec<TransTableName>)>::new();
-    let mut subquery_results = Vec::<Vec<TableView>>::new();
-    for single_status in &executing_state.subqueries {
-      let result = cast!(SingleSubqueryStatus::Finished, single_status).unwrap();
-      let context_schema = &result.context.context_schema;
-      children
-        .push((context_schema.column_context_schema.clone(), context_schema.trans_table_names()));
-      subquery_results.push(result.result.clone());
-    }
+    let (children, subquery_results) = std::mem::take(exec).get_results();
 
     // Create the ContextConstructor.
     let context_constructor = ContextConstructor::new(
