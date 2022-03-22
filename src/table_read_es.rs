@@ -8,8 +8,8 @@ use crate::expression::{
 };
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  iast, proc, CQueryPath, ColName, ColVal, ColValN, Context, ContextRow, QueryId, TQueryPath,
-  TablePath, TableView, TransTableName,
+  iast, proc, CQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow, QueryId,
+  TQueryPath, TablePath, TableView, TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::{
@@ -111,6 +111,40 @@ pub fn check_gossip<'a>(gossip: &GossipDataView<'a>, query_plan: &QueryPlan) -> 
   }
 
   return true;
+}
+
+/// Compute the `ReadRegion` with the given `query_plan` and `selection`.
+pub fn compute_read_region(
+  key_cols: &Vec<(ColName, ColType)>,
+  query_plan: &QueryPlan,
+  context: &Context,
+  selection: &proc::ValExpr,
+) -> ReadRegion {
+  // Compute the Row Region by taking the union across all ContextRows
+  let mut row_region = Vec::<KeyBound>::new();
+  for context_row in &context.context_rows {
+    let key_bounds = compute_key_region(
+      selection,
+      compute_col_map(&context.context_schema, context_row),
+      &query_plan.col_usage_node.source,
+      key_cols,
+    );
+    for key_bound in key_bounds {
+      row_region.push(key_bound);
+    }
+  }
+  row_region = compress_row_region(row_region);
+
+  // Compute the Column Region.
+  let mut val_col_region = BTreeSet::<ColName>::new();
+  val_col_region.extend(query_plan.col_usage_node.safe_present_cols.clone());
+  for (key_col, _) in key_cols {
+    val_col_region.remove(key_col);
+  }
+  let val_col_region = Vec::from_iter(val_col_region.into_iter());
+
+  // Compute the ReadRegion
+  ReadRegion { val_col_region, row_region }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -290,32 +324,16 @@ impl TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
   ) -> TableAction {
-    // Compute the Row Region by taking the union across all ContextRows
-    let mut row_region = Vec::<KeyBound>::new();
-    for context_row in &self.context.context_rows {
-      let key_bounds = compute_key_region(
-        &self.sql_query.selection,
-        compute_col_map(&self.context.context_schema, context_row),
-        &self.query_plan.col_usage_node.source,
-        &ctx.table_schema.key_cols,
-      );
-      for key_bound in key_bounds {
-        row_region.push(key_bound);
-      }
-    }
-    row_region = compress_row_region(row_region);
+    // Compute the ReadRegion
+    let read_region = compute_read_region(
+      &ctx.table_schema.key_cols,
+      &self.query_plan,
+      &self.context,
+      &self.sql_query.selection,
+    );
 
-    // Compute the Read Column Region.
-    let mut val_col_region = BTreeSet::<ColName>::new();
-    val_col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
-    for (key_col, _) in &ctx.table_schema.key_cols {
-      val_col_region.remove(key_col);
-    }
-
-    // Move the TableReadES to the Pending state with the given ReadRegion.
+    // Move the TableReadES to the Pending state
     let protect_qid = mk_qid(io_ctx.rand());
-    let val_col_region = Vec::from_iter(val_col_region.into_iter());
-    let read_region = ReadRegion { val_col_region, row_region };
     self.state = ExecutionS::Pending(Pending { query_id: protect_qid.clone() });
 
     // Add a read protection requested

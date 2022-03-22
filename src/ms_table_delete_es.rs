@@ -17,7 +17,9 @@ use crate::server::{
   ServerContextBase,
 };
 use crate::storage::{GenericTable, MSStorageView};
-use crate::table_read_es::{check_gossip, does_query_plan_align, request_lock_columns};
+use crate::table_read_es::{
+  check_gossip, compute_read_region, does_query_plan_align, request_lock_columns,
+};
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColumnsLocking, Executing, MSQueryES, Pending,
   RequestedReadProtected, StorageLocalTable, TabletContext,
@@ -187,25 +189,20 @@ impl MSTableDeleteES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
   ) -> MSTableDeleteAction {
-    // Compute the Row Region by taking the union across all ContextRows
-    let mut row_region = Vec::<KeyBound>::new();
-    for context_row in &self.context.context_rows {
-      let key_bounds = compute_key_region(
-        &self.sql_query.selection,
-        compute_col_map(&self.context.context_schema, context_row),
-        &self.query_plan.col_usage_node.source,
-        &ctx.table_schema.key_cols,
-      );
-      for key_bound in key_bounds {
-        row_region.push(key_bound);
-      }
-    }
+    // Compute the ReadRegion
+    let read_region = compute_read_region(
+      &ctx.table_schema.key_cols,
+      &self.query_plan,
+      &self.context,
+      &self.sql_query.selection,
+    );
 
-    row_region = compress_row_region(row_region);
-
-    // Compute the Write Region
-    let write_region =
-      WriteRegion { row_region: row_region.clone(), presence: true, val_col_region: vec![] };
+    // Compute the WriteRegion
+    let write_region = WriteRegion {
+      row_region: read_region.row_region.clone(),
+      presence: true,
+      val_col_region: vec![],
+    };
 
     // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
     // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
@@ -213,17 +210,8 @@ impl MSTableDeleteES {
       self.state = MSDeleteExecutionS::Done;
       MSTableDeleteAction::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
     } else {
-      // Compute the Read Column Region.
-      let mut val_col_region = BTreeSet::<ColName>::new();
-      val_col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
-      for (key_col, _) in &ctx.table_schema.key_cols {
-        val_col_region.remove(key_col);
-      }
-
       // Move the MSTableDeleteES to the Pending state with the given ReadRegion.
       let protect_qid = mk_qid(io_ctx.rand());
-      let val_col_region = Vec::from_iter(val_col_region.into_iter());
-      let read_region = ReadRegion { val_col_region, row_region };
       self.state = MSDeleteExecutionS::Pending(Pending { query_id: protect_qid.clone() });
 
       // Add a ReadRegion to the `m_waiting_read_protected` and the

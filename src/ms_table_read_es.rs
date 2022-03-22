@@ -15,7 +15,8 @@ use crate::server::{
 };
 use crate::storage::MSStorageView;
 use crate::table_read_es::{
-  check_gossip, does_query_plan_align, fully_evaluate_select, request_lock_columns,
+  check_gossip, compute_read_region, does_query_plan_align, fully_evaluate_select,
+  request_lock_columns,
 };
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColumnsLocking, Executing, MSQueryES, Pending,
@@ -186,32 +187,16 @@ impl MSTableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
   ) -> MSTableReadAction {
-    // Compute the Row Region by taking the union across all ContextRows
-    let mut row_region = Vec::<KeyBound>::new();
-    for context_row in &self.context.context_rows {
-      let key_bounds = compute_key_region(
-        &self.sql_query.selection,
-        compute_col_map(&self.context.context_schema, context_row),
-        &self.query_plan.col_usage_node.source,
-        &ctx.table_schema.key_cols,
-      );
-      for key_bound in key_bounds {
-        row_region.push(key_bound);
-      }
-    }
-    row_region = compress_row_region(row_region);
-
-    // Compute the Read Column Region.
-    let mut val_col_region = BTreeSet::<ColName>::new();
-    val_col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
-    for (key_col, _) in &ctx.table_schema.key_cols {
-      val_col_region.remove(key_col);
-    }
+    // Compute the ReadRegion
+    let read_region = compute_read_region(
+      &ctx.table_schema.key_cols,
+      &self.query_plan,
+      &self.context,
+      &self.sql_query.selection,
+    );
 
     // Move the MSTableReadES to the Pending state with the given ReadRegion.
     let protect_qid = mk_qid(io_ctx.rand());
-    let val_col_region = Vec::from_iter(val_col_region.into_iter());
-    let read_region = ReadRegion { val_col_region, row_region };
     self.state = MSReadExecutionS::Pending(Pending { query_id: protect_qid.clone() });
 
     // Add a ReadRegion to the m_waiting_read_protected.

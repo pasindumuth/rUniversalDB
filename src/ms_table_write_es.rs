@@ -14,7 +14,9 @@ use crate::server::{
   contains_col, evaluate_update, mk_eval_error, ContextConstructor, ServerContextBase,
 };
 use crate::storage::{GenericTable, MSStorageView};
-use crate::table_read_es::{check_gossip, does_query_plan_align, request_lock_columns};
+use crate::table_read_es::{
+  check_gossip, compute_read_region, does_query_plan_align, request_lock_columns,
+};
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColumnsLocking, Executing, MSQueryES, Pending,
   RequestedReadProtected, StorageLocalTable, TabletContext,
@@ -184,29 +186,20 @@ impl MSTableWriteES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
   ) -> MSTableWriteAction {
-    // Compute the Row Region by taking the union across all ContextRows
-    let mut row_region = Vec::<KeyBound>::new();
-    for context_row in &self.context.context_rows {
-      let key_bounds = compute_key_region(
-        &self.sql_query.selection,
-        compute_col_map(&self.context.context_schema, context_row),
-        &self.query_plan.col_usage_node.source,
-        &ctx.table_schema.key_cols,
-      );
-      for key_bound in key_bounds {
-        row_region.push(key_bound);
-      }
-    }
-    row_region = compress_row_region(row_region);
+    // Compute the ReadRegion
+    let read_region = compute_read_region(
+      &ctx.table_schema.key_cols,
+      &self.query_plan,
+      &self.context,
+      &self.sql_query.selection,
+    );
 
-    // Compute the Write Column Region.
-    let mut val_col_region = BTreeSet::<ColName>::new();
-    val_col_region.extend(self.sql_query.assignment.iter().map(|(col, _)| col.clone()));
-
-    // Compute the Write Region
-    let val_col_region = Vec::from_iter(val_col_region.into_iter());
-    let write_region =
-      WriteRegion { row_region: row_region.clone(), presence: false, val_col_region };
+    // Compute the WriteRegion
+    let write_region = WriteRegion {
+      row_region: read_region.row_region.clone(),
+      presence: false,
+      val_col_region: self.sql_query.assignment.iter().map(|(col, _)| col.clone()).collect(),
+    };
 
     // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
     // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
@@ -214,17 +207,8 @@ impl MSTableWriteES {
       self.state = MSWriteExecutionS::Done;
       MSTableWriteAction::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
     } else {
-      // Compute the Read Column Region.
-      let mut val_col_region = BTreeSet::<ColName>::new();
-      val_col_region.extend(self.query_plan.col_usage_node.safe_present_cols.clone());
-      for (key_col, _) in &ctx.table_schema.key_cols {
-        val_col_region.remove(key_col);
-      }
-
       // Move the MSTableWriteES to the Pending state with the given ReadRegion.
       let protect_qid = mk_qid(io_ctx.rand());
-      let val_col_region = Vec::from_iter(val_col_region.into_iter());
-      let read_region = ReadRegion { val_col_region, row_region };
       self.state = MSWriteExecutionS::Pending(Pending { query_id: protect_qid.clone() });
 
       // Add a ReadRegion to the `m_waiting_read_protected` and the
