@@ -1,196 +1,53 @@
-use crate::col_usage::{compute_insert_schema, free_external_cols};
+use crate::col_usage::compute_insert_schema;
 use crate::common::{
-  lookup, lookup_pos, mk_qid, ColBound, CoreIOCtx, KeyBound, OrigP, PolyColBound, QueryESResult,
-  QueryPlan, ReadRegion, SingleBound, Timestamp, WriteRegion, WriteRegionType,
+  lookup, mk_qid, ColBound, CoreIOCtx, KeyBound, OrigP, PolyColBound, QueryESResult, ReadRegion,
+  SingleBound, WriteRegion,
 };
-use crate::expression::{
-  compress_row_region, construct_colvaln, construct_simple_cexpr, evaluate_c_expr, is_true, CExpr,
-  EvalError,
-};
-use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
+use crate::expression::{construct_simple_cexpr, evaluate_c_expr, EvalError};
+use crate::gr_query_es::GRQueryES;
 use crate::model::common::{
-  proc, CQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow, PrimaryKey, QueryId,
-  TQueryPath, TableView, TransTableName,
+  proc, ColName, ColType, ColVal, ColValN, PrimaryKey, QueryId, TableView, TransTableName,
 };
 use crate::model::message as msg;
-use crate::server::{
-  contains_col, evaluate_update, mk_eval_error, ContextConstructor, ServerContextBase,
-};
+use crate::ms_table_es::{GeneralQueryES, MSTableAction, MSTableES, SqlQueryInner};
+use crate::server::mk_eval_error;
 use crate::storage::{GenericTable, MSStorageView, StorageView, PRESENCE_VALN};
-use crate::table_read_es::{check_gossip, does_query_plan_align, request_lock_columns};
-use crate::tablet::{
-  ColumnsLocking, Executing, MSQueryES, RequestedReadProtected, StorageLocalTable, TabletContext,
-};
+use crate::tablet::{MSQueryES, RequestedReadProtected, TabletContext};
 use std::collections::{BTreeMap, BTreeSet};
-use std::iter::FromIterator;
-use std::rc::Rc;
 
 // -----------------------------------------------------------------------------------------------
 //  MSTableInsertES
 // -----------------------------------------------------------------------------------------------
+
+pub type MSTableInsertES = MSTableES<InsertInner>;
+
 #[derive(Debug)]
-pub struct Pending {
+struct ExtraPendingData {
   /// The keys of the row that is trying to be inserted to in terms of as `Vec<KeyBound>`.
   row_region: Vec<KeyBound>,
   update_view: GenericTable,
   res_table_view: TableView,
-  query_id: QueryId,
 }
 
 #[derive(Debug)]
-pub enum MSTableInsertExecutionS {
-  Start,
-  ColumnsLocking(ColumnsLocking),
-  GossipDataWaiting,
-  Pending(Pending),
-  Done,
+pub struct InsertInner {
+  sql_query: proc::Insert,
+  extra_pending: Option<ExtraPendingData>,
 }
 
-#[derive(Debug)]
-pub struct MSTableInsertES {
-  pub root_query_path: CQueryPath,
-  pub timestamp: Timestamp,
-  pub tier: u32,
-  pub context: Rc<Context>,
-
-  pub query_id: QueryId,
-
-  // Query-related fields.
-  pub sql_query: proc::Insert,
-  pub query_plan: QueryPlan,
-
-  /// The `QueryId` of the `MSQueryES` that this ES belongs to.
-  /// We make sure that it exists as long as this ES exists.
-  pub ms_query_id: QueryId,
-
-  // Dynamically evolving fields.
-  pub new_rms: BTreeSet<TQueryPath>,
-  pub state: MSTableInsertExecutionS,
+impl InsertInner {
+  pub fn new(sql_query: proc::Insert) -> Self {
+    InsertInner { sql_query, extra_pending: None }
+  }
 }
 
-pub enum MSTableInsertAction {
-  /// This tells the parent Server to wait.
-  Wait,
-  /// Indicates the ES succeeded with the given result.
-  Success(QueryESResult),
-  /// Indicates the ES failed with a QueryError.
-  QueryError(msg::QueryError),
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Implementation
-// -----------------------------------------------------------------------------------------------
-
-impl MSTableInsertES {
-  pub fn start<IO: CoreIOCtx>(
+impl SqlQueryInner for InsertInner {
+  fn request_region_locks<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-  ) -> MSTableInsertAction {
-    // First, we lock the columns that the QueryPlan requires certain properties of.
-    assert!(matches!(self.state, MSTableInsertExecutionS::Start));
-    let qid = request_lock_columns(ctx, io_ctx, &self.query_id, &self.timestamp, &self.query_plan);
-    self.state = MSTableInsertExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid: qid });
-
-    MSTableInsertAction::Wait
-  }
-
-  // Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
-  fn check_gossip_data<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-  ) -> MSTableInsertAction {
-    // If the GossipData is valid, then act accordingly.
-    if check_gossip(&ctx.gossip.get(), &self.query_plan) {
-      // We start locking the regions.
-      self.start_ms_table_insert_es(ctx, io_ctx)
-    } else {
-      // If not, we go to GossipDataWaiting
-      self.state = MSTableInsertExecutionS::GossipDataWaiting;
-
-      // Request a GossipData from the Master to help stimulate progress.
-      let sender_path = ctx.this_sid.clone();
-      ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
-        msg::MasterGossipRequest { sender_path },
-      ));
-
-      return MSTableInsertAction::Wait;
-    }
-  }
-
-  /// Handle Columns being locked
-  pub fn local_locked_cols<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-    locked_cols_qid: QueryId,
-  ) -> MSTableInsertAction {
-    match &self.state {
-      MSTableInsertExecutionS::ColumnsLocking(locking) => {
-        if locking.locked_cols_qid == locked_cols_qid {
-          // Now, we check whether the TableSchema aligns with the QueryPlan.
-          if !does_query_plan_align(ctx, &self.timestamp, &self.query_plan) {
-            self.state = MSTableInsertExecutionS::Done;
-            MSTableInsertAction::QueryError(msg::QueryError::InvalidQueryPlan)
-          } else {
-            // If it aligns, we verify is GossipData is recent enough.
-            self.check_gossip_data(ctx, io_ctx)
-          }
-        } else {
-          debug_assert!(false);
-          MSTableInsertAction::Wait
-        }
-      }
-      _ => MSTableInsertAction::Wait,
-    }
-  }
-
-  /// Handle this just as `local_locked_cols`
-  pub fn global_locked_cols<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-    locked_cols_qid: QueryId,
-  ) -> MSTableInsertAction {
-    self.local_locked_cols(ctx, io_ctx, locked_cols_qid)
-  }
-
-  /// Here, the column locking request results in us realizing the table has been dropped.
-  pub fn table_dropped(&mut self, _: &mut TabletContext) -> MSTableInsertAction {
-    match &self.state {
-      MSTableInsertExecutionS::ColumnsLocking(_) => {
-        self.state = MSTableInsertExecutionS::Done;
-        MSTableInsertAction::QueryError(msg::QueryError::InvalidQueryPlan)
-      }
-      _ => {
-        debug_assert!(false);
-        MSTableInsertAction::Wait
-      }
-    }
-  }
-
-  /// Here, we GossipData gets delivered.
-  pub fn gossip_data_changed<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-  ) -> MSTableInsertAction {
-    if let MSTableInsertExecutionS::GossipDataWaiting = self.state {
-      // Verify is GossipData is now recent enough.
-      self.check_gossip_data(ctx, io_ctx)
-    } else {
-      // Do nothing
-      MSTableInsertAction::Wait
-    }
-  }
-
-  /// Starts the Execution state
-  fn start_ms_table_insert_es<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-  ) -> MSTableInsertAction {
+    es: &GeneralQueryES,
+  ) -> Result<QueryId, msg::QueryError> {
     // By this point, we have done QueryVerification. Studying how the QueryPlan is made for
     // Insert queries, we see that by here, we will know for certain that all Key Columns
     // are present in `columns`, all other ColNames in `columns` will be present in the
@@ -208,8 +65,7 @@ impl MSTableInsertES {
         })() {
           Ok(val) => eval_row.push(val),
           Err(eval_error) => {
-            self.state = MSTableInsertExecutionS::Done;
-            return MSTableInsertAction::QueryError(mk_eval_error(eval_error));
+            return Err(mk_eval_error(eval_error));
           }
         }
       }
@@ -222,7 +78,7 @@ impl MSTableInsertES {
         col_type
       } else {
         // The `col_name` must be a ValCol that is already locked at this timestamp.
-        ctx.table_schema.val_cols.static_read(col_name, &self.timestamp).unwrap()
+        ctx.table_schema.val_cols.static_read(col_name, &es.timestamp).unwrap()
       };
 
       for row in &eval_values {
@@ -238,8 +94,7 @@ impl MSTableInsertES {
         };
         if !type_matches {
           // If types do not match for some row, we propagate up a TypeError.
-          self.state = MSTableInsertExecutionS::Done;
-          return MSTableInsertAction::QueryError(mk_eval_error(EvalError::TypeError));
+          return Err(mk_eval_error(EvalError::TypeError));
         }
       }
     }
@@ -261,8 +116,7 @@ impl MSTableInsertES {
           pkey.cols.push(val.clone());
         } else {
           // Since the value of a Key Col cannot be NULL, we return an error if this is the case.
-          self.state = MSTableInsertExecutionS::Done;
-          return MSTableInsertAction::QueryError(mk_eval_error(EvalError::TypeError));
+          return Err(mk_eval_error(EvalError::TypeError));
         }
       }
 
@@ -323,18 +177,13 @@ impl MSTableInsertES {
 
     // Verify that we have Write Region Isolation with Subsequent Reads. We abort
     // if we do not, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
-    if !ctx.check_write_region_isolation(&write_region, &self.timestamp) {
-      self.state = MSTableInsertExecutionS::Done;
-      MSTableInsertAction::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
+    if !ctx.check_write_region_isolation(&write_region, &es.timestamp) {
+      Err(msg::QueryError::WriteRegionConflictWithSubsequentRead)
     } else {
       let protect_qid = mk_qid(io_ctx.rand());
       // Move the MSTableInsertES to the Pending state with the computed update view.
-      self.state = MSTableInsertExecutionS::Pending(Pending {
-        row_region: row_region.clone(),
-        update_view,
-        res_table_view,
-        query_id: protect_qid.clone(),
-      });
+      self.extra_pending =
+        Some(ExtraPendingData { row_region: row_region.clone(), update_view, res_table_view });
 
       // Construct a ReadRegion for checking that none of the new rows already exist. Note that
       // we take `val_col_region` is empty, since we do not need it.
@@ -342,73 +191,70 @@ impl MSTableInsertES {
 
       // Add a ReadRegion to the `m_waiting_read_protected` and the
       // WriteRegion into `m_write_protected`.
-      let verifying = ctx.verifying_writes.get_mut(&self.timestamp).unwrap();
+      let verifying = ctx.verifying_writes.get_mut(&es.timestamp).unwrap();
       verifying.m_waiting_read_protected.insert(RequestedReadProtected {
-        orig_p: OrigP::new(self.query_id.clone()),
-        query_id: protect_qid,
+        orig_p: OrigP::new(es.query_id.clone()),
+        query_id: protect_qid.clone(),
         read_region,
       });
       verifying.m_write_protected.insert(write_region);
-      MSTableInsertAction::Wait
+
+      Ok(protect_qid)
     }
   }
 
-  /// Handle ReadRegion protection
-  pub fn local_read_protected<IO: CoreIOCtx>(
+  fn compute_subqueries<IO: CoreIOCtx>(
+    &mut self,
+    _: &mut TabletContext,
+    _: &mut IO,
+    _: &GeneralQueryES,
+    _: &mut MSQueryES,
+  ) -> Vec<GRQueryES> {
+    vec![]
+  }
+
+  fn finish<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
     _: &mut IO,
+    es: &GeneralQueryES,
+    _: (Vec<(Vec<proc::ColumnRef>, Vec<TransTableName>)>, Vec<Vec<TableView>>),
     ms_query_es: &mut MSQueryES,
-    protect_qid: QueryId,
-  ) -> MSTableInsertAction {
-    match &self.state {
-      MSTableInsertExecutionS::Pending(pending) if protect_qid == pending.query_id => {
-        // Verify that the keys are not in the storage. We create a PresenceSnapshot only
-        // consisting of keys and verify that the Insert does not write to these keys.
-        let storage_view = MSStorageView::new(
-          &ctx.storage,
-          &ctx.table_schema,
-          &ms_query_es.update_views,
-          self.tier.clone() + 1,
-        );
+  ) -> MSTableAction {
+    // Verify that the keys are not in the storage. We create a PresenceSnapshot only
+    // consisting of keys and verify that the Insert does not write to these keys.
+    let storage_view = MSStorageView::new(
+      &ctx.storage,
+      &ctx.table_schema,
+      &ms_query_es.update_views,
+      es.tier.clone() + 1,
+    );
 
-        let snapshot =
-          storage_view.compute_presence_snapshot(&pending.row_region, &vec![], &self.timestamp);
+    let pending = std::mem::take(&mut self.extra_pending).unwrap();
+    let snapshot =
+      storage_view.compute_presence_snapshot(&pending.row_region, &vec![], &es.timestamp);
 
-        // Iterate over the Insert keys.
-        let update_view = &pending.update_view;
-        for ((pkey, ci), _) in update_view {
-          if ci == &None {
-            if snapshot.contains_key(pkey) {
-              // This already key exists, so we must respond with an abort.
-              self.state = MSTableInsertExecutionS::Done;
-              return MSTableInsertAction::QueryError(msg::QueryError::RuntimeError {
-                msg: "Inserting a row that already exists.".to_string(),
-              });
-            }
-          }
+    // Iterate over the Insert keys.
+    let update_view = &pending.update_view;
+    for ((pkey, ci), _) in update_view {
+      if ci == &None {
+        if snapshot.contains_key(pkey) {
+          // This already key exists, so we must respond with an abort.
+          return MSTableAction::QueryError(msg::QueryError::RuntimeError {
+            msg: "Inserting a row that already exists.".to_string(),
+          });
         }
-
-        // Finally, apply the update to the MSQueryES's update_views
-        ms_query_es.update_views.insert(self.tier.clone(), update_view.clone());
-
-        // Signal Success and return the data.
-        let res_table_view = pending.res_table_view.clone();
-        self.state = MSTableInsertExecutionS::Done;
-        MSTableInsertAction::Success(QueryESResult {
-          result: (compute_insert_schema(&self.sql_query), vec![res_table_view]),
-          new_rms: self.new_rms.iter().cloned().collect(),
-        })
-      }
-      _ => {
-        debug_assert!(false);
-        MSTableInsertAction::Wait
       }
     }
-  }
 
-  /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {
-    self.state = MSTableInsertExecutionS::Done;
+    // Finally, apply the update to the MSQueryES's update_views
+    ms_query_es.update_views.insert(es.tier.clone(), update_view.clone());
+
+    // Signal Success and return the data.
+    let res_table_view = pending.res_table_view.clone();
+    MSTableAction::Success(QueryESResult {
+      result: (compute_insert_schema(&self.sql_query), vec![res_table_view]),
+      new_rms: es.new_rms.iter().cloned().collect(),
+    })
   }
 }

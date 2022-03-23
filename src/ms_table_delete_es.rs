@@ -1,199 +1,50 @@
-use crate::col_usage::{
-  collect_top_level_cols, compute_delete_schema, compute_update_schema, free_external_cols,
-};
-use crate::common::{
-  lookup, mk_qid, CoreIOCtx, KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, Timestamp,
-  WriteRegion, WriteRegionType,
-};
-use crate::expression::{compress_row_region, compute_key_region, is_true, EvalError};
+use crate::col_usage::{collect_top_level_cols, compute_delete_schema};
+use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
+use crate::expression::is_true;
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, CQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow, PrimaryKey, QueryId,
-  TQueryPath, TableView, TransTableName,
+  proc, ColValN, ContextRow, PrimaryKey, QueryId, TableView, TransTableName,
 };
 use crate::model::message as msg;
-use crate::server::{
-  contains_col, evaluate_delete, evaluate_update, mk_eval_error, ContextConstructor,
-  ServerContextBase,
-};
+use crate::ms_table_es::{GeneralQueryES, MSTableAction, MSTableES, SqlQueryInner};
+use crate::server::{evaluate_delete, mk_eval_error, ContextConstructor};
 use crate::storage::{GenericTable, MSStorageView};
-use crate::table_read_es::{
-  check_gossip, compute_read_region, does_query_plan_align, request_lock_columns,
-};
+use crate::table_read_es::compute_read_region;
 use crate::tablet::{
-  compute_col_map, compute_subqueries, ColumnsLocking, Executing, MSQueryES, Pending,
-  RequestedReadProtected, StorageLocalTable, TabletContext,
+  compute_subqueries, MSQueryES, RequestedReadProtected, StorageLocalTable, TabletContext,
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
-use std::rc::Rc;
 
 // -----------------------------------------------------------------------------------------------
 //  MSTableDeleteES
 // -----------------------------------------------------------------------------------------------
-#[derive(Debug)]
-pub enum MSDeleteExecutionS {
-  Start,
-  ColumnsLocking(ColumnsLocking),
-  GossipDataWaiting,
-  Pending(Pending),
-  Executing(Executing),
-  Done,
-}
+
+pub type MSTableDeleteES = MSTableES<DeleteInner>;
 
 #[derive(Debug)]
-pub struct MSTableDeleteES {
-  pub root_query_path: CQueryPath,
-  pub timestamp: Timestamp,
-  /// This is the Tier that the new UpdateView should be added at.
-  pub tier: u32,
-  pub context: Rc<Context>,
-
-  pub query_id: QueryId,
-
-  // Query-related fields.
-  pub sql_query: proc::Delete,
-  pub query_plan: QueryPlan,
-
-  /// The `QueryId` of the `MSQueryES` that this ES belongs to.
-  /// We make sure that it exists as long as this ES exists.
-  pub ms_query_id: QueryId,
-
-  // Dynamically evolving fields.
-  pub new_rms: BTreeSet<TQueryPath>,
-  pub state: MSDeleteExecutionS,
+pub struct DeleteInner {
+  sql_query: proc::Delete,
 }
 
-pub enum MSTableDeleteAction {
-  /// This tells the parent Server to wait.
-  Wait,
-  /// This tells the parent Server to perform subqueries.
-  SendSubqueries(Vec<GRQueryES>),
-  /// Indicates the ES succeeded with the given result.
-  Success(QueryESResult),
-  /// Indicates the ES failed with a QueryError.
-  QueryError(msg::QueryError),
+impl DeleteInner {
+  pub fn new(sql_query: proc::Delete) -> Self {
+    DeleteInner { sql_query }
+  }
 }
 
-// -----------------------------------------------------------------------------------------------
-//  Implementation
-// -----------------------------------------------------------------------------------------------
-
-impl MSTableDeleteES {
-  pub fn start<IO: CoreIOCtx>(
+impl SqlQueryInner for DeleteInner {
+  fn request_region_locks<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-  ) -> MSTableDeleteAction {
-    // First, we lock the columns that the QueryPlan requires certain properties of.
-    assert!(matches!(self.state, MSDeleteExecutionS::Start));
-    let qid = request_lock_columns(ctx, io_ctx, &self.query_id, &self.timestamp, &self.query_plan);
-    self.state = MSDeleteExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid: qid });
-
-    MSTableDeleteAction::Wait
-  }
-
-  // Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
-  fn check_gossip_data<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-  ) -> MSTableDeleteAction {
-    // If the GossipData is valid, then act accordingly.
-    if check_gossip(&ctx.gossip.get(), &self.query_plan) {
-      // We start locking the regions.
-      self.start_ms_table_delete_es(ctx, io_ctx)
-    } else {
-      // If not, we go to GossipDataWaiting
-      self.state = MSDeleteExecutionS::GossipDataWaiting;
-
-      // Request a GossipData from the Master to help stimulate progress.
-      let sender_path = ctx.this_sid.clone();
-      ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
-        msg::MasterGossipRequest { sender_path },
-      ));
-
-      return MSTableDeleteAction::Wait;
-    }
-  }
-
-  /// Handle Columns being locked
-  pub fn local_locked_cols<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-    locked_cols_qid: QueryId,
-  ) -> MSTableDeleteAction {
-    match &self.state {
-      MSDeleteExecutionS::ColumnsLocking(locking) => {
-        if locking.locked_cols_qid == locked_cols_qid {
-          // Now, we check whether the TableSchema aligns with the QueryPlan.
-          if !does_query_plan_align(ctx, &self.timestamp, &self.query_plan) {
-            self.state = MSDeleteExecutionS::Done;
-            MSTableDeleteAction::QueryError(msg::QueryError::InvalidQueryPlan)
-          } else {
-            // If it aligns, we verify is GossipData is recent enough.
-            self.check_gossip_data(ctx, io_ctx)
-          }
-        } else {
-          debug_assert!(false);
-          MSTableDeleteAction::Wait
-        }
-      }
-      _ => MSTableDeleteAction::Wait,
-    }
-  }
-
-  /// Handle this just as `local_locked_cols`
-  pub fn global_locked_cols<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-    locked_cols_qid: QueryId,
-  ) -> MSTableDeleteAction {
-    self.local_locked_cols(ctx, io_ctx, locked_cols_qid)
-  }
-
-  /// Here, the column locking request results in us realizing the table has been dropped.
-  pub fn table_dropped(&mut self, _: &mut TabletContext) -> MSTableDeleteAction {
-    match &self.state {
-      MSDeleteExecutionS::ColumnsLocking(_) => {
-        self.state = MSDeleteExecutionS::Done;
-        MSTableDeleteAction::QueryError(msg::QueryError::InvalidQueryPlan)
-      }
-      _ => {
-        debug_assert!(false);
-        MSTableDeleteAction::Wait
-      }
-    }
-  }
-
-  /// Here, we GossipData gets delivered.
-  pub fn gossip_data_changed<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-  ) -> MSTableDeleteAction {
-    if let MSDeleteExecutionS::GossipDataWaiting = self.state {
-      // Verify is GossipData is now recent enough.
-      self.check_gossip_data(ctx, io_ctx)
-    } else {
-      // Do nothing
-      MSTableDeleteAction::Wait
-    }
-  }
-
-  /// Starts the Execution state
-  fn start_ms_table_delete_es<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-  ) -> MSTableDeleteAction {
+    es: &GeneralQueryES,
+  ) -> Result<QueryId, msg::QueryError> {
     // Compute the ReadRegion
     let read_region = compute_read_region(
       &ctx.table_schema.key_cols,
-      &self.query_plan,
-      &self.context,
+      &es.query_plan,
+      &es.context,
       &self.sql_query.selection,
     );
 
@@ -206,141 +57,83 @@ impl MSTableDeleteES {
 
     // Verify that we have WriteRegion Isolation with Subsequent Reads. We abort
     // if we don't, and we amend this MSQuery's VerifyingReadWriteRegions if we do.
-    if !ctx.check_write_region_isolation(&write_region, &self.timestamp) {
-      self.state = MSDeleteExecutionS::Done;
-      MSTableDeleteAction::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
+    if !ctx.check_write_region_isolation(&write_region, &es.timestamp) {
+      Err(msg::QueryError::WriteRegionConflictWithSubsequentRead)
     } else {
       // Move the MSTableDeleteES to the Pending state with the given ReadRegion.
       let protect_qid = mk_qid(io_ctx.rand());
-      self.state = MSDeleteExecutionS::Pending(Pending { query_id: protect_qid.clone() });
 
       // Add a ReadRegion to the `m_waiting_read_protected` and the
       // WriteRegion into `m_write_protected`.
-      let verifying = ctx.verifying_writes.get_mut(&self.timestamp).unwrap();
+      let verifying = ctx.verifying_writes.get_mut(&es.timestamp).unwrap();
       verifying.m_waiting_read_protected.insert(RequestedReadProtected {
-        orig_p: OrigP::new(self.query_id.clone()),
-        query_id: protect_qid,
+        orig_p: OrigP::new(es.query_id.clone()),
+        query_id: protect_qid.clone(),
         read_region,
       });
       verifying.m_write_protected.insert(write_region);
-      MSTableDeleteAction::Wait
+
+      Ok(protect_qid)
     }
   }
 
-  /// Handle ReadRegion protection
-  pub fn local_read_protected<IO: CoreIOCtx>(
+  fn compute_subqueries<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
+    es: &GeneralQueryES,
     ms_query_es: &mut MSQueryES,
-    protect_qid: QueryId,
-  ) -> MSTableDeleteAction {
-    match &self.state {
-      MSDeleteExecutionS::Pending(pending) if protect_qid == pending.query_id => {
-        let gr_query_ess = compute_subqueries(
-          GRQueryConstructorView {
-            root_query_path: &self.root_query_path,
-            timestamp: &self.timestamp,
-            sql_query: &self.sql_query,
-            query_plan: &self.query_plan,
-            query_id: &self.query_id,
-            context: &self.context,
-          },
-          io_ctx.rand(),
-          StorageLocalTable::new(
-            &ctx.table_schema,
-            &self.timestamp,
-            &self.query_plan.col_usage_node.source,
-            &self.sql_query.selection,
-            MSStorageView::new(
-              &ctx.storage,
-              &ctx.table_schema,
-              &ms_query_es.update_views,
-              self.tier.clone() + 1, // Remember that `tier` is the Tier to write to, which is
-                                     // one lower than which to read from.
-            ),
-          ),
-        );
-
-        // Move the ES to the Executing state.
-        self.state = MSDeleteExecutionS::Executing(Executing::create(&gr_query_ess));
-        let exec = cast!(MSDeleteExecutionS::Executing, &mut self.state).unwrap();
-
-        // See if we are already finished (due to having no subqueries).
-        if exec.is_complete() {
-          self.finish_ms_table_delete_es(ctx, io_ctx, ms_query_es)
-        } else {
-          // Otherwise, return the subqueries.
-          MSTableDeleteAction::SendSubqueries(gr_query_ess)
-        }
-      }
-      _ => {
-        debug_assert!(false);
-        MSTableDeleteAction::Wait
-      }
-    }
-  }
-
-  /// This is called if a subquery fails.
-  pub fn handle_internal_query_error<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-    query_error: msg::QueryError,
-  ) -> MSTableDeleteAction {
-    self.exit_and_clean_up(ctx, io_ctx);
-    MSTableDeleteAction::QueryError(query_error)
-  }
-
-  /// Handles a Subquery completing.
-  pub fn handle_subquery_done<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-    ms_query_es: &mut MSQueryES,
-    subquery_id: QueryId,
-    subquery_new_rms: BTreeSet<TQueryPath>,
-    (_, table_views): (Vec<Option<ColName>>, Vec<TableView>),
-  ) -> MSTableDeleteAction {
-    // Add the subquery results into the MSTableDeleteES.
-    self.new_rms.extend(subquery_new_rms);
-    let exec = cast!(MSDeleteExecutionS::Executing, &mut self.state).unwrap();
-    exec.add_subquery_result(subquery_id, table_views);
-
-    // See if we are finished (due to computing all subqueries).
-    if exec.is_complete() {
-      self.finish_ms_table_delete_es(ctx, io_ctx, ms_query_es)
-    } else {
-      // Otherwise, we wait.
-      MSTableDeleteAction::Wait
-    }
-  }
-
-  /// Handles a ES finishing with all subqueries results in.
-  fn finish_ms_table_delete_es<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    _: &mut IO,
-    ms_query_es: &mut MSQueryES,
-  ) -> MSTableDeleteAction {
-    let exec = cast!(MSDeleteExecutionS::Executing, &mut self.state).unwrap();
-
-    // Compute children.
-    let (children, subquery_results) = std::mem::take(exec).get_results();
-
-    // Create the ContextConstructor.
-    let context_constructor = ContextConstructor::new(
-      self.context.context_schema.clone(),
+  ) -> Vec<GRQueryES> {
+    compute_subqueries(
+      GRQueryConstructorView {
+        root_query_path: &es.root_query_path,
+        timestamp: &es.timestamp,
+        sql_query: &self.sql_query,
+        query_plan: &es.query_plan,
+        query_id: &es.query_id,
+        context: &es.context,
+      },
+      io_ctx.rand(),
       StorageLocalTable::new(
         &ctx.table_schema,
-        &self.timestamp,
-        &self.query_plan.col_usage_node.source,
+        &es.timestamp,
+        &es.query_plan.col_usage_node.source,
         &self.sql_query.selection,
         MSStorageView::new(
           &ctx.storage,
           &ctx.table_schema,
           &ms_query_es.update_views,
-          self.tier.clone() + 1,
+          es.tier.clone() + 1, // Remember that `tier` is the Tier to write to, which is
+                               // one lower than which to read from.
+        ),
+      ),
+    )
+  }
+
+  fn finish<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    _: &mut IO,
+    es: &GeneralQueryES,
+    (children, subquery_results): (
+      Vec<(Vec<proc::ColumnRef>, Vec<TransTableName>)>,
+      Vec<Vec<TableView>>,
+    ),
+    ms_query_es: &mut MSQueryES,
+  ) -> MSTableAction {
+    // Create the ContextConstructor.
+    let context_constructor = ContextConstructor::new(
+      es.context.context_schema.clone(),
+      StorageLocalTable::new(
+        &ctx.table_schema,
+        &es.timestamp,
+        &es.query_plan.col_usage_node.source,
+        &self.sql_query.selection,
+        MSStorageView::new(
+          &ctx.storage,
+          &ctx.table_schema,
+          &ms_query_es.update_views,
+          es.tier.clone() + 1,
         ),
       ),
       children,
@@ -362,7 +155,7 @@ impl MSTableDeleteES {
 
     // Finally, iterate over the Context Rows of the subqueries and compute the final values.
     let eval_res = context_constructor.run(
-      &self.context.context_rows,
+      &es.context.context_rows,
       top_level_col_names.clone(),
       &mut |context_row_idx: usize,
             top_level_col_vals: Vec<ColValN>,
@@ -405,24 +198,18 @@ impl MSTableDeleteES {
       },
     );
 
-    if let Err(eval_error) = eval_res {
-      self.state = MSDeleteExecutionS::Done;
-      return MSTableDeleteAction::QueryError(mk_eval_error(eval_error));
+    match eval_res {
+      Ok(()) => {
+        // Amend the `update_view` in the MSQueryES.
+        ms_query_es.update_views.insert(es.tier.clone(), update_view);
+
+        // Signal Success and return the data.
+        MSTableAction::Success(QueryESResult {
+          result: (res_col_names, vec![res_table_view]),
+          new_rms: es.new_rms.iter().cloned().collect(),
+        })
+      }
+      Err(eval_error) => MSTableAction::QueryError(mk_eval_error(eval_error)),
     }
-
-    // Amend the `update_view` in the MSQueryES.
-    ms_query_es.update_views.insert(self.tier.clone(), update_view);
-
-    // Signal Success and return the data.
-    self.state = MSDeleteExecutionS::Done;
-    MSTableDeleteAction::Success(QueryESResult {
-      result: (res_col_names, vec![res_table_view]),
-      new_rms: self.new_rms.iter().cloned().collect(),
-    })
-  }
-
-  /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {
-    self.state = MSDeleteExecutionS::Done;
   }
 }
