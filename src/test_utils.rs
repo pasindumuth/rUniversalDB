@@ -63,7 +63,7 @@ pub fn mk_seed(rand: &mut XorShiftRng) -> [u8; 16] {
 /// in `cum_bool`. We do not simply use a `&mut bool` because sometimes, we want to panic
 /// if the AND expression would evaluate to false (and we want to do it early).
 pub struct CheckCtx {
-  should_assert: bool,
+  pub should_assert: bool,
   cum_bool: bool,
 }
 

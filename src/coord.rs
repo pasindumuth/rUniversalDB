@@ -506,8 +506,9 @@ impl CoordContext {
         let this_gid = self.this_sid.to_gid();
         self.leader_map.insert(this_gid, leader_changed.lid);
 
+        // Check if this node just lost Leadership
         if !self.is_leader() {
-          // This means this node lost Leadership.
+          // Wink away all RequestIds
           self.external_request_id_map.clear();
 
           // Wink away all TM ESs.

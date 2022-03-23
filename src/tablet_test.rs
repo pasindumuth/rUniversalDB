@@ -85,14 +85,26 @@ pub fn assert_tablet_consistency(tablet: &TabletState) {
 
 pub fn check_tablet_clean(tablet: &TabletState, check_ctx: &mut CheckCtx) {
   let statuses = &tablet.statuses;
+  let ctx = &tablet.ctx;
 
-  for (_, es) in &statuses.finish_query_ess {
-    if let FinishQueryRMES::Paxos2PCRMExecOuter(_) = es {
-      check_ctx.check(false);
-    }
-  }
+  // Check `Tablet` clean
+
+  check_ctx.check(ctx.verifying_writes.is_empty());
+  check_ctx.check(ctx.inserting_prepared_writes.is_empty());
+  check_ctx.check(ctx.prepared_writes.is_empty());
+
+  check_ctx.check(ctx.waiting_read_protected.is_empty());
+  check_ctx.check(ctx.inserting_read_protected.is_empty());
+
+  check_ctx.check(ctx.waiting_locked_cols.is_empty());
+  check_ctx.check(ctx.inserting_locked_cols.is_empty());
+
+  check_ctx.check(ctx.ms_root_query_map.is_empty());
+
+  // Check `Statuses` clean
 
   check_ctx.check(statuses.perform_query_buffer.is_empty());
+
   check_ctx.check(statuses.gr_query_ess.is_empty());
   check_ctx.check(statuses.table_read_ess.is_empty());
   check_ctx.check(statuses.trans_table_read_ess.is_empty());
@@ -102,6 +114,12 @@ pub fn check_tablet_clean(tablet: &TabletState, check_ctx: &mut CheckCtx) {
   check_ctx.check(statuses.ms_table_write_ess.is_empty());
   check_ctx.check(statuses.ms_table_insert_ess.is_empty());
   check_ctx.check(statuses.ms_table_delete_ess.is_empty());
+  for (_, es) in &statuses.finish_query_ess {
+    if let FinishQueryRMES::Paxos2PCRMExecOuter(_) = es {
+      check_ctx.check(false);
+    }
+  }
+
   check_ctx.check(match &statuses.ddl_es {
     DDLES::None => true,
     DDLES::Alter(_) => false,

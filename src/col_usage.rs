@@ -330,6 +330,8 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
       }
     }
 
+    // TODO: check that inserts don't have external_cols too.
+
     Ok(children)
   }
 }

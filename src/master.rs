@@ -1142,8 +1142,11 @@ impl MasterContext {
         // NetworkDriver
         self.network_driver.leader_changed();
 
-        // Check if this node just gained Leadership
-        if self.is_leader() {
+        // Check if this node just lost Leadership
+        if !self.is_leader() {
+          // Wink away all RequestIds
+          self.external_request_id_map.clear();
+        } else {
           // TODO: should we be running the main loop here?
           // Run Main Loop
           self.run_main_loop(io_ctx, statuses);
@@ -1359,8 +1362,6 @@ impl MasterContext {
   /// This function advances the DDL ESs as far as possible. Properties:
   ///    1. Running this function again should not modify anything.
   fn advance_ddl_ess<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
-    let gossip = self.gossip.get();
-
     // First, we accumulate all TablePaths that currently have a a DDL Query running for them.
     let mut tables_being_modified = BTreeSet::<TablePath>::new();
     for (_, es) in &statuses.create_table_tm_ess {
@@ -1391,7 +1392,7 @@ impl MasterContext {
         if let paxos2pc::State::Start = &es.state {
           if !tables_being_modified.contains(&es.inner.table_path) {
             // Check Table Validity
-            if gossip.table_generation.get_last_version(&es.inner.table_path).is_none() {
+            if self.gossip.get().table_generation.get_last_version(&es.inner.table_path).is_none() {
               // If the table does not exist, we move the ES to WaitingInsertTMPrepared.
               es.state = paxos2pc::State::WaitingInsertTMPrepared;
               tables_being_modified.insert(es.inner.table_path.clone());
@@ -1406,7 +1407,7 @@ impl MasterContext {
       for query_id in ess_to_remove {
         let es = statuses.create_table_tm_ess.remove(&query_id).unwrap();
         if let Some(response_data) = &es.inner.response_data {
-          respond_invalid_ddl(io_ctx, response_data);
+          self.respond_invalid_ddl(io_ctx, response_data);
         }
       }
     }
@@ -1419,10 +1420,11 @@ impl MasterContext {
           if !tables_being_modified.contains(&es.inner.table_path) {
             // Check Column Validity (which is where the Table exists and the column exists
             // or does not exist, depending on if alter_op is a DROP COLUMN or ADD COLUMN).
+            let gossip = self.gossip.get();
             if let Some(gen) = gossip.table_generation.get_last_version(&es.inner.table_path) {
               // The Table Exists.
               let schema =
-                &gossip.db_schema.get(&(es.inner.table_path.clone(), gen.clone())).unwrap();
+                gossip.db_schema.get(&(es.inner.table_path.clone(), gen.clone())).unwrap();
               if lookup_pos(&schema.key_cols, &es.inner.alter_op.col_name).is_none() {
                 // The `col_name` is not a KeyCol.
                 let contains_col = contains_col_latest(schema, &es.inner.alter_op.col_name);
@@ -1444,7 +1446,7 @@ impl MasterContext {
       for query_id in ess_to_remove {
         let es = statuses.alter_table_tm_ess.remove(&query_id).unwrap();
         if let Some(response_data) = &es.inner.response_data {
-          respond_invalid_ddl(io_ctx, response_data);
+          self.respond_invalid_ddl(io_ctx, response_data);
         }
       }
     }
@@ -1456,7 +1458,7 @@ impl MasterContext {
         if let paxos2pc::State::Start = &es.state {
           if !tables_being_modified.contains(&es.inner.table_path) {
             // Check Table Validity
-            if gossip.table_generation.get_last_version(&es.inner.table_path).is_some() {
+            if self.gossip.get().table_generation.get_last_version(&es.inner.table_path).is_some() {
               // If the table exists, we move the ES to WaitingInsertTMPrepared.
               es.state = paxos2pc::State::WaitingInsertTMPrepared;
               tables_being_modified.insert(es.inner.table_path.clone());
@@ -1471,7 +1473,7 @@ impl MasterContext {
       for query_id in ess_to_remove {
         let es = statuses.drop_table_tm_ess.remove(&query_id).unwrap();
         if let Some(response_data) = &es.inner.response_data {
-          respond_invalid_ddl(io_ctx, response_data);
+          self.respond_invalid_ddl(io_ctx, response_data);
         }
       }
     }
@@ -1535,17 +1537,22 @@ impl MasterContext {
       }),
     );
   }
-}
 
-/// Send `InvalidDDLQuery` to the given `ResponseData`
-fn respond_invalid_ddl<IO: MasterIOCtx>(io_ctx: &mut IO, response_data: &ResponseData) {
-  io_ctx.send(
-    &response_data.sender_eid,
-    msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
-      msg::ExternalDDLQueryAborted {
-        request_id: response_data.request_id.clone(),
-        payload: ExternalDDLQueryAbortData::InvalidDDLQuery,
-      },
-    )),
-  )
+  /// Send `InvalidDDLQuery` to the given `ResponseData`
+  fn respond_invalid_ddl<IO: MasterIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    response_data: &ResponseData,
+  ) {
+    self.external_request_id_map.remove(&response_data.request_id);
+    io_ctx.send(
+      &response_data.sender_eid,
+      msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
+        msg::ExternalDDLQueryAborted {
+          request_id: response_data.request_id.clone(),
+          payload: ExternalDDLQueryAbortData::InvalidDDLQuery,
+        },
+      )),
+    )
+  }
 }

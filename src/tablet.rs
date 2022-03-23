@@ -1218,6 +1218,9 @@ impl TabletContext {
           // Wink away all unpersisted Column Locking Algorithm data
           self.waiting_locked_cols.clear();
           self.inserting_locked_cols.clear();
+
+          // Wink away root query map
+          self.ms_root_query_map.clear();
         } else {
           // TODO: should we be running the main loop here?
           // Run Main Loop
