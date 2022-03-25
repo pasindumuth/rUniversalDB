@@ -13,7 +13,7 @@ use crate::model::message as msg;
 use crate::model::message::PLEntry;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
-use crate::server::{ServerContextBase, SlaveServerContext};
+use crate::server::ServerContextBase;
 use crate::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::RMServerContext;
@@ -199,7 +199,7 @@ impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
   }
 
   fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, _: &(), msg: msg::MasterRemotePayload) {
-    self.ctx().send_to_master(io_ctx, msg);
+    self.send_to_master(io_ctx, msg);
   }
 
   fn mk_node_path(&self) -> SlaveGroupId {
@@ -226,6 +226,24 @@ pub struct SlaveConfig {
   pub remote_leader_changed_period_ms: u128,
   pub failure_detector_period_ms: u128,
   pub check_unconfirmed_eids_period_ms: u128,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Server Context
+// -----------------------------------------------------------------------------------------------
+
+impl ServerContextBase for SlaveContext {
+  fn leader_map(&self) -> &LeaderMap {
+    &self.leader_map.value()
+  }
+
+  fn this_gid(&self) -> &PaxosGroupId {
+    &self.this_gid
+  }
+
+  fn this_eid(&self) -> &EndpointId {
+    &self.this_eid
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -444,14 +462,6 @@ impl SlaveContext {
     }
   }
 
-  pub fn ctx<'a>(&'a self) -> SlaveServerContext<'a> {
-    SlaveServerContext {
-      this_sid: &self.this_sid,
-      this_eid: &self.this_eid,
-      leader_map: &self.leader_map.value(),
-    }
-  }
-
   /// Handles all messages, coming from Tablets, the Slave, External, etc.
   pub fn handle_incoming_message<IO: SlaveIOCtx>(
     &mut self,
@@ -563,7 +573,7 @@ impl SlaveContext {
                   self.maybe_start_snapshot(io_ctx, statuses);
 
                   // Inform the Master that the Reconfiguration was a success.
-                  self.ctx().send_to_master(
+                  self.send_to_master(
                     io_ctx,
                     msg::MasterRemotePayload::SlaveReconfig(
                       msg::SlaveReconfig::SlaveGroupReconfigured(msg::SlaveGroupReconfigured {
@@ -728,7 +738,7 @@ impl SlaveContext {
               // Here, we send the Master a `NodesDead` message indicating that we
               // want to reconfigure. Recall we only reconfigure one-at-a-time to
               // preserve our liveness properties.
-              self.ctx().send_to_master(
+              self.send_to_master(
                 io_ctx,
                 msg::MasterRemotePayload::SlaveReconfig(msg::SlaveReconfig::NodesDead(nodes_dead)),
               );
@@ -819,7 +829,7 @@ impl SlaveContext {
           msg::SlaveRemotePayload::ReconfigSlaveGroup(reconfig) => {
             // Respond affirmative immeidately if this node has already completed this reconfig.
             if self.paxos_driver.contains_nodes(&reconfig.new_eids) {
-              self.ctx().send_to_master(
+              self.send_to_master(
                 io_ctx,
                 msg::MasterRemotePayload::SlaveReconfig(
                   msg::SlaveReconfig::SlaveGroupReconfigured(msg::SlaveGroupReconfigured {

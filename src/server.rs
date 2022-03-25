@@ -24,7 +24,7 @@ pub trait ServerContextBase {
   // Getters
 
   fn leader_map(&self) -> &LeaderMap;
-  fn this_gid(&self) -> PaxosGroupId;
+  fn this_gid(&self) -> &PaxosGroupId;
   fn this_eid(&self) -> &EndpointId;
 
   // Send utilities
@@ -42,7 +42,7 @@ pub trait ServerContextBase {
 
       let to_gid = to_sid.to_gid();
 
-      let this_gid = self.this_gid();
+      let this_gid = self.this_gid().clone();
       let this_lid = self.leader_map().get(&this_gid).unwrap();
 
       let remote_message = msg::RemoteMessage {
@@ -178,7 +178,7 @@ pub trait ServerContextBase {
       let master_gid = PaxosGroupId::Master;
       let master_lid = self.leader_map().get(&master_gid).unwrap().clone();
 
-      let this_gid = self.this_gid();
+      let this_gid = self.this_gid().clone();
       let this_lid = self.leader_map().get(&this_gid).unwrap();
 
       let remote_message = msg::RemoteMessage {
@@ -198,7 +198,7 @@ pub trait ServerContextBase {
 
   /// Returns true iff this is the Leader.
   fn is_leader(&self) -> bool {
-    let lid = self.leader_map().get(&self.this_gid()).unwrap();
+    let lid = self.leader_map().get(self.this_gid()).unwrap();
     &lid.eid == self.this_eid()
   }
 }
@@ -209,38 +209,29 @@ pub trait ServerContextBase {
 
 /// This is used to present a consistent view of Tablets and Slave to shared ESs so
 /// that they can execute agnotisticly.
-pub struct CTServerContext<'a> {
-  /// Metadata
-  pub this_sid: &'a SlaveGroupId,
-  pub this_eid: &'a EndpointId,
-  pub sub_node_path: &'a CTSubNodePath,
+pub trait CTServerContext: ServerContextBase {
+  fn this_sid(&self) -> &SlaveGroupId;
+  fn sub_node_path(&self) -> &CTSubNodePath;
+  fn gossip(&self) -> &Arc<GossipData>;
 
-  /// Paxos
-  pub leader_map: &'a LeaderMap,
-
-  /// Gossip
-  pub gossip: &'a Arc<GossipData>,
-}
-
-impl<'a> CTServerContext<'a> {
   /// Construct a `NodePath` from a `NodeGroupId`.
   /// NOTE: the `tid` must exist in the `gossip` at this point.
-  pub fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
-    let sid = self.gossip.get().tablet_address_config.get(&tid).unwrap();
+  fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
+    let sid = self.gossip().get().tablet_address_config.get(&tid).unwrap();
     TNodePath { sid: sid.clone(), sub: TSubNodePath::Tablet(tid.clone()) }
   }
 
   /// Make a `CTQueryPath` of an ES at this node with `query_id`.
-  pub fn mk_this_query_path(&self, query_id: QueryId) -> CTQueryPath {
+  fn mk_this_query_path(&self, query_id: QueryId) -> CTQueryPath {
     CTQueryPath {
-      node_path: CTNodePath { sid: self.this_sid.clone(), sub: self.sub_node_path.clone() },
+      node_path: CTNodePath { sid: self.this_sid().clone(), sub: self.sub_node_path().clone() },
       query_id,
     }
   }
 
   /// This responds to the given `sender_path` with a QueryAborted containing the given
   /// `abort_data`. Here, the `query_id` is that of the ES that's responding.
-  pub fn send_abort_data<IOCtx: CoreIOCtx>(
+  fn send_abort_data<IOCtx: CoreIOCtx>(
     &mut self,
     io_ctx: &mut IOCtx,
     sender_path: CTQueryPath,
@@ -257,7 +248,7 @@ impl<'a> CTServerContext<'a> {
 
   /// This responds to the given `sender_path` with a QueryAborted containing the given
   /// `query_error`. Here, the `query_id` is that of the ES that's responding.
-  pub fn send_query_error<IOCtx: CoreIOCtx>(
+  fn send_query_error<IOCtx: CoreIOCtx>(
     &mut self,
     io_ctx: &mut IOCtx,
     sender_path: CTQueryPath,
@@ -274,7 +265,7 @@ impl<'a> CTServerContext<'a> {
   /// would be false for all keys, the GRQueryES or MSCoordES needs to know the schema of
   /// the subtables. That can't be determined without contacting a relevant Tablet (who
   /// will perform Column Locking as well to ensure idempotence).
-  pub fn get_min_tablets(
+  fn get_min_tablets(
     &self,
     table_path: &TablePath,
     table_ref: &proc::GeneralSource,
@@ -283,7 +274,7 @@ impl<'a> CTServerContext<'a> {
   ) -> Vec<TabletGroupId> {
     // Compute the Row Region that this selection is accessing.
     let table_path_gen = (table_path.clone(), gen.clone());
-    let key_cols = &self.gossip.get().db_schema.get(&table_path_gen).unwrap().key_cols;
+    let key_cols = &self.gossip().get().db_schema.get(&table_path_gen).unwrap().key_cols;
 
     // TODO: We use a trivial implementation for now. Do a proper implementation later.
     let _ = compute_key_region(selection, BTreeMap::new(), table_ref, key_cols);
@@ -291,82 +282,10 @@ impl<'a> CTServerContext<'a> {
   }
 
   /// Simply returns all `TabletGroupId`s for a `TablePath` and `Gen`
-  pub fn get_all_tablets(&self, table_path: &TablePath, gen: &Gen) -> Vec<TabletGroupId> {
+  fn get_all_tablets(&self, table_path: &TablePath, gen: &Gen) -> Vec<TabletGroupId> {
     let table_path_gen = (table_path.clone(), gen.clone());
-    let tablet_groups = self.gossip.get().sharding_config.get(&table_path_gen).unwrap();
+    let tablet_groups = self.gossip().get().sharding_config.get(&table_path_gen).unwrap();
     tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone()).collect()
-  }
-}
-
-impl<'a> ServerContextBase for CTServerContext<'a> {
-  fn leader_map(&self) -> &LeaderMap {
-    self.leader_map
-  }
-
-  /// Gets the `PaxosGroupId` of the Slave.
-  fn this_gid(&self) -> PaxosGroupId {
-    PaxosGroupId::Slave(self.this_sid.clone())
-  }
-
-  fn this_eid(&self) -> &EndpointId {
-    self.this_eid
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Slave Server Context
-// -----------------------------------------------------------------------------------------------
-
-/// This is used to easily use the `ServerContextBase` methods in the Slave thread.
-pub struct SlaveServerContext<'a> {
-  /// Metadata
-  pub this_sid: &'a SlaveGroupId,
-  pub this_eid: &'a EndpointId,
-
-  /// Paxos
-  pub leader_map: &'a LeaderMap,
-}
-
-impl<'a> ServerContextBase for SlaveServerContext<'a> {
-  fn leader_map(&self) -> &LeaderMap {
-    self.leader_map
-  }
-
-  /// Gets the `PaxosGroupId` of the Slave.
-  fn this_gid(&self) -> PaxosGroupId {
-    PaxosGroupId::Slave(self.this_sid.clone())
-  }
-
-  fn this_eid(&self) -> &EndpointId {
-    self.this_eid
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Master Server Context
-// -----------------------------------------------------------------------------------------------
-
-/// This is used to easily use the `ServerContextBase` methods in the Master thread.
-pub struct MasterServerContext<'a> {
-  /// Metadata
-  pub this_eid: &'a EndpointId,
-
-  /// Paxos
-  pub leader_map: &'a LeaderMap,
-}
-
-impl<'a> ServerContextBase for MasterServerContext<'a> {
-  fn leader_map(&self) -> &LeaderMap {
-    self.leader_map
-  }
-
-  /// Gets the `PaxosGroupId` of the Master.
-  fn this_gid(&self) -> PaxosGroupId {
-    PaxosGroupId::Master
-  }
-
-  fn this_eid(&self) -> &EndpointId {
-    self.this_eid
   }
 }
 

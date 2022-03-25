@@ -155,9 +155,9 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
 // -----------------------------------------------------------------------------------------------
 
 impl TransTableReadES {
-  pub fn start<IO: CoreIOCtx, SourceT: TransTableSource>(
+  pub fn start<IO: CoreIOCtx, Ctx: CTServerContext, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     io_ctx: &mut IO,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
@@ -165,14 +165,14 @@ impl TransTableReadES {
   }
 
   /// Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
-  fn check_gossip_data<IO: CoreIOCtx, SourceT: TransTableSource>(
+  fn check_gossip_data<IO: CoreIOCtx, Ctx: CTServerContext, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     io_ctx: &mut IO,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     // If the GossipData is valid, then act accordingly.
-    if check_gossip(&ctx.gossip.get(), &self.query_plan) {
+    if check_gossip(&ctx.gossip().get(), &self.query_plan) {
       // We start locking the regions.
       self.start_trans_table_read_es(ctx, io_ctx, trans_table_source)
     } else {
@@ -180,7 +180,7 @@ impl TransTableReadES {
       self.state = TransExecutionS::GossipDataWaiting;
 
       // Request a GossipData from the Master to help stimulate progress.
-      let sender_path = ctx.this_sid.clone();
+      let sender_path = ctx.this_sid().clone();
       ctx.send_to_master(
         io_ctx,
         msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest { sender_path }),
@@ -191,9 +191,9 @@ impl TransTableReadES {
   }
 
   /// Here, we GossipData gets delivered.
-  pub fn gossip_data_changed<IO: CoreIOCtx, SourceT: TransTableSource>(
+  pub fn gossip_data_changed<IO: CoreIOCtx, Ctx: CTServerContext, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     io_ctx: &mut IO,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
@@ -207,9 +207,9 @@ impl TransTableReadES {
   }
 
   /// Constructs and returns subqueries.
-  fn start_trans_table_read_es<IO: CoreIOCtx, SourceT: TransTableSource>(
+  fn start_trans_table_read_es<IO: CoreIOCtx, Ctx: CTServerContext, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     io_ctx: &mut IO,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
@@ -268,9 +268,9 @@ impl TransTableReadES {
   /// This is can be called both for if a subquery fails, or if there is a LateralError
   /// due to the ES owning the TransTable disappears. This simply responds to the sender
   /// and Exits and Clean Ups this ES.
-  pub fn handle_internal_query_error<IO: CoreIOCtx>(
+  pub fn handle_internal_query_error<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     _: &mut IO,
     query_error: msg::QueryError,
   ) -> TransTableAction {
@@ -279,9 +279,9 @@ impl TransTableReadES {
   }
 
   /// Handles a Subquery completing
-  pub fn handle_subquery_done<IO: CoreIOCtx, SourceT: TransTableSource>(
+  pub fn handle_subquery_done<IO: CoreIOCtx, Ctx: CTServerContext, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     io_ctx: &mut IO,
     trans_table_source: &SourceT,
     subquery_id: QueryId,
@@ -303,9 +303,9 @@ impl TransTableReadES {
   }
 
   /// Handles a ES finishing with all subqueries results in.
-  fn finish_trans_table_read_es<IO: CoreIOCtx, SourceT: TransTableSource>(
+  fn finish_trans_table_read_es<IO: CoreIOCtx, Ctx: CTServerContext, SourceT: TransTableSource>(
     &mut self,
-    _: &mut CTServerContext,
+    _: &mut Ctx,
     _: &mut IO,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
@@ -350,7 +350,7 @@ impl TransTableReadES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up(&mut self, _: &mut CTServerContext) {
+  pub fn exit_and_clean_up<Ctx: CTServerContext>(&mut self, _: &mut Ctx) {
     self.state = TransExecutionS::Done
   }
 

@@ -25,7 +25,7 @@ use crate::model::message::{
 use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
-use crate::server::{contains_col_latest, MasterServerContext, ServerContextBase};
+use crate::server::{contains_col_latest, ServerContextBase};
 use crate::slave_group_create_es::SlaveGroupCreateES;
 use crate::slave_reconfig_es as slave_reconfig;
 use crate::slave_reconfig_es::{SlaveReconfigES, SlaveReconfigPLm};
@@ -197,7 +197,7 @@ impl TMServerContext<AlterTablePayloadTypes> for MasterContext {
     rm: &TNodePath,
     msg: msg::TabletMessage,
   ) {
-    self.ctx().send_to_t(io_ctx, rm.clone(), msg);
+    self.send_to_t(io_ctx, rm.clone(), msg);
   }
 
   fn mk_node_path(&self) -> () {
@@ -224,7 +224,7 @@ impl TMServerContext<DropTablePayloadTypes> for MasterContext {
     rm: &TNodePath,
     msg: msg::TabletMessage,
   ) {
-    self.ctx().send_to_t(io_ctx, rm.clone(), msg);
+    self.send_to_t(io_ctx, rm.clone(), msg);
   }
 
   fn mk_node_path(&self) -> () {
@@ -251,7 +251,7 @@ impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
     rm: &SlaveGroupId,
     msg: msg::SlaveRemotePayload,
   ) {
-    self.ctx().send_to_slave_common(io_ctx, rm.clone(), msg);
+    self.send_to_slave_common(io_ctx, rm.clone(), msg);
   }
 
   fn mk_node_path(&self) -> () {
@@ -308,6 +308,24 @@ pub struct MasterSnapshot {
   pub drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
   pub slave_group_create_ess: BTreeMap<SlaveGroupId, SlaveGroupCreateES>,
   pub slave_reconfig_ess: BTreeMap<SlaveGroupId, SlaveReconfigES>,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Server Context
+// -----------------------------------------------------------------------------------------------
+
+impl ServerContextBase for MasterContext {
+  fn leader_map(&self) -> &LeaderMap {
+    &self.leader_map.value()
+  }
+
+  fn this_gid(&self) -> &PaxosGroupId {
+    &PaxosGroupId::Master
+  }
+
+  fn this_eid(&self) -> &EndpointId {
+    &self.this_eid
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -517,10 +535,6 @@ impl MasterContext {
       master_bundle: MasterBundle::default(),
       paxos_driver: PaxosDriver::create_initial(master_address_config, paxos_config),
     }
-  }
-
-  pub fn ctx<'a>(&'a self) -> MasterServerContext<'a> {
-    MasterServerContext { this_eid: &self.this_eid, leader_map: &self.leader_map.value() }
   }
 
   pub fn handle_incoming_message<IO: MasterIOCtx>(
@@ -1529,7 +1543,7 @@ impl MasterContext {
 
   /// Send GossipData
   pub fn send_gossip<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, sid: SlaveGroupId) {
-    self.ctx().send_to_slave_common(
+    self.send_to_slave_common(
       io_ctx,
       sid,
       msg::SlaveRemotePayload::MasterGossip(msg::MasterGossip {

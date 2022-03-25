@@ -502,7 +502,7 @@ pub fn handle_msg<IO: MasterIOCtx>(
           );
         }
         MasterQueryPlanningAction::Respond(result) => {
-          ctx.ctx().send_to_c(
+          ctx.send_to_c(
             io_ctx,
             perform.sender_path.node_path,
             msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
@@ -547,7 +547,7 @@ pub fn handle_plm<IO: MasterIOCtx>(
   if ctx.is_leader() {
     if let Some(es) = planning_ess.remove(&query_id) {
       // If the ES still exists, we respond.
-      ctx.ctx().send_to_c(
+      ctx.send_to_c(
         io_ctx,
         es.sender_path.node_path,
         msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {

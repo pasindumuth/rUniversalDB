@@ -193,7 +193,7 @@ impl<SqlQueryInnerT: SqlQueryInner> MSTableES<SqlQueryInnerT> {
 
       // Request a GossipData from the Master to help stimulate progress.
       let sender_path = ctx.this_sid.clone();
-      ctx.ctx().send_to_master(
+      ctx.send_to_master(
         io_ctx,
         msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest { sender_path }),
       );

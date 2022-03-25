@@ -205,18 +205,18 @@ pub enum TransTableIdx {
 
 impl GRQueryES {
   /// Starts the GRQueryES from its initial state.
-  pub fn start<IO: CoreIOCtx>(
+  pub fn start<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     io_ctx: &mut IO,
   ) -> GRQueryAction {
     self.advance(ctx, io_ctx)
   }
 
   /// This is called when the TMStatus has completed successfully.
-  pub fn handle_tm_success<IO: CoreIOCtx>(
+  pub fn handle_tm_success<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     io_ctx: &mut IO,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
@@ -259,9 +259,9 @@ impl GRQueryES {
   }
 
   /// This is called when the TMStatus has completed unsuccessfully.
-  pub fn handle_tm_aborted<IO: CoreIOCtx>(
+  pub fn handle_tm_aborted<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
-    _: &mut CTServerContext,
+    _: &mut Ctx,
     _: &mut IO,
     aborted_data: msg::AbortedData,
   ) -> GRQueryAction {
@@ -276,9 +276,9 @@ impl GRQueryES {
 
   /// This is called when one of the remote node's Leadership changes beyond the
   /// LeadershipId that we had sent a PerformQuery to.
-  pub fn handle_tm_remote_leadership_changed<IO: CoreIOCtx>(
+  pub fn handle_tm_remote_leadership_changed<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     io_ctx: &mut IO,
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &self.state).unwrap();
@@ -286,15 +286,15 @@ impl GRQueryES {
   }
 
   /// This Exits and Cleans up this GRQueryES.
-  pub fn exit_and_clean_up(&mut self, _: &mut CTServerContext) {
+  pub fn exit_and_clean_up<Ctx: CTServerContext>(&mut self, _: &mut Ctx) {
     self.state = GRExecutionS::Done;
   }
 
   /// This advanced the Stage of the GRQueryES. If there is no next Stage, then we
   /// return Done, containing the result and signaling that the GRQueryES is complete.
-  fn advance<IO: CoreIOCtx>(
+  fn advance<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     io_ctx: &mut IO,
   ) -> GRQueryAction {
     // Compute the next stage
@@ -333,9 +333,9 @@ impl GRQueryES {
 
   /// This function moves the GRQueryES to the Stage indicated by `stage_idx`.
   /// (Note the index must be valid (i.e. be an actual stage)).
-  fn process_gr_query_stage<IO: CoreIOCtx>(
+  fn process_gr_query_stage<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
-    ctx: &mut CTServerContext,
+    ctx: &mut Ctx,
     io_ctx: &mut IO,
     stage_idx: usize,
   ) -> GRQueryAction {
@@ -457,7 +457,7 @@ impl GRQueryES {
     let (_, (_, col_usage_node)) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
     let mut query_leader_map = self.query_plan.query_leader_map.clone();
     query_leader_map
-      .insert(ctx.this_sid.clone(), ctx.leader_map.get(&ctx.this_sid.to_gid()).unwrap().clone());
+      .insert(ctx.this_sid().clone(), ctx.leader_map().get(ctx.this_gid()).unwrap().clone());
     let query_plan = QueryPlan {
       tier_map: self.query_plan.tier_map.clone(),
       query_leader_map: query_leader_map.clone(),
@@ -499,9 +499,9 @@ impl GRQueryES {
         let tids =
           ctx.get_min_tablets(table_path, &child_sql_query.from, gen, &child_sql_query.selection);
         for tid in &tids {
-          let sid = ctx.gossip.get().tablet_address_config.get(&tid).unwrap();
+          let sid = ctx.gossip().get().tablet_address_config.get(&tid).unwrap();
           if let Some(lid) = query_leader_map.get(sid) {
-            if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
+            if lid.gen < ctx.leader_map().get(&sid.to_gid()).unwrap().gen {
               // The `lid` is too old, so we cannot finish this GRQueryES.
               self.exit_and_clean_up(ctx);
               return GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId);
@@ -538,7 +538,7 @@ impl GRQueryES {
           if let Some(lid) = query_leader_map.get(&sid) {
             tm_status.leaderships.insert(sid, lid.clone());
           } else {
-            let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
+            let lid = ctx.leader_map().get(&sid.to_gid()).unwrap();
             tm_status.leaderships.insert(sid, lid.clone());
           }
         }
@@ -557,7 +557,7 @@ impl GRQueryES {
         // We do this before sending any messages, in case it fails.
         let sid = &location_prefix.source.node_path.sid;
         if let Some(lid) = query_leader_map.get(sid) {
-          if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
+          if lid.gen < ctx.leader_map().get(&sid.to_gid()).unwrap().gen {
             // The `lid` is too old, so we cannot finish this GRQueryES.
             self.exit_and_clean_up(ctx);
             return GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId);
@@ -597,7 +597,7 @@ impl GRQueryES {
         if let Some(lid) = query_leader_map.get(&sid) {
           tm_status.leaderships.insert(sid, lid.clone());
         } else {
-          let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
+          let lid = ctx.leader_map().get(&sid.to_gid()).unwrap();
           tm_status.leaderships.insert(sid, lid.clone());
         }
       }
