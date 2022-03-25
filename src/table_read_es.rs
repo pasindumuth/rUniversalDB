@@ -19,7 +19,7 @@ use crate::server::{LocalTable, ServerContextBase};
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColumnsLocking, Executing, Pending, RequestedReadProtected,
-  StorageLocalTable, TabletContext,
+  StorageLocalTable, TableAction, TabletContext,
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -177,17 +177,6 @@ pub struct TableReadES {
   pub new_rms: BTreeSet<TQueryPath>,
   pub waiting_global_locks: BTreeSet<QueryId>,
   pub state: ExecutionS,
-}
-
-pub enum TableAction {
-  /// This tells the parent Server to wait.
-  Wait,
-  /// This tells the parent Server to perform subqueries.
-  SendSubqueries(Vec<GRQueryES>),
-  /// Indicates the ES succeeded with the given result.
-  Success(QueryESResult),
-  /// Indicates the ES failed with a QueryError.
-  QueryError(msg::QueryError),
 }
 
 // -----------------------------------------------------------------------------------------------

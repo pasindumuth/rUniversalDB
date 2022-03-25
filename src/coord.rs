@@ -23,8 +23,9 @@ use crate::paxos2pc_tm::{Paxos2PCTMAction, TMMessage};
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CTServerContext, CommonQuery, ServerContextBase};
 use crate::sql_parser::convert_ast;
+use crate::tablet::TableAction;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
-use crate::trans_table_read_es::{TransExecutionS, TransTableAction, TransTableReadES};
+use crate::trans_table_read_es::{TransExecutionS, TransTableReadES};
 use rand::RngCore;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -325,6 +326,7 @@ impl CoordContext {
                         query_plan: query.query_plan,
                         new_rms: Default::default(),
                         state: TransExecutionS::Start,
+                        child_queries: vec![],
                         timestamp: es.timestamp.clone(),
                       },
                     },
@@ -357,6 +359,7 @@ impl CoordContext {
                         query_plan: query.query_plan,
                         new_rms: Default::default(),
                         state: TransExecutionS::Start,
+                        child_queries: vec![],
                         timestamp: gr_query.es.timestamp.clone(),
                       },
                     },
@@ -933,14 +936,14 @@ impl CoordContext {
     io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: TransTableAction,
+    action: TableAction,
   ) {
     match action {
-      TransTableAction::Wait => {}
-      TransTableAction::SendSubqueries(gr_query_ess) => {
+      TableAction::Wait => {}
+      TableAction::SendSubqueries(gr_query_ess) => {
         self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
-      TransTableAction::Success(success) => {
+      TableAction::Success(success) => {
         // Remove the TableReadESWrapper and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
@@ -957,7 +960,7 @@ impl CoordContext {
           }),
         )
       }
-      TransTableAction::QueryError(query_error) => {
+      TableAction::QueryError(query_error) => {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
@@ -1074,7 +1077,7 @@ impl CoordContext {
     }
     // TransTableReadES
     else if let Some(mut trans_read) = statuses.trans_table_read_ess.remove(&query_id) {
-      trans_read.es.exit_and_clean_up(self);
+      trans_read.es.exit_and_clean_up(self, io_ctx);
       self.exit_all(io_ctx, statuses, trans_read.child_queries);
     }
     // TMStatus

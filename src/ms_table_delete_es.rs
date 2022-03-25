@@ -6,12 +6,13 @@ use crate::model::common::{
   proc, ColValN, ContextRow, PrimaryKey, QueryId, TableView, TransTableName,
 };
 use crate::model::message as msg;
-use crate::ms_table_es::{GeneralQueryES, MSTableAction, MSTableES, SqlQueryInner};
+use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
 use crate::server::{evaluate_delete, mk_eval_error, ContextConstructor};
 use crate::storage::{GenericTable, MSStorageView};
 use crate::table_read_es::compute_read_region;
 use crate::tablet::{
-  compute_subqueries, MSQueryES, RequestedReadProtected, StorageLocalTable, TabletContext,
+  compute_subqueries, MSQueryES, RequestedReadProtected, StorageLocalTable, TableAction,
+  TabletContext,
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -120,7 +121,7 @@ impl SqlQueryInner for DeleteInner {
       Vec<Vec<TableView>>,
     ),
     ms_query_es: &mut MSQueryES,
-  ) -> MSTableAction {
+  ) -> TableAction {
     // Create the ContextConstructor.
     let context_constructor = ContextConstructor::new(
       es.context.context_schema.clone(),
@@ -204,12 +205,12 @@ impl SqlQueryInner for DeleteInner {
         ms_query_es.update_views.insert(es.tier.clone(), update_view);
 
         // Signal Success and return the data.
-        MSTableAction::Success(QueryESResult {
+        TableAction::Success(QueryESResult {
           result: (res_col_names, vec![res_table_view]),
           new_rms: es.new_rms.iter().cloned().collect(),
         })
       }
-      Err(eval_error) => MSTableAction::QueryError(mk_eval_error(eval_error)),
+      Err(eval_error) => TableAction::QueryError(mk_eval_error(eval_error)),
     }
   }
 }

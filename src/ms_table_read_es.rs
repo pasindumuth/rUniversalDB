@@ -5,12 +5,13 @@ use crate::model::common::{
   proc, ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TableView, TransTableName,
 };
 use crate::model::message as msg;
-use crate::ms_table_es::{GeneralQueryES, MSTableAction, MSTableES, SqlQueryInner};
+use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
 use crate::server::{mk_eval_error, ContextConstructor};
 use crate::storage::{GenericTable, MSStorageView};
 use crate::table_read_es::{compute_read_region, fully_evaluate_select};
 use crate::tablet::{
-  compute_subqueries, MSQueryES, RequestedReadProtected, StorageLocalTable, TabletContext,
+  compute_subqueries, MSQueryES, RequestedReadProtected, StorageLocalTable, TableAction,
+  TabletContext,
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -104,7 +105,7 @@ impl SqlQueryInner for SelectInner {
       Vec<Vec<TableView>>,
     ),
     ms_query_es: &mut MSQueryES,
-  ) -> MSTableAction {
+  ) -> TableAction {
     // Create the ContextConstructor.
     let context_constructor = ContextConstructor::new(
       es.context.context_schema.clone(),
@@ -134,12 +135,12 @@ impl SqlQueryInner for SelectInner {
     match eval_res {
       Ok((select_schema, res_table_views)) => {
         // Signal Success and return the data.
-        MSTableAction::Success(QueryESResult {
+        TableAction::Success(QueryESResult {
           result: (select_schema, res_table_views),
           new_rms: es.new_rms.iter().cloned().collect(),
         })
       }
-      Err(eval_error) => MSTableAction::QueryError(mk_eval_error(eval_error)),
+      Err(eval_error) => TableAction::QueryError(mk_eval_error(eval_error)),
     }
   }
 }
