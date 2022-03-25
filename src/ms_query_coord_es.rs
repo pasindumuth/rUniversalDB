@@ -391,7 +391,8 @@ impl FullMSCoordES {
       // then this ES will have done its duty of making sure all RegisteredQueries get cleaned up.
       for registered_query in &es.registered_queries {
         if !es.all_rms.contains(registered_query) {
-          ctx.ctx(io_ctx).send_to_ct(
+          ctx.ctx().send_to_ct(
+            io_ctx,
             registered_query.clone().into_ct().node_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: registered_query.query_id.clone(),
@@ -436,7 +437,7 @@ impl FullMSCoordES {
     let mut context_row = ContextRow::default();
     for trans_table_name in &trans_table_names {
       context.context_schema.trans_table_context_schema.push(TransTableLocationPrefix {
-        source: ctx.ctx(io_ctx).mk_this_query_path(es.query_id.clone()),
+        source: ctx.ctx().mk_this_query_path(es.query_id.clone()),
         trans_table_name: trans_table_name.clone(),
       });
       context_row.trans_table_context_row.push(0);
@@ -497,7 +498,7 @@ impl FullMSCoordES {
               ),
             };
             let gen = es.query_plan.table_location_map.get(table_path).unwrap();
-            let tids = ctx.ctx(io_ctx).get_min_tablets(
+            let tids = ctx.ctx().get_min_tablets(
               &table_path,
               &select_query.from,
               gen,
@@ -545,7 +546,7 @@ impl FullMSCoordES {
         };
         let table_path = &update_query.table;
         let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
-        let tids = ctx.ctx(io_ctx).get_min_tablets(
+        let tids = ctx.ctx().get_min_tablets(
           &table_path.source_ref,
           &table_path.to_read_source(),
           gen,
@@ -569,7 +570,7 @@ impl FullMSCoordES {
         // Tablets that are written to. For now, we just consider all.
         let table_path = &insert_query.table;
         let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
-        let tids = ctx.ctx(io_ctx).get_all_tablets(&table_path.source_ref, gen);
+        let tids = ctx.ctx().get_all_tablets(&table_path.source_ref, gen);
         SendHelper::TableQuery(perform_query, tids)
       }
       proc::MSQueryStage::Delete(delete_query) => {
@@ -586,7 +587,7 @@ impl FullMSCoordES {
         };
         let table_path = &delete_query.table;
         let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
-        let tids = ctx.ctx(io_ctx).get_min_tablets(
+        let tids = ctx.ctx().get_min_tablets(
           &table_path.source_ref,
           &table_path.to_read_source(),
           gen,
@@ -623,8 +624,8 @@ impl FullMSCoordES {
           // for the given `tids` align, so using `send_to_t` sends to Leaderships
           // in `query_leader_map`.
           let tablet_msg = msg::TabletMessage::PerformQuery(perform_query.clone());
-          let node_path = ctx.ctx(io_ctx).mk_node_path_from_tablet(tid);
-          ctx.ctx(io_ctx).send_to_t(node_path.clone(), tablet_msg);
+          let node_path = ctx.ctx().mk_node_path_from_tablet(tid);
+          ctx.ctx().send_to_t(io_ctx, node_path.clone(), tablet_msg);
 
           // Add the TabletGroup into the TMStatus.
           tm_status.tm_state.insert(node_path.clone().into_ct(), None);
@@ -638,7 +639,7 @@ impl FullMSCoordES {
         // MSCoordES. Thus, there is no need to verify Leadership of `location_prefix` is
         // still alive, since it obviously is if we get here.
         let node_path = location_prefix.source.node_path.clone();
-        ctx.ctx(io_ctx).send_to_ct(node_path.clone(), CommonQuery::PerformQuery(perform_query));
+        ctx.ctx().send_to_ct(io_ctx, node_path.clone(), CommonQuery::PerformQuery(perform_query));
 
         // Add the TabletGroup into the TMStatus.
         tm_status.tm_state.insert(node_path.clone(), None);
@@ -664,7 +665,8 @@ impl FullMSCoordES {
             // Clean up any Registered Queries in the MSCoordES. The `registered_queries` docs
             // describe why `send_to_ct` sends the message to the right PaxosNode.
             for registered_query in &es.registered_queries {
-              ctx.ctx(io_ctx).send_to_ct(
+              ctx.ctx().send_to_ct(
+                io_ctx,
                 registered_query.clone().into_ct().node_path,
                 CommonQuery::CancelQuery(msg::CancelQuery {
                   query_id: registered_query.query_id.clone(),
@@ -765,14 +767,17 @@ impl QueryPlanningES {
   ) -> QueryPlanningAction {
     let master_query_id = mk_qid(io_ctx.rand());
     let sender_path = ctx.mk_query_path(self.query_id.clone());
-    ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterQueryPlanning(
-      msg::MasterQueryPlanningRequest::Perform(msg::PerformMasterQueryPlanning {
-        sender_path,
-        query_id: master_query_id.clone(),
-        timestamp: self.timestamp.clone(),
-        ms_query: self.sql_query.clone(),
-      }),
-    ));
+    ctx.ctx().send_to_master(
+      io_ctx,
+      msg::MasterRemotePayload::MasterQueryPlanning(msg::MasterQueryPlanningRequest::Perform(
+        msg::PerformMasterQueryPlanning {
+          sender_path,
+          query_id: master_query_id.clone(),
+          timestamp: self.timestamp.clone(),
+          ms_query: self.sql_query.clone(),
+        },
+      )),
+    );
 
     // Advance Planning State.
     self.state = QueryPlanningS::MasterQueryPlanning(MasterQueryPlanning { master_query_id });
@@ -864,9 +869,12 @@ impl QueryPlanningES {
               // Otherwise, this node's GossipData is too far out-of-date. We send
               // a MasterGossipRequest and go to GossipDataWaiting.
               let sender_path = ctx.this_sid.clone();
-              ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
-                msg::MasterGossipRequest { sender_path },
-              ));
+              ctx.ctx().send_to_master(
+                io_ctx,
+                msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest {
+                  sender_path,
+                }),
+              );
 
               self.state =
                 QueryPlanningS::GossipDataWaiting(GossipDataWaiting { master_query_plan });
@@ -923,11 +931,12 @@ impl QueryPlanningES {
     match &self.state {
       QueryPlanningS::Start => {}
       QueryPlanningS::MasterQueryPlanning(MasterQueryPlanning { master_query_id }) => {
-        ctx.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterQueryPlanning(
-          msg::MasterQueryPlanningRequest::Cancel(msg::CancelMasterQueryPlanning {
-            query_id: master_query_id.clone(),
-          }),
-        ));
+        ctx.ctx().send_to_master(
+          io_ctx,
+          msg::MasterRemotePayload::MasterQueryPlanning(msg::MasterQueryPlanningRequest::Cancel(
+            msg::CancelMasterQueryPlanning { query_id: master_query_id.clone() },
+          )),
+        );
       }
       QueryPlanningS::GossipDataWaiting(_) => {}
       QueryPlanningS::Done => {}

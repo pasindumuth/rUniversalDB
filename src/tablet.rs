@@ -707,7 +707,7 @@ impl stmpaxos2pc_tm::RMServerContext<AlterTablePayloadTypes> for TabletContext {
   }
 
   fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, _: &(), msg: msg::MasterRemotePayload) {
-    self.ctx(io_ctx).send_to_master(msg);
+    self.ctx().send_to_master(io_ctx, msg);
   }
 
   fn mk_node_path(&self) -> TNodePath {
@@ -729,7 +729,7 @@ impl stmpaxos2pc_tm::RMServerContext<DropTablePayloadTypes> for TabletContext {
   }
 
   fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, _: &(), msg: msg::MasterRemotePayload) {
-    self.ctx(io_ctx).send_to_master(msg);
+    self.ctx().send_to_master(io_ctx, msg);
   }
 
   fn mk_node_path(&self) -> TNodePath {
@@ -756,7 +756,7 @@ impl paxos2pc_tm::RMServerContext<FinishQueryPayloadTypes> for TabletContext {
     tm: &CNodePath,
     msg: msg::CoordMessage,
   ) {
-    self.ctx(io_ctx).send_to_c(tm.clone(), msg);
+    self.ctx().send_to_c(io_ctx, tm.clone(), msg);
   }
 
   fn mk_node_path(&self) -> TNodePath {
@@ -930,9 +930,8 @@ impl TabletContext {
     }
   }
 
-  pub fn ctx<'a, IO: BasicIOCtx>(&'a self, io_ctx: &'a mut IO) -> CTServerContext<'a, IO> {
+  pub fn ctx<'a>(&'a self) -> CTServerContext<'a> {
     CTServerContext {
-      io_ctx,
       this_sid: &self.this_sid,
       this_eid: &self.this_eid,
       sub_node_path: &self.sub_node_path,
@@ -1049,9 +1048,12 @@ impl TabletContext {
             } else {
               // Request a GossipData from the Master to help stimulate progress.
               let sender_path = self.this_sid.clone();
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::MasterGossipRequest(
-                msg::MasterGossipRequest { sender_path },
-              ));
+              self.ctx().send_to_master(
+                io_ctx,
+                msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest {
+                  sender_path,
+                }),
+              );
 
               // Buffer the PerformQuery
               let query_id = perform_query.query_id.clone();
@@ -1136,11 +1138,13 @@ impl TabletContext {
             let prefix = trans_read.es.location_prefix();
             let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id)
             {
-              trans_read.es.gossip_data_changed(&mut self.ctx(io_ctx), &gr_query.es)
+              trans_read.es.gossip_data_changed(&mut self.ctx(), io_ctx, &gr_query.es)
             } else {
-              trans_read
-                .es
-                .handle_internal_query_error(&mut self.ctx(io_ctx), msg::QueryError::LateralError)
+              trans_read.es.handle_internal_query_error(
+                &mut self.ctx(),
+                io_ctx,
+                msg::QueryError::LateralError,
+              )
             };
             self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
           }
@@ -1251,7 +1255,7 @@ impl TabletContext {
                     let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
                     remove_item(&mut gr_query.child_queries, &query_id);
                     let action =
-                      gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx(io_ctx));
+                      gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx(), io_ctx);
                     self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
                   }
                 }
@@ -1440,12 +1444,13 @@ impl TabletContext {
             },
           );
 
-          let action = trans_table.es.start(&mut self.ctx(io_ctx), &gr_query.es);
+          let action = trans_table.es.start(&mut self.ctx(), io_ctx, &gr_query.es);
           self.handle_trans_read_es_action(io_ctx, statuses, perform_query.query_id, action);
         } else {
           // This means that the target GRQueryES was deleted, so we send back
           // an Abort with LateralError.
-          self.ctx(io_ctx).send_query_error(
+          self.ctx().send_query_error(
+            io_ctx,
             perform_query.sender_path,
             perform_query.query_id,
             msg::QueryError::LateralError,
@@ -1500,7 +1505,8 @@ impl TabletContext {
             }
             Err(query_error) => {
               // The MSQueryES couldn't be constructed.
-              self.ctx(io_ctx).send_query_error(
+              self.ctx().send_query_error(
+                io_ctx,
                 perform_query.sender_path,
                 perform_query.query_id,
                 query_error,
@@ -1590,7 +1596,8 @@ impl TabletContext {
           }
           Err(query_error) => {
             // The MSQueryES couldn't be constructed.
-            self.ctx(io_ctx).send_query_error(
+            self.ctx().send_query_error(
+              io_ctx,
               perform_query.sender_path,
               perform_query.query_id,
               query_error,
@@ -1656,7 +1663,8 @@ impl TabletContext {
           }
           Err(query_error) => {
             // The MSQueryES couldn't be constructed.
-            self.ctx(io_ctx).send_query_error(
+            self.ctx().send_query_error(
+              io_ctx,
               perform_query.sender_path,
               perform_query.query_id,
               query_error,
@@ -1715,7 +1723,8 @@ impl TabletContext {
           }
           Err(query_error) => {
             // The MSQueryES couldn't be constructed.
-            self.ctx(io_ctx).send_query_error(
+            self.ctx().send_query_error(
+              io_ctx,
               perform_query.sender_path,
               perform_query.query_id,
               query_error,
@@ -1765,7 +1774,8 @@ impl TabletContext {
 
     // Otherwise, send a register message back to the root.
     let ms_query_path = self.mk_query_path(ms_query_id.clone());
-    self.ctx(io_ctx).send_to_c_lid(
+    self.ctx().send_to_c_lid(
+      io_ctx,
       root_query_path.node_path.clone(),
       msg::CoordMessage::RegisterQuery(msg::RegisterQuery {
         root_query_id: root_query_id.clone(),
@@ -2370,7 +2380,8 @@ impl TabletContext {
         let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
         remove_item(&mut gr_query.child_queries, tm_query_id);
         let action = gr_query.es.handle_tm_success(
-          &mut self.ctx(io_ctx),
+          &mut self.ctx(),
+          io_ctx,
           tm_query_id.clone(),
           tm_status.new_rms,
           results,
@@ -2397,7 +2408,7 @@ impl TabletContext {
       // Then, inform the GRQueryES
       let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
       remove_item(&mut gr_query.child_queries, tm_query_id);
-      let action = gr_query.es.handle_tm_aborted(&mut self.ctx(io_ctx), query_aborted.payload);
+      let action = gr_query.es.handle_tm_aborted(&mut self.ctx(), io_ctx, query_aborted.payload);
       self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
     }
   }
@@ -2426,16 +2437,19 @@ impl TabletContext {
       remove_item(&mut trans_read.child_queries, &subquery_id);
       let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id) {
         trans_read.es.handle_subquery_done(
-          &mut self.ctx(io_ctx),
+          &mut self.ctx(),
+          io_ctx,
           &gr_query.es,
           subquery_id,
           subquery_new_rms,
           result,
         )
       } else {
-        trans_read
-          .es
-          .handle_internal_query_error(&mut self.ctx(io_ctx), msg::QueryError::LateralError)
+        trans_read.es.handle_internal_query_error(
+          &mut self.ctx(),
+          io_ctx,
+          msg::QueryError::LateralError,
+        )
       };
       self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
     } else {
@@ -2491,7 +2505,7 @@ impl TabletContext {
     } else if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
       // TransTableReadES
       remove_item(&mut trans_read.child_queries, &subquery_id);
-      let action = trans_read.es.handle_internal_query_error(&mut self.ctx(io_ctx), query_error);
+      let action = trans_read.es.handle_internal_query_error(&mut self.ctx(), io_ctx, query_error);
       self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
     } else {
       // MSTable*ES
@@ -2533,7 +2547,7 @@ impl TabletContext {
       if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
         // Generally, we use an `if` guard in case one child Query aborts the parent and
         // thus all other children. (This won't happen for GRQueryESs, though)
-        let action = gr_query.es.start(&mut self.ctx(io_ctx));
+        let action = gr_query.es.start(&mut self.ctx(), io_ctx);
         self.handle_gr_query_es_action(io_ctx, statuses, query_id, action);
       }
     }
@@ -2609,7 +2623,8 @@ impl TabletContext {
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx(io_ctx).send_to_ct(
+        self.ctx().send_to_ct(
+          io_ctx,
           sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -2625,7 +2640,8 @@ impl TabletContext {
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx(io_ctx).send_to_ct(
+        self.ctx().send_to_ct(
+          io_ctx,
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2657,7 +2673,8 @@ impl TabletContext {
         let sender_path = read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx(io_ctx).send_to_ct(
+        self.ctx().send_to_ct(
+          io_ctx,
           sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -2673,7 +2690,8 @@ impl TabletContext {
         let sender_path = read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx(io_ctx).send_to_ct(
+        self.ctx().send_to_ct(
+          io_ctx,
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2706,7 +2724,8 @@ impl TabletContext {
         let sender_path = ms_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx(io_ctx).send_to_ct(
+        self.ctx().send_to_ct(
+          io_ctx,
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2721,7 +2740,8 @@ impl TabletContext {
         let sender_path = ms_write.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx(io_ctx).send_to_ct(
+        self.ctx().send_to_ct(
+          io_ctx,
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2736,7 +2756,8 @@ impl TabletContext {
         let sender_path = ms_insert.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx(io_ctx).send_to_ct(
+        self.ctx().send_to_ct(
+          io_ctx,
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2751,7 +2772,8 @@ impl TabletContext {
         let sender_path = ms_delete.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx(io_ctx).send_to_ct(
+        self.ctx().send_to_ct(
+          io_ctx,
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -2796,7 +2818,8 @@ impl TabletContext {
             let sender_path = es.sender_path;
             let responder_path = ctx.mk_query_path(query_id).into_ct();
             // This is the originating Leadership.
-            ctx.ctx(io_ctx).send_to_ct(
+            ctx.ctx().send_to_ct(
+              io_ctx,
               sender_path.node_path,
               CommonQuery::QuerySuccess(msg::QuerySuccess {
                 return_qid: sender_path.query_id,
@@ -2827,7 +2850,8 @@ impl TabletContext {
             let sender_path = es.sender_path;
             let responder_path = ctx.mk_query_path(query_id).into_ct();
             // This is the originating Leadership.
-            ctx.ctx(io_ctx).send_to_ct(
+            ctx.ctx().send_to_ct(
+              io_ctx,
               sender_path.node_path,
               CommonQuery::QueryAborted(msg::QueryAborted {
                 return_qid: sender_path.query_id,
@@ -2911,7 +2935,7 @@ impl TabletContext {
     }
     // GRQueryES
     else if let Some(mut gr_query) = statuses.gr_query_ess.remove(&query_id) {
-      gr_query.es.exit_and_clean_up(&mut self.ctx(io_ctx));
+      gr_query.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(io_ctx, statuses, gr_query.child_queries);
     }
     // TableReadES
@@ -2921,7 +2945,7 @@ impl TabletContext {
     }
     // TransTableReadES
     else if let Some(mut trans_read) = statuses.trans_table_read_ess.remove(&query_id) {
-      trans_read.es.exit_and_clean_up(&mut self.ctx(io_ctx));
+      trans_read.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(io_ctx, statuses, trans_read.child_queries);
     }
     // TMStatus
@@ -2931,7 +2955,8 @@ impl TabletContext {
         if rm_result.is_none() {
           let orig_sid = &rm_path.sid;
           let orig_lid = tm_status.leaderships.get(&orig_sid).unwrap().clone();
-          self.ctx(io_ctx).send_to_ct_lid(
+          self.ctx().send_to_ct_lid(
+            io_ctx,
             rm_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: tm_status.child_query_id.clone(),

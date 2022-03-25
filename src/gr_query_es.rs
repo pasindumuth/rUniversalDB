@@ -205,14 +205,19 @@ pub enum TransTableIdx {
 
 impl GRQueryES {
   /// Starts the GRQueryES from its initial state.
-  pub fn start<IO: CoreIOCtx>(&mut self, ctx: &mut CTServerContext<IO>) -> GRQueryAction {
-    self.advance(ctx)
+  pub fn start<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut CTServerContext,
+    io_ctx: &mut IO,
+  ) -> GRQueryAction {
+    self.advance(ctx, io_ctx)
   }
 
   /// This is called when the TMStatus has completed successfully.
   pub fn handle_tm_success<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CTServerContext<IO>,
+    ctx: &mut CTServerContext,
+    io_ctx: &mut IO,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
     results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
@@ -250,13 +255,14 @@ impl GRQueryES {
 
     // Add the `table_views` to the GRQueryES and advance it.
     self.trans_table_views.push((trans_table_name.clone(), (schema, table_views)));
-    self.advance(ctx)
+    self.advance(ctx, io_ctx)
   }
 
   /// This is called when the TMStatus has completed unsuccessfully.
   pub fn handle_tm_aborted<IO: CoreIOCtx>(
     &mut self,
-    _: &mut CTServerContext<IO>,
+    _: &mut CTServerContext,
+    _: &mut IO,
     aborted_data: msg::AbortedData,
   ) -> GRQueryAction {
     match aborted_data {
@@ -272,20 +278,25 @@ impl GRQueryES {
   /// LeadershipId that we had sent a PerformQuery to.
   pub fn handle_tm_remote_leadership_changed<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CTServerContext<IO>,
+    ctx: &mut CTServerContext,
+    io_ctx: &mut IO,
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &self.state).unwrap();
-    self.process_gr_query_stage(ctx, read_stage.stage_idx)
+    self.process_gr_query_stage(ctx, io_ctx, read_stage.stage_idx)
   }
 
   /// This Exits and Cleans up this GRQueryES.
-  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut CTServerContext<IO>) {
+  pub fn exit_and_clean_up(&mut self, _: &mut CTServerContext) {
     self.state = GRExecutionS::Done;
   }
 
   /// This advanced the Stage of the GRQueryES. If there is no next Stage, then we
   /// return Done, containing the result and signaling that the GRQueryES is complete.
-  fn advance<IO: CoreIOCtx>(&mut self, ctx: &mut CTServerContext<IO>) -> GRQueryAction {
+  fn advance<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut CTServerContext,
+    io_ctx: &mut IO,
+  ) -> GRQueryAction {
     // Compute the next stage
     let next_stage_idx = match &self.state {
       GRExecutionS::Start => 0,
@@ -295,7 +306,7 @@ impl GRQueryES {
 
     if next_stage_idx < self.query_plan.col_usage_nodes.len() {
       // This means that we have still have stages to evaluate, so we move on.
-      self.process_gr_query_stage(ctx, next_stage_idx)
+      self.process_gr_query_stage(ctx, io_ctx, next_stage_idx)
     } else {
       // This means the GRQueryES is done, so we send the desired result
       // back to the originator.
@@ -324,7 +335,8 @@ impl GRQueryES {
   /// (Note the index must be valid (i.e. be an actual stage)).
   fn process_gr_query_stage<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CTServerContext<IO>,
+    ctx: &mut CTServerContext,
+    io_ctx: &mut IO,
     stage_idx: usize,
   ) -> GRQueryAction {
     assert!(stage_idx < self.query_plan.col_usage_nodes.len());
@@ -455,8 +467,8 @@ impl GRQueryES {
     };
 
     // Construct the TMStatus
-    let tm_qid = mk_qid(ctx.io_ctx.rand());
-    let child_qid = mk_qid(ctx.io_ctx.rand());
+    let tm_qid = mk_qid(io_ctx.rand());
+    let child_qid = mk_qid(io_ctx.rand());
     let mut tm_status = TMStatus {
       query_id: tm_qid.clone(),
       child_query_id: child_qid.clone(),
@@ -516,9 +528,9 @@ impl GRQueryES {
           if let Some(lid) = query_leader_map.get(&sid) {
             // Recall we already validated that `lid` is no lower than the
             // one at this node's LeaderMap.
-            ctx.send_to_ct_lid(node_path.clone(), common_query, lid.clone());
+            ctx.send_to_ct_lid(io_ctx, node_path.clone(), common_query, lid.clone());
           } else {
-            ctx.send_to_ct(node_path.clone(), common_query);
+            ctx.send_to_ct(io_ctx, node_path.clone(), common_query);
           }
 
           // Add the TabletGroup into the TMStatus.
@@ -575,9 +587,9 @@ impl GRQueryES {
         if let Some(lid) = query_leader_map.get(&sid) {
           // Recall we already validated that `lid` is no lower than the
           // one at this node's LeaderMap.
-          ctx.send_to_ct_lid(node_path.clone(), common_query, lid.clone());
+          ctx.send_to_ct_lid(io_ctx, node_path.clone(), common_query, lid.clone());
         } else {
-          ctx.send_to_ct(node_path.clone(), common_query);
+          ctx.send_to_ct(io_ctx, node_path.clone(), common_query);
         }
 
         // Add the TabletGroup into the TMStatus.

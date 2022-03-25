@@ -199,7 +199,7 @@ impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
   }
 
   fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, _: &(), msg: msg::MasterRemotePayload) {
-    self.ctx(io_ctx).send_to_master(msg);
+    self.ctx().send_to_master(io_ctx, msg);
   }
 
   fn mk_node_path(&self) -> SlaveGroupId {
@@ -444,9 +444,8 @@ impl SlaveContext {
     }
   }
 
-  pub fn ctx<'a, IO: BasicIOCtx>(&'a self, io_ctx: &'a mut IO) -> SlaveServerContext<'a, IO> {
+  pub fn ctx<'a>(&'a self) -> SlaveServerContext<'a> {
     SlaveServerContext {
-      io_ctx,
       this_sid: &self.this_sid,
       this_eid: &self.this_eid,
       leader_map: &self.leader_map.value(),
@@ -564,11 +563,14 @@ impl SlaveContext {
                   self.maybe_start_snapshot(io_ctx, statuses);
 
                   // Inform the Master that the Reconfiguration was a success.
-                  self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::SlaveReconfig(
-                    msg::SlaveReconfig::SlaveGroupReconfigured(msg::SlaveGroupReconfigured {
-                      sid: self.this_sid.clone(),
-                    }),
-                  ));
+                  self.ctx().send_to_master(
+                    io_ctx,
+                    msg::MasterRemotePayload::SlaveReconfig(
+                      msg::SlaveReconfig::SlaveGroupReconfigured(msg::SlaveGroupReconfigured {
+                        sid: self.this_sid.clone(),
+                      }),
+                    ),
+                  );
                 }
 
                 // Trace the reconfig event.
@@ -726,9 +728,10 @@ impl SlaveContext {
               // Here, we send the Master a `NodesDead` message indicating that we
               // want to reconfigure. Recall we only reconfigure one-at-a-time to
               // preserve our liveness properties.
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::SlaveReconfig(
-                msg::SlaveReconfig::NodesDead(nodes_dead),
-              ));
+              self.ctx().send_to_master(
+                io_ctx,
+                msg::MasterRemotePayload::SlaveReconfig(msg::SlaveReconfig::NodesDead(nodes_dead)),
+              );
             }
           }
 
@@ -816,11 +819,14 @@ impl SlaveContext {
           msg::SlaveRemotePayload::ReconfigSlaveGroup(reconfig) => {
             // Respond affirmative immeidately if this node has already completed this reconfig.
             if self.paxos_driver.contains_nodes(&reconfig.new_eids) {
-              self.ctx(io_ctx).send_to_master(msg::MasterRemotePayload::SlaveReconfig(
-                msg::SlaveReconfig::SlaveGroupReconfigured(msg::SlaveGroupReconfigured {
-                  sid: self.this_sid.clone(),
-                }),
-              ));
+              self.ctx().send_to_master(
+                io_ctx,
+                msg::MasterRemotePayload::SlaveReconfig(
+                  msg::SlaveReconfig::SlaveGroupReconfigured(msg::SlaveGroupReconfigured {
+                    sid: self.this_sid.clone(),
+                  }),
+                ),
+              );
             } else {
               // Otherwise, do nothing if we are already going to do this reconfig.
               if let Some((rem_eids, new_eids)) = &statuses.do_reconfig {

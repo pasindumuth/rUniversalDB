@@ -157,31 +157,34 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
 impl TransTableReadES {
   pub fn start<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut CTServerContext<IO>,
+    ctx: &mut CTServerContext,
+    io_ctx: &mut IO,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
-    self.check_gossip_data(ctx, trans_table_source)
+    self.check_gossip_data(ctx, io_ctx, trans_table_source)
   }
 
   /// Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
   fn check_gossip_data<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut CTServerContext<IO>,
+    ctx: &mut CTServerContext,
+    io_ctx: &mut IO,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     // If the GossipData is valid, then act accordingly.
     if check_gossip(&ctx.gossip.get(), &self.query_plan) {
       // We start locking the regions.
-      self.start_trans_table_read_es(ctx, trans_table_source)
+      self.start_trans_table_read_es(ctx, io_ctx, trans_table_source)
     } else {
       // If not, we go to GossipDataWaiting
       self.state = TransExecutionS::GossipDataWaiting;
 
       // Request a GossipData from the Master to help stimulate progress.
       let sender_path = ctx.this_sid.clone();
-      ctx.send_to_master(msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest {
-        sender_path,
-      }));
+      ctx.send_to_master(
+        io_ctx,
+        msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest { sender_path }),
+      );
 
       return TransTableAction::Wait;
     }
@@ -190,12 +193,13 @@ impl TransTableReadES {
   /// Here, we GossipData gets delivered.
   pub fn gossip_data_changed<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut CTServerContext<IO>,
+    ctx: &mut CTServerContext,
+    io_ctx: &mut IO,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     if let TransExecutionS::GossipDataWaiting = self.state {
       // Verify is GossipData is now recent enough.
-      self.check_gossip_data(ctx, trans_table_source)
+      self.check_gossip_data(ctx, io_ctx, trans_table_source)
     } else {
       // Do nothing
       TransTableAction::Wait
@@ -205,7 +209,8 @@ impl TransTableReadES {
   /// Constructs and returns subqueries.
   fn start_trans_table_read_es<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut CTServerContext<IO>,
+    ctx: &mut CTServerContext,
+    io_ctx: &mut IO,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     // Here, we first construct all of the subquery Contexts using the
@@ -241,7 +246,7 @@ impl TransTableReadES {
     let mut gr_query_ess = Vec::<GRQueryES>::new();
     for (subquery_idx, child_context) in child_contexts.into_iter().enumerate() {
       gr_query_ess.push(subquery_view.mk_gr_query_es(
-        mk_qid(ctx.io_ctx.rand()),
+        mk_qid(io_ctx.rand()),
         Rc::new(child_context),
         subquery_idx,
       ));
@@ -253,7 +258,7 @@ impl TransTableReadES {
 
     // See if we are already finished (due to having no subqueries).
     if exec.is_complete() {
-      self.finish_trans_table_read_es(ctx, trans_table_source)
+      self.finish_trans_table_read_es(ctx, io_ctx, trans_table_source)
     } else {
       // Otherwise, return the subqueries.
       TransTableAction::SendSubqueries(gr_query_ess)
@@ -265,7 +270,8 @@ impl TransTableReadES {
   /// and Exits and Clean Ups this ES.
   pub fn handle_internal_query_error<IO: CoreIOCtx>(
     &mut self,
-    ctx: &mut CTServerContext<IO>,
+    ctx: &mut CTServerContext,
+    _: &mut IO,
     query_error: msg::QueryError,
   ) -> TransTableAction {
     self.exit_and_clean_up(ctx);
@@ -275,7 +281,8 @@ impl TransTableReadES {
   /// Handles a Subquery completing
   pub fn handle_subquery_done<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    ctx: &mut CTServerContext<IO>,
+    ctx: &mut CTServerContext,
+    io_ctx: &mut IO,
     trans_table_source: &SourceT,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
@@ -288,7 +295,7 @@ impl TransTableReadES {
 
     // See if we are finished (due to computing all subqueries).
     if exec.is_complete() {
-      self.finish_trans_table_read_es(ctx, trans_table_source)
+      self.finish_trans_table_read_es(ctx, io_ctx, trans_table_source)
     } else {
       // Otherwise, we wait.
       TransTableAction::Wait
@@ -298,7 +305,8 @@ impl TransTableReadES {
   /// Handles a ES finishing with all subqueries results in.
   fn finish_trans_table_read_es<IO: CoreIOCtx, SourceT: TransTableSource>(
     &mut self,
-    _: &mut CTServerContext<IO>,
+    _: &mut CTServerContext,
+    _: &mut IO,
     trans_table_source: &SourceT,
   ) -> TransTableAction {
     let exec = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
@@ -342,7 +350,7 @@ impl TransTableReadES {
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
-  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut CTServerContext<IO>) {
+  pub fn exit_and_clean_up(&mut self, _: &mut CTServerContext) {
     self.state = TransExecutionS::Done
   }
 

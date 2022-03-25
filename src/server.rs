@@ -1,4 +1,6 @@
-use crate::common::{lookup_pos, BasicIOCtx, GossipData, LeaderMap, TableSchema, Timestamp};
+use crate::common::{
+  lookup_pos, BasicIOCtx, CoreIOCtx, GossipData, LeaderMap, TableSchema, Timestamp,
+};
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::{
   proc, CNodePath, CSubNodePath, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColVal, ColValN,
@@ -24,12 +26,12 @@ pub trait ServerContextBase {
   fn leader_map(&self) -> &LeaderMap;
   fn this_gid(&self) -> PaxosGroupId;
   fn this_eid(&self) -> &EndpointId;
-  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage);
 
   // Send utilities
 
-  fn send_to_slave_leadership(
+  fn send_to_slave_leadership<IOCtx: BasicIOCtx>(
     &mut self,
+    io_ctx: &mut IOCtx,
     payload: msg::SlaveRemotePayload,
     to_sid: SlaveGroupId,
     to_lid: LeadershipId,
@@ -51,37 +53,50 @@ pub trait ServerContextBase {
         to_gid,
       };
 
-      self.send(
+      io_ctx.send(
         &to_lid.eid,
         msg::NetworkMessage::Slave(msg::SlaveMessage::RemoteMessage(remote_message)),
       );
     }
   }
 
-  fn send_to_slave_common(&mut self, to_sid: SlaveGroupId, payload: msg::SlaveRemotePayload) {
+  fn send_to_slave_common<IOCtx: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IOCtx,
+    to_sid: SlaveGroupId,
+    payload: msg::SlaveRemotePayload,
+  ) {
     let to_lid = self.leader_map().get(&to_sid.to_gid()).unwrap().clone();
-    self.send_to_slave_leadership(payload, to_sid, to_lid);
+    self.send_to_slave_leadership(io_ctx, payload, to_sid, to_lid);
   }
 
   // send_to_c
 
-  fn send_to_c_lid(
+  fn send_to_c_lid<IOCtx: BasicIOCtx>(
     &mut self,
+    io_ctx: &mut IOCtx,
     node_path: CNodePath,
     query: msg::CoordMessage,
     to_lid: LeadershipId,
   ) {
     let CSubNodePath::Coord(cid) = node_path.sub;
     self.send_to_slave_leadership(
+      io_ctx,
       msg::SlaveRemotePayload::CoordMessage(cid, query),
       node_path.sid.clone(),
       to_lid,
     );
   }
 
-  fn send_to_c(&mut self, node_path: CNodePath, query: msg::CoordMessage) {
+  fn send_to_c<IOCtx: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IOCtx,
+    node_path: CNodePath,
+    query: msg::CoordMessage,
+  ) {
     let CSubNodePath::Coord(cid) = node_path.sub;
     self.send_to_slave_common(
+      io_ctx,
       node_path.sid.clone(),
       msg::SlaveRemotePayload::CoordMessage(cid, query),
     );
@@ -89,23 +104,31 @@ pub trait ServerContextBase {
 
   // send_to_t
 
-  fn send_to_t_lid(
+  fn send_to_t_lid<IOCtx: BasicIOCtx>(
     &mut self,
+    io_ctx: &mut IOCtx,
     node_path: TNodePath,
     query: msg::TabletMessage,
     to_lid: LeadershipId,
   ) {
     let TSubNodePath::Tablet(tid) = node_path.sub;
     self.send_to_slave_leadership(
+      io_ctx,
       msg::SlaveRemotePayload::TabletMessage(tid, query),
       node_path.sid.clone(),
       to_lid,
     );
   }
 
-  fn send_to_t(&mut self, node_path: TNodePath, query: msg::TabletMessage) {
+  fn send_to_t<IOCtx: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IOCtx,
+    node_path: TNodePath,
+    query: msg::TabletMessage,
+  ) {
     let TSubNodePath::Tablet(tid) = node_path.sub;
     self.send_to_slave_common(
+      io_ctx,
       node_path.sid.clone(),
       msg::SlaveRemotePayload::TabletMessage(tid, query),
     );
@@ -113,21 +136,41 @@ pub trait ServerContextBase {
 
   // send_to_ct
 
-  fn send_to_ct_lid(&mut self, node_path: CTNodePath, query: CommonQuery, to_lid: LeadershipId) {
+  fn send_to_ct_lid<IOCtx: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IOCtx,
+    node_path: CTNodePath,
+    query: CommonQuery,
+    to_lid: LeadershipId,
+  ) {
     self.send_to_slave_leadership(
+      io_ctx,
       query.into_remote_payload(node_path.sub),
       node_path.sid.clone(),
       to_lid,
     );
   }
 
-  fn send_to_ct(&mut self, node_path: CTNodePath, query: CommonQuery) {
-    self.send_to_slave_common(node_path.sid.clone(), query.into_remote_payload(node_path.sub));
+  fn send_to_ct<IOCtx: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IOCtx,
+    node_path: CTNodePath,
+    query: CommonQuery,
+  ) {
+    self.send_to_slave_common(
+      io_ctx,
+      node_path.sid.clone(),
+      query.into_remote_payload(node_path.sub),
+    );
   }
 
   // send_to_master
 
-  fn send_to_master(&mut self, payload: msg::MasterRemotePayload) {
+  fn send_to_master<IOCtx: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IOCtx,
+    payload: msg::MasterRemotePayload,
+  ) {
     if self.is_leader() {
       // Only send out messages if this node is the Leader. This ensures that
       // followers do not leak out Leadership information of this PaxosGroup.
@@ -146,7 +189,7 @@ pub trait ServerContextBase {
         to_gid: master_gid,
       };
 
-      self.send(
+      io_ctx.send(
         &master_lid.eid,
         msg::NetworkMessage::Master(msg::MasterMessage::RemoteMessage(remote_message)),
       );
@@ -166,10 +209,7 @@ pub trait ServerContextBase {
 
 /// This is used to present a consistent view of Tablets and Slave to shared ESs so
 /// that they can execute agnotisticly.
-pub struct CTServerContext<'a, IO: BasicIOCtx> {
-  /// IO
-  pub io_ctx: &'a mut IO,
-
+pub struct CTServerContext<'a> {
   /// Metadata
   pub this_sid: &'a SlaveGroupId,
   pub this_eid: &'a EndpointId,
@@ -182,7 +222,7 @@ pub struct CTServerContext<'a, IO: BasicIOCtx> {
   pub gossip: &'a Arc<GossipData>,
 }
 
-impl<'a, IO: BasicIOCtx> CTServerContext<'a, IO> {
+impl<'a> CTServerContext<'a> {
   /// Construct a `NodePath` from a `NodeGroupId`.
   /// NOTE: the `tid` must exist in the `gossip` at this point.
   pub fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
@@ -200,8 +240,9 @@ impl<'a, IO: BasicIOCtx> CTServerContext<'a, IO> {
 
   /// This responds to the given `sender_path` with a QueryAborted containing the given
   /// `abort_data`. Here, the `query_id` is that of the ES that's responding.
-  pub fn send_abort_data(
+  pub fn send_abort_data<IOCtx: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IOCtx,
     sender_path: CTQueryPath,
     query_id: QueryId,
     abort_data: msg::AbortedData,
@@ -211,18 +252,19 @@ impl<'a, IO: BasicIOCtx> CTServerContext<'a, IO> {
       responder_path: self.mk_this_query_path(query_id),
       payload: abort_data,
     };
-    self.send_to_ct(sender_path.node_path, CommonQuery::QueryAborted(aborted));
+    self.send_to_ct(io_ctx, sender_path.node_path, CommonQuery::QueryAborted(aborted));
   }
 
   /// This responds to the given `sender_path` with a QueryAborted containing the given
   /// `query_error`. Here, the `query_id` is that of the ES that's responding.
-  pub fn send_query_error(
+  pub fn send_query_error<IOCtx: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IOCtx,
     sender_path: CTQueryPath,
     query_id: QueryId,
     query_error: msg::QueryError,
   ) {
-    self.send_abort_data(sender_path, query_id, msg::AbortedData::QueryError(query_error));
+    self.send_abort_data(io_ctx, sender_path, query_id, msg::AbortedData::QueryError(query_error));
   }
 
   /// This function computes a minimum set of `TabletGroupId`s whose `TabletKeyRange`
@@ -256,7 +298,7 @@ impl<'a, IO: BasicIOCtx> CTServerContext<'a, IO> {
   }
 }
 
-impl<'a, IO: BasicIOCtx> ServerContextBase for CTServerContext<'a, IO> {
+impl<'a> ServerContextBase for CTServerContext<'a> {
   fn leader_map(&self) -> &LeaderMap {
     self.leader_map
   }
@@ -268,10 +310,6 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for CTServerContext<'a, IO> {
 
   fn this_eid(&self) -> &EndpointId {
     self.this_eid
-  }
-
-  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    self.io_ctx.send(eid, msg);
   }
 }
 
@@ -280,10 +318,7 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for CTServerContext<'a, IO> {
 // -----------------------------------------------------------------------------------------------
 
 /// This is used to easily use the `ServerContextBase` methods in the Slave thread.
-pub struct SlaveServerContext<'a, IO: BasicIOCtx> {
-  /// IO
-  pub io_ctx: &'a mut IO,
-
+pub struct SlaveServerContext<'a> {
   /// Metadata
   pub this_sid: &'a SlaveGroupId,
   pub this_eid: &'a EndpointId,
@@ -292,7 +327,7 @@ pub struct SlaveServerContext<'a, IO: BasicIOCtx> {
   pub leader_map: &'a LeaderMap,
 }
 
-impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
+impl<'a> ServerContextBase for SlaveServerContext<'a> {
   fn leader_map(&self) -> &LeaderMap {
     self.leader_map
   }
@@ -305,10 +340,6 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
   fn this_eid(&self) -> &EndpointId {
     self.this_eid
   }
-
-  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    self.io_ctx.send(eid, msg);
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -316,10 +347,7 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for SlaveServerContext<'a, IO> {
 // -----------------------------------------------------------------------------------------------
 
 /// This is used to easily use the `ServerContextBase` methods in the Master thread.
-pub struct MasterServerContext<'a, IO> {
-  /// IO
-  pub io_ctx: &'a mut IO,
-
+pub struct MasterServerContext<'a> {
   /// Metadata
   pub this_eid: &'a EndpointId,
 
@@ -327,7 +355,7 @@ pub struct MasterServerContext<'a, IO> {
   pub leader_map: &'a LeaderMap,
 }
 
-impl<'a, IO: BasicIOCtx> ServerContextBase for MasterServerContext<'a, IO> {
+impl<'a> ServerContextBase for MasterServerContext<'a> {
   fn leader_map(&self) -> &LeaderMap {
     self.leader_map
   }
@@ -339,10 +367,6 @@ impl<'a, IO: BasicIOCtx> ServerContextBase for MasterServerContext<'a, IO> {
 
   fn this_eid(&self) -> &EndpointId {
     self.this_eid
-  }
-
-  fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    self.io_ctx.send(eid, msg);
   }
 }
 

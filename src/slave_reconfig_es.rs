@@ -223,7 +223,8 @@ impl SlaveReconfigES {
     io_ctx: &mut IO,
     new_eids: &Vec<EndpointId>,
   ) {
-    ctx.ctx(io_ctx).send_to_slave_common(
+    ctx.ctx().send_to_slave_common(
+      io_ctx,
       self.sid.clone(),
       msg::SlaveRemotePayload::ReconfigSlaveGroup(msg::ReconfigSlaveGroup {
         new_eids: new_eids.clone(),

@@ -89,7 +89,7 @@ impl paxos2pc::TMServerContext<FinishQueryPayloadTypes> for CoordContext {
     rm: &TNodePath,
     msg: msg::TabletMessage,
   ) {
-    self.ctx(io_ctx).send_to_t(rm.clone(), msg);
+    self.ctx().send_to_t(io_ctx, rm.clone(), msg);
   }
 
   fn mk_node_path(&self) -> CNodePath {
@@ -192,9 +192,8 @@ impl CoordContext {
     }
   }
 
-  pub fn ctx<'a, IO: BasicIOCtx>(&'a mut self, io_ctx: &'a mut IO) -> CTServerContext<'a, IO> {
+  pub fn ctx<'a>(&'a mut self) -> CTServerContext<'a> {
     CTServerContext {
-      io_ctx,
       this_sid: &self.this_sid,
       this_eid: &self.this_eid,
       sub_node_path: &self.sub_node_path,
@@ -307,7 +306,7 @@ impl CoordContext {
                     },
                   );
 
-                  let action = trans_table.es.start(&mut self.ctx(io_ctx), es);
+                  let action = trans_table.es.start(&mut self.ctx(), io_ctx, es);
                   self.handle_trans_read_es_action(
                     io_ctx,
                     statuses,
@@ -339,7 +338,7 @@ impl CoordContext {
                     },
                   );
 
-                  let action = trans_table.es.start(&mut self.ctx(io_ctx), &gr_query.es);
+                  let action = trans_table.es.start(&mut self.ctx(), io_ctx, &gr_query.es);
                   self.handle_trans_read_es_action(
                     io_ctx,
                     statuses,
@@ -349,7 +348,8 @@ impl CoordContext {
                 } else {
                   // This means that the target GRQueryES was deleted. We can send back an
                   // Abort with LateralError. Exit and Clean Up will be done later.
-                  self.ctx(io_ctx).send_query_error(
+                  self.ctx().send_query_error(
+                    io_ctx,
                     perform_query.sender_path,
                     perform_query.query_id,
                     msg::QueryError::LateralError,
@@ -422,13 +422,15 @@ impl CoordContext {
             let prefix = trans_read.es.location_prefix();
             let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id)
             {
-              trans_read.es.gossip_data_changed(&mut self.ctx(io_ctx), &gr_query.es)
+              trans_read.es.gossip_data_changed(&mut self.ctx(), io_ctx, &gr_query.es)
             } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.source.query_id) {
-              trans_read.es.gossip_data_changed(&mut self.ctx(io_ctx), ms_coord.es.to_exec())
+              trans_read.es.gossip_data_changed(&mut self.ctx(), io_ctx, ms_coord.es.to_exec())
             } else {
-              trans_read
-                .es
-                .handle_internal_query_error(&mut self.ctx(io_ctx), msg::QueryError::LateralError)
+              trans_read.es.handle_internal_query_error(
+                &mut self.ctx(),
+                io_ctx,
+                msg::QueryError::LateralError,
+              )
             };
             self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
           }
@@ -486,7 +488,7 @@ impl CoordContext {
                     if let Some(gr_query) = statuses.gr_query_ess.get_mut(&orig_qid) {
                       remove_item(&mut gr_query.child_queries, &query_id);
                       let action =
-                        gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx(io_ctx));
+                        gr_query.es.handle_tm_remote_leadership_changed(&mut self.ctx(), io_ctx);
                       self.handle_gr_query_es_action(io_ctx, statuses, orig_qid, action);
                     }
                     // Inform the MSCoordES
@@ -609,7 +611,7 @@ impl CoordContext {
     // Route TM results to GRQueryES
     else if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
       remove_item(&mut gr_query.child_queries, &tm_qid);
-      let action = gr_query.es.handle_tm_success(&mut self.ctx(io_ctx), tm_qid, new_rms, results);
+      let action = gr_query.es.handle_tm_success(&mut self.ctx(), io_ctx, tm_qid, new_rms, results);
       self.handle_gr_query_es_action(io_ctx, statuses, query_id, action);
     }
   }
@@ -645,7 +647,7 @@ impl CoordContext {
     let query_id = orig_p.query_id;
     // Route TM results to MSQueryES
     if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
-      let action = gr_query.es.handle_tm_aborted(&mut self.ctx(io_ctx), aborted_data);
+      let action = gr_query.es.handle_tm_aborted(&mut self.ctx(), io_ctx, aborted_data);
       self.handle_gr_query_es_action(io_ctx, statuses, query_id, action);
     }
     // Route TM results to GRQueryES
@@ -671,7 +673,8 @@ impl CoordContext {
     let prefix = trans_read.es.location_prefix();
     let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id) {
       trans_read.es.handle_subquery_done(
-        &mut self.ctx(io_ctx),
+        &mut self.ctx(),
+        io_ctx,
         &gr_query.es,
         subquery_id,
         subquery_new_rms,
@@ -679,16 +682,19 @@ impl CoordContext {
       )
     } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.source.query_id) {
       trans_read.es.handle_subquery_done(
-        &mut self.ctx(io_ctx),
+        &mut self.ctx(),
+        io_ctx,
         ms_coord.es.to_exec(),
         subquery_id,
         subquery_new_rms,
         result,
       )
     } else {
-      trans_read
-        .es
-        .handle_internal_query_error(&mut self.ctx(io_ctx), msg::QueryError::LateralError)
+      trans_read.es.handle_internal_query_error(
+        &mut self.ctx(),
+        io_ctx,
+        msg::QueryError::LateralError,
+      )
     };
     self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
   }
@@ -706,7 +712,7 @@ impl CoordContext {
     let query_id = orig_p.query_id;
     let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
     remove_item(&mut trans_read.child_queries, &subquery_id);
-    let action = trans_read.es.handle_internal_query_error(&mut self.ctx(io_ctx), query_error);
+    let action = trans_read.es.handle_internal_query_error(&mut self.ctx(), io_ctx, query_error);
     self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
   }
 
@@ -731,7 +737,7 @@ impl CoordContext {
       if let Some(gr_query) = statuses.gr_query_ess.get_mut(&query_id) {
         // Generally, we use an `if` guard in case one child Query aborts the parent and
         // thus all other children. (This won't happen for GRQueryESs, though)
-        let action = gr_query.es.start(&mut self.ctx(io_ctx));
+        let action = gr_query.es.start(&mut self.ctx(), io_ctx);
         self.handle_gr_query_es_action(io_ctx, statuses, query_id, action);
       }
     }
@@ -925,7 +931,8 @@ impl CoordContext {
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx(io_ctx).send_to_ct(
+        self.ctx().send_to_ct(
+          io_ctx,
           sender_path.node_path,
           CommonQuery::QuerySuccess(msg::QuerySuccess {
             return_qid: sender_path.query_id,
@@ -941,7 +948,8 @@ impl CoordContext {
         let sender_path = trans_read.sender_path;
         let responder_path = self.mk_query_path(query_id).into_ct();
         // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.ctx(io_ctx).send_to_ct(
+        self.ctx().send_to_ct(
+          io_ctx,
           sender_path.node_path,
           CommonQuery::QueryAborted(msg::QueryAborted {
             return_qid: sender_path.query_id,
@@ -1009,7 +1017,8 @@ impl CoordContext {
       // Paxos2PC will gracefully abort. (But this will never happen, since we already sent out
       // the Prepare and network queues are FIFO.)
       let query_path = register.query_path;
-      self.ctx(io_ctx).send_to_t(
+      self.ctx().send_to_t(
+        io_ctx,
         query_path.node_path,
         msg::TabletMessage::CancelQuery(msg::CancelQuery { query_id: query_path.query_id.clone() }),
       );
@@ -1045,12 +1054,12 @@ impl CoordContext {
     }
     // GRQueryES
     else if let Some(mut gr_query) = statuses.gr_query_ess.remove(&query_id) {
-      gr_query.es.exit_and_clean_up(&mut self.ctx(io_ctx));
+      gr_query.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(io_ctx, statuses, gr_query.child_queries);
     }
     // TransTableReadES
     else if let Some(mut trans_read) = statuses.trans_table_read_ess.remove(&query_id) {
-      trans_read.es.exit_and_clean_up(&mut self.ctx(io_ctx));
+      trans_read.es.exit_and_clean_up(&mut self.ctx());
       self.exit_all(io_ctx, statuses, trans_read.child_queries);
     }
     // TMStatus
@@ -1060,7 +1069,8 @@ impl CoordContext {
         if rm_result.is_none() {
           let orig_sid = &rm_path.sid;
           let orig_lid = tm_status.leaderships.get(&orig_sid).unwrap().clone();
-          self.ctx(io_ctx).send_to_ct_lid(
+          self.ctx().send_to_ct_lid(
+            io_ctx,
             rm_path,
             CommonQuery::CancelQuery(msg::CancelQuery {
               query_id: tm_status.child_query_id.clone(),
