@@ -1,7 +1,8 @@
 use crate::common::{CoreIOCtx, QueryESResult, QueryPlan, Timestamp};
 use crate::gr_query_es::GRQueryES;
 use crate::model::common::{
-  proc, CQueryPath, ColName, Context, QueryId, TQueryPath, TableView, TransTableName,
+  proc, CQueryPath, CTQueryPath, ColName, Context, PaxosGroupId, PaxosGroupIdTrait, QueryId,
+  TQueryPath, TableView, TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
@@ -74,6 +75,8 @@ pub struct GeneralQueryES {
 
 #[derive(Debug)]
 pub struct MSTableES<SqlQueryInnerT: SqlQueryInner> {
+  pub sender_path: CTQueryPath,
+  pub child_queries: Vec<QueryId>,
   pub general: GeneralQueryES,
   pub inner: SqlQueryInnerT,
   pub state: MSTableExecutionS,
@@ -232,6 +235,7 @@ impl<SqlQueryInnerT: SqlQueryInner> MSTableES<SqlQueryInnerT> {
         // See if we are already finished (due to having no subqueries).
         if exec.is_complete() {
           let result = std::mem::take(exec).get_results();
+          self.state = MSTableExecutionS::Done;
           self.inner.finish(ctx, io_ctx, &self.general, result, ms_query_es)
         } else {
           // Otherwise, return the subqueries.
@@ -274,6 +278,7 @@ impl<SqlQueryInnerT: SqlQueryInner> MSTableES<SqlQueryInnerT> {
     // See if we are finished (due to computing all subqueries).
     if exec.is_complete() {
       let result = std::mem::take(exec).get_results();
+      self.state = MSTableExecutionS::Done;
       self.inner.finish(ctx, io_ctx, &self.general, result, ms_query_es)
     } else {
       // Otherwise, we wait.
@@ -284,5 +289,9 @@ impl<SqlQueryInnerT: SqlQueryInner> MSTableES<SqlQueryInnerT> {
   /// Cleans up all currently owned resources, and goes to Done.
   pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _: &mut TabletContext, _: &mut IO) {
     self.state = MSTableExecutionS::Done;
+  }
+
+  pub fn sender_gid(&self) -> PaxosGroupId {
+    self.sender_path.node_path.sid.to_gid()
   }
 }

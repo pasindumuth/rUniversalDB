@@ -38,14 +38,14 @@ pub fn assert_tablet_consistency(tablet: &TabletState) {
   // Verify for every MSQueryES, every ES in `pending_queries` exist.
   for (query_id, ms_query_es) in &statuses.ms_query_ess {
     for child_qid in &ms_query_es.pending_queries {
-      if let Some(wrapper) = statuses.ms_table_read_ess.get(child_qid) {
-        assert_eq!(&wrapper.es.general.ms_query_id, query_id);
-      } else if let Some(wrapper) = statuses.ms_table_write_ess.get(child_qid) {
-        assert_eq!(&wrapper.es.general.ms_query_id, query_id);
-      } else if let Some(wrapper) = statuses.ms_table_insert_ess.get(child_qid) {
-        assert_eq!(&wrapper.es.general.ms_query_id, query_id);
-      } else if let Some(wrapper) = statuses.ms_table_delete_ess.get(child_qid) {
-        assert_eq!(&wrapper.es.general.ms_query_id, query_id);
+      if let Some(es) = statuses.ms_table_read_ess.get(child_qid) {
+        assert_eq!(&es.general.ms_query_id, query_id);
+      } else if let Some(es) = statuses.ms_table_write_ess.get(child_qid) {
+        assert_eq!(&es.general.ms_query_id, query_id);
+      } else if let Some(es) = statuses.ms_table_insert_ess.get(child_qid) {
+        assert_eq!(&es.general.ms_query_id, query_id);
+      } else if let Some(es) = statuses.ms_table_delete_ess.get(child_qid) {
+        assert_eq!(&es.general.ms_query_id, query_id);
       } else {
         panic!();
       }
@@ -53,29 +53,29 @@ pub fn assert_tablet_consistency(tablet: &TabletState) {
   }
 
   // Verify that for every MSTable*ES, a valid MSQueryES exists.
-  for (query_id, wrapper) in &statuses.ms_table_read_ess {
-    if let Some(ms_query_es) = statuses.ms_query_ess.get(&wrapper.es.general.ms_query_id) {
+  for (query_id, es) in &statuses.ms_table_read_ess {
+    if let Some(ms_query_es) = statuses.ms_query_ess.get(&es.general.ms_query_id) {
       assert!(ms_query_es.pending_queries.contains(query_id));
     } else {
       panic!()
     }
   }
-  for (query_id, wrapper) in &statuses.ms_table_write_ess {
-    if let Some(ms_query_es) = statuses.ms_query_ess.get(&wrapper.es.general.ms_query_id) {
+  for (query_id, es) in &statuses.ms_table_write_ess {
+    if let Some(ms_query_es) = statuses.ms_query_ess.get(&es.general.ms_query_id) {
       assert!(ms_query_es.pending_queries.contains(query_id));
     } else {
       panic!()
     }
   }
-  for (query_id, wrapper) in &statuses.ms_table_insert_ess {
-    if let Some(ms_query_es) = statuses.ms_query_ess.get(&wrapper.es.general.ms_query_id) {
+  for (query_id, es) in &statuses.ms_table_insert_ess {
+    if let Some(ms_query_es) = statuses.ms_query_ess.get(&es.general.ms_query_id) {
       assert!(ms_query_es.pending_queries.contains(query_id));
     } else {
       panic!()
     }
   }
-  for (query_id, wrapper) in &statuses.ms_table_delete_ess {
-    if let Some(ms_query_es) = statuses.ms_query_ess.get(&wrapper.es.general.ms_query_id) {
+  for (query_id, es) in &statuses.ms_table_delete_ess {
+    if let Some(ms_query_es) = statuses.ms_query_ess.get(&es.general.ms_query_id) {
       assert!(ms_query_es.pending_queries.contains(query_id));
     } else {
       panic!()
