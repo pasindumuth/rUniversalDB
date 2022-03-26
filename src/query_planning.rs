@@ -35,11 +35,12 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
   table_paths
 }
 
-/// Compute the all TierMaps for the `MSQueryES`.
+/// Compute the `TierMap` for every stage in the `MSQuery`. A `TablePath` should appear
+/// in a `TierMap` iff it is written to by the `MSQuery`.
 ///
-/// The Tier for a stage is where every Read query should be reading from, except for the
-/// written `TablePath` if the stage is a write (i.e. Update or Insert), in which case the
-/// Tier is one lower that which a Read query should be reading from.
+/// The `TierMap` for a stage contains the Tiers that should be used to read the `TablePath`s
+/// inside. Note that if a stage is a write (e.g. an Update), the Tier of the written `TablePath`
+/// in the `TierMap` is one behind (i.e. one more) the Tier that the write should commit at.
 pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableName, TierMap> {
   let mut all_tier_maps = BTreeMap::<TransTableName, TierMap>::new();
   let mut cur_tier_map = BTreeMap::<TablePath, u32>::new();
@@ -58,7 +59,6 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
     }
   }
   for (trans_table_name, stage) in ms_query.trans_tables.iter().rev() {
-    all_tier_maps.insert(trans_table_name.clone(), TierMap { map: cur_tier_map.clone() });
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(update) => {
@@ -71,6 +71,7 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
         *cur_tier_map.get_mut(&delete.table.source_ref).unwrap() += 1;
       }
     }
+    all_tier_maps.insert(trans_table_name.clone(), TierMap { map: cur_tier_map.clone() });
   }
   all_tier_maps
 }

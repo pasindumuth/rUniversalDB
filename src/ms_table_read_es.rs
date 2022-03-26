@@ -2,7 +2,8 @@ use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TableView, TransTableName,
+  proc, ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
@@ -35,6 +36,10 @@ impl SelectInner {
 }
 
 impl SqlQueryInner for SelectInner {
+  fn table_path(&self) -> &TablePath {
+    cast!(proc::GeneralSourceRef::TablePath, &self.sql_query.from.source_ref).unwrap()
+  }
+
   fn request_region_locks<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,

@@ -2,7 +2,7 @@ use crate::common::{remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp}
 use crate::gr_query_es::GRQueryES;
 use crate::model::common::{
   proc, CQueryPath, CTQueryPath, ColName, Context, PaxosGroupId, PaxosGroupIdTrait, QueryId,
-  SlaveGroupId, TQueryPath, TableView, TransTableName,
+  SlaveGroupId, TQueryPath, TablePath, TableView, TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
@@ -18,6 +18,8 @@ use std::rc::Rc;
 // -----------------------------------------------------------------------------------------------
 
 pub trait SqlQueryInner {
+  fn table_path(&self) -> &TablePath;
+
   fn request_region_locks<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,

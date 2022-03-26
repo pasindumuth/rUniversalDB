@@ -6,7 +6,8 @@ use crate::common::{
 use crate::expression::{construct_simple_cexpr, evaluate_c_expr, EvalError};
 use crate::gr_query_es::GRQueryES;
 use crate::model::common::{
-  proc, ColName, ColType, ColVal, ColValN, PrimaryKey, QueryId, TableView, TransTableName,
+  proc, ColName, ColType, ColVal, ColValN, PrimaryKey, QueryId, TablePath, TableView,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
@@ -43,6 +44,10 @@ impl InsertInner {
 }
 
 impl SqlQueryInner for InsertInner {
+  fn table_path(&self) -> &TablePath {
+    &self.sql_query.table.source_ref
+  }
+
   fn request_region_locks<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
@@ -228,7 +233,7 @@ impl SqlQueryInner for InsertInner {
       &ctx.storage,
       &ctx.table_schema,
       &ms_query_es.update_views,
-      es.tier.clone() + 1,
+      es.tier.clone(),
     );
 
     let pending = std::mem::take(&mut self.extra_pending).unwrap();
@@ -249,7 +254,7 @@ impl SqlQueryInner for InsertInner {
     }
 
     // Finally, apply the update to the MSQueryES's update_views
-    ms_query_es.update_views.insert(es.tier.clone(), update_view.clone());
+    ms_query_es.update_views.insert(es.tier.clone() - 1, update_view.clone());
 
     // Signal Success and return the data.
     let res_table_view = pending.res_table_view.clone();

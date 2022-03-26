@@ -3,7 +3,8 @@ use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
-  proc, ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TableView, TransTableName,
+  proc, ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
@@ -35,6 +36,10 @@ impl UpdateInner {
 }
 
 impl SqlQueryInner for UpdateInner {
+  fn table_path(&self) -> &TablePath {
+    &self.sql_query.table.source_ref
+  }
+
   fn request_region_locks<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
@@ -104,8 +109,7 @@ impl SqlQueryInner for UpdateInner {
           &ctx.storage,
           &ctx.table_schema,
           &ms_query_es.update_views,
-          es.tier.clone() + 1, // Remember that `tier` is the Tier to write to, which is
-                               // one lower than which to read from.
+          es.tier.clone(),
         ),
       ),
     )
@@ -134,7 +138,7 @@ impl SqlQueryInner for UpdateInner {
           &ctx.storage,
           &ctx.table_schema,
           &ms_query_es.update_views,
-          es.tier.clone() + 1,
+          es.tier.clone(),
         ),
       ),
       children,
@@ -227,7 +231,7 @@ impl SqlQueryInner for UpdateInner {
     match eval_res {
       Ok(()) => {
         // Amend the `update_view` in the MSQueryES.
-        ms_query_es.update_views.insert(es.tier.clone(), update_view);
+        ms_query_es.update_views.insert(es.tier.clone() - 1, update_view);
 
         // Signal Success and return the data.
         TPESAction::Success(QueryESResult {

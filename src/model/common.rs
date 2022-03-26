@@ -80,11 +80,7 @@ pub struct TableView {
   pub rows: BTreeMap<Vec<ColValN>, u64>,
 }
 
-/// A TablePath should appear here iff that Table is written to in the MSQuery.
-/// The Tier for every such TablePath here is the Tier that MSTableRead should be
-/// using to read. If the TransTable created by the MSQuery stage that uses this
-/// `TierMap` corresponds to an Update, the Tier for TablePath being updated should
-/// be one ahead (i.e. lower).
+/// See `compute_all_tier_maps` to see how this is used in the `QueryPlan`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TierMap {
   pub map: BTreeMap<TablePath, u32>,
