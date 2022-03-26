@@ -19,7 +19,7 @@ use crate::server::{LocalTable, ServerContextBase};
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColumnsLocking, Executing, Pending, RequestedReadProtected,
-  StorageLocalTable, TableAction, TableESBase, TabletContext,
+  StorageLocalTable, TPESAction, TPESBase, TabletContext,
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -192,7 +192,7 @@ impl TableReadES {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-  ) -> TableAction {
+  ) -> TPESAction {
     // If the GossipData is valid, then act accordingly.
     if check_gossip(&ctx.gossip.get(), &self.query_plan) {
       // We start locking the regions.
@@ -208,7 +208,7 @@ impl TableReadES {
         msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest { sender_path }),
       );
 
-      return TableAction::Wait;
+      return TPESAction::Wait;
     }
   }
 
@@ -216,11 +216,11 @@ impl TableReadES {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-  ) -> TableAction {
+  ) -> TPESAction {
     // Now, we check whether the TableSchema aligns with the QueryPlan.
     if !does_query_plan_align(ctx, &self.timestamp, &self.query_plan) {
       self.state = ExecutionS::Done;
-      TableAction::QueryError(msg::QueryError::InvalidQueryPlan)
+      TPESAction::QueryError(msg::QueryError::InvalidQueryPlan)
     } else {
       // If it aligns, we verify is GossipData is recent enough.
       self.check_gossip_data(ctx, io_ctx)
@@ -232,19 +232,19 @@ impl TableReadES {
     _: &mut TabletContext,
     _: &mut IO,
     query_id: &QueryId,
-  ) -> TableAction {
+  ) -> TPESAction {
     self.waiting_global_locks.remove(query_id);
     if self.waiting_global_locks.is_empty() {
       if let ExecutionS::WaitingGlobalLockedCols(res) = &self.state {
         // Signal Success and return the data.
         let res = res.clone();
         self.state = ExecutionS::Done;
-        TableAction::Success(res)
+        TPESAction::Success(res)
       } else {
-        TableAction::Wait
+        TPESAction::Wait
       }
     } else {
-      TableAction::Wait
+      TPESAction::Wait
     }
   }
 
@@ -253,7 +253,7 @@ impl TableReadES {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-  ) -> TableAction {
+  ) -> TPESAction {
     // Compute the ReadRegion
     let read_region = compute_read_region(
       &ctx.table_schema.key_cols,
@@ -277,7 +277,7 @@ impl TableReadES {
       },
     );
 
-    TableAction::Wait
+    TPESAction::Wait
   }
 
   /// Handles a ES finishing with all subqueries results in.
@@ -285,7 +285,7 @@ impl TableReadES {
     &mut self,
     ctx: &mut TabletContext,
     _: &mut IO,
-  ) -> TableAction {
+  ) -> TPESAction {
     let exec = cast!(ExecutionS::Executing, &mut self.state).unwrap();
 
     // Compute children.
@@ -322,21 +322,21 @@ impl TableReadES {
         if self.waiting_global_locks.is_empty() {
           // Signal Success and return the data.
           self.state = ExecutionS::Done;
-          TableAction::Success(res)
+          TPESAction::Success(res)
         } else {
           self.state = ExecutionS::WaitingGlobalLockedCols(res);
-          TableAction::Wait
+          TPESAction::Wait
         }
       }
       Err(eval_error) => {
         self.state = ExecutionS::Done;
-        TableAction::QueryError(mk_eval_error(eval_error))
+        TPESAction::QueryError(mk_eval_error(eval_error))
       }
     }
   }
 }
 
-impl TableESBase for TableReadES {
+impl TPESBase for TableReadES {
   type ESContext = ();
 
   fn sender_gid(&self) -> PaxosGroupId {
@@ -348,13 +348,13 @@ impl TableESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     _: &mut (),
-  ) -> TableAction {
+  ) -> TPESAction {
     // First, we lock the columns that the QueryPlan requires certain properties of.
     assert!(matches!(self.state, ExecutionS::Start));
     let qid = request_lock_columns(ctx, io_ctx, &self.query_id, &self.timestamp, &self.query_plan);
     self.state = ExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid: qid });
 
-    TableAction::Wait
+    TPESAction::Wait
   }
 
   /// Handle Columns being locked
@@ -363,7 +363,7 @@ impl TableESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     locked_cols_qid: QueryId,
-  ) -> TableAction {
+  ) -> TPESAction {
     let locking = cast!(ExecutionS::ColumnsLocking, &self.state).unwrap();
     assert_eq!(locking.locked_cols_qid, locked_cols_qid);
 
@@ -378,7 +378,7 @@ impl TableESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     locked_cols_qid: QueryId,
-  ) -> TableAction {
+  ) -> TPESAction {
     if let ExecutionS::ColumnsLocking(locking) = &self.state {
       assert_eq!(locking.locked_cols_qid, locked_cols_qid);
       self.common_locked_cols(ctx, io_ctx)
@@ -390,10 +390,10 @@ impl TableESBase for TableReadES {
   }
 
   /// Here, the column locking request results in us realizing the table has been dropped.
-  fn table_dropped(&mut self, _: &mut TabletContext) -> TableAction {
+  fn table_dropped(&mut self, _: &mut TabletContext) -> TPESAction {
     assert!(cast!(ExecutionS::ColumnsLocking, &self.state).is_ok());
     self.state = ExecutionS::Done;
-    TableAction::QueryError(msg::QueryError::InvalidQueryPlan)
+    TPESAction::QueryError(msg::QueryError::InvalidQueryPlan)
   }
 
   /// Here, we GossipData gets delivered.
@@ -402,13 +402,13 @@ impl TableESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     _: &mut (),
-  ) -> TableAction {
+  ) -> TPESAction {
     if let ExecutionS::GossipDataWaiting = self.state {
       // Verify is GossipData is now recent enough.
       self.check_gossip_data(ctx, io_ctx)
     } else {
       // Do nothing
-      TableAction::Wait
+      TPESAction::Wait
     }
   }
 
@@ -419,7 +419,7 @@ impl TableESBase for TableReadES {
     io_ctx: &mut IO,
     _: &mut (),
     protect_qid: QueryId,
-  ) -> TableAction {
+  ) -> TPESAction {
     match &self.state {
       ExecutionS::Pending(pending) if protect_qid == pending.query_id => {
         self.waiting_global_locks.insert(protect_qid);
@@ -451,12 +451,12 @@ impl TableESBase for TableReadES {
           self.finish_table_read_es(ctx, io_ctx)
         } else {
           // Otherwise, return the subqueries.
-          TableAction::SendSubqueries(gr_query_ess)
+          TPESAction::SendSubqueries(gr_query_ess)
         }
       }
       _ => {
         debug_assert!(false);
-        TableAction::Wait
+        TPESAction::Wait
       }
     }
   }
@@ -467,7 +467,7 @@ impl TableESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     query_id: QueryId,
-  ) -> TableAction {
+  ) -> TPESAction {
     self.remove_waiting_global_lock(ctx, io_ctx, &query_id)
   }
 
@@ -479,9 +479,9 @@ impl TableESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     query_error: msg::QueryError,
-  ) -> TableAction {
+  ) -> TPESAction {
     self.exit_and_clean_up(ctx, io_ctx);
-    TableAction::QueryError(query_error)
+    TPESAction::QueryError(query_error)
   }
 
   /// Handles a Subquery completing
@@ -493,7 +493,7 @@ impl TableESBase for TableReadES {
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
     (_, table_views): (Vec<Option<ColName>>, Vec<TableView>),
-  ) -> TableAction {
+  ) -> TPESAction {
     // Add the subquery results into the TableReadES.
     self.new_rms.extend(subquery_new_rms);
     let exec = cast!(ExecutionS::Executing, &mut self.state).unwrap();
@@ -504,7 +504,7 @@ impl TableESBase for TableReadES {
       self.finish_table_read_es(ctx, io_ctx)
     } else {
       // Otherwise, we wait.
-      TableAction::Wait
+      TPESAction::Wait
     }
   }
 
@@ -513,8 +513,8 @@ impl TableESBase for TableReadES {
     self.state = ExecutionS::Done;
   }
 
-  fn deregister(self, _: &mut ()) -> (QueryId, CTQueryPath) {
-    (self.query_id, self.sender_path)
+  fn deregister(self, _: &mut ()) -> (QueryId, CTQueryPath, Vec<QueryId>) {
+    (self.query_id, self.sender_path, self.child_queries)
   }
 }
 

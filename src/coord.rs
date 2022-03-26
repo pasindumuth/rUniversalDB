@@ -23,7 +23,7 @@ use crate::paxos2pc_tm::{Paxos2PCTMAction, TMMessage};
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CTServerContext, CommonQuery, ServerContextBase};
 use crate::sql_parser::convert_ast;
-use crate::tablet::TableAction;
+use crate::tablet::TPESAction;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
 use crate::trans_table_read_es::{TransExecutionS, TransTableReadES};
 use rand::RngCore;
@@ -936,14 +936,14 @@ impl CoordContext {
     io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: TableAction,
+    action: TPESAction,
   ) {
     match action {
-      TableAction::Wait => {}
-      TableAction::SendSubqueries(gr_query_ess) => {
+      TPESAction::Wait => {}
+      TPESAction::SendSubqueries(gr_query_ess) => {
         self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
-      TableAction::Success(success) => {
+      TPESAction::Success(success) => {
         // Remove the TableReadESWrapper and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
@@ -960,7 +960,7 @@ impl CoordContext {
           }),
         )
       }
-      TableAction::QueryError(query_error) => {
+      TPESAction::QueryError(query_error) => {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;

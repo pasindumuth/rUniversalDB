@@ -16,7 +16,7 @@ use crate::server::{
   ServerContextBase,
 };
 use crate::table_read_es::{check_gossip, fully_evaluate_select};
-use crate::tablet::{compute_contexts, Executing, TableAction, TableESBase, TabletContext};
+use crate::tablet::{compute_contexts, Executing, TPESAction, TPESBase, TabletContext};
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use std::ops::Deref;
@@ -155,7 +155,7 @@ impl TransTableReadES {
     ctx: &mut Ctx,
     io_ctx: &mut IO,
     trans_table_source: &SourceT,
-  ) -> TableAction {
+  ) -> TPESAction {
     self.check_gossip_data(ctx, io_ctx, trans_table_source)
   }
 
@@ -165,7 +165,7 @@ impl TransTableReadES {
     ctx: &mut Ctx,
     io_ctx: &mut IO,
     trans_table_source: &SourceT,
-  ) -> TableAction {
+  ) -> TPESAction {
     // If the GossipData is valid, then act accordingly.
     if check_gossip(&ctx.gossip().get(), &self.query_plan) {
       // We start locking the regions.
@@ -181,7 +181,7 @@ impl TransTableReadES {
         msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest { sender_path }),
       );
 
-      return TableAction::Wait;
+      return TPESAction::Wait;
     }
   }
 
@@ -191,13 +191,13 @@ impl TransTableReadES {
     ctx: &mut Ctx,
     io_ctx: &mut IO,
     trans_table_source: &SourceT,
-  ) -> TableAction {
+  ) -> TPESAction {
     if let TransExecutionS::GossipDataWaiting = self.state {
       // Verify is GossipData is now recent enough.
       self.check_gossip_data(ctx, io_ctx, trans_table_source)
     } else {
       // Do nothing
-      TableAction::Wait
+      TPESAction::Wait
     }
   }
 
@@ -207,7 +207,7 @@ impl TransTableReadES {
     ctx: &mut Ctx,
     io_ctx: &mut IO,
     trans_table_source: &SourceT,
-  ) -> TableAction {
+  ) -> TPESAction {
     // Here, we first construct all of the subquery Contexts using the
     // ContextConstructor, and then we construct GRQueryESs.
 
@@ -256,7 +256,7 @@ impl TransTableReadES {
       self.finish_trans_table_read_es(ctx, io_ctx, trans_table_source)
     } else {
       // Otherwise, return the subqueries.
-      TableAction::SendSubqueries(gr_query_ess)
+      TPESAction::SendSubqueries(gr_query_ess)
     }
   }
 
@@ -268,9 +268,9 @@ impl TransTableReadES {
     ctx: &mut Ctx,
     io_ctx: &mut IO,
     query_error: msg::QueryError,
-  ) -> TableAction {
+  ) -> TPESAction {
     self.exit_and_clean_up(ctx, io_ctx);
-    TableAction::QueryError(query_error)
+    TPESAction::QueryError(query_error)
   }
 
   /// Handles a Subquery completing
@@ -282,7 +282,7 @@ impl TransTableReadES {
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
     (_, table_views): (Vec<Option<ColName>>, Vec<TableView>),
-  ) -> TableAction {
+  ) -> TPESAction {
     // Add the subquery results into the TableReadES.
     self.new_rms.extend(subquery_new_rms);
     let exec = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
@@ -293,7 +293,7 @@ impl TransTableReadES {
       self.finish_trans_table_read_es(ctx, io_ctx, trans_table_source)
     } else {
       // Otherwise, we wait.
-      TableAction::Wait
+      TPESAction::Wait
     }
   }
 
@@ -303,7 +303,7 @@ impl TransTableReadES {
     _: &mut Ctx,
     _: &mut IO,
     trans_table_source: &SourceT,
-  ) -> TableAction {
+  ) -> TPESAction {
     let exec = cast!(TransExecutionS::Executing, &mut self.state).unwrap();
 
     // Compute children.
@@ -332,14 +332,14 @@ impl TransTableReadES {
       Ok((select_schema, res_table_views)) => {
         // Signal Success and return the data.
         self.state = TransExecutionS::Done;
-        TableAction::Success(QueryESResult {
+        TPESAction::Success(QueryESResult {
           result: (select_schema, res_table_views),
           new_rms: self.new_rms.iter().cloned().collect(),
         })
       }
       Err(eval_error) => {
         self.state = TransExecutionS::Done;
-        TableAction::QueryError(mk_eval_error(eval_error))
+        TPESAction::QueryError(mk_eval_error(eval_error))
       }
     }
   }
@@ -362,16 +362,19 @@ impl TransTableReadES {
     remove_item(&mut self.child_queries, subquery_id)
   }
 
-  pub fn deregister<SourceT: TransTableSource>(self, _: &SourceT) -> (QueryId, CTQueryPath) {
-    (self.query_id, self.sender_path)
+  pub fn deregister<SourceT: TransTableSource>(
+    self,
+    _: &SourceT,
+  ) -> (QueryId, CTQueryPath, Vec<QueryId>) {
+    (self.query_id, self.sender_path, self.child_queries)
   }
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Implementation of TableESBase
+//  Implementation of TPESBase
 // -----------------------------------------------------------------------------------------------
 
-impl TableESBase for TransTableReadES {
+impl TPESBase for TransTableReadES {
   type ESContext = GRQueryES;
 
   fn sender_gid(&self) -> PaxosGroupId {
@@ -383,7 +386,7 @@ impl TableESBase for TransTableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     es_ctx: &mut Self::ESContext,
-  ) -> TableAction {
+  ) -> TPESAction {
     TransTableReadES::start(self, ctx, io_ctx, es_ctx)
   }
 
@@ -392,7 +395,7 @@ impl TableESBase for TransTableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     es_ctx: &mut Self::ESContext,
-  ) -> TableAction {
+  ) -> TPESAction {
     TransTableReadES::gossip_data_changed(self, ctx, io_ctx, es_ctx)
   }
 
@@ -401,7 +404,7 @@ impl TableESBase for TransTableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     query_error: QueryError,
-  ) -> TableAction {
+  ) -> TPESAction {
     TransTableReadES::handle_internal_query_error(self, ctx, io_ctx, query_error)
   }
 
@@ -413,7 +416,7 @@ impl TableESBase for TransTableReadES {
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
     results: (Vec<Option<ColName>>, Vec<TableView>),
-  ) -> TableAction {
+  ) -> TPESAction {
     TransTableReadES::handle_subquery_done(
       self,
       ctx,
@@ -429,7 +432,7 @@ impl TableESBase for TransTableReadES {
     TransTableReadES::exit_and_clean_up(self, ctx, io_ctx)
   }
 
-  fn deregister(self, es_ctx: &mut Self::ESContext) -> (QueryId, CTQueryPath) {
+  fn deregister(self, es_ctx: &mut Self::ESContext) -> (QueryId, CTQueryPath, Vec<QueryId>) {
     TransTableReadES::deregister(self, es_ctx)
   }
 

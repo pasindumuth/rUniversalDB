@@ -8,7 +8,7 @@ use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::table_read_es::{check_gossip, does_query_plan_align, request_lock_columns};
 use crate::tablet::{
-  ColumnsLocking, Executing, MSQueryES, Pending, TableAction, TableESBase, TabletContext,
+  ColumnsLocking, Executing, MSQueryES, Pending, TPESAction, TPESBase, TabletContext,
 };
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -40,7 +40,7 @@ pub trait SqlQueryInner {
     es: &GeneralQueryES,
     subquery_results: (Vec<(Vec<proc::ColumnRef>, Vec<TransTableName>)>, Vec<Vec<TableView>>),
     ms_query_es: &mut MSQueryES,
-  ) -> TableAction;
+  ) -> TPESAction;
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -94,18 +94,18 @@ impl<SqlQueryInnerT: SqlQueryInner> MSTableES<SqlQueryInnerT> {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-  ) -> TableAction {
+  ) -> TPESAction {
     // If the GossipData is valid, then act accordingly.
     if check_gossip(&ctx.gossip.get(), &self.general.query_plan) {
       // We start locking the regions.
       match self.inner.request_region_locks(ctx, io_ctx, &self.general) {
         Ok(protect_qid) => {
           self.state = MSTableExecutionS::Pending(Pending { query_id: protect_qid });
-          TableAction::Wait
+          TPESAction::Wait
         }
         Err(query_error) => {
           self.state = MSTableExecutionS::Done;
-          TableAction::QueryError(query_error)
+          TPESAction::QueryError(query_error)
         }
       }
     } else {
@@ -119,12 +119,12 @@ impl<SqlQueryInnerT: SqlQueryInner> MSTableES<SqlQueryInnerT> {
         msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest { sender_path }),
       );
 
-      TableAction::Wait
+      TPESAction::Wait
     }
   }
 }
 
-impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
+impl<SqlQueryInnerT: SqlQueryInner> TPESBase for MSTableES<SqlQueryInnerT> {
   type ESContext = MSQueryES;
 
   fn sender_gid(&self) -> PaxosGroupId {
@@ -136,7 +136,7 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     _: &mut MSQueryES,
-  ) -> TableAction {
+  ) -> TPESAction {
     // First, we lock the columns that the QueryPlan requires certain properties of.
     assert!(matches!(self.state, MSTableExecutionS::Start));
     let locked_cols_qid = request_lock_columns(
@@ -148,7 +148,7 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
     );
     self.state = MSTableExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid });
 
-    TableAction::Wait
+    TPESAction::Wait
   }
 
   /// Handle Columns being locked
@@ -157,24 +157,24 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     locked_cols_qid: QueryId,
-  ) -> TableAction {
+  ) -> TPESAction {
     match &self.state {
       MSTableExecutionS::ColumnsLocking(locking) => {
         if locking.locked_cols_qid == locked_cols_qid {
           // Now, we check whether the TableSchema aligns with the QueryPlan.
           if !does_query_plan_align(ctx, &self.general.timestamp, &self.general.query_plan) {
             self.state = MSTableExecutionS::Done;
-            TableAction::QueryError(msg::QueryError::InvalidQueryPlan)
+            TPESAction::QueryError(msg::QueryError::InvalidQueryPlan)
           } else {
             // If it aligns, we verify is GossipData is recent enough.
             self.check_gossip_data(ctx, io_ctx)
           }
         } else {
           debug_assert!(false);
-          TableAction::Wait
+          TPESAction::Wait
         }
       }
-      _ => TableAction::Wait,
+      _ => TPESAction::Wait,
     }
   }
 
@@ -184,20 +184,20 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     locked_cols_qid: QueryId,
-  ) -> TableAction {
+  ) -> TPESAction {
     self.local_locked_cols(ctx, io_ctx, locked_cols_qid)
   }
 
   /// Here, the column locking request results in us realizing the table has been dropped.
-  fn table_dropped(&mut self, _: &mut TabletContext) -> TableAction {
+  fn table_dropped(&mut self, _: &mut TabletContext) -> TPESAction {
     match &self.state {
       MSTableExecutionS::ColumnsLocking(_) => {
         self.state = MSTableExecutionS::Done;
-        TableAction::QueryError(msg::QueryError::InvalidQueryPlan)
+        TPESAction::QueryError(msg::QueryError::InvalidQueryPlan)
       }
       _ => {
         debug_assert!(false);
-        TableAction::Wait
+        TPESAction::Wait
       }
     }
   }
@@ -208,13 +208,13 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     _: &mut MSQueryES,
-  ) -> TableAction {
+  ) -> TPESAction {
     if let MSTableExecutionS::GossipDataWaiting = self.state {
       // Verify is GossipData is now recent enough.
       self.check_gossip_data(ctx, io_ctx)
     } else {
       // Do nothing
-      TableAction::Wait
+      TPESAction::Wait
     }
   }
 
@@ -225,7 +225,7 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
     io_ctx: &mut IO,
     ms_query_es: &mut MSQueryES,
     protect_qid: QueryId,
-  ) -> TableAction {
+  ) -> TPESAction {
     match &self.state {
       MSTableExecutionS::Pending(pending) if protect_qid == pending.query_id => {
         let gr_query_ess = self.inner.compute_subqueries(ctx, io_ctx, &self.general, ms_query_es);
@@ -241,12 +241,12 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
           self.inner.finish(ctx, io_ctx, &self.general, result, ms_query_es)
         } else {
           // Otherwise, return the subqueries.
-          TableAction::SendSubqueries(gr_query_ess)
+          TPESAction::SendSubqueries(gr_query_ess)
         }
       }
       _ => {
         debug_assert!(false);
-        TableAction::Wait
+        TPESAction::Wait
       }
     }
   }
@@ -257,9 +257,9 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     query_error: msg::QueryError,
-  ) -> TableAction {
+  ) -> TPESAction {
     self.exit_and_clean_up(ctx, io_ctx);
-    TableAction::QueryError(query_error)
+    TPESAction::QueryError(query_error)
   }
 
   /// Handles a Subquery completing
@@ -271,7 +271,7 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
     (_, table_views): (Vec<Option<ColName>>, Vec<TableView>),
-  ) -> TableAction {
+  ) -> TPESAction {
     // Add the subquery results into the MSTableES.
     self.general.new_rms.extend(subquery_new_rms);
     let exec = cast!(MSTableExecutionS::Executing, &mut self.state).unwrap();
@@ -284,7 +284,7 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
       self.inner.finish(ctx, io_ctx, &self.general, result, ms_query_es)
     } else {
       // Otherwise, we wait.
-      TableAction::Wait
+      TPESAction::Wait
     }
   }
 
@@ -293,9 +293,9 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
     self.state = MSTableExecutionS::Done;
   }
 
-  fn deregister(self, ms_query_es: &mut MSQueryES) -> (QueryId, CTQueryPath) {
+  fn deregister(self, ms_query_es: &mut MSQueryES) -> (QueryId, CTQueryPath, Vec<QueryId>) {
     ms_query_es.pending_queries.remove(&self.general.query_id);
-    (self.general.query_id, self.sender_path)
+    (self.general.query_id, self.sender_path, self.child_queries)
   }
 
   fn remove_subquery(&mut self, subquery_id: &QueryId) {

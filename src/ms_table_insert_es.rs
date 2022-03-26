@@ -12,7 +12,7 @@ use crate::model::message as msg;
 use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
 use crate::server::mk_eval_error;
 use crate::storage::{GenericTable, MSStorageView, StorageView, PRESENCE_VALN};
-use crate::tablet::TableAction;
+use crate::tablet::TPESAction;
 use crate::tablet::{MSQueryES, RequestedReadProtected, TabletContext};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -221,7 +221,7 @@ impl SqlQueryInner for InsertInner {
     es: &GeneralQueryES,
     _: (Vec<(Vec<proc::ColumnRef>, Vec<TransTableName>)>, Vec<Vec<TableView>>),
     ms_query_es: &mut MSQueryES,
-  ) -> TableAction {
+  ) -> TPESAction {
     // Verify that the keys are not in the storage. We create a PresenceSnapshot only
     // consisting of keys and verify that the Insert does not write to these keys.
     let storage_view = MSStorageView::new(
@@ -241,7 +241,7 @@ impl SqlQueryInner for InsertInner {
       if ci == &None {
         if snapshot.contains_key(pkey) {
           // This already key exists, so we must respond with an abort.
-          return TableAction::QueryError(msg::QueryError::RuntimeError {
+          return TPESAction::QueryError(msg::QueryError::RuntimeError {
             msg: "Inserting a row that already exists.".to_string(),
           });
         }
@@ -253,7 +253,7 @@ impl SqlQueryInner for InsertInner {
 
     // Signal Success and return the data.
     let res_table_view = pending.res_table_view.clone();
-    TableAction::Success(QueryESResult {
+    TPESAction::Success(QueryESResult {
       result: (compute_insert_schema(&self.sql_query), vec![res_table_view]),
       new_rms: es.new_rms.iter().cloned().collect(),
     })
