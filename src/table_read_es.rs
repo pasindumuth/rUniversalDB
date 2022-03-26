@@ -9,7 +9,8 @@ use crate::expression::{
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
   iast, proc, CQueryPath, CTQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow,
-  PaxosGroupId, PaxosGroupIdTrait, QueryId, TQueryPath, TablePath, TableView, TransTableName,
+  PaxosGroupId, PaxosGroupIdTrait, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
+  TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::{
@@ -339,8 +340,11 @@ impl TableReadES {
 impl TPESBase for TableReadES {
   type ESContext = ();
 
-  fn sender_gid(&self) -> PaxosGroupId {
-    self.sender_path.node_path.sid.to_gid()
+  fn sender_sid(&self) -> &SlaveGroupId {
+    &self.sender_path.node_path.sid
+  }
+  fn query_id(&self) -> &QueryId {
+    &self.query_id
   }
 
   fn start<IO: CoreIOCtx>(

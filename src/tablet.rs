@@ -218,7 +218,8 @@ pub struct TabletSnapshot {
 pub trait TPESBase {
   type ESContext;
 
-  fn sender_gid(&self) -> PaxosGroupId;
+  fn sender_sid(&self) -> &SlaveGroupId;
+  fn query_id(&self) -> &QueryId;
 
   fn start<IO: CoreIOCtx>(
     &mut self,
@@ -384,6 +385,7 @@ trait CallbackWithContextRemove<ExtraDataT> {
 /// A more general action that the above callbacks can return so that the
 /// `TabletContext` can do more than just `TPESAction`s.
 pub enum TabletAction {
+  Wait,
   TPESAction(TPESAction),
   ExitAll(Vec<QueryId>),
   ExitAndCleanUp(QueryId),
@@ -1388,8 +1390,8 @@ impl TabletContext {
           }
 
           // Inform Top-Level ESs.
-          struct MSGossipCb;
-          impl CallbackWithContext<()> for MSGossipCb {
+          struct Cb;
+          impl CallbackWithContext<()> for Cb {
             fn call<IOCtx: CoreIOCtx, TPEST: TPESBase>(
               ctx: &mut TabletContext,
               io_ctx: &mut IOCtx,
@@ -1401,7 +1403,7 @@ impl TabletContext {
             }
           };
 
-          statuses.execute_all_ctx::<_, _, MSGossipCb>(self, io_ctx, &());
+          statuses.execute_all_ctx::<_, _, Cb>(self, io_ctx, &());
 
           // Run Main Loop
           self.run_main_loop(io_ctx, statuses);
@@ -1416,71 +1418,40 @@ impl TabletContext {
           // Only update the LeadershipId if the new one increases the old one.
           if lid.gen > cur_lid.gen {
             self.leader_map.insert(gid.clone(), lid.clone());
-
-            // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no
-            // response). Note that although it is not critical for avoiding resource leaks, it
-            // means we only end up responding to the PaxosNode that sent the request (not a
-            // random subsequent one).
-
-            // TODO: bring these under the SlaveGroupId if statement below.
-            let query_ids: Vec<QueryId> = statuses.perform_query_buffer.keys().cloned().collect();
-            for query_id in query_ids {
-              let perform_query = statuses.perform_query_buffer.get(&query_id).unwrap();
-              if perform_query.sender_path.node_path.sid.to_gid() == gid {
-                self.exit_and_clean_up(io_ctx, statuses, query_id);
-              }
-            }
-
-            let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
-            for query_id in query_ids {
-              let read = statuses.table_read_ess.get_mut(&query_id).unwrap();
-              if read.sender_gid() == gid {
-                self.exit_and_clean_up(io_ctx, statuses, query_id);
-              }
-            }
-
-            let query_ids: Vec<QueryId> = statuses.trans_table_read_ess.keys().cloned().collect();
-            for query_id in query_ids {
-              let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
-              if trans_read.sender_gid() == gid {
-                self.exit_and_clean_up(io_ctx, statuses, query_id);
-              }
-            }
-
-            let query_ids: Vec<QueryId> = statuses.ms_table_read_ess.keys().cloned().collect();
-            for query_id in query_ids {
-              let ms_read = statuses.ms_table_read_ess.get_mut(&query_id).unwrap();
-              if ms_read.sender_gid() == gid {
-                self.exit_and_clean_up(io_ctx, statuses, query_id);
-              }
-            }
-
-            let query_ids: Vec<QueryId> = statuses.ms_table_write_ess.keys().cloned().collect();
-            for query_id in query_ids {
-              let ms_write = statuses.ms_table_write_ess.get_mut(&query_id).unwrap();
-              if ms_write.sender_gid() == gid {
-                self.exit_and_clean_up(io_ctx, statuses, query_id);
-              }
-            }
-
-            let query_ids: Vec<QueryId> = statuses.ms_table_insert_ess.keys().cloned().collect();
-            for query_id in query_ids {
-              let ms_insert = statuses.ms_table_insert_ess.get_mut(&query_id).unwrap();
-              if ms_insert.sender_gid() == gid {
-                self.exit_and_clean_up(io_ctx, statuses, query_id);
-              }
-            }
-
-            let query_ids: Vec<QueryId> = statuses.ms_table_delete_ess.keys().cloned().collect();
-            for query_id in query_ids {
-              let ms_delete = statuses.ms_table_delete_ess.get_mut(&query_id).unwrap();
-              if ms_delete.sender_gid() == gid {
-                self.exit_and_clean_up(io_ctx, statuses, query_id);
-              }
-            }
-
-            // Inform TMStatus
             if let PaxosGroupId::Slave(sid) = gid {
+              // For Top-Level ESs, if the sending PaxosGroup's Leadership changed, we ECU (no
+              // response). Note that although it is not critical for avoiding resource leaks, it
+              // means we only end up responding to the PaxosNode that sent the request (not a
+              // random subsequent one).
+
+              let query_ids: Vec<QueryId> = statuses.perform_query_buffer.keys().cloned().collect();
+              for query_id in query_ids {
+                let perform_query = statuses.perform_query_buffer.get(&query_id).unwrap();
+                if perform_query.sender_path.node_path.sid == sid {
+                  self.exit_and_clean_up(io_ctx, statuses, query_id);
+                }
+              }
+
+              // Inform Top-Level ESs.
+              struct Cb;
+              impl Callback<SlaveGroupId> for Cb {
+                fn call<IOCtx: CoreIOCtx, TPEST: TPESBase>(
+                  _: &mut TabletContext,
+                  _: &mut IOCtx,
+                  es: &mut TPEST,
+                  sid: &SlaveGroupId,
+                ) -> TabletAction {
+                  if es.sender_sid() == sid {
+                    TabletAction::ExitAndCleanUp(es.query_id().clone())
+                  } else {
+                    TabletAction::Wait
+                  }
+                }
+              };
+
+              statuses.execute_all::<_, _, Cb>(self, io_ctx, &sid);
+
+              // Inform TMStatus
               let query_ids: Vec<QueryId> = statuses.tm_statuss.keys().cloned().collect();
               for query_id in query_ids {
                 let tm_status = statuses.tm_statuss.get_mut(&query_id).unwrap();
@@ -2828,79 +2799,22 @@ impl TabletContext {
     query_id: QueryId,
     query_error: msg::QueryError,
   ) {
-    let ms_query_es = statuses.ms_query_ess.remove(&query_id).unwrap();
-    self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
-
-    // Then, we ECU all ESs in `pending_queries`, and respond with an Abort.
-    for query_id in ms_query_es.pending_queries {
-      if let Some(mut ms_read) = statuses.ms_table_read_ess.remove(&query_id) {
-        // MSTableReadES
-        ms_read.exit_and_clean_up(self, io_ctx);
-        let sender_path = ms_read.sender_path;
-        let responder_path = self.mk_query_path(query_id).into_ct();
-        // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.send_to_ct(
-          io_ctx,
-          sender_path.node_path,
-          CommonQuery::QueryAborted(msg::QueryAborted {
-            return_qid: sender_path.query_id,
-            responder_path,
-            payload: msg::AbortedData::QueryError(query_error.clone()),
-          }),
-        );
-        self.exit_all(io_ctx, statuses, ms_read.child_queries);
-      } else if let Some(mut ms_write) = statuses.ms_table_write_ess.remove(&query_id) {
-        // MSTableWriteES
-        ms_write.exit_and_clean_up(self, io_ctx);
-        let sender_path = ms_write.sender_path;
-        let responder_path = self.mk_query_path(query_id).into_ct();
-        // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.send_to_ct(
-          io_ctx,
-          sender_path.node_path,
-          CommonQuery::QueryAborted(msg::QueryAborted {
-            return_qid: sender_path.query_id,
-            responder_path,
-            payload: msg::AbortedData::QueryError(query_error.clone()),
-          }),
-        );
-        self.exit_all(io_ctx, statuses, ms_write.child_queries);
-      } else if let Some(mut ms_insert) = statuses.ms_table_insert_ess.remove(&query_id) {
-        // MSTableWriteES
-        ms_insert.exit_and_clean_up(self, io_ctx);
-        let sender_path = ms_insert.sender_path;
-        let responder_path = self.mk_query_path(query_id).into_ct();
-        // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.send_to_ct(
-          io_ctx,
-          sender_path.node_path,
-          CommonQuery::QueryAborted(msg::QueryAborted {
-            return_qid: sender_path.query_id,
-            responder_path,
-            payload: msg::AbortedData::QueryError(query_error.clone()),
-          }),
-        );
-        self.exit_all(io_ctx, statuses, ms_insert.child_queries);
-      } else if let Some(mut ms_delete) = statuses.ms_table_delete_ess.remove(&query_id) {
-        // MSTableDeleteES
-        ms_delete.exit_and_clean_up(self, io_ctx);
-        let sender_path = ms_delete.sender_path;
-        let responder_path = self.mk_query_path(query_id).into_ct();
-        // This is the originating Leadership (see Scenario 4,"SenderPath LeaderMap Consistency").
-        self.send_to_ct(
-          io_ctx,
-          sender_path.node_path,
-          CommonQuery::QueryAborted(msg::QueryAborted {
-            return_qid: sender_path.query_id,
-            responder_path,
-            payload: msg::AbortedData::QueryError(query_error.clone()),
-          }),
-        );
-        self.exit_all(io_ctx, statuses, ms_delete.child_queries);
-      }
+    // Exit all ESs in `pending_queries` with `query_error` first.
+    let pending_queries = statuses.ms_query_ess.get(&query_id).unwrap().pending_queries.clone();
+    for query_id in pending_queries {
+      self.handle_tp_es_action(
+        io_ctx,
+        statuses,
+        query_id,
+        TPESAction::QueryError(query_error.clone()),
+      );
     }
 
+    // Remove the MSQueryES.
+    let ms_query_es = statuses.ms_query_ess.remove(&query_id).unwrap();
+
     // Cleanup the TableContext's
+    self.ms_root_query_map.remove(&ms_query_es.root_query_path.query_id);
     self.verifying_writes.remove(&ms_query_es.timestamp);
   }
 
@@ -2913,6 +2827,7 @@ impl TabletContext {
     action: TabletAction,
   ) {
     match action {
+      TabletAction::Wait => {}
       TabletAction::TPESAction(action) => {
         self.handle_tp_es_action(io_ctx, statuses, query_id, action);
       }
@@ -2939,7 +2854,6 @@ impl TabletContext {
         self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
       TPESAction::Success(success) => {
-        // Remove the MSTable*ES, removing it from the MSQueryES, and respond.
         struct Cb;
         impl CallbackWithContextRemove<QueryESResult> for Cb {
           fn call<IOCtx: CoreIOCtx, TPEST: TPESBase>(
@@ -2969,7 +2883,6 @@ impl TabletContext {
         statuses.execute_remove_ctx::<_, _, Cb>(self, io_ctx, query_id, success);
       }
       TPESAction::QueryError(query_error) => {
-        // Remove the MSTable*ES, removing it from the MSQueryES, and respond.
         struct Cb;
         impl CallbackWithContextRemove<msg::QueryError> for Cb {
           fn call<IOCtx: CoreIOCtx, TPEST: TPESBase>(
@@ -3072,16 +2985,6 @@ impl TabletContext {
       gr_query.es.exit_and_clean_up(self);
       self.exit_all(io_ctx, statuses, gr_query.child_queries);
     }
-    // TableReadES
-    else if let Some(mut read) = statuses.table_read_ess.remove(&query_id) {
-      read.exit_and_clean_up(self, io_ctx);
-      self.exit_all(io_ctx, statuses, read.child_queries);
-    }
-    // TransTableReadES
-    else if let Some(mut trans_read) = statuses.trans_table_read_ess.remove(&query_id) {
-      trans_read.exit_and_clean_up(self, io_ctx);
-      self.exit_all(io_ctx, statuses, trans_read.child_queries);
-    }
     // TMStatus
     else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
       // We ECU this TMStatus by sending CancelQuery to all remaining RMs.
@@ -3121,33 +3024,23 @@ impl TabletContext {
         msg::QueryError::LateralError,
       );
     }
-    // MSTableWriteES
-    else if let Some(mut ms_write) = statuses.ms_table_write_ess.remove(&query_id) {
-      let ms_query_es = statuses.ms_query_ess.get_mut(&ms_write.general.ms_query_id).unwrap();
-      ms_query_es.pending_queries.remove(&query_id);
-      ms_write.exit_and_clean_up(self, io_ctx);
-      self.exit_all(io_ctx, statuses, ms_write.child_queries);
-    }
-    // MSTableInsertES
-    else if let Some(mut ms_insert) = statuses.ms_table_insert_ess.remove(&query_id) {
-      let ms_query_es = statuses.ms_query_ess.get_mut(&ms_insert.general.ms_query_id).unwrap();
-      ms_query_es.pending_queries.remove(&query_id);
-      ms_insert.exit_and_clean_up(self, io_ctx);
-      self.exit_all(io_ctx, statuses, ms_insert.child_queries);
-    }
-    // MSTableDeleteES
-    else if let Some(mut ms_delete) = statuses.ms_table_delete_ess.remove(&query_id) {
-      let ms_query_es = statuses.ms_query_ess.get_mut(&ms_delete.general.ms_query_id).unwrap();
-      ms_query_es.pending_queries.remove(&query_id);
-      ms_delete.exit_and_clean_up(self, io_ctx);
-      self.exit_all(io_ctx, statuses, ms_delete.child_queries);
-    }
-    // MSTableReadES
-    else if let Some(mut ms_read) = statuses.ms_table_read_ess.remove(&query_id) {
-      let ms_query_es = statuses.ms_query_ess.get_mut(&ms_read.general.ms_query_id).unwrap();
-      ms_query_es.pending_queries.remove(&query_id);
-      ms_read.exit_and_clean_up(self, io_ctx);
-      self.exit_all(io_ctx, statuses, ms_read.child_queries);
+    // Top Level ESs
+    else {
+      struct Cb;
+      impl CallbackWithContextRemove<()> for Cb {
+        fn call<IOCtx: CoreIOCtx, TPEST: TPESBase>(
+          _: &mut TabletContext,
+          _: &mut IOCtx,
+          es: TPEST,
+          es_ctx: &mut TPEST::ESContext,
+          _: (),
+        ) -> TabletAction {
+          let (_, _, child_queries) = es.deregister(es_ctx);
+          TabletAction::ExitAll(child_queries)
+        }
+      };
+
+      statuses.execute_remove_ctx::<_, _, Cb>(self, io_ctx, query_id, ());
     }
   }
 

@@ -2,7 +2,7 @@ use crate::common::{remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp}
 use crate::gr_query_es::GRQueryES;
 use crate::model::common::{
   proc, CQueryPath, CTQueryPath, ColName, Context, PaxosGroupId, PaxosGroupIdTrait, QueryId,
-  TQueryPath, TableView, TransTableName,
+  SlaveGroupId, TQueryPath, TableView, TransTableName,
 };
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
@@ -127,8 +127,11 @@ impl<SqlQueryInnerT: SqlQueryInner> MSTableES<SqlQueryInnerT> {
 impl<SqlQueryInnerT: SqlQueryInner> TPESBase for MSTableES<SqlQueryInnerT> {
   type ESContext = MSQueryES;
 
-  fn sender_gid(&self) -> PaxosGroupId {
-    self.sender_path.node_path.sid.to_gid()
+  fn sender_sid(&self) -> &SlaveGroupId {
+    &self.sender_path.node_path.sid
+  }
+  fn query_id(&self) -> &QueryId {
+    &self.general.query_id
   }
 
   fn start<IO: CoreIOCtx>(

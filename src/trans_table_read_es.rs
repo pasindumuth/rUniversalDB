@@ -6,7 +6,7 @@ use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::model::common::{
   proc, CQueryPath, ColName, ColValN, ContextRow, ContextSchema, PaxosGroupId, PaxosGroupIdTrait,
-  TQueryPath, TableView, TransTableName,
+  SlaveGroupId, TQueryPath, TableView, TransTableName,
 };
 use crate::model::common::{CTQueryPath, Context, QueryId, TransTableLocationPrefix};
 use crate::model::message as msg;
@@ -146,8 +146,11 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
 // -----------------------------------------------------------------------------------------------
 
 impl TransTableReadES {
-  pub fn sender_gid(&self) -> PaxosGroupId {
-    self.sender_path.node_path.sid.to_gid()
+  pub fn sender_sid(&self) -> &SlaveGroupId {
+    &self.sender_path.node_path.sid
+  }
+  pub fn query_id(&self) -> &QueryId {
+    &self.query_id
   }
 
   pub fn start<IO: CoreIOCtx, Ctx: CTServerContext, SourceT: TransTableSource>(
@@ -377,8 +380,11 @@ impl TransTableReadES {
 impl TPESBase for TransTableReadES {
   type ESContext = GRQueryES;
 
-  fn sender_gid(&self) -> PaxosGroupId {
-    TransTableReadES::sender_gid(self)
+  fn sender_sid(&self) -> &SlaveGroupId {
+    TransTableReadES::sender_sid(self)
+  }
+  fn query_id(&self) -> &QueryId {
+    TransTableReadES::query_id(self)
   }
 
   fn start<IO: CoreIOCtx>(
