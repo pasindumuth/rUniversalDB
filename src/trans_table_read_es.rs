@@ -361,6 +361,10 @@ impl TransTableReadES {
   pub fn remove_subquery(&mut self, subquery_id: &QueryId) {
     remove_item(&mut self.child_queries, subquery_id)
   }
+
+  pub fn deregister<SourceT: TransTableSource>(self, _: &SourceT) -> (QueryId, CTQueryPath) {
+    (self.query_id, self.sender_path)
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -368,7 +372,7 @@ impl TransTableReadES {
 // -----------------------------------------------------------------------------------------------
 
 impl TableESBase for TransTableReadES {
-  type ESExtraData = GRQueryES;
+  type ESContext = GRQueryES;
 
   fn sender_gid(&self) -> PaxosGroupId {
     TransTableReadES::sender_gid(self)
@@ -378,18 +382,18 @@ impl TableESBase for TransTableReadES {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-    extra_data: &mut Self::ESExtraData,
+    es_ctx: &mut Self::ESContext,
   ) -> TableAction {
-    TransTableReadES::start(self, ctx, io_ctx, extra_data)
+    TransTableReadES::start(self, ctx, io_ctx, es_ctx)
   }
 
   fn gossip_data_changed<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-    extra_data: &mut Self::ESExtraData,
+    es_ctx: &mut Self::ESContext,
   ) -> TableAction {
-    TransTableReadES::gossip_data_changed(self, ctx, io_ctx, extra_data)
+    TransTableReadES::gossip_data_changed(self, ctx, io_ctx, es_ctx)
   }
 
   fn handle_internal_query_error<IO: CoreIOCtx>(
@@ -405,7 +409,7 @@ impl TableESBase for TransTableReadES {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-    extra_data: &mut Self::ESExtraData,
+    es_ctx: &mut Self::ESContext,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
     results: (Vec<Option<ColName>>, Vec<TableView>),
@@ -414,7 +418,7 @@ impl TableESBase for TransTableReadES {
       self,
       ctx,
       io_ctx,
-      extra_data,
+      es_ctx,
       subquery_id,
       subquery_new_rms,
       results,
@@ -423,6 +427,10 @@ impl TableESBase for TransTableReadES {
 
   fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) {
     TransTableReadES::exit_and_clean_up(self, ctx, io_ctx)
+  }
+
+  fn deregister(self, es_ctx: &mut Self::ESContext) -> (QueryId, CTQueryPath) {
+    TransTableReadES::deregister(self, es_ctx)
   }
 
   fn remove_subquery(&mut self, subquery_id: &QueryId) {

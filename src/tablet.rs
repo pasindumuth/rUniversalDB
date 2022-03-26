@@ -161,19 +161,6 @@ pub struct MSQueryES {
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
-struct TableReadESWrapper {
-  sender_path: CTQueryPath,
-  child_queries: Vec<QueryId>,
-  es: TableReadES,
-}
-
-impl TableReadESWrapper {
-  fn sender_gid(&self) -> PaxosGroupId {
-    self.sender_path.node_path.sid.to_gid()
-  }
-}
-
-#[derive(Debug)]
 pub struct TransTableReadESWrapper {
   pub sender_path: CTQueryPath,
   pub child_queries: Vec<QueryId>,
@@ -229,7 +216,7 @@ pub struct TabletSnapshot {
 // -----------------------------------------------------------------------------------------------
 
 pub trait TableESBase {
-  type ESExtraData;
+  type ESContext;
 
   fn sender_gid(&self) -> PaxosGroupId;
 
@@ -237,7 +224,7 @@ pub trait TableESBase {
     &mut self,
     _ctx: &mut TabletContext,
     _io_ctx: &mut IO,
-    _extra_data: &mut Self::ESExtraData,
+    _es_ctx: &mut Self::ESContext,
   ) -> TableAction {
     TableAction::Wait
   }
@@ -268,7 +255,17 @@ pub trait TableESBase {
     &mut self,
     _ctx: &mut TabletContext,
     _io_ctx: &mut IO,
-    _extra_data: &mut Self::ESExtraData,
+    _es_ctx: &mut Self::ESContext,
+  ) -> TableAction {
+    TableAction::Wait
+  }
+
+  fn m_local_read_protected<IO: CoreIOCtx>(
+    &mut self,
+    _ctx: &mut TabletContext,
+    _io_ctx: &mut IO,
+    _es_ctx: &mut Self::ESContext,
+    _protect_qid: QueryId,
   ) -> TableAction {
     TableAction::Wait
   }
@@ -277,7 +274,7 @@ pub trait TableESBase {
     &mut self,
     _ctx: &mut TabletContext,
     _io_ctx: &mut IO,
-    _extra_data: &mut Self::ESExtraData,
+    _es_ctx: &mut Self::ESContext,
     _protect_qid: QueryId,
   ) -> TableAction {
     TableAction::Wait
@@ -305,7 +302,7 @@ pub trait TableESBase {
     &mut self,
     _ctx: &mut TabletContext,
     _io_ctx: &mut IO,
-    _extra_data: &mut Self::ESExtraData,
+    _es_ctx: &mut Self::ESContext,
     _subquery_id: QueryId,
     _subquery_new_rms: BTreeSet<TQueryPath>,
     _results: (Vec<Option<ColName>>, Vec<TableView>),
@@ -316,7 +313,7 @@ pub trait TableESBase {
   fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _ctx: &mut TabletContext, _io_ctx: &mut IO) {}
 
   // TODO: see if we can merge this with exit_and_clean_up
-  fn deregister(&self, _extra_data: &mut Self::ESExtraData) {}
+  fn deregister(self, _es_ctx: &mut Self::ESContext) -> (QueryId, CTQueryPath);
 
   fn remove_subquery(&mut self, _subquery_id: &QueryId) {}
 }
@@ -336,50 +333,50 @@ pub enum TableAction {
 //  MSCallable
 // -----------------------------------------------------------------------------------------------
 
-trait MSCallback<ExtraDataT> {
-  fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
-    ctx: &mut TabletContext,
-    io_ctx: &mut IOCtx,
-    es: &mut MSTableES<SqlQueryInnerT>,
-    extra_data: &ExtraDataT,
-  ) -> TableAction;
-}
-
-trait MSCallbackWithContext<ExtraDataT> {
-  fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
-    ctx: &mut TabletContext,
-    io_ctx: &mut IOCtx,
-    es: &mut MSTableES<SqlQueryInnerT>,
-    ms_query_es: &mut MSQueryES,
-    extra_data: &ExtraDataT,
-  ) -> TableAction;
-}
-
-trait MSCallbackOnce<ExtraDataT> {
-  fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
-    ctx: &mut TabletContext,
-    io_ctx: &mut IOCtx,
-    es: &mut MSTableES<SqlQueryInnerT>,
-    extra_data: ExtraDataT,
-  ) -> TableAction;
-}
-
-trait MSCallbackWithContextOnce<ExtraDataT> {
+trait Callback<ExtraDataT> {
   fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
     ctx: &mut TabletContext,
     io_ctx: &mut IOCtx,
     es: &mut TableEST,
-    ms_query_es: &mut TableEST::ESExtraData,
+    extra_data: &ExtraDataT,
+  ) -> TableAction;
+}
+
+trait CallbackWithContext<ExtraDataT> {
+  fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
+    ctx: &mut TabletContext,
+    io_ctx: &mut IOCtx,
+    es: &mut TableEST,
+    es_ctx: &mut TableEST::ESContext,
+    extra_data: &ExtraDataT,
+  ) -> TableAction;
+}
+
+trait CallbackOnce<ExtraDataT> {
+  fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
+    ctx: &mut TabletContext,
+    io_ctx: &mut IOCtx,
+    es: &mut TableEST,
     extra_data: ExtraDataT,
   ) -> TableAction;
 }
 
-trait MSCallbackWithContextRemove<ExtraDataT> {
-  fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
+trait CallbackWithContextOnce<ExtraDataT> {
+  fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
     ctx: &mut TabletContext,
     io_ctx: &mut IOCtx,
-    es: MSTableES<SqlQueryInnerT>,
-    ms_query_es: &mut MSQueryES,
+    es: &mut TableEST,
+    es_ctx: &mut TableEST::ESContext,
+    extra_data: ExtraDataT,
+  ) -> TableAction;
+}
+
+trait CallbackWithContextRemove<ExtraDataT> {
+  fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
+    ctx: &mut TabletContext,
+    io_ctx: &mut IOCtx,
+    es: TableEST,
+    es_ctx: &mut TableEST::ESContext,
     extra_data: ExtraDataT,
   ) -> TableAction;
 }
@@ -401,7 +398,7 @@ pub struct Statuses {
   /// This contains `PerformQuery`s with a `root_query_path`
   perform_query_buffer: BTreeMap<QueryId, msg::PerformQuery>,
   gr_query_ess: BTreeMap<QueryId, GRQueryESWrapper>,
-  table_read_ess: BTreeMap<QueryId, TableReadESWrapper>,
+  table_read_ess: BTreeMap<QueryId, TableReadES>,
   trans_table_read_ess: BTreeMap<QueryId, TransTableReadES>,
   tm_statuss: BTreeMap<QueryId, TMStatus>,
   ms_query_ess: BTreeMap<QueryId, MSQueryES>,
@@ -429,12 +426,28 @@ impl Default for DDLES {
 }
 
 impl Statuses {
-  fn execute_ms_all<IOCtx: CoreIOCtx, ExtraDataT, Cb: MSCallback<ExtraDataT>>(
+  fn execute_all<IOCtx: CoreIOCtx, ExtraDataT, Cb: Callback<ExtraDataT>>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IOCtx,
     extra_data: &ExtraDataT,
   ) {
+    // TableReadES
+    let query_ids: Vec<QueryId> = self.table_read_ess.keys().cloned().collect();
+    for query_id in query_ids {
+      if let Some(read) = self.table_read_ess.get_mut(&query_id) {
+        let action = Cb::call(ctx, io_ctx, read, extra_data);
+        ctx.handle_read_es_action(io_ctx, self, query_id, action);
+      }
+    }
+    // TransTableReadES
+    let query_ids: Vec<QueryId> = self.trans_table_read_ess.keys().cloned().collect();
+    for query_id in query_ids {
+      if let Some(trans_read) = self.trans_table_read_ess.get_mut(&query_id) {
+        let action = Cb::call(ctx, io_ctx, trans_read, extra_data);
+        ctx.handle_trans_read_es_action(io_ctx, self, query_id, action);
+      }
+    }
     // MSTableReadES
     let query_ids: Vec<QueryId> = self.ms_table_read_ess.keys().cloned().collect();
     for query_id in query_ids {
@@ -469,12 +482,33 @@ impl Statuses {
     }
   }
 
-  fn execute_ms_all_ctx<IOCtx: CoreIOCtx, ExtraDataT, Cb: MSCallbackWithContext<ExtraDataT>>(
+  fn execute_all_ctx<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackWithContext<ExtraDataT>>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IOCtx,
     extra_data: &ExtraDataT,
   ) {
+    // TableReadES
+    let query_ids: Vec<QueryId> = self.table_read_ess.keys().cloned().collect();
+    for query_id in query_ids {
+      if let Some(read) = self.table_read_ess.get_mut(&query_id) {
+        let action = Cb::call(ctx, io_ctx, read, &mut (), extra_data);
+        ctx.handle_read_es_action(io_ctx, self, query_id, action);
+      }
+    }
+    // TransTableReadES
+    let query_ids: Vec<QueryId> = self.trans_table_read_ess.keys().cloned().collect();
+    for query_id in query_ids {
+      if let Some(trans_read) = self.trans_table_read_ess.get_mut(&query_id) {
+        let prefix = trans_read.location_prefix();
+        let action = if let Some(gr_query) = self.gr_query_ess.get_mut(&prefix.source.query_id) {
+          Cb::call(ctx, io_ctx, trans_read, &mut gr_query.es, extra_data)
+        } else {
+          trans_read.handle_internal_query_error(ctx, io_ctx, msg::QueryError::LateralError)
+        };
+        ctx.handle_trans_read_es_action(io_ctx, self, query_id, action);
+      }
+    }
     // MSTableReadES
     let query_ids: Vec<QueryId> = self.ms_table_read_ess.keys().cloned().collect();
     for query_id in query_ids {
@@ -513,15 +547,25 @@ impl Statuses {
     }
   }
 
-  fn execute_ms_once<IOCtx: CoreIOCtx, ExtraDataT, Cb: MSCallbackOnce<ExtraDataT>>(
+  fn execute_once<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackOnce<ExtraDataT>>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IOCtx,
     query_id: QueryId,
     extra_data: ExtraDataT,
   ) {
+    // TableReadES
+    if let Some(read) = self.table_read_ess.get_mut(&query_id) {
+      let action = Cb::call(ctx, io_ctx, read, extra_data);
+      ctx.handle_read_es_action(io_ctx, self, query_id, action);
+    }
+    // TransTableReadES
+    else if let Some(trans_read) = self.trans_table_read_ess.get_mut(&query_id) {
+      let action = Cb::call(ctx, io_ctx, trans_read, extra_data);
+      ctx.handle_trans_read_es_action(io_ctx, self, query_id, action);
+    }
     // MSTableReadES
-    if let Some(ms_read) = self.ms_table_read_ess.get_mut(&query_id) {
+    else if let Some(ms_read) = self.ms_table_read_ess.get_mut(&query_id) {
       let action = Cb::call(ctx, io_ctx, ms_read, extra_data);
       ctx.handle_ms_es_action(io_ctx, self, query_id, action);
     }
@@ -542,19 +586,20 @@ impl Statuses {
     }
   }
 
-  fn execute_ms_once_ctx<
-    IOCtx: CoreIOCtx,
-    ExtraDataT,
-    Cb: MSCallbackWithContextOnce<ExtraDataT>,
-  >(
+  fn execute_once_ctx<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackWithContextOnce<ExtraDataT>>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IOCtx,
     query_id: QueryId,
     extra_data: ExtraDataT,
   ) {
+    // TableReadES
+    if let Some(read) = self.table_read_ess.get_mut(&query_id) {
+      let action = Cb::call(ctx, io_ctx, read, &mut (), extra_data);
+      ctx.handle_read_es_action(io_ctx, self, query_id, action);
+    }
     // TransTableReadES
-    if let Some(trans_read) = self.trans_table_read_ess.get_mut(&query_id) {
+    else if let Some(trans_read) = self.trans_table_read_ess.get_mut(&query_id) {
       let prefix = trans_read.location_prefix();
       let action = if let Some(gr_query) = self.gr_query_ess.get_mut(&prefix.source.query_id) {
         Cb::call(ctx, io_ctx, trans_read, &mut gr_query.es, extra_data)
@@ -589,19 +634,30 @@ impl Statuses {
     }
   }
 
-  fn execute_ms_remove_ctx<
-    IOCtx: CoreIOCtx,
-    ExtraDataT,
-    Cb: MSCallbackWithContextRemove<ExtraDataT>,
-  >(
+  fn execute_remove_ctx<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackWithContextRemove<ExtraDataT>>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IOCtx,
     query_id: QueryId,
     extra_data: ExtraDataT,
   ) {
+    // TableReadES
+    if let Some(read) = self.table_read_ess.remove(&query_id) {
+      let action = Cb::call(ctx, io_ctx, read, &mut (), extra_data);
+      ctx.handle_read_es_action(io_ctx, self, query_id, action);
+    }
+    // TransTableReadES
+    else if let Some(mut trans_read) = self.trans_table_read_ess.remove(&query_id) {
+      let prefix = trans_read.location_prefix();
+      let action = if let Some(gr_query) = self.gr_query_ess.get_mut(&prefix.source.query_id) {
+        Cb::call(ctx, io_ctx, trans_read, &mut gr_query.es, extra_data)
+      } else {
+        trans_read.handle_internal_query_error(ctx, io_ctx, msg::QueryError::LateralError)
+      };
+      ctx.handle_trans_read_es_action(io_ctx, self, query_id, action);
+    }
     // MSTableReadES
-    if let Some(ms_read) = self.ms_table_read_ess.remove(&query_id) {
+    else if let Some(ms_read) = self.ms_table_read_ess.remove(&query_id) {
       let ms_query_es = self.ms_query_ess.get_mut(&ms_read.general.ms_query_id).unwrap();
       let action = Cb::call(ctx, io_ctx, ms_read, ms_query_es, extra_data);
       ctx.handle_ms_es_action(io_ctx, self, query_id, action);
@@ -1169,19 +1225,14 @@ impl TabletContext {
               );
 
               if self.is_leader() {
+                // Remove the RequestedReadProtected and grang GlobalReadProtected
                 let req = self
                   .remove_inserting_read_protected_request(
                     &read_protected.timestamp,
                     &read_protected.query_id,
                   )
                   .unwrap();
-
-                // Inform the originator.
-                let query_id = req.orig_p.query_id;
-                if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
-                  let action = read.es.global_read_protected(self, io_ctx, req.query_id);
-                  self.handle_read_es_action(io_ctx, statuses, query_id, action);
-                }
+                self.grant_global_read_protected(io_ctx, statuses, req);
               }
             }
             // FinishQuery
@@ -1317,43 +1368,20 @@ impl TabletContext {
           }
 
           // Inform Top-Level ESs.
-
-          // TableReadES
-          let query_ids: Vec<QueryId> = statuses.table_read_ess.keys().cloned().collect();
-          for query_id in query_ids {
-            let read = statuses.table_read_ess.get_mut(&query_id).unwrap();
-            let action = read.es.gossip_data_changed(self, io_ctx);
-            self.handle_read_es_action(io_ctx, statuses, query_id, action);
-          }
-
-          // TransTableReadES
-          let query_ids: Vec<QueryId> = statuses.trans_table_read_ess.keys().cloned().collect();
-          for query_id in query_ids {
-            let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
-            let prefix = trans_read.location_prefix();
-            let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id)
-            {
-              trans_read.gossip_data_changed(self, io_ctx, &gr_query.es)
-            } else {
-              trans_read.handle_internal_query_error(self, io_ctx, msg::QueryError::LateralError)
-            };
-            self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
-          }
-
           struct MSGossipCb;
-          impl MSCallbackWithContext<()> for MSGossipCb {
-            fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
+          impl CallbackWithContext<()> for MSGossipCb {
+            fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
               ctx: &mut TabletContext,
               io_ctx: &mut IOCtx,
-              es: &mut MSTableES<SqlQueryInnerT>,
-              ms_query_es: &mut MSQueryES,
+              es: &mut TableEST,
+              es_ctx: &mut TableEST::ESContext,
               _: &(),
             ) -> TableAction {
-              es.gossip_data_changed(ctx, io_ctx, ms_query_es)
+              es.gossip_data_changed(ctx, io_ctx, es_ctx)
             }
           };
 
-          statuses.execute_ms_all_ctx::<_, _, MSGossipCb>(self, io_ctx, &());
+          statuses.execute_all_ctx::<_, _, MSGossipCb>(self, io_ctx, &());
 
           // Run Main Loop
           self.run_main_loop(io_ctx, statuses);
@@ -1706,23 +1734,21 @@ impl TabletContext {
           let read = map_insert(
             &mut statuses.table_read_ess,
             &perform_query.query_id,
-            TableReadESWrapper {
+            TableReadES {
+              root_query_path: perform_query.root_query_path,
+              timestamp: query.timestamp,
+              context: Rc::new(query.context),
               sender_path: perform_query.sender_path.clone(),
+              query_id: perform_query.query_id.clone(),
+              sql_query: query.sql_query,
+              query_plan: query.query_plan,
+              new_rms: Default::default(),
+              waiting_global_locks: Default::default(),
+              state: ExecutionS::Start,
               child_queries: vec![],
-              es: TableReadES {
-                root_query_path: perform_query.root_query_path,
-                timestamp: query.timestamp,
-                context: Rc::new(query.context),
-                query_id: perform_query.query_id.clone(),
-                sql_query: query.sql_query,
-                query_plan: query.query_plan,
-                new_rms: Default::default(),
-                waiting_global_locks: Default::default(),
-                state: ExecutionS::Start,
-              },
             },
           );
-          let action = read.es.start(self, io_ctx);
+          let action = read.start(self, io_ctx, &mut ());
           self.handle_read_es_action(io_ctx, statuses, perform_query.query_id, action);
         }
       }
@@ -2385,27 +2411,19 @@ impl TabletContext {
     }));
 
     // Inform the ES.
-    let query_id = req.orig_p.query_id;
-    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
-      // TableReadES
-      let action = read.es.local_locked_cols(self, io_ctx, locked_cols_qid);
-      self.handle_read_es_action(io_ctx, statuses, query_id, action);
-    } else {
-      // MSTable*ES
-      struct Cb;
-      impl MSCallbackOnce<QueryId> for Cb {
-        fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
-          ctx: &mut TabletContext,
-          io_ctx: &mut IOCtx,
-          es: &mut MSTableES<SqlQueryInnerT>,
-          locked_cols_qid: QueryId,
-        ) -> TableAction {
-          es.local_locked_cols(ctx, io_ctx, locked_cols_qid)
-        }
-      };
+    struct Cb;
+    impl CallbackOnce<QueryId> for Cb {
+      fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
+        ctx: &mut TabletContext,
+        io_ctx: &mut IOCtx,
+        es: &mut TableEST,
+        locked_cols_qid: QueryId,
+      ) -> TableAction {
+        es.local_locked_cols(ctx, io_ctx, locked_cols_qid)
+      }
+    };
 
-      statuses.execute_ms_once::<_, _, Cb>(self, io_ctx, query_id, locked_cols_qid);
-    }
+    statuses.execute_once::<_, _, Cb>(self, io_ctx, req.orig_p.query_id, locked_cols_qid);
   }
 
   /// Route the column locking to the appropriate ES.
@@ -2416,27 +2434,19 @@ impl TabletContext {
     orig_p: OrigP,
     locked_cols_qid: QueryId,
   ) {
-    let query_id = orig_p.query_id;
-    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
-      // TableReadES
-      let action = read.es.global_locked_cols(self, io_ctx, locked_cols_qid);
-      self.handle_read_es_action(io_ctx, statuses, query_id, action);
-    } else {
-      // MSTable*ES
-      struct Cb;
-      impl MSCallbackOnce<QueryId> for Cb {
-        fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
-          ctx: &mut TabletContext,
-          io_ctx: &mut IOCtx,
-          es: &mut MSTableES<SqlQueryInnerT>,
-          locked_cols_qid: QueryId,
-        ) -> TableAction {
-          es.global_locked_cols(ctx, io_ctx, locked_cols_qid)
-        }
-      };
+    struct Cb;
+    impl CallbackOnce<QueryId> for Cb {
+      fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
+        ctx: &mut TabletContext,
+        io_ctx: &mut IOCtx,
+        es: &mut TableEST,
+        locked_cols_qid: QueryId,
+      ) -> TableAction {
+        es.global_locked_cols(ctx, io_ctx, locked_cols_qid)
+      }
+    };
 
-      statuses.execute_ms_once::<_, _, Cb>(self, io_ctx, query_id, locked_cols_qid);
-    }
+    statuses.execute_once::<_, _, Cb>(self, io_ctx, orig_p.query_id, locked_cols_qid);
   }
 
   /// Route the column locking to the appropriate ES.
@@ -2446,27 +2456,19 @@ impl TabletContext {
     statuses: &mut Statuses,
     orig_p: OrigP,
   ) {
-    let query_id = orig_p.query_id;
-    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
-      // TableReadES
-      let action = read.es.table_dropped(self, io_ctx);
-      self.handle_read_es_action(io_ctx, statuses, query_id, action);
-    } else {
-      // MSTable*ES
-      struct Cb;
-      impl MSCallbackOnce<()> for Cb {
-        fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
-          ctx: &mut TabletContext,
-          _: &mut IOCtx,
-          es: &mut MSTableES<SqlQueryInnerT>,
-          _: (),
-        ) -> TableAction {
-          es.table_dropped(ctx)
-        }
-      };
+    struct Cb;
+    impl CallbackOnce<()> for Cb {
+      fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
+        ctx: &mut TabletContext,
+        _: &mut IOCtx,
+        es: &mut TableEST,
+        _: (),
+      ) -> TableAction {
+        es.table_dropped(ctx)
+      }
+    };
 
-      statuses.execute_ms_once::<_, _, Cb>(self, io_ctx, query_id, ());
-    }
+    statuses.execute_once::<_, _, Cb>(self, io_ctx, orig_p.query_id, ());
   }
 
   /// Move the ProtectRequest in `waiting_read_protected` forward.
@@ -2485,13 +2487,48 @@ impl TabletContext {
       region: protect_request.read_region,
     }));
 
-    // Inform the originator.
-    let query_id = protect_request.orig_p.query_id;
-    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
-      // TableReadES
-      let action = read.es.local_read_protected(self, io_ctx, protect_request.query_id);
-      self.handle_read_es_action(io_ctx, statuses, query_id, action);
-    }
+    // Inform the ES.
+    struct Cb;
+    impl CallbackWithContextOnce<QueryId> for Cb {
+      fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
+        ctx: &mut TabletContext,
+        io_ctx: &mut IOCtx,
+        es: &mut TableEST,
+        es_ctx: &mut TableEST::ESContext,
+        protect_qid: QueryId,
+      ) -> TableAction {
+        es.local_read_protected(ctx, io_ctx, es_ctx, protect_qid)
+      }
+    };
+
+    statuses.execute_once_ctx::<_, _, Cb>(
+      self,
+      io_ctx,
+      protect_request.orig_p.query_id,
+      protect_request.query_id,
+    );
+  }
+
+  /// By here, the `ReadRegion` has been persisted.
+  fn grant_global_read_protected<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    req: RequestedReadProtected,
+  ) {
+    struct Cb;
+    impl CallbackOnce<QueryId> for Cb {
+      fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
+        ctx: &mut TabletContext,
+        io_ctx: &mut IOCtx,
+        es: &mut TableEST,
+        protect_qid: QueryId,
+      ) -> TableAction {
+        es.global_read_protected(ctx, io_ctx, protect_qid)
+      }
+    };
+
+    statuses.execute_once::<_, _, Cb>(self, io_ctx, req.orig_p.query_id, req.query_id);
   }
 
   /// Move the ProtectRequest in `m_waiting_read_protected` forward.
@@ -2506,24 +2543,26 @@ impl TabletContext {
     verifying_write.m_waiting_read_protected.remove(&protect_request);
     verifying_write.m_read_protected.insert(protect_request.read_region);
 
-    // Inform the originator.
-    let query_id = protect_request.orig_p.query_id;
-
-    // MSTable*ES
+    // Inform the ES.
     struct Cb;
-    impl MSCallbackWithContextOnce<QueryId> for Cb {
+    impl CallbackWithContextOnce<QueryId> for Cb {
       fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
         ctx: &mut TabletContext,
         io_ctx: &mut IOCtx,
         es: &mut TableEST,
-        ms_query_es: &mut TableEST::ESExtraData,
+        es_ctx: &mut TableEST::ESContext,
         protect_qid: QueryId,
       ) -> TableAction {
-        es.local_read_protected(ctx, io_ctx, ms_query_es, protect_qid)
+        es.m_local_read_protected(ctx, io_ctx, es_ctx, protect_qid)
       }
     };
 
-    statuses.execute_ms_once_ctx::<_, _, Cb>(self, io_ctx, query_id, protect_request.query_id);
+    statuses.execute_once_ctx::<_, _, Cb>(
+      self,
+      io_ctx,
+      protect_request.orig_p.query_id,
+      protect_request.query_id,
+    );
   }
 
   /// Simply aborts the MSQueryES, which will clean up everything to do with it.
@@ -2612,46 +2651,36 @@ impl TabletContext {
     subquery_new_rms: BTreeSet<TQueryPath>,
     result: (Vec<Option<ColName>>, Vec<TableView>),
   ) {
-    let query_id = orig_p.query_id;
-    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
-      // TableReadES
-      remove_item(&mut read.child_queries, &subquery_id);
-      let action =
-        read.es.handle_subquery_done(self, io_ctx, subquery_id, subquery_new_rms, result);
-      self.handle_read_es_action(io_ctx, statuses, query_id, action);
-    } else {
-      // *Table*ES
-      struct Cb;
-      impl
-        MSCallbackWithContextOnce<(
+    struct Cb;
+    impl
+      CallbackWithContextOnce<(
+        QueryId,
+        BTreeSet<TQueryPath>,
+        (Vec<Option<ColName>>, Vec<TableView>),
+      )> for Cb
+    {
+      fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
+        ctx: &mut TabletContext,
+        io_ctx: &mut IOCtx,
+        es: &mut TableEST,
+        es_ctx: &mut TableEST::ESContext,
+        (subquery_id, subquery_new_rms, result): (
           QueryId,
           BTreeSet<TQueryPath>,
           (Vec<Option<ColName>>, Vec<TableView>),
-        )> for Cb
-      {
-        fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
-          ctx: &mut TabletContext,
-          io_ctx: &mut IOCtx,
-          es: &mut TableEST,
-          es_context: &mut TableEST::ESExtraData,
-          (subquery_id, subquery_new_rms, result): (
-            QueryId,
-            BTreeSet<TQueryPath>,
-            (Vec<Option<ColName>>, Vec<TableView>),
-          ),
-        ) -> TableAction {
-          es.remove_subquery(&subquery_id);
-          es.handle_subquery_done(ctx, io_ctx, es_context, subquery_id, subquery_new_rms, result)
-        }
-      };
+        ),
+      ) -> TableAction {
+        es.remove_subquery(&subquery_id);
+        es.handle_subquery_done(ctx, io_ctx, es_ctx, subquery_id, subquery_new_rms, result)
+      }
+    };
 
-      statuses.execute_ms_once_ctx::<_, _, Cb>(
-        self,
-        io_ctx,
-        query_id,
-        (subquery_id, subquery_new_rms, result),
-      );
-    }
+    statuses.execute_once_ctx::<_, _, Cb>(
+      self,
+      io_ctx,
+      orig_p.query_id,
+      (subquery_id, subquery_new_rms, result),
+    );
   }
 
   /// This routes the QueryError propagated by a GRQueryES up to the appropriate top-level ES.
@@ -2663,34 +2692,20 @@ impl TabletContext {
     subquery_id: QueryId,
     query_error: msg::QueryError,
   ) {
-    let query_id = orig_p.query_id;
-    if let Some(read) = statuses.table_read_ess.get_mut(&query_id) {
-      // TableReadES
-      remove_item(&mut read.child_queries, &subquery_id);
-      let action = read.es.handle_internal_query_error(self, io_ctx, query_error);
-      self.handle_read_es_action(io_ctx, statuses, query_id, action);
-    } else if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
-      // TransTableReadES
-      remove_item(&mut trans_read.child_queries, &subquery_id);
-      let action = trans_read.handle_internal_query_error(self, io_ctx, query_error);
-      self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
-    } else {
-      // MSTable*ES
-      struct Cb;
-      impl MSCallbackOnce<(QueryId, msg::QueryError)> for Cb {
-        fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
-          ctx: &mut TabletContext,
-          io_ctx: &mut IOCtx,
-          es: &mut MSTableES<SqlQueryInnerT>,
-          (subquery_id, query_error): (QueryId, msg::QueryError),
-        ) -> TableAction {
-          remove_item(&mut es.child_queries, &subquery_id);
-          es.handle_internal_query_error(ctx, io_ctx, query_error)
-        }
-      };
+    struct Cb;
+    impl CallbackOnce<(QueryId, msg::QueryError)> for Cb {
+      fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
+        ctx: &mut TabletContext,
+        io_ctx: &mut IOCtx,
+        es: &mut TableEST,
+        (subquery_id, query_error): (QueryId, msg::QueryError),
+      ) -> TableAction {
+        es.remove_subquery(&subquery_id);
+        es.handle_internal_query_error(ctx, io_ctx, query_error)
+      }
+    };
 
-      statuses.execute_ms_once::<_, _, Cb>(self, io_ctx, query_id, (subquery_id, query_error));
-    }
+    statuses.execute_once::<_, _, Cb>(self, io_ctx, orig_p.query_id, (subquery_id, query_error));
   }
 
   /// Adds the given `gr_query_ess` to `statuses`, executing them one at a time.
@@ -2972,17 +2987,15 @@ impl TabletContext {
       TableAction::Success(success) => {
         // Remove the MSTable*ES, removing it from the MSQueryES, and respond.
         struct Cb;
-        impl MSCallbackWithContextRemove<QueryESResult> for Cb {
-          fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
+        impl CallbackWithContextRemove<QueryESResult> for Cb {
+          fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
             ctx: &mut TabletContext,
             io_ctx: &mut IOCtx,
-            es: MSTableES<SqlQueryInnerT>,
-            ms_query_es: &mut MSQueryES,
+            es: TableEST,
+            es_ctx: &mut TableEST::ESContext,
             success: QueryESResult,
           ) -> TableAction {
-            es.deregister(ms_query_es);
-            let query_id = es.general.query_id;
-            let sender_path = es.sender_path;
+            let (query_id, sender_path) = es.deregister(es_ctx);
             let responder_path = ctx.mk_query_path(query_id).into_ct();
             // This is the originating Leadership.
             ctx.send_to_ct(
@@ -2999,22 +3012,20 @@ impl TabletContext {
           }
         };
 
-        statuses.execute_ms_remove_ctx::<_, _, Cb>(self, io_ctx, query_id, success);
+        statuses.execute_remove_ctx::<_, _, Cb>(self, io_ctx, query_id, success);
       }
       TableAction::QueryError(query_error) => {
         // Remove the MSTable*ES, removing it from the MSQueryES, and respond.
         struct Cb;
-        impl MSCallbackWithContextRemove<msg::QueryError> for Cb {
-          fn call<IOCtx: CoreIOCtx, SqlQueryInnerT: SqlQueryInner>(
+        impl CallbackWithContextRemove<msg::QueryError> for Cb {
+          fn call<IOCtx: CoreIOCtx, TableEST: TableESBase>(
             ctx: &mut TabletContext,
             io_ctx: &mut IOCtx,
-            es: MSTableES<SqlQueryInnerT>,
-            ms_query_es: &mut MSQueryES,
+            es: TableEST,
+            es_ctx: &mut TableEST::ESContext,
             query_error: msg::QueryError,
           ) -> TableAction {
-            es.deregister(ms_query_es);
-            let query_id = es.general.query_id;
-            let sender_path = es.sender_path;
+            let (query_id, sender_path) = es.deregister(es_ctx);
             let responder_path = ctx.mk_query_path(query_id).into_ct();
             // This is the originating Leadership.
             ctx.send_to_ct(
@@ -3030,7 +3041,7 @@ impl TabletContext {
           }
         };
 
-        statuses.execute_ms_remove_ctx::<_, _, Cb>(self, io_ctx, query_id, query_error);
+        statuses.execute_remove_ctx::<_, _, Cb>(self, io_ctx, query_id, query_error);
       }
     }
   }
@@ -3107,7 +3118,7 @@ impl TabletContext {
     }
     // TableReadES
     else if let Some(mut read) = statuses.table_read_ess.remove(&query_id) {
-      read.es.exit_and_clean_up(self, io_ctx);
+      read.exit_and_clean_up(self, io_ctx);
       self.exit_all(io_ctx, statuses, read.child_queries);
     }
     // TransTableReadES

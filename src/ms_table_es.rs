@@ -125,7 +125,7 @@ impl<SqlQueryInnerT: SqlQueryInner> MSTableES<SqlQueryInnerT> {
 }
 
 impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
-  type ESExtraData = MSQueryES;
+  type ESContext = MSQueryES;
 
   fn sender_gid(&self) -> PaxosGroupId {
     self.sender_path.node_path.sid.to_gid()
@@ -219,7 +219,7 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
   }
 
   /// Handle ReadRegion protection
-  fn local_read_protected<IO: CoreIOCtx>(
+  fn m_local_read_protected<IO: CoreIOCtx>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
@@ -293,8 +293,9 @@ impl<SqlQueryInnerT: SqlQueryInner> TableESBase for MSTableES<SqlQueryInnerT> {
     self.state = MSTableExecutionS::Done;
   }
 
-  fn deregister(&self, ms_query_es: &mut MSQueryES) {
+  fn deregister(self, ms_query_es: &mut MSQueryES) -> (QueryId, CTQueryPath) {
     ms_query_es.pending_queries.remove(&self.general.query_id);
+    (self.general.query_id, self.sender_path)
   }
 
   fn remove_subquery(&mut self, subquery_id: &QueryId) {
