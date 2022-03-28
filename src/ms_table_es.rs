@@ -135,6 +135,9 @@ impl<SqlQueryInnerT: SqlQueryInner> TPESBase for MSTableES<SqlQueryInnerT> {
   fn query_id(&self) -> &QueryId {
     &self.general.query_id
   }
+  fn ctx_query_id(&self) -> Option<&QueryId> {
+    Some(&self.general.ms_query_id)
+  }
 
   fn start<IO: CoreIOCtx>(
     &mut self,

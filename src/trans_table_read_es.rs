@@ -152,6 +152,9 @@ impl TransTableReadES {
   pub fn query_id(&self) -> &QueryId {
     &self.query_id
   }
+  pub fn ctx_query_id(&self) -> Option<&QueryId> {
+    Some(&self.location_prefix.source.query_id)
+  }
 
   pub fn start<IO: CoreIOCtx, Ctx: CTServerContext, SourceT: TransTableSource>(
     &mut self,
@@ -385,6 +388,9 @@ impl TPESBase for TransTableReadES {
   }
   fn query_id(&self) -> &QueryId {
     TransTableReadES::query_id(self)
+  }
+  fn ctx_query_id(&self) -> Option<&QueryId> {
+    TransTableReadES::ctx_query_id(self)
   }
 
   fn start<IO: CoreIOCtx>(

@@ -346,6 +346,9 @@ impl TPESBase for TableReadES {
   fn query_id(&self) -> &QueryId {
     &self.query_id
   }
+  fn ctx_query_id(&self) -> Option<&QueryId> {
+    None
+  }
 
   fn start<IO: CoreIOCtx>(
     &mut self,

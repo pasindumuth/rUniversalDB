@@ -220,6 +220,7 @@ pub trait TPESBase {
 
   fn sender_sid(&self) -> &SlaveGroupId;
   fn query_id(&self) -> &QueryId;
+  fn ctx_query_id(&self) -> Option<&QueryId>;
 
   fn start<IO: CoreIOCtx>(
     &mut self,
@@ -440,13 +441,35 @@ impl Default for DDLES {
   }
 }
 
-trait ESContGetter: Sized {
+// -----------------------------------------------------------------------------------------------
+//  ESContGetter
+// -----------------------------------------------------------------------------------------------
+// This is used to provide a uniform interface access the `TPESBase`
+// containers located in `Statuses`
+
+trait ESContGetter: Sized + TPESBase {
   fn mut_ess(top: &mut TopLevelStatuses) -> &mut BTreeMap<QueryId, Self>;
+  fn mut_ctx<'a>(
+    query_id: Option<&QueryId>,
+    unit: &'a mut (),
+    gr_query_ess: &'a mut BTreeMap<QueryId, GRQueryESWrapper>,
+    ms_query_ess: &'a mut BTreeMap<QueryId, MSQueryES>,
+  ) -> Option<&'a mut Self::ESContext>;
 }
 
 impl ESContGetter for TableReadES {
   fn mut_ess(top: &mut TopLevelStatuses) -> &mut BTreeMap<QueryId, Self> {
     &mut top.table_read_ess
+  }
+
+  /// Recall that the ESContext of `TableReadES` is just `()`, which always exists.
+  fn mut_ctx<'a>(
+    _: Option<&QueryId>,
+    unit: &'a mut (),
+    _: &'a mut BTreeMap<QueryId, GRQueryESWrapper>,
+    _: &'a mut BTreeMap<QueryId, MSQueryES>,
+  ) -> Option<&'a mut Self::ESContext> {
+    Some(unit)
   }
 }
 
@@ -454,11 +477,29 @@ impl ESContGetter for TransTableReadES {
   fn mut_ess(top: &mut TopLevelStatuses) -> &mut BTreeMap<QueryId, Self> {
     &mut top.trans_table_read_ess
   }
+
+  fn mut_ctx<'a>(
+    query_id: Option<&QueryId>,
+    _: &'a mut (),
+    gr_query_ess: &'a mut BTreeMap<QueryId, GRQueryESWrapper>,
+    _: &'a mut BTreeMap<QueryId, MSQueryES>,
+  ) -> Option<&'a mut Self::ESContext> {
+    gr_query_ess.get_mut(query_id.unwrap()).map(|wrapper| &mut wrapper.es)
+  }
 }
 
 impl ESContGetter for MSTableReadES {
   fn mut_ess(top: &mut TopLevelStatuses) -> &mut BTreeMap<QueryId, Self> {
     &mut top.ms_table_read_ess
+  }
+
+  fn mut_ctx<'a>(
+    query_id: Option<&QueryId>,
+    _: &'a mut (),
+    _: &'a mut BTreeMap<QueryId, GRQueryESWrapper>,
+    ms_query_ess: &'a mut BTreeMap<QueryId, MSQueryES>,
+  ) -> Option<&'a mut Self::ESContext> {
+    ms_query_ess.get_mut(query_id.unwrap())
   }
 }
 
@@ -466,11 +507,29 @@ impl ESContGetter for MSTableWriteES {
   fn mut_ess(top: &mut TopLevelStatuses) -> &mut BTreeMap<QueryId, Self> {
     &mut top.ms_table_write_ess
   }
+
+  fn mut_ctx<'a>(
+    query_id: Option<&QueryId>,
+    _: &'a mut (),
+    _: &'a mut BTreeMap<QueryId, GRQueryESWrapper>,
+    ms_query_ess: &'a mut BTreeMap<QueryId, MSQueryES>,
+  ) -> Option<&'a mut Self::ESContext> {
+    ms_query_ess.get_mut(query_id.unwrap())
+  }
 }
 
 impl ESContGetter for MSTableInsertES {
   fn mut_ess(top: &mut TopLevelStatuses) -> &mut BTreeMap<QueryId, Self> {
     &mut top.ms_table_insert_ess
+  }
+
+  fn mut_ctx<'a>(
+    query_id: Option<&QueryId>,
+    _: &'a mut (),
+    _: &'a mut BTreeMap<QueryId, GRQueryESWrapper>,
+    ms_query_ess: &'a mut BTreeMap<QueryId, MSQueryES>,
+  ) -> Option<&'a mut Self::ESContext> {
+    ms_query_ess.get_mut(query_id.unwrap())
   }
 }
 
@@ -478,63 +537,206 @@ impl ESContGetter for MSTableDeleteES {
   fn mut_ess(top: &mut TopLevelStatuses) -> &mut BTreeMap<QueryId, Self> {
     &mut top.ms_table_delete_ess
   }
+
+  fn mut_ctx<'a>(
+    query_id: Option<&QueryId>,
+    _: &'a mut (),
+    _: &'a mut BTreeMap<QueryId, GRQueryESWrapper>,
+    ms_query_ess: &'a mut BTreeMap<QueryId, MSQueryES>,
+  ) -> Option<&'a mut Self::ESContext> {
+    ms_query_ess.get_mut(query_id.unwrap())
+  }
 }
 
 impl Statuses {
+  // -----------------------------------------------------------------------------------------------
+  //  do_it
+  // -----------------------------------------------------------------------------------------------
+
+  fn do_it_once<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackOnce<ExtraDataT>, TPEST: TPESBase>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IOCtx,
+    query_id: QueryId,
+    extra_data: ExtraDataT,
+  ) -> Option<(QueryId, ExtraDataT)>
+  where
+    TPEST: ESContGetter,
+  {
+    if let Some(es) = TPEST::mut_ess(&mut self.top).get_mut(&query_id) {
+      let action = Cb::call(ctx, io_ctx, es, extra_data);
+      ctx.handle_tablet_action(io_ctx, self, query_id, action);
+      None
+    } else {
+      Some((query_id, extra_data))
+    }
+  }
+
+  fn do_it<IOCtx: CoreIOCtx, ExtraDataT, Cb: Callback<ExtraDataT>, TPEST: TPESBase>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IOCtx,
+    query_id: QueryId,
+    extra_data: &ExtraDataT,
+  ) where
+    TPEST: ESContGetter,
+  {
+    if let Some(es) = TPEST::mut_ess(&mut self.top).get_mut(&query_id) {
+      let action = Cb::call(ctx, io_ctx, es, extra_data);
+      ctx.handle_tablet_action(io_ctx, self, query_id, action);
+    }
+  }
+
+  fn do_it_all<IOCtx: CoreIOCtx, ExtraDataT, Cb: Callback<ExtraDataT>, TPEST: TPESBase>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IOCtx,
+    extra_data: &ExtraDataT,
+  ) where
+    TPEST: ESContGetter,
+  {
+    let query_ids: Vec<QueryId> = TPEST::mut_ess(&mut self.top).keys().cloned().collect();
+    for query_id in query_ids {
+      self.do_it::<_, _, Cb, TPEST>(ctx, io_ctx, query_id, extra_data);
+    }
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  //  do_it_ctx
+  // -----------------------------------------------------------------------------------------------
+
+  fn do_it_once_ctx<
+    IOCtx: CoreIOCtx,
+    ExtraDataT,
+    Cb: CallbackWithContextOnce<ExtraDataT>,
+    TPEST: TPESBase,
+  >(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IOCtx,
+    query_id: QueryId,
+    extra_data: ExtraDataT,
+  ) -> Option<(QueryId, ExtraDataT)>
+  where
+    TPEST: ESContGetter,
+  {
+    if let Some(es) = TPEST::mut_ess(&mut self.top).get_mut(&query_id) {
+      let action = if let Some(ctx_es) =
+        TPEST::mut_ctx(es.ctx_query_id(), &mut (), &mut self.gr_query_ess, &mut self.ms_query_ess)
+      {
+        Cb::call(ctx, io_ctx, es, ctx_es, extra_data)
+      } else {
+        TabletAction::TPESAction(es.handle_internal_query_error(
+          ctx,
+          io_ctx,
+          msg::QueryError::LateralError,
+        ))
+      };
+      ctx.handle_tablet_action(io_ctx, self, query_id, action);
+      None
+    } else {
+      Some((query_id, extra_data))
+    }
+  }
+
+  fn do_it_ctx<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackWithContext<ExtraDataT>, TPEST: TPESBase>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IOCtx,
+    query_id: QueryId,
+    extra_data: &ExtraDataT,
+  ) where
+    TPEST: ESContGetter,
+  {
+    if let Some(es) = TPEST::mut_ess(&mut self.top).get_mut(&query_id) {
+      let action = if let Some(ctx_es) =
+        TPEST::mut_ctx(es.ctx_query_id(), &mut (), &mut self.gr_query_ess, &mut self.ms_query_ess)
+      {
+        Cb::call(ctx, io_ctx, es, ctx_es, extra_data)
+      } else {
+        TabletAction::TPESAction(es.handle_internal_query_error(
+          ctx,
+          io_ctx,
+          msg::QueryError::LateralError,
+        ))
+      };
+      ctx.handle_tablet_action(io_ctx, self, query_id, action);
+    }
+  }
+
+  fn do_it_all_ctx<
+    IOCtx: CoreIOCtx,
+    ExtraDataT,
+    Cb: CallbackWithContext<ExtraDataT>,
+    TPEST: TPESBase,
+  >(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IOCtx,
+    extra_data: &ExtraDataT,
+  ) where
+    TPEST: ESContGetter,
+  {
+    let query_ids: Vec<QueryId> = TPEST::mut_ess(&mut self.top).keys().cloned().collect();
+    for query_id in query_ids {
+      self.do_it_ctx::<_, _, Cb, TPEST>(ctx, io_ctx, query_id, extra_data);
+    }
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  //  do_it_remove_ctx
+  // -----------------------------------------------------------------------------------------------
+
+  fn do_it_remove_ctx<
+    IOCtx: CoreIOCtx,
+    ExtraDataT,
+    Cb: CallbackWithContextRemove<ExtraDataT>,
+    TPEST: TPESBase,
+  >(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IOCtx,
+    query_id: QueryId,
+    extra_data: ExtraDataT,
+  ) -> Option<(QueryId, ExtraDataT)>
+  where
+    TPEST: ESContGetter,
+  {
+    if let Some(mut es) = TPEST::mut_ess(&mut self.top).remove(&query_id) {
+      let action = if let Some(ctx_es) =
+        TPEST::mut_ctx(es.ctx_query_id(), &mut (), &mut self.gr_query_ess, &mut self.ms_query_ess)
+      {
+        Cb::call(ctx, io_ctx, es, ctx_es, extra_data)
+      } else {
+        TabletAction::TPESAction(es.handle_internal_query_error(
+          ctx,
+          io_ctx,
+          msg::QueryError::LateralError,
+        ))
+      };
+      ctx.handle_tablet_action(io_ctx, self, query_id, action);
+      None
+    } else {
+      Some((query_id, extra_data))
+    }
+  }
+
+  // -----------------------------------------------------------------------------------------------
+  //  execute_*
+  // -----------------------------------------------------------------------------------------------
+
   fn execute_all<IOCtx: CoreIOCtx, ExtraDataT, Cb: Callback<ExtraDataT>>(
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IOCtx,
     extra_data: &ExtraDataT,
   ) {
-    // TableReadES
-    let query_ids: Vec<QueryId> = self.top.table_read_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(read) = self.top.table_read_ess.get_mut(&query_id) {
-        let action = Cb::call(ctx, io_ctx, read, extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
-    // TransTableReadES
-    let query_ids: Vec<QueryId> = self.top.trans_table_read_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(trans_read) = self.top.trans_table_read_ess.get_mut(&query_id) {
-        let action = Cb::call(ctx, io_ctx, trans_read, extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
-    // MSTableReadES
-    let query_ids: Vec<QueryId> = self.top.ms_table_read_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(ms_read) = self.top.ms_table_read_ess.get_mut(&query_id) {
-        let action = Cb::call(ctx, io_ctx, ms_read, extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
-    // MSTableWriteES
-    let query_ids: Vec<QueryId> = self.top.ms_table_write_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(ms_write) = self.top.ms_table_write_ess.get_mut(&query_id) {
-        let action = Cb::call(ctx, io_ctx, ms_write, extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
-    // MSTableInsertES
-    let query_ids: Vec<QueryId> = self.top.ms_table_insert_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(ms_insert) = self.top.ms_table_insert_ess.get_mut(&query_id) {
-        let action = Cb::call(ctx, io_ctx, ms_insert, extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
-    // MSTableDeleteES
-    let query_ids: Vec<QueryId> = self.top.ms_table_delete_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(ms_delete) = self.top.ms_table_delete_ess.get_mut(&query_id) {
-        let action = Cb::call(ctx, io_ctx, ms_delete, extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
+    self.do_it_all::<_, _, Cb, TableReadES>(ctx, io_ctx, extra_data);
+    self.do_it_all::<_, _, Cb, TransTableReadES>(ctx, io_ctx, extra_data);
+    self.do_it_all::<_, _, Cb, MSTableReadES>(ctx, io_ctx, extra_data);
+    self.do_it_all::<_, _, Cb, MSTableWriteES>(ctx, io_ctx, extra_data);
+    self.do_it_all::<_, _, Cb, MSTableInsertES>(ctx, io_ctx, extra_data);
+    self.do_it_all::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, extra_data);
   }
 
   fn execute_all_ctx<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackWithContext<ExtraDataT>>(
@@ -543,67 +745,12 @@ impl Statuses {
     io_ctx: &mut IOCtx,
     extra_data: &ExtraDataT,
   ) {
-    // TableReadES
-    let query_ids: Vec<QueryId> = self.top.table_read_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(read) = self.top.table_read_ess.get_mut(&query_id) {
-        let action = Cb::call(ctx, io_ctx, read, &mut (), extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
-    // TransTableReadES
-    let query_ids: Vec<QueryId> = self.top.trans_table_read_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(trans_read) = self.top.trans_table_read_ess.get_mut(&query_id) {
-        let prefix = trans_read.location_prefix();
-        let action = if let Some(gr_query) = self.gr_query_ess.get_mut(&prefix.source.query_id) {
-          Cb::call(ctx, io_ctx, trans_read, &mut gr_query.es, extra_data)
-        } else {
-          TabletAction::TPESAction(trans_read.handle_internal_query_error(
-            ctx,
-            io_ctx,
-            msg::QueryError::LateralError,
-          ))
-        };
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
-    // MSTableReadES
-    let query_ids: Vec<QueryId> = self.top.ms_table_read_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(ms_read) = self.top.ms_table_read_ess.get_mut(&query_id) {
-        let ms_query_es = self.ms_query_ess.get_mut(&ms_read.general.ms_query_id).unwrap();
-        let action = Cb::call(ctx, io_ctx, ms_read, ms_query_es, extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
-    // MSTableWriteES
-    let query_ids: Vec<QueryId> = self.top.ms_table_write_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(ms_write) = self.top.ms_table_write_ess.get_mut(&query_id) {
-        let ms_query_es = self.ms_query_ess.get_mut(&ms_write.general.ms_query_id).unwrap();
-        let action = Cb::call(ctx, io_ctx, ms_write, ms_query_es, extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
-    // MSTableInsertES
-    let query_ids: Vec<QueryId> = self.top.ms_table_insert_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(ms_insert) = self.top.ms_table_insert_ess.get_mut(&query_id) {
-        let ms_query_es = self.ms_query_ess.get_mut(&ms_insert.general.ms_query_id).unwrap();
-        let action = Cb::call(ctx, io_ctx, ms_insert, ms_query_es, extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
-    // MSTableDeleteES
-    let query_ids: Vec<QueryId> = self.top.ms_table_delete_ess.keys().cloned().collect();
-    for query_id in query_ids {
-      if let Some(ms_delete) = self.top.ms_table_delete_ess.get_mut(&query_id) {
-        let ms_query_es = self.ms_query_ess.get_mut(&ms_delete.general.ms_query_id).unwrap();
-        let action = Cb::call(ctx, io_ctx, ms_delete, ms_query_es, extra_data);
-        ctx.handle_tablet_action(io_ctx, self, query_id, action);
-      }
-    }
+    self.do_it_all_ctx::<_, _, Cb, TableReadES>(ctx, io_ctx, extra_data);
+    self.do_it_all_ctx::<_, _, Cb, TransTableReadES>(ctx, io_ctx, extra_data);
+    self.do_it_all_ctx::<_, _, Cb, MSTableReadES>(ctx, io_ctx, extra_data);
+    self.do_it_all_ctx::<_, _, Cb, MSTableWriteES>(ctx, io_ctx, extra_data);
+    self.do_it_all_ctx::<_, _, Cb, MSTableInsertES>(ctx, io_ctx, extra_data);
+    self.do_it_all_ctx::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, extra_data);
   }
 
   fn execute_once<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackOnce<ExtraDataT>>(
@@ -612,37 +759,18 @@ impl Statuses {
     io_ctx: &mut IOCtx,
     query_id: QueryId,
     extra_data: ExtraDataT,
-  ) {
-    // TableReadES
-    if let Some(read) = self.top.table_read_ess.get_mut(&query_id) {
-      let action = Cb::call(ctx, io_ctx, read, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // TransTableReadES
-    else if let Some(trans_read) = self.top.trans_table_read_ess.get_mut(&query_id) {
-      let action = Cb::call(ctx, io_ctx, trans_read, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableReadES
-    else if let Some(ms_read) = self.top.ms_table_read_ess.get_mut(&query_id) {
-      let action = Cb::call(ctx, io_ctx, ms_read, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableWriteES
-    else if let Some(ms_write) = self.top.ms_table_write_ess.get_mut(&query_id) {
-      let action = Cb::call(ctx, io_ctx, ms_write, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableInsertES
-    else if let Some(ms_insert) = self.top.ms_table_insert_ess.get_mut(&query_id) {
-      let action = Cb::call(ctx, io_ctx, ms_insert, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableDeleteES
-    else if let Some(ms_delete) = self.top.ms_table_delete_ess.get_mut(&query_id) {
-      let action = Cb::call(ctx, io_ctx, ms_delete, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
+  ) -> Option<(QueryId, ExtraDataT)> {
+    let (query_id, extra_data) =
+      self.do_it_once::<_, _, Cb, TableReadES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_once::<_, _, Cb, TransTableReadES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_once::<_, _, Cb, MSTableReadES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_once::<_, _, Cb, MSTableWriteES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_once::<_, _, Cb, MSTableInsertES>(ctx, io_ctx, query_id, extra_data)?;
+    self.do_it_once::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, query_id, extra_data)
   }
 
   fn execute_once_ctx<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackWithContextOnce<ExtraDataT>>(
@@ -651,50 +779,18 @@ impl Statuses {
     io_ctx: &mut IOCtx,
     query_id: QueryId,
     extra_data: ExtraDataT,
-  ) {
-    // TableReadES
-    if let Some(read) = self.top.table_read_ess.get_mut(&query_id) {
-      let action = Cb::call(ctx, io_ctx, read, &mut (), extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // TransTableReadES
-    else if let Some(trans_read) = self.top.trans_table_read_ess.get_mut(&query_id) {
-      let prefix = trans_read.location_prefix();
-      let action = if let Some(gr_query) = self.gr_query_ess.get_mut(&prefix.source.query_id) {
-        Cb::call(ctx, io_ctx, trans_read, &mut gr_query.es, extra_data)
-      } else {
-        TabletAction::TPESAction(trans_read.handle_internal_query_error(
-          ctx,
-          io_ctx,
-          msg::QueryError::LateralError,
-        ))
-      };
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableReadES
-    else if let Some(ms_read) = self.top.ms_table_read_ess.get_mut(&query_id) {
-      let ms_query_es = self.ms_query_ess.get_mut(&ms_read.general.ms_query_id).unwrap();
-      let action = Cb::call(ctx, io_ctx, ms_read, ms_query_es, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableWriteES
-    else if let Some(ms_write) = self.top.ms_table_write_ess.get_mut(&query_id) {
-      let ms_query_es = self.ms_query_ess.get_mut(&ms_write.general.ms_query_id).unwrap();
-      let action = Cb::call(ctx, io_ctx, ms_write, ms_query_es, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableInsertES
-    else if let Some(ms_insert) = self.top.ms_table_insert_ess.get_mut(&query_id) {
-      let ms_query_es = self.ms_query_ess.get_mut(&ms_insert.general.ms_query_id).unwrap();
-      let action = Cb::call(ctx, io_ctx, ms_insert, ms_query_es, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableDeleteES
-    else if let Some(ms_delete) = self.top.ms_table_delete_ess.get_mut(&query_id) {
-      let ms_query_es = self.ms_query_ess.get_mut(&ms_delete.general.ms_query_id).unwrap();
-      let action = Cb::call(ctx, io_ctx, ms_delete, ms_query_es, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
+  ) -> Option<(QueryId, ExtraDataT)> {
+    let (query_id, extra_data) =
+      self.do_it_once_ctx::<_, _, Cb, TableReadES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_once_ctx::<_, _, Cb, TransTableReadES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_once_ctx::<_, _, Cb, MSTableReadES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_once_ctx::<_, _, Cb, MSTableWriteES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_once_ctx::<_, _, Cb, MSTableInsertES>(ctx, io_ctx, query_id, extra_data)?;
+    self.do_it_once_ctx::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, query_id, extra_data)
   }
 
   fn execute_remove_ctx<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackWithContextRemove<ExtraDataT>>(
@@ -703,50 +799,18 @@ impl Statuses {
     io_ctx: &mut IOCtx,
     query_id: QueryId,
     extra_data: ExtraDataT,
-  ) {
-    // TableReadES
-    if let Some(read) = self.top.table_read_ess.remove(&query_id) {
-      let action = Cb::call(ctx, io_ctx, read, &mut (), extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // TransTableReadES
-    else if let Some(mut trans_read) = self.top.trans_table_read_ess.remove(&query_id) {
-      let prefix = trans_read.location_prefix();
-      let action = if let Some(gr_query) = self.gr_query_ess.get_mut(&prefix.source.query_id) {
-        Cb::call(ctx, io_ctx, trans_read, &mut gr_query.es, extra_data)
-      } else {
-        TabletAction::TPESAction(trans_read.handle_internal_query_error(
-          ctx,
-          io_ctx,
-          msg::QueryError::LateralError,
-        ))
-      };
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableReadES
-    else if let Some(ms_read) = self.top.ms_table_read_ess.remove(&query_id) {
-      let ms_query_es = self.ms_query_ess.get_mut(&ms_read.general.ms_query_id).unwrap();
-      let action = Cb::call(ctx, io_ctx, ms_read, ms_query_es, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableWriteES
-    else if let Some(ms_write) = self.top.ms_table_write_ess.remove(&query_id) {
-      let ms_query_es = self.ms_query_ess.get_mut(&ms_write.general.ms_query_id).unwrap();
-      let action = Cb::call(ctx, io_ctx, ms_write, ms_query_es, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableInsertES
-    else if let Some(ms_insert) = self.top.ms_table_insert_ess.remove(&query_id) {
-      let ms_query_es = self.ms_query_ess.get_mut(&ms_insert.general.ms_query_id).unwrap();
-      let action = Cb::call(ctx, io_ctx, ms_insert, ms_query_es, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
-    // MSTableDeleteES
-    else if let Some(ms_delete) = self.top.ms_table_delete_ess.remove(&query_id) {
-      let ms_query_es = self.ms_query_ess.get_mut(&ms_delete.general.ms_query_id).unwrap();
-      let action = Cb::call(ctx, io_ctx, ms_delete, ms_query_es, extra_data);
-      ctx.handle_tablet_action(io_ctx, self, query_id, action);
-    }
+  ) -> Option<(QueryId, ExtraDataT)> {
+    let (query_id, extra_data) =
+      self.do_it_remove_ctx::<_, _, Cb, TableReadES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_remove_ctx::<_, _, Cb, TransTableReadES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_remove_ctx::<_, _, Cb, MSTableReadES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_remove_ctx::<_, _, Cb, MSTableWriteES>(ctx, io_ctx, query_id, extra_data)?;
+    let (query_id, extra_data) =
+      self.do_it_remove_ctx::<_, _, Cb, MSTableInsertES>(ctx, io_ctx, query_id, extra_data)?;
+    self.do_it_remove_ctx::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, query_id, extra_data)
   }
 }
 
@@ -1794,6 +1858,7 @@ impl TabletContext {
     inner: InnerT,
   ) where
     MSTableES<InnerT>: ESContGetter,
+    MSTableES<InnerT>: TPESBase<ESContext = MSQueryES>,
   {
     match self.get_msquery_id(
       io_ctx,
