@@ -491,12 +491,14 @@ pub struct TMStatus {
   /// This is the QueryId of the PerformQuery. We keep this distinct from the TMStatus'
   /// QueryId, since one of the RMs might be this node.
   pub child_query_id: QueryId,
+  /// Accumulates all transitively accessed Tablets where an `MSQueryES` was used.
   pub new_rms: BTreeSet<TQueryPath>,
   /// The current set of Leaderships that this TMStatus is waiting on. Thus, in order to
   /// contact an RM, we just use the `LeadershipId` found here.
   pub leaderships: BTreeMap<SlaveGroupId, LeadershipId>,
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   pub responded_count: usize,
+  /// Holds all child Querys, initially mapping to `None`. As results come in, we hold them here.
   pub tm_state: BTreeMap<CTNodePath, Option<(Vec<Option<ColName>>, Vec<TableView>)>>,
   pub orig_p: OrigP,
 }
@@ -653,6 +655,7 @@ pub fn cur_timestamp<IO: BasicIOCtx>(io_ctx: &mut IO, timestamp_suffix_divisor: 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QueryPlan {
   pub tier_map: TierMap,
+  /// See the `compute_query_leader_map` in `QueryPlanningES`.
   pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   pub table_location_map: BTreeMap<TablePath, Gen>,
   /// These are additional required columns that the QueryPlan expects that these `TablePaths`

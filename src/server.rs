@@ -214,9 +214,9 @@ pub trait CTServerContext: ServerContextBase {
   fn sub_node_path(&self) -> &CTSubNodePath;
   fn gossip(&self) -> &Arc<GossipData>;
 
-  /// Construct a `NodePath` from a `NodeGroupId`.
+  /// Construct a `NodePath` for a `TabletGroupId`.
   /// NOTE: the `tid` must exist in the `gossip` at this point.
-  fn mk_node_path_from_tablet(&self, tid: TabletGroupId) -> TNodePath {
+  fn mk_tablet_node_path(&self, tid: TabletGroupId) -> TNodePath {
     let sid = self.gossip().get().tablet_address_config.get(&tid).unwrap();
     TNodePath { sid: sid.clone(), sub: TSubNodePath::Tablet(tid.clone()) }
   }
@@ -268,8 +268,8 @@ pub trait CTServerContext: ServerContextBase {
   fn get_min_tablets(
     &self,
     table_path: &TablePath,
-    table_ref: &proc::GeneralSource,
     gen: &Gen,
+    table_ref: &proc::GeneralSource,
     selection: &proc::ValExpr,
   ) -> Vec<TabletGroupId> {
     // Compute the Row Region that this selection is accessing.
@@ -705,8 +705,9 @@ pub trait LocalTable {
   /// Checks if the given `col` is in the schema of the LocalTable.
   fn contains_col(&self, col: &ColName) -> bool;
 
-  /// The `GeneralSource` used in the query that this LocalTable is being used as a Data
-  /// Source for. This is needed to interpret `ColumnRef`s as refering to the Data Source or not.
+  /// The `GeneralSource` used in the query that this `LocalTable` is being used as a Data
+  /// Source for. This is needed to interpret whether a `ColumnRef`s is referring to the
+  /// Data Source or not.
   fn source(&self) -> &proc::GeneralSource;
 
   /// Checks whether this `ColumnRef` refers to a column in this `LocalTable`, taking the alias
@@ -726,7 +727,7 @@ pub trait LocalTable {
 
   /// Here, every `col_names` must be in `contains_col`, and every `ColumnRef` in
   /// `parent_context_schema` must have `contains_col_ref` evaluate to false. This function
-  /// get all rows in the local table that's associated with the given parent ContextRow.
+  /// gets all rows in the local table that is associated with the given parent ContextRow.
   /// Here, we return the value of every row (`Vec<ColValN>`), as well as the count of how
   /// many times that row occurred (this is more performant than returning the same row over
   /// and over again).

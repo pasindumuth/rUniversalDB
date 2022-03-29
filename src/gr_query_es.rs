@@ -497,7 +497,7 @@ impl GRQueryES {
         // We do this before sending any messages, in case it fails.
         let gen = self.query_plan.table_location_map.get(table_path).unwrap();
         let tids =
-          ctx.get_min_tablets(table_path, &child_sql_query.from, gen, &child_sql_query.selection);
+          ctx.get_min_tablets(table_path, gen, &child_sql_query.from, &child_sql_query.selection);
         for tid in &tids {
           let sid = ctx.gossip().get().tablet_address_config.get(&tid).unwrap();
           if let Some(lid) = query_leader_map.get(sid) {
@@ -523,7 +523,7 @@ impl GRQueryES {
 
           // Send out PerformQuery. Recall that this could only be a Tablet.
           let common_query = CommonQuery::PerformQuery(perform_query);
-          let node_path = ctx.mk_node_path_from_tablet(tid).into_ct();
+          let node_path = ctx.mk_tablet_node_path(tid).into_ct();
           let sid = node_path.sid.clone();
           if let Some(lid) = query_leader_map.get(&sid) {
             // Recall we already validated that `lid` is no lower than the

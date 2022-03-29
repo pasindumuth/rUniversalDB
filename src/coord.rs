@@ -835,7 +835,7 @@ impl CoordContext {
         let child_queries = ms_coord.child_queries.clone();
         self.exit_all(io_ctx, statuses, child_queries);
 
-        // Construct a new MSCoordES using a Timestamp that's strictly greater than before.
+        // Construct a new MSCoordES using a Timestamp that is strictly greater than before.
         let mut ms_coord = statuses.ms_coord_ess.remove(&query_id).unwrap();
         let exec = ms_coord.es.to_exec();
         let query_id = mk_qid(io_ctx.rand());

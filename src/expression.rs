@@ -327,6 +327,9 @@ pub fn evaluate_c_expr(c_expr: &CExpr) -> Result<ColValN, EvalError> {
   }
 }
 
+/// Given a Table with `key_cols` KeyCols and a SQL Query (e.g. a SELECT) with `source`
+/// Data Source Name (i.e. FROM clause), this function checks whether the `ColumnRef` is
+/// referring to a KeyCol in this Table.
 fn contains_key_col_ref(
   source: &proc::GeneralSource,
   key_cols: &Vec<(ColName, ColType)>,
@@ -646,15 +649,18 @@ pub fn compress_row_region(row_region: Vec<KeyBound>) -> Vec<KeyBound> {
   row_region
 }
 
-/// Computes `KeyBound`s that have a corresponding shape to `key_cols` such that any key
-/// outside of this is guaranteed to evaluate `expr` to `false` or `NULL`. We have `col_map`
-/// as concrete values that we substitute into `expr` first. This returns the compressed
-/// regions.
+/// For a given Table, for a given WHERE clause and FROM clause, this function computes
+/// `Vec<KeyBound>` such that any PrimaryKey outside of it will certainly evaluate
+/// the WHERE clause to `false` or `NULL`. The `key_cols` are the KeyCols of the Table,
+/// the `expr` is the WHERE clause, and `source` is the Data Source Name in the FROM
+/// clause, and `col_map` are some values that we can substitute some `ColumnRef`s in
+/// the `expr` with. Importantly, none of these `ColumnRef`s should refer to a KeyCol (i.e.
+/// `contains_key_col_ref` should evaluate to `false`).
 ///
-/// Importantly, `expr` might not even be evaluatable for keys within the  `KeyBound` (i.e.
+/// This returns the compressed regions.
+///
+/// Importantly, `expr` might not even be evaluatable for some keys within the  `KeyBound` (i.e.
 /// there might be runtime errors or type errors). But that is not something we check here.
-///
-/// Note that the `ColumnRef`s in `col_map` must evaluate `contains_key_col_ref` to false.
 pub fn compute_key_region(
   expr: &proc::ValExpr,
   col_map: BTreeMap<proc::ColumnRef, ColValN>,

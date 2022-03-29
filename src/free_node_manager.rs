@@ -1,10 +1,22 @@
 use crate::common::{mk_cid, mk_sid, LeaderMap, MasterIOCtx, MasterTraceMessage};
-use crate::master::plm::FreeNodeManagerPLm;
 use crate::master::{MasterBundle, MasterConfig, MasterContext, MasterPLm};
 use crate::model::common::{CoordGroupId, EndpointId, LeadershipId, PaxosGroupId, SlaveGroupId};
 use crate::model::message as msg;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+
+// -----------------------------------------------------------------------------------------------
+//  PLms
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FreeNodeManagerPLm {
+  /// Here, we hold enough data such that `msg::CreateSlaveGroup` can be Derived State.
+  new_slave_groups: BTreeMap<SlaveGroupId, (Vec<EndpointId>, Vec<CoordGroupId>)>,
+  new_nodes: Vec<(EndpointId, FreeNodeType)>,
+  nodes_dead: Vec<EndpointId>,
+  granted_reconfig_eids: BTreeMap<PaxosGroupId, Vec<EndpointId>>,
+}
 
 // -----------------------------------------------------------------------------------------------
 //  FreeNodeManager

@@ -175,14 +175,21 @@ pub fn perform_static_validations<
       }
       proc::MSQueryStage::Insert(query) => {
         // Check that the `stage` is inserting to all KeyCols.
-        // and all assigned columns are unique.
         let key_cols = view.key_cols(&query.table.source_ref)?;
-        let mut all_cols = BTreeSet::<&ColName>::new();
         for (col_name, _) in key_cols {
-          if !all_cols.insert(col_name) || !query.columns.contains(col_name) {
+          if !query.columns.contains(col_name) {
             return Err(ErrorT::mk_error(StaticValidationError::InvalidInsert));
           }
         }
+
+        // Check that all assigned columns are unique.
+        let mut all_cols = BTreeSet::<&ColName>::new();
+        for col_name in &query.columns {
+          if !all_cols.insert(col_name) {
+            return Err(ErrorT::mk_error(StaticValidationError::InvalidInsert));
+          }
+        }
+
         // Check that `values` has equal length to `columns`.
         for row in &query.values {
           if row.len() != query.columns.len() {
@@ -206,7 +213,7 @@ pub fn check_cols_present<ErrorT: ReqColPresenceError, ViewT: DBSchemaView<Error
   for (table_path, col_names) in table_col_map {
     for col_name in col_names {
       if !view.contains_col(table_path, col_name)? {
-        return Err(ReqColPresenceError::mk_error(col_name.clone()));
+        return Err(ErrorT::mk_error(col_name.clone()));
       }
     }
   }

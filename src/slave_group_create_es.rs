@@ -1,26 +1,34 @@
 use crate::common::{mk_cid, mk_sid, update_all_eids, MasterIOCtx};
-use crate::master::plm::ConfirmCreateGroup;
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupIdTrait, SlaveGroupId,
 };
 use crate::model::message as msg;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+// -----------------------------------------------------------------------------------------------
+//  PLms
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmCreateGroup {
+  sid: SlaveGroupId,
+}
 
 // -----------------------------------------------------------------------------------------------
 //  SlaveGroupCreateES
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum State {
+enum State {
   Follower,
   WaitingConfirmed(BTreeSet<EndpointId>),
   InsertingConfirmed,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct SlaveGroupCreateES {
+struct SlaveGroupCreateES {
   create_msg: msg::CreateSlaveGroup,
   paxos_nodes: Vec<EndpointId>,
   state: State,
@@ -28,7 +36,7 @@ pub struct SlaveGroupCreateES {
 
 impl SlaveGroupCreateES {
   /// Constructs an `ES`, sending out `CreateSlaveGroup` if this is the Master node.
-  pub fn create<IO: MasterIOCtx>(
+  fn create<IO: MasterIOCtx>(
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
     sid: SlaveGroupId,
@@ -62,7 +70,7 @@ impl SlaveGroupCreateES {
   }
 
   /// Handles the `ConfirmSlaveCreation` sent back by a node that successfully constructed itself.
-  pub fn handle_confirm_msg<IO: MasterIOCtx>(
+  fn handle_confirm_msg<IO: MasterIOCtx>(
     &mut self,
     ctx: &mut MasterContext,
     _: &mut IO,
@@ -87,7 +95,7 @@ impl SlaveGroupCreateES {
   }
 
   /// Handles the insertion of the `ConfirmCreateGroup` PLm.
-  pub fn handle_confirm_plm<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
+  fn handle_confirm_plm<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     match &self.state {
       State::Follower | State::InsertingConfirmed => {
         // Update the GossipData
@@ -116,7 +124,7 @@ impl SlaveGroupCreateES {
   }
 
   /// Handle the current (Master) leader changing.
-  pub fn leader_changed<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
+  fn leader_changed<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
     match &self.state {
       State::Follower => {
         if ctx.is_leader() {
@@ -141,11 +149,81 @@ impl SlaveGroupCreateES {
   /// If this node is a Follower, a copy of this `SlaveGroupCreateES` is returned. If this
   /// node is a Leader, then the value of this `SlaveGroupCreateES` that would result from
   /// losing Leadership is returned (i.e. after calling `leader_changed`).
-  pub fn reconfig_snapshot(&self) -> SlaveGroupCreateES {
+  fn reconfig_snapshot(&self) -> SlaveGroupCreateES {
     SlaveGroupCreateES {
       create_msg: self.create_msg.clone(),
       paxos_nodes: self.paxos_nodes.clone(),
       state: State::Follower,
     }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  ES Container Functions
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SlaveGroupCreateESS {
+  ess: BTreeMap<SlaveGroupId, SlaveGroupCreateES>,
+}
+
+impl SlaveGroupCreateESS {
+  pub fn new() -> SlaveGroupCreateESS {
+    SlaveGroupCreateESS { ess: Default::default() }
+  }
+
+  // Leader-only
+
+  pub fn handle_msg<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
+    confirm_msg: msg::ConfirmSlaveCreation,
+  ) {
+    if let Some(es) = self.ess.get_mut(&confirm_msg.sid) {
+      es.handle_confirm_msg(ctx, io_ctx, confirm_msg);
+    }
+  }
+
+  pub fn handle_new_slaves<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
+    new_slave_groups: BTreeMap<SlaveGroupId, (Vec<EndpointId>, Vec<CoordGroupId>)>,
+  ) {
+    // Construct `SlaveGroupCreateES`s accordingly
+    for (sid, (paxos_nodes, coord_ids)) in new_slave_groups {
+      let es = SlaveGroupCreateES::create(ctx, io_ctx, sid.clone(), paxos_nodes, coord_ids);
+      self.ess.insert(sid, es);
+    }
+  }
+
+  // Leader and Follower
+
+  pub fn handle_plm<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
+    confirm_create: ConfirmCreateGroup,
+  ) {
+    // Here, we remove the ES and then finish it off.
+    let mut es = self.ess.remove(&confirm_create.sid).unwrap();
+    es.handle_confirm_plm(ctx, io_ctx);
+  }
+
+  pub fn handle_lc<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
+    for (_, es) in &mut self.ess {
+      es.leader_changed(ctx, io_ctx);
+    }
+  }
+
+  /// Add in the `SlaveGroupCreateES` where at least `ReconfigSlaveGroup` PLm has been inserted.
+  pub fn handle_reconfig_snapshot(&self) -> SlaveGroupCreateESS {
+    let mut create_ess = SlaveGroupCreateESS::new();
+    for (qid, es) in &self.ess {
+      let es = es.reconfig_snapshot();
+      create_ess.ess.insert(qid.clone(), es);
+    }
+    create_ess
   }
 }

@@ -447,7 +447,7 @@ impl FullMSCoordES {
     // Construct the QueryPlan
     let mut query_leader_map = es.query_plan.query_leader_map.clone();
     query_leader_map
-      .insert(ctx.this_sid.clone(), ctx.leader_map.get(&ctx.this_sid.to_gid()).unwrap().clone());
+      .insert(ctx.this_sid.clone(), ctx.leader_map.get(&ctx.this_gid).unwrap().clone());
     let query_plan = QueryPlan {
       tier_map: es.query_plan.all_tier_maps.get(trans_table_name).unwrap().clone(),
       query_leader_map: query_leader_map.clone(),
@@ -456,7 +456,7 @@ impl FullMSCoordES {
       col_usage_node: col_usage_node.clone(),
     };
 
-    // Create Construct the TMStatus that's going to be used to coordinate this stage.
+    // Construct the TMStatus that is going to be used to coordinate this stage
     let tm_qid = mk_qid(io_ctx.rand());
     let child_qid = mk_qid(io_ctx.rand());
     let mut tm_status = TMStatus {
@@ -499,7 +499,7 @@ impl FullMSCoordES {
             };
             let gen = es.query_plan.table_location_map.get(table_path).unwrap();
             let tids =
-              ctx.get_min_tablets(&table_path, &select_query.from, gen, &select_query.selection);
+              ctx.get_min_tablets(&table_path, gen, &select_query.from, &select_query.selection);
             SendHelper::TableQuery(perform_query, tids)
           }
           proc::GeneralSourceRef::TransTableName(sub_trans_table_name) => {
@@ -544,8 +544,8 @@ impl FullMSCoordES {
         let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
         let tids = ctx.get_min_tablets(
           &table_path.source_ref,
-          &table_path.to_read_source(),
           gen,
+          &table_path.to_read_source(),
           &update_query.selection,
         );
         SendHelper::TableQuery(perform_query, tids)
@@ -585,8 +585,8 @@ impl FullMSCoordES {
         let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
         let tids = ctx.get_min_tablets(
           &table_path.source_ref,
-          &table_path.to_read_source(),
           gen,
+          &table_path.to_read_source(),
           &delete_query.selection,
         );
         SendHelper::TableQuery(perform_query, tids)
@@ -601,6 +601,7 @@ impl FullMSCoordES {
         // earlier, so this check is necessary.
         for tid in &tids {
           let sid = ctx.gossip.get().tablet_address_config.get(&tid).unwrap();
+          // TODO: when sharding occurs, this query_leader_map.get might be invalid.
           if let Some(lid) = query_leader_map.get(sid) {
             if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
               // The `lid` has since changed, so we cannot finish this MSQueryES.
@@ -620,13 +621,13 @@ impl FullMSCoordES {
           // for the given `tids` align, so using `send_to_t` sends to Leaderships
           // in `query_leader_map`.
           let tablet_msg = msg::TabletMessage::PerformQuery(perform_query.clone());
-          let node_path = ctx.mk_node_path_from_tablet(tid);
+          let node_path = ctx.mk_tablet_node_path(tid);
           ctx.send_to_t(io_ctx, node_path.clone(), tablet_msg);
 
           // Add the TabletGroup into the TMStatus.
-          tm_status.tm_state.insert(node_path.clone().into_ct(), None);
           let sid = node_path.sid.clone();
           let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
+          tm_status.tm_state.insert(node_path.into_ct(), None);
           tm_status.leaderships.insert(sid, lid.clone());
         }
       }
@@ -638,9 +639,9 @@ impl FullMSCoordES {
         ctx.send_to_ct(io_ctx, node_path.clone(), CommonQuery::PerformQuery(perform_query));
 
         // Add the TabletGroup into the TMStatus.
-        tm_status.tm_state.insert(node_path.clone(), None);
         let sid = node_path.sid.clone();
         let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
+        tm_status.tm_state.insert(node_path, None);
         tm_status.leaderships.insert(sid, lid.clone());
       }
     }

@@ -3,7 +3,7 @@ use crate::col_usage::{
   GeneralStage,
 };
 use crate::common::{lookup, MasterIOCtx, RemoteLeaderChangedPLm, TableSchema, Timestamp};
-use crate::master::{plm, MasterContext, MasterPLm};
+use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
   proc, CQueryPath, ColName, ColType, Gen, PaxosGroupId, PaxosGroupIdTrait, QueryId, TablePath,
@@ -18,6 +18,7 @@ use crate::query_planning::{
   compute_table_location_map, perform_static_validations, StaticValidationError,
 };
 use crate::server::ServerContextBase;
+use serde::{Deserialize, Serialize};
 use sqlparser::test_utils::table;
 use std::collections::BTreeMap;
 
@@ -389,6 +390,17 @@ pub fn master_query_planning<
 }
 
 // -----------------------------------------------------------------------------------------------
+//  PLms
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MasterQueryPlanning {
+  query_id: QueryId,
+  timestamp: Timestamp,
+  ms_query: proc::MSQuery,
+}
+
+// -----------------------------------------------------------------------------------------------
 //  MasterQueryPlanningES
 // -----------------------------------------------------------------------------------------------
 
@@ -443,7 +455,7 @@ fn master_query_planning_pre(
 /// Handle the insertion of a `MasterQueryPlanning` message.
 fn master_query_planning_post(
   ctx: &mut MasterContext,
-  planning_plm: plm::MasterQueryPlanning,
+  planning_plm: MasterQueryPlanning,
 ) -> msg::MasteryQueryPlanningResult {
   ctx.gossip.update(|gossip| {
     let mut view = LockingDBSchemaView {
@@ -533,7 +545,7 @@ impl MasterQueryPlanningESS {
   /// For every `MasterQueryPlanningES`, we add a PLm
   pub fn handle_bundle_processed(&mut self, ctx: &mut MasterContext) {
     for (_, es) in &mut self.ess {
-      ctx.master_bundle.plms.push(MasterPLm::MasterQueryPlanning(plm::MasterQueryPlanning {
+      ctx.master_bundle.plms.push(MasterPLm::MasterQueryPlanning(MasterQueryPlanning {
         query_id: es.query_id.clone(),
         timestamp: es.timestamp.clone(),
         ms_query: es.ms_query.clone(),
@@ -547,7 +559,7 @@ impl MasterQueryPlanningESS {
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-    planning_plm: plm::MasterQueryPlanning,
+    planning_plm: MasterQueryPlanning,
   ) {
     let query_id = planning_plm.query_id.clone();
     let result = master_query_planning_post(ctx, planning_plm);

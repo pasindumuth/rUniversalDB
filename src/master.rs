@@ -8,9 +8,8 @@ use crate::common::{
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
 use crate::drop_table_tm_es::{DropTablePayloadTypes, DropTableTMES, DropTableTMInner};
-use crate::free_node_manager::{FreeNodeManager, FreeNodeType};
-use crate::master::plm::{ConfirmCreateGroup, FreeNodeManagerPLm};
-use crate::master_query_planning_es::MasterQueryPlanningESS;
+use crate::free_node_manager::{FreeNodeManager, FreeNodeManagerPLm, FreeNodeType};
+use crate::master_query_planning_es::{MasterQueryPlanning, MasterQueryPlanningESS};
 use crate::model::common::{
   proc, ColName, ColType, ColVal, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
   PrimaryKey, QueryId, RequestId, SlaveGroupId, TNodePath, TablePath, TabletGroupId,
@@ -25,7 +24,7 @@ use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use crate::server::{contains_col_latest, ServerContextBase};
-use crate::slave_group_create_es::SlaveGroupCreateES;
+use crate::slave_group_create_es::{ConfirmCreateGroup, SlaveGroupCreateESS};
 use crate::slave_reconfig_es::{SlaveReconfigESS, SlaveReconfigPLm};
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
@@ -44,43 +43,6 @@ use std::iter::FromIterator;
 pub mod master_test;
 
 // -----------------------------------------------------------------------------------------------
-//  MasterPLm
-// -----------------------------------------------------------------------------------------------
-
-pub mod plm {
-  use crate::common::Timestamp;
-  use crate::free_node_manager::FreeNodeType;
-  use crate::model::common::{proc, CoordGroupId, EndpointId, PaxosGroupId, QueryId, SlaveGroupId};
-  use serde::{Deserialize, Serialize};
-  use std::collections::BTreeMap;
-
-  // MasterQueryPlanning
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct MasterQueryPlanning {
-    pub query_id: QueryId,
-    pub timestamp: Timestamp,
-    pub ms_query: proc::MSQuery,
-  }
-
-  // FreeNodeManager
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct FreeNodeManagerPLm {
-    /// Here, we hold enough data such that `msg::CreateSlaveGroup` can be Derived State.
-    pub new_slave_groups: BTreeMap<SlaveGroupId, (Vec<EndpointId>, Vec<CoordGroupId>)>,
-    pub new_nodes: Vec<(EndpointId, FreeNodeType)>,
-    pub nodes_dead: Vec<EndpointId>,
-    pub granted_reconfig_eids: BTreeMap<PaxosGroupId, Vec<EndpointId>>,
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct ConfirmCreateGroup {
-    pub sid: SlaveGroupId,
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
 //  MasterBundle
 // -----------------------------------------------------------------------------------------------
 
@@ -92,7 +54,7 @@ pub struct MasterBundle {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterPLm {
-  MasterQueryPlanning(plm::MasterQueryPlanning),
+  MasterQueryPlanning(MasterQueryPlanning),
 
   // DDL and STMPaxos2PC
   CreateTable(paxos2pc::TMPLm<CreateTablePayloadTypes>),
@@ -304,7 +266,7 @@ pub struct MasterSnapshot {
   pub create_table_tm_ess: BTreeMap<QueryId, CreateTableTMES>,
   pub alter_table_tm_ess: BTreeMap<QueryId, AlterTableTMES>,
   pub drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
-  pub slave_group_create_ess: BTreeMap<SlaveGroupId, SlaveGroupCreateES>,
+  pub slave_group_create_ess: SlaveGroupCreateESS,
   pub slave_reconfig_ess: SlaveReconfigESS,
 }
 
@@ -338,7 +300,7 @@ pub struct Statuses {
   pub drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
   pub planning_ess: MasterQueryPlanningESS,
 
-  pub slave_group_create_ess: BTreeMap<SlaveGroupId, SlaveGroupCreateES>,
+  pub slave_group_create_ess: SlaveGroupCreateESS,
   pub slave_reconfig_ess: SlaveReconfigESS,
 
   /// FreeNodeManager
@@ -413,7 +375,7 @@ impl MasterState {
         alter_table_tm_ess: Default::default(),
         drop_table_tm_ess: Default::default(),
         planning_ess: MasterQueryPlanningESS::new(),
-        slave_group_create_ess: Default::default(),
+        slave_group_create_ess: SlaveGroupCreateESS::new(),
         slave_reconfig_ess: SlaveReconfigESS::new(),
         free_node_manager: FreeNodeManager::new(),
         do_reconfig: None,
@@ -598,10 +560,7 @@ impl MasterContext {
               statuses.free_node_manager.handle_heartbeat(self, heartbeat);
             }
             FreeNodeAssoc::ConfirmSlaveCreation(confirm_msg) => {
-              // Recall that the ES here could have been completed already.
-              if let Some(es) = statuses.slave_group_create_ess.get_mut(&confirm_msg.sid) {
-                es.handle_confirm_msg(self, io_ctx, confirm_msg);
-              }
+              statuses.slave_group_create_ess.handle_msg(self, io_ctx, confirm_msg);
             }
           }
         }
@@ -820,19 +779,10 @@ impl MasterContext {
             // FreeNode PLms
             MasterPLm::FreeNodeManagerPLm(plm) => {
               let new_slave_groups = statuses.free_node_manager.handle_plm(self, io_ctx, plm);
-
-              // Construct `SlaveGroupCreateES`s accordingly
-              for (sid, (paxos_nodes, coord_ids)) in new_slave_groups {
-                statuses.slave_group_create_ess.insert(
-                  sid.clone(),
-                  SlaveGroupCreateES::create(self, io_ctx, sid, paxos_nodes, coord_ids),
-                );
-              }
+              statuses.slave_group_create_ess.handle_new_slaves(self, io_ctx, new_slave_groups);
             }
             MasterPLm::ConfirmCreateGroup(confirm_create) => {
-              // Here, we remove the ES and then finish it off.
-              let mut es = statuses.slave_group_create_ess.remove(&confirm_create.sid).unwrap();
-              es.handle_confirm_plm(self, io_ctx);
+              statuses.slave_group_create_ess.handle_plm(self, io_ctx, confirm_create);
             }
             MasterPLm::SlaveConfigPLm(plm) => {
               statuses.slave_reconfig_ess.handle_plm(self, io_ctx, plm);
@@ -1112,9 +1062,7 @@ impl MasterContext {
         // DropTable
         paxos2pc::handle_lc(self, io_ctx, &mut statuses.drop_table_tm_ess);
         // SlaveGroupCreate
-        for (_, es) in &mut statuses.slave_group_create_ess {
-          es.leader_changed(self, io_ctx);
-        }
+        statuses.slave_group_create_ess.handle_lc(self, io_ctx);
         // SlaveReconfig
         statuses.slave_reconfig_ess.handle_lc(self, io_ctx);
         // MasterQueryPlanningES
@@ -1485,15 +1433,9 @@ impl MasterContext {
       create_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.create_table_tm_ess),
       alter_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.alter_table_tm_ess),
       drop_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.drop_table_tm_ess),
-      slave_group_create_ess: Default::default(),
+      slave_group_create_ess: statuses.slave_group_create_ess.handle_reconfig_snapshot(),
       slave_reconfig_ess: statuses.slave_reconfig_ess.handle_reconfig_snapshot(),
     };
-
-    // Add in the SlaveGroupCreateES.
-    for (qid, es) in &statuses.slave_group_create_ess {
-      let es = es.reconfig_snapshot();
-      snapshot.slave_group_create_ess.insert(qid.clone(), es);
-    }
 
     // Send the Snapshot.
     for new_eid in &non_started_eids {
