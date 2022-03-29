@@ -858,7 +858,7 @@ impl QueryPlanningES {
         match result {
           MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
             // By now, we know the QueryPlanning can succeed. However, we need to make sure
-            // the local GossipData is recent enough so we can communicate with the shared.
+            // the local GossipData is recent enough so we can communicate with the shards.
             if self.check_local_gossip(ctx, &master_query_plan) {
               self.finish_master_query_plan(ctx, master_query_plan)
             } else {
@@ -874,7 +874,7 @@ impl QueryPlanningES {
 
               self.state =
                 QueryPlanningS::GossipDataWaiting(GossipDataWaiting { master_query_plan });
-              return QueryPlanningAction::Wait;
+              QueryPlanningAction::Wait
             }
           }
           MasteryQueryPlanningResult::QueryPlanningError(error) => {
@@ -923,7 +923,7 @@ impl QueryPlanningES {
   }
 
   /// This Exits and Cleans up this QueryPlanningES
-  fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, ctx: &mut CoordContext, io_ctx: &mut IO) {
+  pub fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, ctx: &mut CoordContext, io_ctx: &mut IO) {
     match &self.state {
       QueryPlanningS::Start => {}
       QueryPlanningS::MasterQueryPlanning(MasterQueryPlanning { master_query_id }) => {

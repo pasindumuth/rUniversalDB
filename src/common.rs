@@ -279,7 +279,14 @@ impl TableSchema {
 // -------------------------------------------------------------------------------------------------
 
 /// Holds system Metadata that is Gossiped out from the Master to the Slaves. It is very
-/// important, containing the dtabase schema, Paxos configuration, etc.
+/// important, containing the database schema, Paxos configuration, etc.
+///
+/// Properties:
+///   1. The set of keys in `db_schema` is equal to the key-value pairs in `table_generation`.
+///   2. The set of keys in `db_schema` is equal to keys in `sharding_config`.
+///   3. The `PrimaryKey`s in `TabletKeyRange` have the right schema according to `db_schema`.
+///   4. Every `TabletGroupId` in `sharding_config` is a key in `tablet_address_config`.
+///   5. Every `SlaveGroupId` in `tablet_address_config` is a key in `slave_address_config`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct GossipData {
   /// Database Schema
@@ -387,6 +394,9 @@ impl<'a> GossipDataMutView<'a> {
 //  LeaderMap
 // -----------------------------------------------------------------------------------------------
 
+/// This contains every `PaxosGroupId` in `GossipData` (i.e. all Slaves and the Master).
+/// Inside of Slaves, recall that `GossipData` might not yet contain the Slave (this happens
+/// when the SlaveGroup is freshly created). This `LeaderMap` will contain that as well.
 pub type LeaderMap = BTreeMap<PaxosGroupId, LeadershipId>;
 
 /// Amend the local LeaderMap to refect the new GossipData.

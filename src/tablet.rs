@@ -770,7 +770,9 @@ impl Statuses {
       self.do_it_once::<_, _, Cb, MSTableWriteES>(ctx, io_ctx, query_id, extra_data)?;
     let (query_id, extra_data) =
       self.do_it_once::<_, _, Cb, MSTableInsertES>(ctx, io_ctx, query_id, extra_data)?;
-    self.do_it_once::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, query_id, extra_data)
+    let (query_id, extra_data) =
+      self.do_it_once::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, query_id, extra_data)?;
+    Some((query_id, extra_data))
   }
 
   fn execute_once_ctx<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackWithContextOnce<ExtraDataT>>(
@@ -790,7 +792,9 @@ impl Statuses {
       self.do_it_once_ctx::<_, _, Cb, MSTableWriteES>(ctx, io_ctx, query_id, extra_data)?;
     let (query_id, extra_data) =
       self.do_it_once_ctx::<_, _, Cb, MSTableInsertES>(ctx, io_ctx, query_id, extra_data)?;
-    self.do_it_once_ctx::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, query_id, extra_data)
+    let (query_id, extra_data) =
+      self.do_it_once_ctx::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, query_id, extra_data)?;
+    Some((query_id, extra_data))
   }
 
   fn execute_remove_ctx<IOCtx: CoreIOCtx, ExtraDataT, Cb: CallbackWithContextRemove<ExtraDataT>>(
@@ -810,7 +814,9 @@ impl Statuses {
       self.do_it_remove_ctx::<_, _, Cb, MSTableWriteES>(ctx, io_ctx, query_id, extra_data)?;
     let (query_id, extra_data) =
       self.do_it_remove_ctx::<_, _, Cb, MSTableInsertES>(ctx, io_ctx, query_id, extra_data)?;
-    self.do_it_remove_ctx::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, query_id, extra_data)
+    let (query_id, extra_data) =
+      self.do_it_remove_ctx::<_, _, Cb, MSTableDeleteES>(ctx, io_ctx, query_id, extra_data)?;
+    Some((query_id, extra_data))
   }
 }
 

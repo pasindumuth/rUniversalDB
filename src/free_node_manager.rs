@@ -7,25 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 // -----------------------------------------------------------------------------------------------
-//  FreeNodeManagerContext
-// -----------------------------------------------------------------------------------------------
-
-pub struct FreeNodeManagerContext<'a> {
-  pub config: &'a MasterConfig,
-  pub this_eid: &'a EndpointId,
-  pub leader_map: &'a LeaderMap,
-  pub master_bundle: &'a mut MasterBundle,
-  pub master_config: &'a MasterConfig,
-}
-
-impl<'a> FreeNodeManagerContext<'a> {
-  fn is_leader(&self) -> bool {
-    let lid = self.leader_map.get(&PaxosGroupId::Master).unwrap();
-    &lid.eid == self.this_eid
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
 //  FreeNodeManager
 // -----------------------------------------------------------------------------------------------
 
@@ -80,14 +61,10 @@ impl FreeNodeManager {
     self.pending_new_free_nodes.insert((register.sender_eid, register.node_type));
   }
 
-  pub fn handle_heartbeat(
-    &mut self,
-    ctx: FreeNodeManagerContext,
-    heartbeat: msg::FreeNodeHeartbeat,
-  ) {
+  pub fn handle_heartbeat(&mut self, ctx: &MasterContext, heartbeat: msg::FreeNodeHeartbeat) {
     debug_assert!(ctx.is_leader());
     // We filter the heartbeat for the current LeadershipId (this is only a formality).
-    let cur_lid = ctx.leader_map.get(&PaxosGroupId::Master).unwrap();
+    let cur_lid = ctx.leader_map.value().get(&PaxosGroupId::Master).unwrap();
     if &heartbeat.cur_lid == cur_lid {
       // Update the heartbeat count of the FreeNode still exists.
       if let Some(count) = self.free_node_heartbeat.get_mut(&heartbeat.sender_eid) {
@@ -96,7 +73,7 @@ impl FreeNodeManager {
     }
   }
 
-  pub fn handle_timer(&mut self, ctx: FreeNodeManagerContext) {
+  pub fn handle_timer(&mut self, ctx: &MasterContext) {
     if ctx.is_leader() {
       for (_, count) in &mut self.free_node_heartbeat {
         *count += 1;
@@ -104,7 +81,7 @@ impl FreeNodeManager {
     }
   }
 
-  pub fn leader_changed(&mut self, ctx: FreeNodeManagerContext) {
+  pub fn leader_changed(&mut self, ctx: &MasterContext) {
     // Check if we lost Leadership.
     if !ctx.is_leader() {
       self.pending_new_free_nodes.clear();
@@ -127,7 +104,7 @@ impl FreeNodeManager {
   /// This returns the new SlaveGroup `EndpointId`s that we should use to create new Groups.
   pub fn handle_plm<IO: MasterIOCtx>(
     &mut self,
-    ctx: FreeNodeManagerContext,
+    ctx: &MasterContext,
     io_ctx: &mut IO,
     plm: FreeNodeManagerPLm,
   ) -> BTreeMap<SlaveGroupId, (Vec<EndpointId>, Vec<CoordGroupId>)> {
@@ -137,7 +114,7 @@ impl FreeNodeManager {
       self.free_node_heartbeat.insert(new_eid.clone(), 0);
       // Send back a FreeNodeRegistered message
       if ctx.is_leader() {
-        let cur_lid = ctx.leader_map.get(&PaxosGroupId::Master).unwrap().clone();
+        let cur_lid = ctx.leader_map.value().get(&PaxosGroupId::Master).unwrap().clone();
         io_ctx.send(
           &new_eid,
           msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::FreeNodeRegistered(
@@ -188,7 +165,7 @@ impl FreeNodeManager {
   /// Note that this should only be called if this is the Leader.
   pub fn process<IO: MasterIOCtx>(
     &mut self,
-    ctx: FreeNodeManagerContext,
+    ctx: &mut MasterContext,
     io_ctx: &mut IO,
   ) -> BTreeMap<PaxosGroupId, Vec<EndpointId>> {
     debug_assert!(ctx.is_leader());
@@ -268,7 +245,7 @@ impl FreeNodeManager {
       }
       let sid = mk_sid(&mut io_ctx.rand());
       let mut coord_ids = Vec::<CoordGroupId>::new();
-      for _ in 0..ctx.config.num_coords {
+      for _ in 0..ctx.master_config.num_coords {
         coord_ids.push(mk_cid(&mut io_ctx.rand()));
       }
       plm.new_slave_groups.insert(sid, (new_slave_eids, coord_ids));

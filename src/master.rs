@@ -8,10 +8,9 @@ use crate::common::{
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
 use crate::drop_table_tm_es::{DropTablePayloadTypes, DropTableTMES, DropTableTMInner};
-use crate::free_node_manager::{FreeNodeManager, FreeNodeManagerContext, FreeNodeType};
+use crate::free_node_manager::{FreeNodeManager, FreeNodeType};
 use crate::master::plm::{ConfirmCreateGroup, FreeNodeManagerPLm};
-use crate::master_query_planning_es as master_planning;
-use crate::master_query_planning_es::{MasterQueryPlanningAction, MasterQueryPlanningES};
+use crate::master_query_planning_es::MasterQueryPlanningESS;
 use crate::model::common::{
   proc, ColName, ColType, ColVal, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
   PrimaryKey, QueryId, RequestId, SlaveGroupId, TNodePath, TablePath, TabletGroupId,
@@ -27,8 +26,7 @@ use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use crate::server::{contains_col_latest, ServerContextBase};
 use crate::slave_group_create_es::SlaveGroupCreateES;
-use crate::slave_reconfig_es as slave_reconfig;
-use crate::slave_reconfig_es::{SlaveReconfigES, SlaveReconfigPLm};
+use crate::slave_reconfig_es::{SlaveReconfigESS, SlaveReconfigPLm};
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::{STMPaxos2PCTMAction, State, TMServerContext};
@@ -307,7 +305,7 @@ pub struct MasterSnapshot {
   pub alter_table_tm_ess: BTreeMap<QueryId, AlterTableTMES>,
   pub drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
   pub slave_group_create_ess: BTreeMap<SlaveGroupId, SlaveGroupCreateES>,
-  pub slave_reconfig_ess: BTreeMap<SlaveGroupId, SlaveReconfigES>,
+  pub slave_reconfig_ess: SlaveReconfigESS,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -333,15 +331,18 @@ impl ServerContextBase for MasterContext {
 // -----------------------------------------------------------------------------------------------
 
 /// NOTE: When adding a new element here, amend the `MasterSnapshot` accordingly.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Statuses {
   pub create_table_tm_ess: BTreeMap<QueryId, CreateTableTMES>,
   pub alter_table_tm_ess: BTreeMap<QueryId, AlterTableTMES>,
   pub drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
-  pub planning_ess: BTreeMap<QueryId, MasterQueryPlanningES>,
+  pub planning_ess: MasterQueryPlanningESS,
 
   pub slave_group_create_ess: BTreeMap<SlaveGroupId, SlaveGroupCreateES>,
-  pub slave_reconfig_ess: BTreeMap<SlaveGroupId, SlaveReconfigES>,
+  pub slave_reconfig_ess: SlaveReconfigESS,
+
+  /// FreeNodeManager
+  pub free_node_manager: FreeNodeManager,
 
   /// When a reconfig seems warranted, we set this to be present so that during the
   /// next bundle insertion, we make sure to insert a `ReconfigBundle`. We hold
@@ -382,9 +383,6 @@ pub struct MasterContext {
   /// NetworkDriver
   pub network_driver: NetworkDriver<msg::MasterRemotePayload>,
 
-  /// FreeNodeManager
-  pub free_node_manager: FreeNodeManager,
-
   /// Request Management
   pub external_request_id_map: BTreeMap<RequestId, QueryId>,
 
@@ -408,7 +406,19 @@ impl Debug for MasterContext {
 
 impl MasterState {
   pub fn new(ctx: MasterContext) -> MasterState {
-    MasterState { ctx, statuses: Default::default() }
+    MasterState {
+      ctx,
+      statuses: Statuses {
+        create_table_tm_ess: Default::default(),
+        alter_table_tm_ess: Default::default(),
+        drop_table_tm_ess: Default::default(),
+        planning_ess: MasterQueryPlanningESS::new(),
+        slave_group_create_ess: Default::default(),
+        slave_reconfig_ess: SlaveReconfigESS::new(),
+        free_node_manager: FreeNodeManager::new(),
+        do_reconfig: None,
+      },
+    }
   }
 
   /// Handles a `MasterSnapshot` to initiate a reconfigured `MasterState` properly.
@@ -424,9 +434,10 @@ impl MasterState {
       create_table_tm_ess: snapshot.create_table_tm_ess,
       alter_table_tm_ess: snapshot.alter_table_tm_ess,
       drop_table_tm_ess: snapshot.drop_table_tm_ess,
-      planning_ess: Default::default(),
+      planning_ess: MasterQueryPlanningESS::new(),
       slave_group_create_ess: snapshot.slave_group_create_ess,
       slave_reconfig_ess: snapshot.slave_reconfig_ess,
+      free_node_manager: FreeNodeManager::create_reconfig(snapshot.free_nodes),
       do_reconfig: None,
     };
 
@@ -448,7 +459,6 @@ impl MasterState {
       leader_map,
       all_eids: VersionedValue::new(all_eids),
       network_driver,
-      free_node_manager: FreeNodeManager::create_reconfig(snapshot.free_nodes),
       external_request_id_map: Default::default(),
       master_bundle: Default::default(),
       paxos_driver: PaxosDriver::create_reconfig(
@@ -530,7 +540,6 @@ impl MasterContext {
       leader_map,
       all_eids: VersionedValue::new(all_eids),
       network_driver,
-      free_node_manager: FreeNodeManager::new(),
       external_request_id_map: Default::default(),
       master_bundle: MasterBundle::default(),
       paxos_driver: PaxosDriver::create_initial(master_address_config, paxos_config),
@@ -583,19 +592,10 @@ impl MasterContext {
         if self.is_leader() {
           match free_node_msg {
             FreeNodeAssoc::RegisterFreeNode(register) => {
-              self.free_node_manager.handle_register(register);
+              statuses.free_node_manager.handle_register(register);
             }
             FreeNodeAssoc::FreeNodeHeartbeat(heartbeat) => {
-              self.free_node_manager.handle_heartbeat(
-                FreeNodeManagerContext {
-                  config: &self.master_config,
-                  this_eid: &self.this_eid,
-                  leader_map: self.leader_map.value(),
-                  master_bundle: &mut self.master_bundle,
-                  master_config: &self.master_config,
-                },
-                heartbeat,
-              );
+              statuses.free_node_manager.handle_heartbeat(self, heartbeat);
             }
             FreeNodeAssoc::ConfirmSlaveCreation(confirm_msg) => {
               // Recall that the ES here could have been completed already.
@@ -736,7 +736,7 @@ impl MasterContext {
         MasterTimerInput::RemoteLeaderChanged => {
           if self.is_leader() {
             // If this node is the Leader, then send out RemoteLeaderChanged to all Slaves.
-            self.broadcast_leadership(io_ctx);
+            self.broadcast_leadership(io_ctx, statuses);
           }
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
@@ -762,7 +762,7 @@ impl MasterContext {
               let maybe_dead_eids = self.paxos_driver.get_maybe_dead();
               if !maybe_dead_eids.is_empty() {
                 // Recall that the above returns only as much as we are capable of reconfiguring.
-                self
+                statuses
                   .free_node_manager
                   .request_new_eids(PaxosGroupId::Master, maybe_dead_eids.len());
                 statuses.do_reconfig = Some(maybe_dead_eids);
@@ -789,13 +789,7 @@ impl MasterContext {
         }
         MasterTimerInput::FreeNodeHeartbeatTimer => {
           if self.is_leader() {
-            self.free_node_manager.handle_timer(FreeNodeManagerContext {
-              config: &self.master_config,
-              this_eid: &self.this_eid,
-              leader_map: self.leader_map.value(),
-              master_bundle: &mut self.master_bundle,
-              master_config: &self.master_config,
-            });
+            statuses.free_node_manager.handle_timer(self);
           }
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
@@ -809,7 +803,7 @@ impl MasterContext {
           match paxos_log_msg {
             // MasterQueryPlanning
             MasterPLm::MasterQueryPlanning(plm) => {
-              master_planning::handle_plm(self, io_ctx, &mut statuses.planning_ess, plm);
+              statuses.planning_ess.handle_plm(self, io_ctx, plm);
             }
             // CreateTable
             MasterPLm::CreateTable(plm) => {
@@ -825,17 +819,7 @@ impl MasterContext {
             }
             // FreeNode PLms
             MasterPLm::FreeNodeManagerPLm(plm) => {
-              let new_slave_groups = self.free_node_manager.handle_plm(
-                FreeNodeManagerContext {
-                  config: &self.master_config,
-                  this_eid: &self.this_eid,
-                  leader_map: self.leader_map.value(),
-                  master_bundle: &mut self.master_bundle,
-                  master_config: &self.master_config,
-                },
-                io_ctx,
-                plm,
-              );
+              let new_slave_groups = statuses.free_node_manager.handle_plm(self, io_ctx, plm);
 
               // Construct `SlaveGroupCreateES`s accordingly
               for (sid, (paxos_nodes, coord_ids)) in new_slave_groups {
@@ -851,7 +835,7 @@ impl MasterContext {
               es.handle_confirm_plm(self, io_ctx);
             }
             MasterPLm::SlaveConfigPLm(plm) => {
-              slave_reconfig::handle_plm(self, io_ctx, &mut statuses.slave_reconfig_ess, plm);
+              statuses.slave_reconfig_ess.handle_plm(self, io_ctx, plm);
             }
           }
         }
@@ -867,19 +851,10 @@ impl MasterContext {
           // DropTable
           paxos2pc::handle_bundle_processed(self, io_ctx, &mut statuses.drop_table_tm_ess);
           // MasterQueryPlanningES
-          master_planning::handle_bundle_processed(self, &mut statuses.planning_ess);
+          statuses.planning_ess.handle_bundle_processed(self);
 
           // Construct PLms related to FreeNode management.
-          let granted_reconfig_eids = self.free_node_manager.process(
-            FreeNodeManagerContext {
-              config: &self.master_config,
-              this_eid: &self.this_eid,
-              leader_map: self.leader_map.value(),
-              master_bundle: &mut self.master_bundle,
-              master_config: &self.master_config,
-            },
-            io_ctx,
-          );
+          let granted_reconfig_eids = statuses.free_node_manager.process(self, io_ctx);
 
           // Forwarded the granted `EndpointId`s to the `SlaveGroupReconfig`s that requested it.
           // We might also be doing a Master Reconfig, record the new_eids for that.
@@ -891,8 +866,7 @@ impl MasterContext {
                 do_reconfig = Some((rem_eids, new_eids));
               }
               PaxosGroupId::Slave(sid) => {
-                let ess = &mut statuses.slave_reconfig_ess;
-                slave_reconfig::handle_eids_granted(self, ess, &sid, new_eids);
+                statuses.slave_reconfig_ess.handle_eids_granted(self, &sid, new_eids);
               }
             }
           }
@@ -1064,7 +1038,7 @@ impl MasterContext {
         match payload {
           // MasterQueryPlanning
           MasterRemotePayload::MasterQueryPlanning(request) => {
-            master_planning::handle_msg(self, io_ctx, &mut statuses.planning_ess, request);
+            statuses.planning_ess.handle_msg(self, io_ctx, request);
           }
           // CreateTable
           MasterRemotePayload::CreateTable(message) => {
@@ -1084,7 +1058,12 @@ impl MasterContext {
           }
           // SlaveReconfig
           MasterRemotePayload::SlaveReconfig(reconfig) => {
-            slave_reconfig::handle_msg(self, io_ctx, &mut statuses.slave_reconfig_ess, reconfig);
+            statuses.slave_reconfig_ess.handle_msg(
+              self,
+              io_ctx,
+              &mut statuses.free_node_manager,
+              reconfig,
+            );
           }
         }
 
@@ -1110,9 +1089,9 @@ impl MasterContext {
             // DropTable
             paxos2pc::handle_rlc(self, io_ctx, &mut statuses.drop_table_tm_ess, rlc.clone());
             // SlaveReconfigES
-            slave_reconfig::handle_rlc(self, io_ctx, &mut statuses.slave_reconfig_ess, rlc.clone());
+            statuses.slave_reconfig_ess.handle_rlc(self, io_ctx, rlc.clone());
             // MasterQueryPlanningES
-            master_planning::handle_rlc(&mut statuses.planning_ess, rlc.clone());
+            statuses.planning_ess.handle_rlc(rlc.clone());
           }
         }
       }
@@ -1137,21 +1116,15 @@ impl MasterContext {
           es.leader_changed(self, io_ctx);
         }
         // SlaveReconfig
-        slave_reconfig::handle_lc(self, io_ctx, &mut statuses.slave_reconfig_ess);
+        statuses.slave_reconfig_ess.handle_lc(self, io_ctx);
         // MasterQueryPlanningES
-        master_planning::handle_lc(self, &mut statuses.planning_ess);
+        statuses.planning_ess.handle_lc(self);
 
         // MasterReconfig
         statuses.do_reconfig = None;
 
         // FreeNodeManager
-        self.free_node_manager.leader_changed(FreeNodeManagerContext {
-          config: &self.master_config,
-          this_eid: &self.this_eid,
-          leader_map: self.leader_map.value(),
-          master_bundle: &mut self.master_bundle,
-          master_config: &self.master_config,
-        });
+        statuses.free_node_manager.leader_changed(self);
 
         // NetworkDriver
         self.network_driver.leader_changed();
@@ -1166,7 +1139,7 @@ impl MasterContext {
           self.run_main_loop(io_ctx, statuses);
 
           // This node is the new Leader
-          self.broadcast_leadership(io_ctx); // Broadcast RemoteLeaderChanged
+          self.broadcast_leadership(io_ctx, statuses); // Broadcast RemoteLeaderChanged
 
           // Start the insert cycle.
           self.paxos_driver.insert_bundle(
@@ -1334,7 +1307,11 @@ impl MasterContext {
 
   /// Used to broadcast out `RemoteLeaderChanged` to all other
   /// PaxosGroups to help maintain their LeaderMaps.
-  fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
+  fn broadcast_leadership<IO: BasicIOCtx<msg::NetworkMessage>>(
+    &self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+  ) {
     let this_lid = self.leader_map.value().get(&PaxosGroupId::Master).unwrap().clone();
 
     // Send to SlaveGroups
@@ -1350,7 +1327,7 @@ impl MasterContext {
     }
 
     // Send to FreeNodes
-    for (eid, _) in self.free_node_manager.free_nodes() {
+    for (eid, _) in statuses.free_node_manager.free_nodes() {
       io_ctx.send(
         eid,
         msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::MasterLeadershipId(this_lid.clone())),
@@ -1503,13 +1480,13 @@ impl MasterContext {
     let mut snapshot = MasterSnapshot {
       gossip: self.gossip.clone(),
       leader_map: self.leader_map.value().clone(),
-      free_nodes: self.free_node_manager.free_nodes().clone(),
+      free_nodes: statuses.free_node_manager.free_nodes().clone(),
       paxos_driver_start,
       create_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.create_table_tm_ess),
       alter_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.alter_table_tm_ess),
       drop_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.drop_table_tm_ess),
       slave_group_create_ess: Default::default(),
-      slave_reconfig_ess: slave_reconfig::handle_reconfig_snapshot(&statuses.slave_reconfig_ess),
+      slave_reconfig_ess: statuses.slave_reconfig_ess.handle_reconfig_snapshot(),
     };
 
     // Add in the SlaveGroupCreateES.

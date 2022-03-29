@@ -169,7 +169,7 @@ pub struct CoordContext {
   /// Gossip
   pub gossip: Arc<GossipData>,
 
-  /// Paxos
+  /// LeaderMap. See `LeaderMap` docs.
   pub leader_map: LeaderMap,
 
   /// This is used to allow the user to cancel requests. There is an element (`RequestId`,

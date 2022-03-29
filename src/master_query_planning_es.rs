@@ -393,7 +393,7 @@ pub fn master_query_planning<
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub struct MasterQueryPlanningES {
+struct MasterQueryPlanningES {
   sender_path: CQueryPath,
   query_id: QueryId,
   timestamp: Timestamp,
@@ -409,7 +409,7 @@ fn master_query_planning_pre(
   let view = CheckingDBSchemaView {
     db_schema: gossip.db_schema,
     table_generation: gossip.table_generation,
-    timestamp: planning_msg.timestamp.clone(),
+    timestamp: planning_msg.timestamp,
   };
 
   fn respond_error(error: msg::QueryPlanningError) -> MasterQueryPlanningAction {
@@ -449,7 +449,7 @@ fn master_query_planning_post(
     let mut view = LockingDBSchemaView {
       db_schema: gossip.db_schema,
       table_generation: gossip.table_generation,
-      timestamp: planning_plm.timestamp.clone(),
+      timestamp: planning_plm.timestamp,
     };
 
     match master_query_planning(view, &planning_plm.ms_query) {
@@ -478,109 +478,117 @@ fn master_query_planning_post(
 //  ES Container Functions
 // -----------------------------------------------------------------------------------------------
 
-// Leader-only
+#[derive(Debug)]
+pub struct MasterQueryPlanningESS {
+  ess: BTreeMap<QueryId, MasterQueryPlanningES>,
+}
 
-pub fn handle_msg<IO: MasterIOCtx>(
-  ctx: &mut MasterContext,
-  io_ctx: &mut IO,
-  planning_ess: &mut BTreeMap<QueryId, MasterQueryPlanningES>,
-  request: msg::MasterQueryPlanningRequest,
-) {
-  match request {
-    msg::MasterQueryPlanningRequest::Perform(perform) => {
-      let action = master_query_planning_pre(ctx, perform.clone());
-      match action {
-        MasterQueryPlanningAction::Wait => {
-          planning_ess.insert(
-            perform.query_id.clone(),
-            MasterQueryPlanningES {
-              sender_path: perform.sender_path,
-              query_id: perform.query_id,
-              timestamp: perform.timestamp,
-              ms_query: perform.ms_query,
-            },
-          );
-        }
-        MasterQueryPlanningAction::Respond(result) => {
-          ctx.send_to_c(
-            io_ctx,
-            perform.sender_path.node_path,
-            msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
-              return_qid: perform.sender_path.query_id,
-              query_id: perform.query_id,
-              result,
-            }),
-          );
+impl MasterQueryPlanningESS {
+  pub fn new() -> MasterQueryPlanningESS {
+    MasterQueryPlanningESS { ess: Default::default() }
+  }
+
+  // Leader-only
+
+  pub fn handle_msg<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
+    request: msg::MasterQueryPlanningRequest,
+  ) {
+    match request {
+      msg::MasterQueryPlanningRequest::Perform(perform) => {
+        let action = master_query_planning_pre(ctx, perform.clone());
+        match action {
+          MasterQueryPlanningAction::Wait => {
+            self.ess.insert(
+              perform.query_id.clone(),
+              MasterQueryPlanningES {
+                sender_path: perform.sender_path,
+                query_id: perform.query_id,
+                timestamp: perform.timestamp,
+                ms_query: perform.ms_query,
+              },
+            );
+          }
+          MasterQueryPlanningAction::Respond(result) => {
+            ctx.send_to_c(
+              io_ctx,
+              perform.sender_path.node_path,
+              msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
+                return_qid: perform.sender_path.query_id,
+                query_id: perform.query_id,
+                result,
+              }),
+            );
+          }
         }
       }
-    }
-    msg::MasterQueryPlanningRequest::Cancel(cancel) => {
-      planning_ess.remove(&cancel.query_id);
-    }
-  }
-}
-
-/// For every `MasterQueryPlanningES`, we add a PLm
-pub fn handle_bundle_processed(
-  ctx: &mut MasterContext,
-  planning_ess: &mut BTreeMap<QueryId, MasterQueryPlanningES>,
-) {
-  for (_, es) in planning_ess {
-    ctx.master_bundle.plms.push(MasterPLm::MasterQueryPlanning(plm::MasterQueryPlanning {
-      query_id: es.query_id.clone(),
-      timestamp: es.timestamp.clone(),
-      ms_query: es.ms_query.clone(),
-    }));
-  }
-}
-
-// Leader and Follower
-
-pub fn handle_plm<IO: MasterIOCtx>(
-  ctx: &mut MasterContext,
-  io_ctx: &mut IO,
-  planning_ess: &mut BTreeMap<QueryId, MasterQueryPlanningES>,
-  planning_plm: plm::MasterQueryPlanning,
-) {
-  let query_id = planning_plm.query_id.clone();
-  let result = master_query_planning_post(ctx, planning_plm);
-  if ctx.is_leader() {
-    if let Some(es) = planning_ess.remove(&query_id) {
-      // If the ES still exists, we respond.
-      ctx.send_to_c(
-        io_ctx,
-        es.sender_path.node_path,
-        msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
-          return_qid: es.sender_path.query_id,
-          query_id: es.query_id,
-          result,
-        }),
-      );
+      msg::MasterQueryPlanningRequest::Cancel(cancel) => {
+        self.ess.remove(&cancel.query_id);
+      }
     }
   }
-}
 
-/// For `MasterQueryPlanningES`s, if the sending PaxosGroup's Leadership
-/// changed, we ECU (no response).
-pub fn handle_rlc(
-  planning_ess: &mut BTreeMap<QueryId, MasterQueryPlanningES>,
-  remote_leader_changed: RemoteLeaderChangedPLm,
-) {
-  let query_ids: Vec<QueryId> = planning_ess.keys().cloned().collect();
-  for query_id in query_ids {
-    let es = planning_ess.get_mut(&query_id).unwrap();
-    if es.sender_path.node_path.sid.to_gid() == remote_leader_changed.gid {
-      planning_ess.remove(&query_id);
+  /// For every `MasterQueryPlanningES`, we add a PLm
+  pub fn handle_bundle_processed(&mut self, ctx: &mut MasterContext) {
+    for (_, es) in &mut self.ess {
+      ctx.master_bundle.plms.push(MasterPLm::MasterQueryPlanning(plm::MasterQueryPlanning {
+        query_id: es.query_id.clone(),
+        timestamp: es.timestamp.clone(),
+        ms_query: es.ms_query.clone(),
+      }));
     }
   }
-}
 
-/// Wink away all `MasterQueryPlanningES`s if we lost Leadership.
-pub fn handle_lc(
-  ctx: &mut MasterContext,
-  planning_ess: &mut BTreeMap<QueryId, MasterQueryPlanningES>,
-) {
-  if !ctx.is_leader() {
-    planning_ess.clear();
+  // Leader and Follower
+
+  pub fn handle_plm<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
+    planning_plm: plm::MasterQueryPlanning,
+  ) {
+    let query_id = planning_plm.query_id.clone();
+    let result = master_query_planning_post(ctx, planning_plm);
+    if ctx.is_leader() {
+      if let Some(es) = self.ess.remove(&query_id) {
+        // If the ES still exists, we respond.
+        ctx.send_to_c(
+          io_ctx,
+          es.sender_path.node_path,
+          msg::CoordMessage::MasterQueryPlanningSuccess(msg::MasterQueryPlanningSuccess {
+            return_qid: es.sender_path.query_id,
+            query_id: es.query_id,
+            result,
+          }),
+        );
+      }
+    }
+  }
+
+  /// For `MasterQueryPlanningES`s, if the sending PaxosGroup's Leadership
+  /// changed, we ECU (no response).
+  pub fn handle_rlc(&mut self, remote_leader_changed: RemoteLeaderChangedPLm) {
+    let query_ids: Vec<QueryId> = self.ess.keys().cloned().collect();
+    for query_id in query_ids {
+      let es = self.ess.get_mut(&query_id).unwrap();
+      if es.sender_path.node_path.sid.to_gid() == remote_leader_changed.gid {
+        self.ess.remove(&query_id);
+      }
+    }
+  }
+
+  /// Wink away all `MasterQueryPlanningES`s if we lost Leadership.
+  pub fn handle_lc(&mut self, ctx: &mut MasterContext) {
+    if !ctx.is_leader() {
+      self.ess.clear();
+    }
+  }
+
+  // Utils
+
+  pub fn is_empty(&self) -> bool {
+    self.ess.is_empty()
   }
 }

@@ -1,4 +1,5 @@
 use crate::common::{remove_item, update_all_eids, MasterIOCtx, RemoteLeaderChangedPLm};
+use crate::free_node_manager::FreeNodeManager;
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{EndpointId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId};
 use crate::model::message as msg;
@@ -42,7 +43,7 @@ enum State {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct SlaveReconfigES {
+struct SlaveReconfigES {
   sid: SlaveGroupId,
   rem_eids: Vec<EndpointId>,
   state: State,
@@ -50,10 +51,15 @@ pub struct SlaveReconfigES {
 
 impl SlaveReconfigES {
   /// This is called by the Leader
-  fn new(ctx: &mut MasterContext, sid: SlaveGroupId, rem_eids: Vec<EndpointId>) -> SlaveReconfigES {
+  fn new(
+    ctx: &mut MasterContext,
+    free_node_manager: &mut FreeNodeManager,
+    sid: SlaveGroupId,
+    rem_eids: Vec<EndpointId>,
+  ) -> SlaveReconfigES {
     debug_assert!(ctx.is_leader());
     // Request new `EndpointId`s from the FreeNodeManager
-    ctx.free_node_manager.request_new_eids(sid.to_gid(), rem_eids.len());
+    free_node_manager.request_new_eids(sid.to_gid(), rem_eids.len());
     SlaveReconfigES { sid, rem_eids, state: State::WaitingRequestedNodes }
   }
 
@@ -238,103 +244,112 @@ impl SlaveReconfigES {
 //  ES Container Functions
 // -----------------------------------------------------------------------------------------------
 
-// Leader-only
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SlaveReconfigESS {
+  ess: BTreeMap<SlaveGroupId, SlaveReconfigES>,
+}
 
-pub fn handle_msg<IO: MasterIOCtx>(
-  ctx: &mut MasterContext,
-  io_ctx: &mut IO,
-  slave_reconfig_ess: &mut BTreeMap<SlaveGroupId, SlaveReconfigES>,
-  reconfig_msg: msg::SlaveReconfig,
-) {
-  match reconfig_msg {
-    msg::SlaveReconfig::NodesDead(nodes_dead) => {
-      // Construct an `SlaveReconfigES` if it does not already exist.
-      let sid = nodes_dead.sid;
-      if !slave_reconfig_ess.contains_key(&sid) {
-        slave_reconfig_ess.insert(sid.clone(), SlaveReconfigES::new(ctx, sid, nodes_dead.eids));
+impl SlaveReconfigESS {
+  pub fn new() -> SlaveReconfigESS {
+    SlaveReconfigESS { ess: Default::default() }
+  }
+
+  // Leader-only
+
+  pub fn handle_msg<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
+    free_node_manager: &mut FreeNodeManager,
+    reconfig_msg: msg::SlaveReconfig,
+  ) {
+    match reconfig_msg {
+      msg::SlaveReconfig::NodesDead(nodes_dead) => {
+        // Construct an `SlaveReconfigES` if it does not already exist.
+        let sid = nodes_dead.sid;
+        if !self.ess.contains_key(&sid) {
+          self.ess.insert(
+            sid.clone(),
+            SlaveReconfigES::new(ctx, free_node_manager, sid, nodes_dead.eids),
+          );
+        }
+      }
+      msg::SlaveReconfig::SlaveGroupReconfigured(reconfigured) => {
+        if let Some(es) = self.ess.get_mut(&reconfigured.sid) {
+          es.handle_reconfigured_msg(ctx, io_ctx, reconfigured);
+        }
       }
     }
-    msg::SlaveReconfig::SlaveGroupReconfigured(reconfigured) => {
-      if let Some(es) = slave_reconfig_ess.get_mut(&reconfigured.sid) {
-        es.handle_reconfigured_msg(ctx, io_ctx, reconfigured);
+  }
+
+  /// This is a local granting of the `EndpointId`s; it has not been persisted yet.
+  pub fn handle_eids_granted(
+    &mut self,
+    ctx: &mut MasterContext,
+    sid: &SlaveGroupId,
+    new_eids: Vec<EndpointId>,
+  ) {
+    let es = self.ess.get_mut(sid).unwrap();
+    es.handle_eids_granted(ctx, new_eids);
+  }
+
+  // Leader and Follower
+
+  pub fn handle_plm<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
+    reconfig_plm: SlaveReconfigPLm,
+  ) {
+    match reconfig_plm {
+      SlaveReconfigPLm::Reconfig(reconfig) => {
+        let sid = reconfig.sid.clone();
+        if ctx.is_leader() {
+          let es = self.ess.get_mut(&sid).unwrap();
+          es.handle_reconfig_plm(ctx, io_ctx, reconfig);
+        } else {
+          // This is a backup, so we should make a `SlaveReconfigES`.
+          let es = SlaveReconfigES::new_follower(ctx, reconfig);
+          self.ess.insert(sid, es);
+        }
+      }
+      SlaveReconfigPLm::Reconfigured(reconfigured) => {
+        // Here, we remove the ES and then finish it off.
+        let mut es = self.ess.remove(&reconfigured.sid).unwrap();
+        es.handle_reconfigured_plm(ctx, io_ctx, reconfigured);
       }
     }
   }
-}
 
-/// This is a local granting of the `EndpointId`s; it has not been persisted yet.
-pub fn handle_eids_granted(
-  ctx: &mut MasterContext,
-  slave_reconfig_ess: &mut BTreeMap<SlaveGroupId, SlaveReconfigES>,
-  sid: &SlaveGroupId,
-  new_eids: Vec<EndpointId>,
-) {
-  let es = slave_reconfig_ess.get_mut(sid).unwrap();
-  es.handle_eids_granted(ctx, new_eids);
-}
+  pub fn handle_rlc<IO: MasterIOCtx>(
+    &mut self,
+    ctx: &mut MasterContext,
+    io_ctx: &mut IO,
+    remote_leader_changed: RemoteLeaderChangedPLm,
+  ) {
+    for (_, es) in &mut self.ess {
+      es.remote_leader_changed(ctx, io_ctx, &remote_leader_changed.gid);
+    }
+  }
 
-// Leader and Follower
-
-pub fn handle_plm<IO: MasterIOCtx>(
-  ctx: &mut MasterContext,
-  io_ctx: &mut IO,
-  slave_reconfig_ess: &mut BTreeMap<SlaveGroupId, SlaveReconfigES>,
-  reconfig_plm: SlaveReconfigPLm,
-) {
-  match reconfig_plm {
-    SlaveReconfigPLm::Reconfig(reconfig) => {
-      let sid = reconfig.sid.clone();
-      if ctx.is_leader() {
-        let es = slave_reconfig_ess.get_mut(&sid).unwrap();
-        es.handle_reconfig_plm(ctx, io_ctx, reconfig);
-      } else {
-        // This is a backup, so we should make a `SlaveReconfigES`.
-        let es = SlaveReconfigES::new_follower(ctx, reconfig);
-        slave_reconfig_ess.insert(sid, es);
+  pub fn handle_lc<IO: MasterIOCtx>(&mut self, ctx: &mut MasterContext, io_ctx: &mut IO) {
+    let sids: Vec<SlaveGroupId> = self.ess.keys().cloned().collect();
+    for sid in sids {
+      let es = self.ess.get_mut(&sid).unwrap();
+      if es.leader_changed(ctx, io_ctx) {
+        self.ess.remove(&sid);
       }
     }
-    SlaveReconfigPLm::Reconfigured(reconfigured) => {
-      // Here, we remove the ES and then finish it off.
-      let mut es = slave_reconfig_ess.remove(&reconfigured.sid).unwrap();
-      es.handle_reconfigured_plm(ctx, io_ctx, reconfigured);
-    }
   }
-}
 
-pub fn handle_rlc<IO: MasterIOCtx>(
-  ctx: &mut MasterContext,
-  io_ctx: &mut IO,
-  slave_reconfig_ess: &mut BTreeMap<SlaveGroupId, SlaveReconfigES>,
-  remote_leader_changed: RemoteLeaderChangedPLm,
-) {
-  for (_, es) in slave_reconfig_ess {
-    es.remote_leader_changed(ctx, io_ctx, &remote_leader_changed.gid);
-  }
-}
-
-pub fn handle_lc<IO: MasterIOCtx>(
-  ctx: &mut MasterContext,
-  io_ctx: &mut IO,
-  slave_reconfig_ess: &mut BTreeMap<SlaveGroupId, SlaveReconfigES>,
-) {
-  let sids: Vec<SlaveGroupId> = slave_reconfig_ess.keys().cloned().collect();
-  for sid in sids {
-    let es = slave_reconfig_ess.get_mut(&sid).unwrap();
-    if es.leader_changed(ctx, io_ctx) {
-      slave_reconfig_ess.remove(&sid);
+  /// Add in the `SlaveReconfigES` where at least `ReconfigSlaveGroup` PLm has been inserted.
+  pub fn handle_reconfig_snapshot(&self) -> SlaveReconfigESS {
+    let mut reconfig_ess = SlaveReconfigESS::new();
+    for (qid, es) in &self.ess {
+      if let Some(es) = es.reconfig_snapshot() {
+        reconfig_ess.ess.insert(qid.clone(), es);
+      }
     }
+    reconfig_ess
   }
-}
-
-/// Add in the `SlaveReconfigES` where at least `ReconfigSlaveGroup` PLm has been inserted.
-pub fn handle_reconfig_snapshot(
-  slave_reconfig_ess: &BTreeMap<SlaveGroupId, SlaveReconfigES>,
-) -> BTreeMap<SlaveGroupId, SlaveReconfigES> {
-  let mut ess = BTreeMap::<SlaveGroupId, SlaveReconfigES>::new();
-  for (qid, es) in slave_reconfig_ess {
-    if let Some(es) = es.reconfig_snapshot() {
-      ess.insert(qid.clone(), es);
-    }
-  }
-  ess
 }
