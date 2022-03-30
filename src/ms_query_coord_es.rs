@@ -2,7 +2,7 @@ use crate::col_usage::{
   iterate_stage_ms_query, node_external_trans_tables, ColUsageError, ColUsageNode, ColUsagePlanner,
   GeneralStage,
 };
-use crate::common::{lookup, merge_table_views, mk_qid, OrigP, QueryPlan, TMStatus, Timestamp};
+use crate::common::{lookup, merge_table_views, mk_qid, OrigP, QueryPlan, Timestamp};
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::expression::EvalError;
@@ -19,6 +19,7 @@ use crate::model::message as msg;
 use crate::model::message::{ExternalAbortedData, MasteryQueryPlanningResult};
 use crate::server::{contains_col, CTServerContext, CommonQuery, ServerContextBase};
 use crate::table_read_es::perform_aggregation;
+use crate::tm_status::{SendHelper, TMStatus};
 use crate::trans_table_read_es::TransTableSource;
 use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
@@ -457,50 +458,28 @@ impl FullMSCoordES {
     };
 
     // Construct the TMStatus that is going to be used to coordinate this stage
-    let tm_qid = mk_qid(io_ctx.rand());
-    let child_qid = mk_qid(io_ctx.rand());
-    let mut tm_status = TMStatus {
-      query_id: tm_qid.clone(),
-      child_query_id: child_qid.clone(),
-      new_rms: Default::default(),
-      leaderships: Default::default(),
-      responded_count: 0,
-      tm_state: Default::default(),
-      orig_p: OrigP::new(es.query_id.clone()),
-    };
-
-    // The `sender_path` for the TMStatus above.
-    let sender_path = ctx.mk_query_path(tm_qid.clone());
-    // The `root_query_path` pointing to this MSCoordES.
-    let root_query_path = ctx.mk_query_path(es.query_id.clone());
-
-    pub enum SendHelper {
-      TableQuery(msg::PerformQuery, Vec<TabletGroupId>),
-      TransTableQuery(msg::PerformQuery, TransTableLocationPrefix),
-    }
+    let mut tm_status = TMStatus::new(
+      io_ctx,
+      ctx.mk_query_path(es.query_id.clone()),
+      OrigP::new(es.query_id.clone()),
+    );
 
     // Send out the PerformQuery.
     let helper = match ms_query_stage {
       proc::MSQueryStage::SuperSimpleSelect(select_query) => {
         match &select_query.from.source_ref {
           proc::GeneralSourceRef::TablePath(table_path) => {
-            let perform_query = msg::PerformQuery {
-              root_query_path: root_query_path.clone(),
-              sender_path: sender_path.clone().into_ct(),
-              query_id: child_qid.clone(),
-              query: msg::GeneralQuery::SuperSimpleTableSelectQuery(
-                msg::SuperSimpleTableSelectQuery {
-                  timestamp: es.timestamp.clone(),
-                  context: context.clone(),
-                  sql_query: select_query.clone(),
-                  query_plan,
-                },
-              ),
-            };
+            let general_query =
+              msg::GeneralQuery::SuperSimpleTableSelectQuery(msg::SuperSimpleTableSelectQuery {
+                timestamp: es.timestamp.clone(),
+                context: context.clone(),
+                sql_query: select_query.clone(),
+                query_plan,
+              });
             let gen = es.query_plan.table_location_map.get(table_path).unwrap();
             let tids =
               ctx.get_min_tablets(&table_path, gen, &select_query.from, &select_query.selection);
-            SendHelper::TableQuery(perform_query, tids)
+            SendHelper::TableQuery(general_query, tids)
           }
           proc::GeneralSourceRef::TransTableName(sub_trans_table_name) => {
             // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
@@ -511,35 +490,25 @@ impl FullMSCoordES {
               .find(|prefix| &prefix.trans_table_name == sub_trans_table_name)
               .unwrap()
               .clone();
-            let perform_query = msg::PerformQuery {
-              root_query_path,
-              sender_path: sender_path.into_ct(),
-              query_id: child_qid.clone(),
-              query: msg::GeneralQuery::SuperSimpleTransTableSelectQuery(
-                msg::SuperSimpleTransTableSelectQuery {
-                  location_prefix: location_prefix.clone(),
-                  context: context.clone(),
-                  sql_query: select_query.clone(),
-                  query_plan,
-                },
-              ),
-            };
-            SendHelper::TransTableQuery(perform_query, location_prefix)
+            let general_query = msg::GeneralQuery::SuperSimpleTransTableSelectQuery(
+              msg::SuperSimpleTransTableSelectQuery {
+                location_prefix: location_prefix.clone(),
+                context: context.clone(),
+                sql_query: select_query.clone(),
+                query_plan,
+              },
+            );
+            SendHelper::TransTableQuery(general_query, location_prefix)
           }
         }
       }
       proc::MSQueryStage::Update(update_query) => {
-        let perform_query = msg::PerformQuery {
-          root_query_path: root_query_path.clone(),
-          sender_path: sender_path.clone().into_ct(),
-          query_id: child_qid.clone(),
-          query: msg::GeneralQuery::UpdateQuery(msg::UpdateQuery {
-            timestamp: es.timestamp.clone(),
-            context: context.clone(),
-            sql_query: update_query.clone(),
-            query_plan,
-          }),
-        };
+        let general_query = msg::GeneralQuery::UpdateQuery(msg::UpdateQuery {
+          timestamp: es.timestamp.clone(),
+          context: context.clone(),
+          sql_query: update_query.clone(),
+          query_plan,
+        });
         let table_path = &update_query.table;
         let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
         let tids = ctx.get_min_tablets(
@@ -548,39 +517,29 @@ impl FullMSCoordES {
           &table_path.to_read_source(),
           &update_query.selection,
         );
-        SendHelper::TableQuery(perform_query, tids)
+        SendHelper::TableQuery(general_query, tids)
       }
       proc::MSQueryStage::Insert(insert_query) => {
-        let perform_query = msg::PerformQuery {
-          root_query_path: root_query_path.clone(),
-          sender_path: sender_path.clone().into_ct(),
-          query_id: child_qid.clone(),
-          query: msg::GeneralQuery::InsertQuery(msg::InsertQuery {
-            timestamp: es.timestamp.clone(),
-            context: context.clone(),
-            sql_query: insert_query.clone(),
-            query_plan,
-          }),
-        };
+        let general_query = msg::GeneralQuery::InsertQuery(msg::InsertQuery {
+          timestamp: es.timestamp.clone(),
+          context: context.clone(),
+          sql_query: insert_query.clone(),
+          query_plan,
+        });
         // As an optimization, for inserts, we can evaluate the VALUES and select only the
         // Tablets that are written to. For now, we just consider all.
         let table_path = &insert_query.table;
         let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
         let tids = ctx.get_all_tablets(&table_path.source_ref, gen);
-        SendHelper::TableQuery(perform_query, tids)
+        SendHelper::TableQuery(general_query, tids)
       }
       proc::MSQueryStage::Delete(delete_query) => {
-        let perform_query = msg::PerformQuery {
-          root_query_path: root_query_path.clone(),
-          sender_path: sender_path.clone().into_ct(),
-          query_id: child_qid.clone(),
-          query: msg::GeneralQuery::DeleteQuery(msg::DeleteQuery {
-            timestamp: es.timestamp.clone(),
-            context: context.clone(),
-            sql_query: delete_query.clone(),
-            query_plan,
-          }),
-        };
+        let general_query = msg::GeneralQuery::DeleteQuery(msg::DeleteQuery {
+          timestamp: es.timestamp.clone(),
+          context: context.clone(),
+          sql_query: delete_query.clone(),
+          query_plan,
+        });
         let table_path = &delete_query.table;
         let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
         let tids = ctx.get_min_tablets(
@@ -589,65 +548,17 @@ impl FullMSCoordES {
           &table_path.to_read_source(),
           &delete_query.selection,
         );
-        SendHelper::TableQuery(perform_query, tids)
+        SendHelper::TableQuery(general_query, tids)
       }
     };
 
-    match helper {
-      SendHelper::TableQuery(perform_query, tids) => {
-        // Validate the LeadershipId of PaxosGroups that the PerformQuery will be sent to.
-        // We do this before sending any messages, in case it fails. Recall that the local
-        // `leader_map` is allowed to get ahead of the `query_leader_map` which we computed
-        // earlier, so this check is necessary.
-        for tid in &tids {
-          let sid = ctx.gossip.get().tablet_address_config.get(&tid).unwrap();
-          // TODO: when sharding occurs, this query_leader_map.get might be invalid.
-          if let Some(lid) = query_leader_map.get(sid) {
-            if lid.gen < ctx.leader_map.get(&sid.to_gid()).unwrap().gen {
-              // The `lid` has since changed, so we cannot finish this MSQueryES.
-              self.exit_and_clean_up(ctx, io_ctx);
-              return MSQueryCoordAction::NonFatalFailure;
-            }
-            // Recall that since > is not possible, these Leadership must be equals.
-            assert_eq!(lid.gen, ctx.leader_map.get(&sid.to_gid()).unwrap().gen);
-          }
-        }
-
-        // Having non-empty `tids` solves the TMStatus deadlock and determining the child schema.
-        assert!(tids.len() > 0);
-        for tid in tids {
-          // Send out PerformQuery. Recall that this could only be a Tablet. Also recall
-          // from the prior leader_map check, the local `leader_map` and the `query_leader_map`
-          // for the given `tids` align, so using `send_to_t` sends to Leaderships
-          // in `query_leader_map`.
-          let tablet_msg = msg::TabletMessage::PerformQuery(perform_query.clone());
-          let node_path = ctx.mk_tablet_node_path(tid);
-          ctx.send_to_t(io_ctx, node_path.clone(), tablet_msg);
-
-          // Add the TabletGroup into the TMStatus.
-          let sid = node_path.sid.clone();
-          let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
-          tm_status.tm_state.insert(node_path.into_ct(), None);
-          tm_status.leaderships.insert(sid, lid.clone());
-        }
-      }
-      SendHelper::TransTableQuery(perform_query, location_prefix) => {
-        // Send out PerformQuery. Recall that this TransTable is held in this very
-        // MSCoordES. Thus, there is no need to verify Leadership of `location_prefix` is
-        // still alive, since it obviously is if we get here.
-        let node_path = location_prefix.source.node_path.clone();
-        ctx.send_to_ct(io_ctx, node_path.clone(), CommonQuery::PerformQuery(perform_query));
-
-        // Add the TabletGroup into the TMStatus.
-        let sid = node_path.sid.clone();
-        let lid = ctx.leader_map.get(&sid.to_gid()).unwrap();
-        tm_status.tm_state.insert(node_path, None);
-        tm_status.leaderships.insert(sid, lid.clone());
-      }
+    if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
+      self.exit_and_clean_up(ctx, io_ctx);
+      return MSQueryCoordAction::NonFatalFailure;
     }
 
     // Populate the TMStatus accordingly.
-    es.state = CoordState::Stage(Stage { stage_idx, stage_query_id: tm_qid.clone() });
+    es.state = CoordState::Stage(Stage { stage_idx, stage_query_id: tm_status.query_id().clone() });
     MSQueryCoordAction::ExecuteTMStatus(tm_status)
   }
 

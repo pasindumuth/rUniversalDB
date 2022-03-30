@@ -2,14 +2,15 @@ use crate::col_usage::ColUsageNode;
 use crate::coord::{CoordContext, CoordForwardMsg, CoordState};
 use crate::master::MasterTimerInput;
 use crate::model::common::{
-  proc, CTNodePath, ColName, ColType, ColVal, ColValN, CoordGroupId, EndpointId, Gen, LeadershipId,
-  PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath,
-  TableView, TabletGroupId, TabletKeyRange, TierMap,
+  proc, CQueryPath, CTNodePath, ColName, ColType, ColVal, ColValN, CoordGroupId, EndpointId, Gen,
+  LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId, SlaveGroupId, TQueryPath,
+  TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, TransTableLocationPrefix,
 };
 use crate::model::message as msg;
 use crate::model::message::NetworkMessage;
 use crate::multiversion_map::MVM;
 use crate::node::{GenericInput, GenericTimerInput};
+use crate::server::{CTServerContext, CommonQuery};
 use crate::slave::{SlaveBackMessage, SlaveTimerInput};
 use crate::tablet::{
   TabletConfig, TabletContext, TabletCreateHelper, TabletForwardMsg, TabletSnapshot, TabletState,
@@ -477,30 +478,6 @@ pub fn update_all_eids(
 pub struct RemoteLeaderChangedPLm {
   pub gid: PaxosGroupId,
   pub lid: LeadershipId,
-}
-
-// -----------------------------------------------------------------------------------------------
-//  TMStatus
-// -----------------------------------------------------------------------------------------------
-
-// These are used to perform PCSA over the network for reads and writes.
-#[derive(Debug)]
-pub struct TMStatus {
-  /// The QueryId of the TMStatus.
-  pub query_id: QueryId,
-  /// This is the QueryId of the PerformQuery. We keep this distinct from the TMStatus'
-  /// QueryId, since one of the RMs might be this node.
-  pub child_query_id: QueryId,
-  /// Accumulates all transitively accessed Tablets where an `MSQueryES` was used.
-  pub new_rms: BTreeSet<TQueryPath>,
-  /// The current set of Leaderships that this TMStatus is waiting on. Thus, in order to
-  /// contact an RM, we just use the `LeadershipId` found here.
-  pub leaderships: BTreeMap<SlaveGroupId, LeadershipId>,
-  /// Holds the number of nodes that responded (used to decide when this TM is done).
-  pub responded_count: usize,
-  /// Holds all child Querys, initially mapping to `None`. As results come in, we hold them here.
-  pub tm_state: BTreeMap<CTNodePath, Option<(Vec<Option<ColName>>, Vec<TableView>)>>,
-  pub orig_p: OrigP,
 }
 
 // -----------------------------------------------------------------------------------------------

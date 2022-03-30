@@ -47,4 +47,5 @@ pub mod storage;
 pub mod table_read_es;
 pub mod tablet;
 pub mod test_utils;
+pub mod tm_status;
 pub mod trans_table_read_es;

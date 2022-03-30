@@ -3,7 +3,7 @@ use crate::col_usage::{
   node_external_trans_tables, ColUsageNode,
 };
 use crate::common::{
-  lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, OrigP, QueryPlan, TMStatus, Timestamp,
+  lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, OrigP, QueryPlan, Timestamp,
 };
 use crate::model::common::{
   proc, CQueryPath, ColName, Context, ContextRow, ContextSchema, Gen, LeadershipId,
@@ -14,6 +14,7 @@ use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::server::{CTServerContext, CommonQuery};
 use crate::table_read_es::{is_agg, perform_aggregation};
+use crate::tm_status::{SendHelper, TMStatus};
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -467,81 +468,26 @@ impl GRQueryES {
     };
 
     // Construct the TMStatus
-    let tm_qid = mk_qid(io_ctx.rand());
-    let child_qid = mk_qid(io_ctx.rand());
-    let mut tm_status = TMStatus {
-      query_id: tm_qid.clone(),
-      child_query_id: child_qid.clone(),
-      new_rms: Default::default(),
-      leaderships: Default::default(),
-      responded_count: 0,
-      tm_state: Default::default(),
-      orig_p: OrigP::new(self.query_id.clone()),
-    };
-    let sender_path = ctx.mk_this_query_path(tm_qid.clone());
+    let mut tm_status =
+      TMStatus::new(io_ctx, self.root_query_path.clone(), OrigP::new(self.query_id.clone()));
 
     // Send out the PerformQuery and populate TMStatus accordingly.
     let (_, stage) = self.sql_query.trans_tables.get(stage_idx).unwrap();
     let child_sql_query = cast!(proc::GRQueryStage::SuperSimpleSelect, stage).unwrap();
-    match &child_sql_query.from.source_ref {
+    let helper = match &child_sql_query.from.source_ref {
       proc::GeneralSourceRef::TablePath(table_path) => {
         // Here, we must do a SuperSimpleTableSelectQuery.
-        let child_query = msg::SuperSimpleTableSelectQuery {
-          timestamp: self.timestamp.clone(),
-          context: context.clone(),
-          sql_query: child_sql_query.clone(),
-          query_plan,
-        };
-
-        // Validate the LeadershipId of PaxosGroups that the PerformQuery will be sent to.
-        // We do this before sending any messages, in case it fails.
+        let general_query =
+          msg::GeneralQuery::SuperSimpleTableSelectQuery(msg::SuperSimpleTableSelectQuery {
+            timestamp: self.timestamp.clone(),
+            context: context.clone(),
+            sql_query: child_sql_query.clone(),
+            query_plan,
+          });
         let gen = self.query_plan.table_location_map.get(table_path).unwrap();
         let tids =
           ctx.get_min_tablets(table_path, gen, &child_sql_query.from, &child_sql_query.selection);
-        for tid in &tids {
-          let sid = ctx.gossip().get().tablet_address_config.get(&tid).unwrap();
-          if let Some(lid) = query_leader_map.get(sid) {
-            if lid.gen < ctx.leader_map().get(&sid.to_gid()).unwrap().gen {
-              // The `lid` is too old, so we cannot finish this GRQueryES.
-              self.exit_and_clean_up(ctx);
-              return GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId);
-            }
-          }
-        }
-
-        // Having non-empty `tids` solves the TMStatus deadlock and determining the child schema.
-        assert!(tids.len() > 0);
-        for tid in tids {
-          // Construct PerformQuery
-          let general_query = msg::GeneralQuery::SuperSimpleTableSelectQuery(child_query.clone());
-          let perform_query = msg::PerformQuery {
-            root_query_path: self.root_query_path.clone(),
-            sender_path: sender_path.clone(),
-            query_id: child_qid.clone(),
-            query: general_query,
-          };
-
-          // Send out PerformQuery. Recall that this could only be a Tablet.
-          let common_query = CommonQuery::PerformQuery(perform_query);
-          let node_path = ctx.mk_tablet_node_path(tid).into_ct();
-          let sid = node_path.sid.clone();
-          if let Some(lid) = query_leader_map.get(&sid) {
-            // Recall we already validated that `lid` is no lower than the
-            // one at this node's LeaderMap.
-            ctx.send_to_ct_lid(io_ctx, node_path.clone(), common_query, lid.clone());
-          } else {
-            ctx.send_to_ct(io_ctx, node_path.clone(), common_query);
-          }
-
-          // Add the TabletGroup into the TMStatus.
-          tm_status.tm_state.insert(node_path, None);
-          if let Some(lid) = query_leader_map.get(&sid) {
-            tm_status.leaderships.insert(sid, lid.clone());
-          } else {
-            let lid = ctx.leader_map().get(&sid.to_gid()).unwrap();
-            tm_status.leaderships.insert(sid, lid.clone());
-          }
-        }
+        SendHelper::TableQuery(general_query, tids)
       }
       proc::GeneralSourceRef::TransTableName(trans_table_name) => {
         // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
@@ -552,62 +498,28 @@ impl GRQueryES {
           .find(|prefix| &prefix.trans_table_name == trans_table_name)
           .unwrap()
           .clone();
-
-        // Validate the LeadershipId of PaxosGroups that the PerformQuery will be sent to.
-        // We do this before sending any messages, in case it fails.
-        let sid = &location_prefix.source.node_path.sid;
-        if let Some(lid) = query_leader_map.get(sid) {
-          if lid.gen < ctx.leader_map().get(&sid.to_gid()).unwrap().gen {
-            // The `lid` is too old, so we cannot finish this GRQueryES.
-            self.exit_and_clean_up(ctx);
-            return GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId);
-          }
-        }
-
-        let child_query = msg::SuperSimpleTransTableSelectQuery {
-          location_prefix: location_prefix.clone(),
-          context: context.clone(),
-          sql_query: child_sql_query.clone(),
-          query_plan,
-        };
-
-        // Construct PerformQuery
-        let general_query = msg::GeneralQuery::SuperSimpleTransTableSelectQuery(child_query);
-        let perform_query = msg::PerformQuery {
-          root_query_path: self.root_query_path.clone(),
-          sender_path: sender_path.clone(),
-          query_id: child_qid.clone(),
-          query: general_query,
-        };
-
-        // Send out PerformQuery. Recall that this could be a Slave or a Tablet.
-        let common_query = CommonQuery::PerformQuery(perform_query);
-        let node_path = location_prefix.source.node_path.clone();
-        let sid = node_path.sid.clone();
-        if let Some(lid) = query_leader_map.get(&sid) {
-          // Recall we already validated that `lid` is no lower than the
-          // one at this node's LeaderMap.
-          ctx.send_to_ct_lid(io_ctx, node_path.clone(), common_query, lid.clone());
-        } else {
-          ctx.send_to_ct(io_ctx, node_path.clone(), common_query);
-        }
-
-        // Add the TabletGroup into the TMStatus.
-        tm_status.tm_state.insert(node_path, None);
-        if let Some(lid) = query_leader_map.get(&sid) {
-          tm_status.leaderships.insert(sid, lid.clone());
-        } else {
-          let lid = ctx.leader_map().get(&sid.to_gid()).unwrap();
-          tm_status.leaderships.insert(sid, lid.clone());
-        }
+        let general_query = msg::GeneralQuery::SuperSimpleTransTableSelectQuery(
+          msg::SuperSimpleTransTableSelectQuery {
+            location_prefix: location_prefix.clone(),
+            context: context.clone(),
+            sql_query: child_sql_query.clone(),
+            query_plan,
+          },
+        );
+        SendHelper::TransTableQuery(general_query, location_prefix)
       }
     };
+
+    if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
+      self.exit_and_clean_up(ctx);
+      return GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId);
+    }
 
     // Create a SubqueryStatus and move the GRQueryES to the next Stage.
     self.state = GRExecutionS::ReadStage(ReadStage {
       stage_idx,
       parent_context_map,
-      stage_query_id: tm_qid.clone(),
+      stage_query_id: tm_status.query_id().clone(),
     });
 
     // Return the TMStatus for the parent Server to execute.

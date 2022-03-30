@@ -5,7 +5,7 @@ use crate::common::{
   btree_multimap_insert, lookup, map_insert, merge_table_views, mk_qid, mk_t, remove_item,
   update_leader_map, update_leader_map_unversioned, BasicIOCtx, BoundType, CoreIOCtx, GossipData,
   KeyBound, LeaderMap, OrigP, QueryESResult, QueryPlan, ReadRegion, RemoteLeaderChangedPLm,
-  TMStatus, TableSchema, Timestamp, VersionedValue, WriteRegion,
+  TableSchema, Timestamp, VersionedValue, WriteRegion,
 };
 use crate::drop_table_rm_es::{DropTableRMAction, DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;
@@ -44,6 +44,7 @@ use crate::stmpaxos2pc_tm;
 use crate::stmpaxos2pc_tm::RMServerContext;
 use crate::storage::{GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableReadES};
+use crate::tm_status::TMStatus;
 use crate::trans_table_read_es::{TransExecutionS, TransTableReadES};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -2553,31 +2554,19 @@ impl TabletContext {
     statuses: &mut Statuses,
     query_success: msg::QuerySuccess,
   ) {
-    let tm_query_id = &query_success.return_qid;
-    if let Some(tm_status) = statuses.tm_statuss.get_mut(tm_query_id) {
-      // We just add the result of the `query_success` here.
-      let node_path = query_success.responder_path.node_path;
-      tm_status.tm_state.insert(node_path, Some(query_success.result.clone()));
-      tm_status.new_rms.extend(query_success.new_rms);
-      tm_status.responded_count += 1;
-      if tm_status.responded_count == tm_status.tm_state.len() {
-        // Remove the `TMStatus` and take ownership
-        let tm_status = statuses.tm_statuss.remove(tm_query_id).unwrap();
-        // Merge there TableViews together
-        let mut results = Vec::<(Vec<Option<ColName>>, Vec<TableView>)>::new();
-        for (_, rm_result) in tm_status.tm_state {
-          results.push(rm_result.unwrap());
-        }
-        let gr_query_id = tm_status.orig_p.query_id;
+    let tm_query_id = query_success.return_qid.clone();
+    if let Some(tm_status) = statuses.tm_statuss.get_mut(&tm_query_id) {
+      tm_status.handle_query_success(query_success);
+      if tm_status.is_complete() {
+        // Remove the TMStatus and take ownership before forwarding the results back.
+        let tm_status = statuses.tm_statuss.remove(&tm_query_id).unwrap();
+        let (orig_p, results, new_rms) = tm_status.get_results();
+        let gr_query_id = orig_p.query_id;
+
+        // Then, inform the GRQueryES
         let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
-        remove_item(&mut gr_query.child_queries, tm_query_id);
-        let action = gr_query.es.handle_tm_success(
-          self,
-          io_ctx,
-          tm_query_id.clone(),
-          tm_status.new_rms,
-          results,
-        );
+        remove_item(&mut gr_query.child_queries, &tm_query_id);
+        let action = gr_query.es.handle_tm_success(self, io_ctx, tm_query_id, new_rms, results);
         self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
       }
     }
@@ -2959,22 +2948,8 @@ impl TabletContext {
       self.exit_all(io_ctx, statuses, gr_query.child_queries);
     }
     // TMStatus
-    else if let Some(tm_status) = statuses.tm_statuss.remove(&query_id) {
-      // We ECU this TMStatus by sending CancelQuery to all remaining RMs.
-      for (rm_path, rm_result) in tm_status.tm_state {
-        if rm_result.is_none() {
-          let orig_sid = &rm_path.sid;
-          let orig_lid = tm_status.leaderships.get(&orig_sid).unwrap().clone();
-          self.send_to_ct_lid(
-            io_ctx,
-            rm_path,
-            CommonQuery::CancelQuery(msg::CancelQuery {
-              query_id: tm_status.child_query_id.clone(),
-            }),
-            orig_lid,
-          );
-        }
-      }
+    else if let Some(mut tm_status) = statuses.tm_statuss.remove(&query_id) {
+      tm_status.exit_and_clean_up(self, io_ctx);
     }
     // MSQueryES
     else if let Some(ms_query_es) = statuses.ms_query_ess.get(&query_id) {
