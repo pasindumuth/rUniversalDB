@@ -174,9 +174,9 @@ pub struct CoordContext {
   pub leader_map: LeaderMap,
 
   /// This is used to allow the user to cancel requests. There is an element (`RequestId`,
-  /// `QueryId`) here exactly when there is an `MSCoordES` (exclusive) or `FinishQueryES`
-  /// stored at that `QueryId` in `statuses`. In addition, ES will hold the `RequestId` in
-  /// its `request_id` field.
+  /// `QueryId`) here exactly when there is an `MSCoordES` or `FinishQueryES` stored at that
+  /// `QueryId` in `statuses` (recall that the former becomes the latter). In addition, ES
+  /// will hold the `RequestId` in its `request_id` field.
   pub external_request_id_map: BTreeMap<RequestId, QueryId>,
 }
 

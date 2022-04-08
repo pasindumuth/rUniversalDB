@@ -144,14 +144,8 @@ pub enum StaticValidationError {
   InvalidInsert,
 }
 
-/// This function performs validations that include checks on the shape of the query
-/// and checks related to the Key Columns of the Tablets.
-///
-/// Preconditions:
-///   1. All `TablePaths` that appear in `ms_query` must be present in `table_generation`
-///      at `timestamp` (by `static_read`).
-///   2. All `(TablePath, Gen)` pairs in `table_generation` must be a key in `db_schema`
-///      (this will be true of all `GossipData` instances).
+/// This function performs validations of `ms_query` that requries nothing more than
+/// calling `view.key_cols` for a given `TablePath`.
 pub fn perform_static_validations<
   ErrorT: StaticValidationErrorTrait,
   ViewT: DBSchemaView<ErrorT = ErrorT>,

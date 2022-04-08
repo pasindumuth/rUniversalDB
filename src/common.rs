@@ -91,11 +91,13 @@ pub trait SlaveIOCtx: BasicIOCtx {
 
   // Tablet
   fn create_tablet(&mut self, helper: TabletCreateHelper);
+  /// Forwards `forward_msg` to the Tablet. This function asserts that the Tablet exists.
   fn tablet_forward(&mut self, tablet_group_id: &TabletGroupId, forward_msg: TabletForwardMsg);
   fn all_tids(&self) -> Vec<TabletGroupId>;
   fn num_tablets(&self) -> usize;
 
   // Coord
+  /// Forwards `forward_msg` to the Coord. This function asserts that the Coord exists.
   fn coord_forward(&mut self, coord_group_id: &CoordGroupId, forward_msg: CoordForwardMsg);
   fn all_cids(&self) -> Vec<CoordGroupId>;
 

@@ -72,7 +72,7 @@ pub struct GRQueryPlan {
   pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   pub table_location_map: BTreeMap<TablePath, Gen>,
   pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
-  pub col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, ColUsageNode))>,
+  pub col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
 
 #[derive(Debug)]
@@ -241,9 +241,9 @@ impl GRQueryES {
     };
 
     // For now, just assert that the schema that we get corresponds to that in the QueryPlan.
-    let (trans_table_name, (cur_schema, _)) =
+    let (trans_table_name, node) =
       self.query_plan.col_usage_nodes.get(read_stage.stage_idx).unwrap();
-    assert_eq!(&schema, cur_schema);
+    assert_eq!(&schema, &node.schema);
 
     // Amend the `new_trans_table_context`
     for i in 0..self.context.context_rows.len() {
@@ -341,7 +341,7 @@ impl GRQueryES {
     stage_idx: usize,
   ) -> GRQueryAction {
     assert!(stage_idx < self.query_plan.col_usage_nodes.len());
-    let (_, (_, child)) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
+    let (_, child) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
 
     // Compute the `ColName`s and `TransTableNames` that we want in the child Query,
     // and process that.
@@ -455,7 +455,7 @@ impl GRQueryES {
     let context = Context { context_schema: new_context_schema, context_rows: new_context_rows };
 
     // Construct the QueryPlan. We amend this Slave to the `query_leader_map`.
-    let (_, (_, col_usage_node)) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
+    let (_, col_usage_node) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
     let mut query_leader_map = self.query_plan.query_leader_map.clone();
     query_leader_map
       .insert(ctx.this_sid().clone(), ctx.leader_map().get(ctx.this_gid()).unwrap().clone());

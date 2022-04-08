@@ -649,7 +649,7 @@ pub struct MasterQueryPlan {
   pub all_tier_maps: BTreeMap<TransTableName, TierMap>,
   pub table_location_map: BTreeMap<TablePath, Gen>,
   pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
-  pub col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, ColUsageNode))>,
+  pub col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

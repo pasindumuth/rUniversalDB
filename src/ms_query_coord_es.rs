@@ -34,7 +34,7 @@ pub struct CoordQueryPlan {
   query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   table_location_map: BTreeMap<TablePath, Gen>,
   extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
-  col_usage_nodes: Vec<(TransTableName, (Vec<Option<ColName>>, ColUsageNode))>,
+  col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
 
 #[derive(Debug)]
@@ -219,9 +219,8 @@ impl FullMSCoordES {
             };
 
             let (trans_table_name, _) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
-            let (plan_schema, _) =
-              lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
-            assert_eq!(plan_schema, &schema);
+            let node = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
+            assert_eq!(&schema, &node.schema);
             // Recall that since we only send out one ContextRow, there should only be one TableView.
             assert_eq!(table_views.len(), 1);
 
@@ -430,7 +429,7 @@ impl FullMSCoordES {
 
     // Get the corresponding MSQueryStage and ColUsageNode.
     let (trans_table_name, ms_query_stage) = es.sql_query.trans_tables.get(stage_idx).unwrap();
-    let (_, col_usage_node) = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
+    let col_usage_node = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
 
     // Compute the Context for this stage. Recall there must be exactly one row.
     let trans_table_names = node_external_trans_tables(col_usage_node);
