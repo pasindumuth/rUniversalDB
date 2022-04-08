@@ -1,5 +1,5 @@
 use crate::common::{lookup, TableSchema, Timestamp};
-use crate::master_query_planning_es::{ColUsageErrorTrait, DBSchemaView};
+use crate::master_query_planning_es::{ColPresenceReq, ColUsageErrorTrait, DBSchemaView};
 use crate::model::common::proc::{GeneralSourceRef, MSQueryStage};
 use crate::model::common::{iast, proc, ColName, ColType, Gen, TablePath, TierMap, TransTableName};
 use crate::multiversion_map::MVM;
@@ -336,6 +336,10 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
     // TODO: check that inserts don't have external_cols too.
 
     Ok(children)
+  }
+
+  pub fn finish(self) -> BTreeMap<TablePath, ColPresenceReq> {
+    self.view.finish()
   }
 }
 

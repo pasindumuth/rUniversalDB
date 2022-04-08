@@ -5,6 +5,7 @@ use crate::col_usage::{
 use crate::common::{
   lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, OrigP, QueryPlan, Timestamp,
 };
+use crate::master_query_planning_es::ColPresenceReq;
 use crate::model::common::{
   proc, CQueryPath, ColName, Context, ContextRow, ContextSchema, Gen, LeadershipId,
   PaxosGroupIdTrait, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TierMap,
@@ -71,7 +72,7 @@ pub struct GRQueryPlan {
   pub tier_map: TierMap,
   pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   pub table_location_map: BTreeMap<TablePath, Gen>,
-  pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
+  pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
   pub col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
 
@@ -184,7 +185,7 @@ impl<'a, SqlQueryT: SubqueryComputableSql> GRQueryConstructorView<'a, SqlQueryT>
         tier_map: self.query_plan.tier_map.clone(),
         query_leader_map: self.query_plan.query_leader_map.clone(),
         table_location_map: self.query_plan.table_location_map.clone(),
-        extra_req_cols: self.query_plan.extra_req_cols.clone(),
+        col_presence_req: self.query_plan.col_presence_req.clone(),
         col_usage_nodes: col_usage_nodes.clone(),
       },
       new_rms: Default::default(),
@@ -463,7 +464,7 @@ impl GRQueryES {
       tier_map: self.query_plan.tier_map.clone(),
       query_leader_map: query_leader_map.clone(),
       table_location_map: self.query_plan.table_location_map.clone(),
-      extra_req_cols: self.query_plan.extra_req_cols.clone(),
+      col_presence_req: self.query_plan.col_presence_req.clone(),
       col_usage_node: col_usage_node.clone(),
     };
 

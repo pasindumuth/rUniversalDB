@@ -2,7 +2,10 @@ use crate::col_usage::{
   free_external_cols, iterate_stage_ms_query, ColUsageError, ColUsageNode, ColUsagePlanner,
   GeneralStage,
 };
-use crate::common::{lookup, MasterIOCtx, RemoteLeaderChangedPLm, TableSchema, Timestamp};
+use crate::common::{
+  add_item, default_get, lookup, map_insert, MasterIOCtx, RemoteLeaderChangedPLm, TableSchema,
+  Timestamp,
+};
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
@@ -10,12 +13,10 @@ use crate::model::common::{
   TransTableName,
 };
 use crate::model::message as msg;
-use crate::model::message::ExternalAbortedData::QueryPlanningError;
-use crate::model::message::MasterQueryPlan;
 use crate::multiversion_map::MVM;
 use crate::query_planning::{
-  check_cols_present, collect_table_paths, compute_all_tier_maps, compute_extra_req_cols,
-  compute_table_location_map, perform_static_validations, StaticValidationError,
+  collect_table_paths, compute_all_tier_maps, compute_table_location_map, perform_validations,
+  StaticValidationError,
 };
 use crate::server::ServerContextBase;
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,26 @@ pub trait ReqColPresenceError {
 //  DBSchemaView
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColPresenceReq {
+  pub present_cols: Vec<ColName>,
+  pub absent_cols: Vec<ColName>,
+}
+
+fn amend_presence_req(
+  col_presence_req: &mut BTreeMap<TablePath, ColPresenceReq>,
+  table_path: &TablePath,
+  col_name: &ColName,
+  present: bool,
+) {
+  let col_req = default_get(col_presence_req, table_path);
+  if present {
+    add_item(&mut col_req.present_cols, col_name);
+  } else {
+    add_item(&mut col_req.absent_cols, col_name);
+  }
+}
+
 /// This exposes what is virtually an unversioned Database Schema.
 pub trait DBSchemaView {
   type ErrorT;
@@ -61,6 +82,8 @@ pub trait DBSchemaView {
     table_path: &TablePath,
     col_name: &ColName,
   ) -> Result<bool, Self::ErrorT>;
+
+  fn finish(self) -> BTreeMap<TablePath, ColPresenceReq>;
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -89,6 +112,7 @@ struct CheckingDBSchemaView<'a> {
   pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
   pub table_generation: &'a MVM<TablePath, Gen>,
   pub timestamp: Timestamp,
+  pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
 }
 
 impl<'a> CheckingDBSchemaView<'a> {
@@ -135,15 +159,21 @@ impl<'a> DBSchemaView for CheckingDBSchemaView<'a> {
   ) -> Result<bool, CheckingDBSchemaViewError> {
     let timestamp = self.timestamp.clone();
     let schema = self.get_table_schema(table_path)?;
-    if lookup(&schema.key_cols, col_name).is_none() {
+    let present = if lookup(&schema.key_cols, col_name).is_none() {
       if schema.val_cols.get_lat(col_name) < timestamp {
-        Err(CheckingDBSchemaViewError::InsufficientLat)
+        return Err(CheckingDBSchemaViewError::InsufficientLat);
       } else {
-        Ok(schema.val_cols.strong_static_read(col_name, &timestamp).is_some())
+        schema.val_cols.strong_static_read(col_name, &timestamp).is_some()
       }
     } else {
-      Ok(true)
-    }
+      true
+    };
+    amend_presence_req(&mut self.col_presence_req, table_path, col_name, present);
+    Ok(present)
+  }
+
+  fn finish(self) -> BTreeMap<TablePath, ColPresenceReq> {
+    self.col_presence_req
   }
 }
 
@@ -192,6 +222,7 @@ struct LockingDBSchemaView<'a> {
   pub db_schema: &'a mut BTreeMap<(TablePath, Gen), TableSchema>,
   pub table_generation: &'a mut MVM<TablePath, Gen>,
   pub timestamp: Timestamp,
+  pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
 }
 
 impl<'a> LockingDBSchemaView<'a> {
@@ -230,11 +261,17 @@ impl<'a> DBSchemaView for LockingDBSchemaView<'a> {
   ) -> Result<bool, LockingDBSchemaViewError> {
     let timestamp = self.timestamp.clone();
     let schema = self.get_table_schema(table_path)?;
-    if lookup(&schema.key_cols, col_name).is_none() {
-      Ok(schema.val_cols.read(col_name, &timestamp).is_some())
+    let present = if lookup(&schema.key_cols, col_name).is_none() {
+      schema.val_cols.read(col_name, &timestamp).is_some()
     } else {
-      Ok(true)
-    }
+      true
+    };
+    amend_presence_req(&mut self.col_presence_req, table_path, col_name, present);
+    Ok(present)
+  }
+
+  fn finish(self) -> BTreeMap<TablePath, ColPresenceReq> {
+    self.col_presence_req
   }
 }
 
@@ -282,6 +319,7 @@ pub struct StaticDBSchemaView<'a> {
   pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
   pub table_generation: &'a MVM<TablePath, Gen>,
   pub timestamp: Timestamp,
+  pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
 }
 
 impl<'a> StaticDBSchemaView<'a> {
@@ -320,11 +358,17 @@ impl<'a> DBSchemaView for StaticDBSchemaView<'a> {
   ) -> Result<bool, StaticDBSchemaViewError> {
     let timestamp = self.timestamp.clone();
     let schema = self.get_table_schema(table_path)?;
-    if lookup(&schema.key_cols, col_name).is_none() {
-      Ok(schema.val_cols.static_read(col_name, &timestamp).is_some())
+    let present = if lookup(&schema.key_cols, col_name).is_none() {
+      schema.val_cols.static_read(col_name, &timestamp).is_some()
     } else {
-      Ok(true)
-    }
+      true
+    };
+    amend_presence_req(&mut self.col_presence_req, table_path, col_name, present);
+    Ok(present)
+  }
+
+  fn finish(self) -> BTreeMap<TablePath, ColPresenceReq> {
+    self.col_presence_req
   }
 }
 
@@ -374,11 +418,7 @@ pub fn master_query_planning<
   let table_location_map = compute_table_location_map(&mut view, &table_paths)?;
 
   // Next, we do various validations on the MSQuery.
-  perform_static_validations(&mut view, ms_query)?;
-
-  // Next, we see if all required columns in all queries are present.
-  let extra_req_cols = compute_extra_req_cols(ms_query);
-  check_cols_present(&mut view, &extra_req_cols)?;
+  perform_validations(&mut view, ms_query)?;
 
   // Next, we run the FrozenColUsageAlgorithm
   let mut planner = ColUsagePlanner { view };
@@ -386,7 +426,12 @@ pub fn master_query_planning<
 
   // Finally we construct a MasterQueryPlan and respond to the sender.
   let all_tier_maps = compute_all_tier_maps(ms_query);
-  Ok(msg::MasterQueryPlan { all_tier_maps, table_location_map, extra_req_cols, col_usage_nodes })
+  Ok(msg::MasterQueryPlan {
+    all_tier_maps,
+    table_location_map,
+    col_presence_req: planner.finish(),
+    col_usage_nodes,
+  })
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -422,6 +467,7 @@ fn master_query_planning_pre(
     db_schema: gossip.db_schema,
     table_generation: gossip.table_generation,
     timestamp: planning_msg.timestamp,
+    col_presence_req: Default::default(),
   };
 
   fn respond_error(error: msg::QueryPlanningError) -> MasterQueryPlanningAction {
@@ -462,6 +508,7 @@ fn master_query_planning_post(
       db_schema: gossip.db_schema,
       table_generation: gossip.table_generation,
       timestamp: planning_plm.timestamp,
+      col_presence_req: Default::default(),
     };
 
     match master_query_planning(view, &planning_plm.ms_query) {

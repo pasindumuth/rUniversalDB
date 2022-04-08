@@ -1,6 +1,7 @@
 use crate::col_usage::ColUsageNode;
 use crate::coord::{CoordContext, CoordForwardMsg, CoordState};
 use crate::master::MasterTimerInput;
+use crate::master_query_planning_es::ColPresenceReq;
 use crate::model::common::{
   proc, CQueryPath, CTNodePath, ColName, ColType, ColVal, ColValN, CoordGroupId, EndpointId, Gen,
   LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId, SlaveGroupId, TQueryPath,
@@ -170,6 +171,8 @@ impl RangeEnds for u32 {
   }
 }
 
+// FlatMap Interface
+
 /// Lookup the position of a `key` in an associative list.
 pub fn lookup_pos<K: Eq, V>(assoc: &Vec<(K, V)>, key: &K) -> Option<usize> {
   assoc.iter().position(|(k, _)| k == key)
@@ -180,12 +183,23 @@ pub fn lookup<'a, K: Eq, V>(assoc: &'a Vec<(K, V)>, key: &K) -> Option<&'a V> {
   assoc.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-/// Remove an item from the Vector
+// FlatSet Interface
+
+/// Add an item to the `vec`
+pub fn add_item<V: Eq + Clone>(vec: &mut Vec<V>, item: &V) {
+  if !vec.contains(item) {
+    vec.push(item.clone());
+  }
+}
+
+/// Remove an item from the `vec`
 pub fn remove_item<V: Eq>(vec: &mut Vec<V>, item: &V) {
   if let Some(pos) = vec.iter().position(|x| x == item) {
     vec.remove(pos);
   }
 }
+
+// Map Utils
 
 /// This is a simple insert-get operation for BTreeMaps. We usually want to create a value
 /// in the same expression as the insert operation, but we also want to get a &mut to the
@@ -196,6 +210,18 @@ pub fn map_insert<'a, K: Clone + Eq + Ord, V>(
   value: V,
 ) -> &'a mut V {
   map.insert(key.clone(), value);
+  map.get_mut(key).unwrap()
+}
+
+/// Looks up the `key` in the `map`, and returns the value, if it is present. Otherwise,
+/// we insert a default constructed value at that `key` and return that.
+pub fn default_get<'a, K: Clone + Eq + Ord, V: Default>(
+  map: &'a mut BTreeMap<K, V>,
+  key: &K,
+) -> &'a mut V {
+  if !map.contains_key(key) {
+    map.insert(key.clone(), V::default());
+  }
   map.get_mut(key).unwrap()
 }
 
@@ -643,7 +669,7 @@ pub struct QueryPlan {
   /// happen is happening, we must verify the presence of these `ColName`.
   ///
   /// Note: not all `TablePaths` used in the MSQuery needs to be here.
-  pub extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
+  pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
   pub col_usage_node: ColUsageNode,
 }
 

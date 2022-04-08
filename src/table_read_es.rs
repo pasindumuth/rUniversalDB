@@ -39,13 +39,9 @@ pub fn request_lock_columns<IO: CoreIOCtx>(
   query_plan: &QueryPlan,
 ) -> QueryId {
   let mut all_cols = BTreeSet::<ColName>::new();
-  all_cols.extend(free_external_cols(&query_plan.col_usage_node.external_cols));
-  all_cols.extend(query_plan.col_usage_node.safe_present_cols.clone());
-
-  // If there are extra required cols, we add them in.
-  if let Some(extra_cols) = query_plan.extra_req_cols.get(&ctx.this_table_path) {
-    all_cols.extend(extra_cols.clone());
-  }
+  let col_presence_req = query_plan.col_presence_req.get(&ctx.this_table_path).unwrap().clone();
+  all_cols.extend(col_presence_req.present_cols);
+  all_cols.extend(col_presence_req.absent_cols);
 
   ctx.add_requested_locked_columns(
     io_ctx,
@@ -55,38 +51,25 @@ pub fn request_lock_columns<IO: CoreIOCtx>(
   )
 }
 
-/// This checks that free `external_cols` are not present, and `safe_present_cols` and
-/// `extra_req_cols` are preset.
-///
-/// Note: this does *not* required columns to be globally locked, only locally.
+/// Check that `col_presence_req` aligns with the local `TabletSchema`.
 pub fn does_query_plan_align(
   ctx: &TabletContext,
   timestamp: &Timestamp,
   query_plan: &QueryPlan,
 ) -> bool {
-  // First, check that `external_cols are absent.
-  for col in free_external_cols(&query_plan.col_usage_node.external_cols) {
-    // Since the `key_cols` are static, no query plan should have one of
-    // these as an External Column.
-    assert!(lookup(&ctx.table_schema.key_cols, &col).is_none());
-    if ctx.table_schema.val_cols.static_read(&col, timestamp).is_some() {
-      return false;
-    }
-  }
+  let col_presence_req = query_plan.col_presence_req.get(&ctx.this_table_path).unwrap();
 
-  // Next, check that `safe_present_cols` are present.
-  for col in &query_plan.col_usage_node.safe_present_cols {
+  // Check the `present_cols`
+  for col in &col_presence_req.present_cols {
     if !contains_col(&ctx.table_schema, col, timestamp) {
       return false;
     }
   }
 
-  // Next, check that `extra_req_cols` are present.
-  if let Some(extra_cols) = query_plan.extra_req_cols.get(&ctx.this_table_path) {
-    for col in extra_cols {
-      if !contains_col(&ctx.table_schema, col, timestamp) {
-        return false;
-      }
+  // Check the `absent_cols`
+  for col in &col_presence_req.absent_cols {
+    if contains_col(&ctx.table_schema, col, timestamp) {
+      return false;
     }
   }
 

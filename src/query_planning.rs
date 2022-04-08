@@ -76,53 +76,6 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
   all_tier_maps
 }
 
-/// Computes `extra_req_cols`, which is a class of columns that must be present in the
-/// Tablets according to the MSQuery. The presence of these columns need to be validated
-/// before other algorithms can run, e.g. `ColUsagePlanner`. Note that KeyCols of a
-/// Table can also be here.
-pub fn compute_extra_req_cols(ms_query: &proc::MSQuery) -> BTreeMap<TablePath, Vec<ColName>> {
-  let mut extra_req_cols = BTreeMap::<TablePath, Vec<ColName>>::new();
-
-  // Helper to add extra columns to `extra_req_cols` which avoids duplicating
-  // ColNames that are already present.
-  fn add_cols(
-    extra_req_cols: &mut BTreeMap<TablePath, Vec<ColName>>,
-    table_path: &TablePath,
-    col_names: Vec<ColName>,
-  ) {
-    // Recall there might already be required columns for this TablePath.
-    if !extra_req_cols.contains_key(table_path) {
-      extra_req_cols.insert(table_path.clone(), Vec::new());
-    }
-    let req_cols = extra_req_cols.get_mut(table_path).unwrap();
-    for col_name in col_names {
-      if !req_cols.contains(&col_name) {
-        req_cols.push(col_name);
-      }
-    }
-  }
-
-  iterate_stage_ms_query(
-    &mut |stage: GeneralStage| match stage {
-      GeneralStage::SuperSimpleSelect(_) => {}
-      GeneralStage::Update(query) => {
-        add_cols(
-          &mut extra_req_cols,
-          &query.table.source_ref,
-          query.assignment.iter().map(|(c, _)| c).cloned().collect(),
-        );
-      }
-      GeneralStage::Insert(query) => {
-        add_cols(&mut extra_req_cols, &query.table.source_ref, query.columns.clone());
-      }
-      GeneralStage::Delete(_) => {}
-    },
-    ms_query,
-  );
-
-  extra_req_cols
-}
-
 /// Computes a map that maps all `TablePath`s used in the MSQuery to the `Gen`
 /// in the `table_generation` at `timestamp`.
 ///
@@ -144,10 +97,10 @@ pub enum StaticValidationError {
   InvalidInsert,
 }
 
-/// This function performs validations of `ms_query` that requries nothing more than
-/// calling `view.key_cols` for a given `TablePath`.
-pub fn perform_static_validations<
-  ErrorT: StaticValidationErrorTrait,
+/// Validates the `MSQuery` in various ways. In particularly, this checks whether the
+/// columnt that are written by an Insert or Update are valid and present in `view`.
+pub fn perform_validations<
+  ErrorT: StaticValidationErrorTrait + ReqColPresenceError,
   ViewT: DBSchemaView<ErrorT = ErrorT>,
 >(
   view: &mut ViewT,
@@ -158,21 +111,33 @@ pub fn perform_static_validations<
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(query) => {
         // Check that the `stage` is not trying to modify a KeyCol,
-        // and all assigned columns are unique.
-        let key_cols = view.key_cols(&query.table.source_ref)?;
+        // all assigned columns are unique, and they are present.
+        let table_path = &query.table.source_ref;
+        let key_cols = view.key_cols(table_path)?.clone();
         let mut all_cols = BTreeSet::<&ColName>::new();
         for (col_name, _) in &query.assignment {
-          if !all_cols.insert(col_name) || lookup(key_cols, col_name).is_some() {
-            return Err(ErrorT::mk_error(StaticValidationError::InvalidUpdate));
+          if !all_cols.insert(col_name) || lookup(&key_cols, col_name).is_some() {
+            return Err(StaticValidationErrorTrait::mk_error(StaticValidationError::InvalidUpdate));
+          }
+          if !view.contains_col(table_path, col_name)? {
+            return Err(ReqColPresenceError::mk_error(col_name.clone()));
           }
         }
       }
       proc::MSQueryStage::Insert(query) => {
         // Check that the `stage` is inserting to all KeyCols.
-        let key_cols = view.key_cols(&query.table.source_ref)?;
+        let table_path = &query.table.source_ref;
+        let key_cols = view.key_cols(table_path)?;
         for (col_name, _) in key_cols {
           if !query.columns.contains(col_name) {
-            return Err(ErrorT::mk_error(StaticValidationError::InvalidInsert));
+            return Err(StaticValidationErrorTrait::mk_error(StaticValidationError::InvalidInsert));
+          }
+        }
+
+        // Check that every inserted column is present
+        for col_name in &query.columns {
+          if !view.contains_col(table_path, col_name)? {
+            return Err(ReqColPresenceError::mk_error(col_name.clone()));
           }
         }
 
@@ -180,35 +145,18 @@ pub fn perform_static_validations<
         let mut all_cols = BTreeSet::<&ColName>::new();
         for col_name in &query.columns {
           if !all_cols.insert(col_name) {
-            return Err(ErrorT::mk_error(StaticValidationError::InvalidInsert));
+            return Err(StaticValidationErrorTrait::mk_error(StaticValidationError::InvalidInsert));
           }
         }
 
         // Check that `values` has equal length to `columns`.
         for row in &query.values {
           if row.len() != query.columns.len() {
-            return Err(ErrorT::mk_error(StaticValidationError::InvalidInsert));
+            return Err(StaticValidationErrorTrait::mk_error(StaticValidationError::InvalidInsert));
           }
         }
       }
       proc::MSQueryStage::Delete(_) => {}
-    }
-  }
-
-  Ok(())
-}
-
-/// Checks if all `ColName`s in the value of `extra_req_cols` are contained in
-/// the `TablePath` in the key.
-pub fn check_cols_present<ErrorT: ReqColPresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>(
-  view: &mut ViewT,
-  table_col_map: &BTreeMap<TablePath, Vec<ColName>>,
-) -> Result<(), ErrorT> {
-  for (table_path, col_names) in table_col_map {
-    for col_name in col_names {
-      if !view.contains_col(table_path, col_name)? {
-        return Err(ErrorT::mk_error(col_name.clone()));
-      }
     }
   }
 

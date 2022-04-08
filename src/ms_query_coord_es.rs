@@ -7,7 +7,7 @@ use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::expression::EvalError;
 use crate::master_query_planning_es::{
-  master_query_planning, StaticDBSchemaView, StaticDBSchemaViewError,
+  master_query_planning, ColPresenceReq, StaticDBSchemaView, StaticDBSchemaViewError,
 };
 use crate::model::common::proc::MSQueryStage;
 use crate::model::common::{
@@ -33,7 +33,7 @@ pub struct CoordQueryPlan {
   all_tier_maps: BTreeMap<TransTableName, TierMap>,
   query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   table_location_map: BTreeMap<TablePath, Gen>,
-  extra_req_cols: BTreeMap<TablePath, Vec<ColName>>,
+  col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
   col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
 
@@ -452,7 +452,7 @@ impl FullMSCoordES {
       tier_map: es.query_plan.all_tier_maps.get(trans_table_name).unwrap().clone(),
       query_leader_map: query_leader_map.clone(),
       table_location_map: es.query_plan.table_location_map.clone(),
-      extra_req_cols: es.query_plan.extra_req_cols.clone(),
+      col_presence_req: es.query_plan.col_presence_req.clone(),
       col_usage_node: col_usage_node.clone(),
     };
 
@@ -655,6 +655,7 @@ impl QueryPlanningES {
         db_schema: gossip.db_schema,
         table_generation: gossip.table_generation,
         timestamp: self.timestamp.clone(),
+        col_presence_req: Default::default(),
       };
 
       match master_query_planning(view, &self.sql_query) {
@@ -702,7 +703,7 @@ impl QueryPlanningES {
       all_tier_maps: master_query_plan.all_tier_maps,
       query_leader_map: self.compute_query_leader_map(ctx, &master_query_plan.table_location_map),
       table_location_map: master_query_plan.table_location_map,
-      extra_req_cols: master_query_plan.extra_req_cols,
+      col_presence_req: master_query_plan.col_presence_req,
       col_usage_nodes: master_query_plan.col_usage_nodes,
     })
   }
