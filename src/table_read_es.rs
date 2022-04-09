@@ -14,7 +14,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::server::{
-  contains_col, evaluate_super_simple_select, mk_eval_error, ContextConstructor,
+  contains_col, contains_val_col, evaluate_super_simple_select, mk_eval_error, ContextConstructor,
 };
 use crate::server::{LocalTable, ServerContextBase};
 use crate::storage::SimpleStorageView;
@@ -38,16 +38,18 @@ pub fn request_lock_columns<IO: CoreIOCtx>(
   timestamp: &Timestamp,
   query_plan: &QueryPlan,
 ) -> QueryId {
-  let mut all_cols = BTreeSet::<ColName>::new();
-  let col_presence_req = query_plan.col_presence_req.get(&ctx.this_table_path).unwrap().clone();
-  all_cols.extend(col_presence_req.present_cols);
-  all_cols.extend(col_presence_req.absent_cols);
+  let mut all_cols = Vec::<ColName>::new();
+  if let Some(col_presence_req) = query_plan.col_presence_req.get(&ctx.this_table_path) {
+    all_cols.extend(col_presence_req.present_cols.clone());
+    all_cols.extend(col_presence_req.absent_cols.clone());
+  }
 
+  // Even if `all_cols` is empty, we need to at least update the `presence_timestamp`.
   ctx.add_requested_locked_columns(
     io_ctx,
     OrigP::new(query_id.clone()),
     timestamp.clone(),
-    all_cols.into_iter().collect(),
+    all_cols,
   )
 }
 
@@ -57,19 +59,19 @@ pub fn does_query_plan_align(
   timestamp: &Timestamp,
   query_plan: &QueryPlan,
 ) -> bool {
-  let col_presence_req = query_plan.col_presence_req.get(&ctx.this_table_path).unwrap();
-
-  // Check the `present_cols`
-  for col in &col_presence_req.present_cols {
-    if !contains_col(&ctx.table_schema, col, timestamp) {
-      return false;
+  if let Some(col_presence_req) = query_plan.col_presence_req.get(&ctx.this_table_path) {
+    // Check the `present_cols`
+    for col in &col_presence_req.present_cols {
+      if !contains_val_col(&ctx.table_schema, col, timestamp) {
+        return false;
+      }
     }
-  }
 
-  // Check the `absent_cols`
-  for col in &col_presence_req.absent_cols {
-    if contains_col(&ctx.table_schema, col, timestamp) {
-      return false;
+    // Check the `absent_cols`
+    for col in &col_presence_req.absent_cols {
+      if contains_val_col(&ctx.table_schema, col, timestamp) {
+        return false;
+      }
     }
   }
 

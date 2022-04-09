@@ -1331,9 +1331,7 @@ impl TabletContext {
             TabletPLm::LockedCols(locked_cols) => {
               // Increase TableSchema LATs
               for col_name in &locked_cols.cols {
-                if lookup(&self.table_schema.key_cols, col_name).is_none() {
-                  self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
-                }
+                self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
               }
 
               self.presence_timestamp = max(self.presence_timestamp.clone(), locked_cols.timestamp);
@@ -2143,16 +2141,14 @@ impl TabletContext {
   ) -> bool {
     // First, we see if we can satisfy Column Locking
 
-    // Process `waiting_locked_cols`
+    // Process `waiting_locked_cols`. This is Tablets a part of the Tablet DDL Algorithm.
     for (_, req) in &self.waiting_locked_cols {
       // First, we see if we can grant GlobalLockedCols immediately.
       let mut global_locked = req.timestamp <= self.presence_timestamp;
       for col_name in &req.cols {
-        if lookup(&self.table_schema.key_cols, col_name).is_none() {
-          if !(req.timestamp <= self.table_schema.val_cols.get_lat(col_name)) {
-            global_locked = false;
-            break;
-          }
+        if !(req.timestamp <= self.table_schema.val_cols.get_lat(col_name)) {
+          global_locked = false;
+          break;
         }
       }
 

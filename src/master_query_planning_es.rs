@@ -53,7 +53,8 @@ pub struct ColPresenceReq {
   pub absent_cols: Vec<ColName>,
 }
 
-fn amend_presence_req(
+/// This marks the presence/absence of a ValCol `col_name` in the Table `table_path`.
+fn mark_val_col_presence(
   col_presence_req: &mut BTreeMap<TablePath, ColPresenceReq>,
   table_path: &TablePath,
   col_name: &ColName,
@@ -159,17 +160,17 @@ impl<'a> DBSchemaView for CheckingDBSchemaView<'a> {
   ) -> Result<bool, CheckingDBSchemaViewError> {
     let timestamp = self.timestamp.clone();
     let schema = self.get_table_schema(table_path)?;
-    let present = if lookup(&schema.key_cols, col_name).is_none() {
+    if lookup(&schema.key_cols, col_name).is_none() {
       if schema.val_cols.get_lat(col_name) < timestamp {
-        return Err(CheckingDBSchemaViewError::InsufficientLat);
+        Err(CheckingDBSchemaViewError::InsufficientLat)
       } else {
-        schema.val_cols.strong_static_read(col_name, &timestamp).is_some()
+        let present = schema.val_cols.strong_static_read(col_name, &timestamp).is_some();
+        mark_val_col_presence(&mut self.col_presence_req, table_path, col_name, present);
+        Ok(present)
       }
     } else {
-      true
-    };
-    amend_presence_req(&mut self.col_presence_req, table_path, col_name, present);
-    Ok(present)
+      Ok(true)
+    }
   }
 
   fn finish(self) -> BTreeMap<TablePath, ColPresenceReq> {
@@ -261,13 +262,13 @@ impl<'a> DBSchemaView for LockingDBSchemaView<'a> {
   ) -> Result<bool, LockingDBSchemaViewError> {
     let timestamp = self.timestamp.clone();
     let schema = self.get_table_schema(table_path)?;
-    let present = if lookup(&schema.key_cols, col_name).is_none() {
-      schema.val_cols.read(col_name, &timestamp).is_some()
+    if lookup(&schema.key_cols, col_name).is_none() {
+      let present = schema.val_cols.read(col_name, &timestamp).is_some();
+      mark_val_col_presence(&mut self.col_presence_req, table_path, col_name, present);
+      Ok(present)
     } else {
-      true
-    };
-    amend_presence_req(&mut self.col_presence_req, table_path, col_name, present);
-    Ok(present)
+      Ok(true)
+    }
   }
 
   fn finish(self) -> BTreeMap<TablePath, ColPresenceReq> {
@@ -358,13 +359,13 @@ impl<'a> DBSchemaView for StaticDBSchemaView<'a> {
   ) -> Result<bool, StaticDBSchemaViewError> {
     let timestamp = self.timestamp.clone();
     let schema = self.get_table_schema(table_path)?;
-    let present = if lookup(&schema.key_cols, col_name).is_none() {
-      schema.val_cols.static_read(col_name, &timestamp).is_some()
+    if lookup(&schema.key_cols, col_name).is_none() {
+      let present = schema.val_cols.static_read(col_name, &timestamp).is_some();
+      mark_val_col_presence(&mut self.col_presence_req, table_path, col_name, present);
+      Ok(present)
     } else {
-      true
-    };
-    amend_presence_req(&mut self.col_presence_req, table_path, col_name, present);
-    Ok(present)
+      Ok(true)
+    }
   }
 
   fn finish(self) -> BTreeMap<TablePath, ColPresenceReq> {

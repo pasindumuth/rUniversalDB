@@ -534,7 +534,14 @@ pub fn strong_contains_col(
 /// of any sort.
 pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
   lookup_pos(&table_schema.key_cols, col).is_some()
-    || table_schema.val_cols.static_read(col, timestamp).is_some()
+    || contains_val_col(table_schema, col, timestamp)
+}
+
+/// Computes whether `col` is in `table_schema.val_cols` at `timestamp`. Here, the `col` need not
+/// be locked at `timestamp`; we just use a `static_read`, which doesn't guarantee idempotence
+/// of any sort.
+pub fn contains_val_col(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
+  table_schema.val_cols.static_read(col, timestamp).is_some()
 }
 
 /// Computes whether `col` is in `table_schema` at the latest time which `col` had been modified
@@ -542,27 +549,6 @@ pub fn contains_col(table_schema: &TableSchema, col: &ColName, timestamp: &Times
 pub fn contains_col_latest(table_schema: &TableSchema, col: &ColName) -> bool {
   lookup_pos(&table_schema.key_cols, col).is_some()
     || table_schema.val_cols.get_last_version(col).is_some()
-}
-
-/// Returns true iff the `col` is either a KeyCol in `table_schema`, or a ValCol
-/// with high enough `lat`.
-pub fn is_col_locked(table_schema: &TableSchema, col: &ColName, timestamp: &Timestamp) -> bool {
-  lookup_pos(&table_schema.key_cols, col).is_some()
-    || table_schema.val_cols.get_lat(col) >= *timestamp
-}
-
-/// Returns true iff one of the columns in `cols` passes `is_col_locked`.
-pub fn are_cols_locked(
-  table_schema: &TableSchema,
-  cols: &Vec<ColName>,
-  timestamp: &Timestamp,
-) -> bool {
-  for col in cols {
-    if !is_col_locked(table_schema, col, timestamp) {
-      return false;
-    }
-  }
-  return true;
 }
 
 // -----------------------------------------------------------------------------------------------
