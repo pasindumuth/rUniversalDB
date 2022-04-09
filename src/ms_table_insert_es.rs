@@ -1,4 +1,3 @@
-use crate::col_usage::compute_insert_schema;
 use crate::common::{
   lookup, mk_qid, ColBound, CoreIOCtx, KeyBound, OrigP, PolyColBound, QueryESResult, ReadRegion,
   SingleBound, WriteRegion,
@@ -107,7 +106,7 @@ impl SqlQueryInner for InsertInner {
 
     // Compute the UpdateView where we insert all of these rows as new rows.
     let mut update_view = GenericTable::new();
-    let mut res_table_view = TableView::new(compute_insert_schema(&self.sql_query));
+    let mut res_table_view = TableView::new(es.query_plan.col_usage_node.schema.clone());
     let mut pkeys = BTreeSet::<PrimaryKey>::new();
     for row in eval_values {
       // Construct PrimaryKey.
@@ -259,7 +258,7 @@ impl SqlQueryInner for InsertInner {
     // Signal Success and return the data.
     let res_table_view = pending.res_table_view.clone();
     TPESAction::Success(QueryESResult {
-      result: (compute_insert_schema(&self.sql_query), vec![res_table_view]),
+      result: (es.query_plan.col_usage_node.schema.clone(), vec![res_table_view]),
       new_rms: es.new_rms.iter().cloned().collect(),
     })
   }

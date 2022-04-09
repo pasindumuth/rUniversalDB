@@ -2,10 +2,10 @@ use crate::alter_table_rm_es::{AlterTableRMAction, AlterTableRMES, AlterTableRMI
 use crate::alter_table_tm_es::AlterTablePayloadTypes;
 use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
 use crate::common::{
-  btree_multimap_insert, lookup, map_insert, merge_table_views, mk_qid, mk_t, remove_item,
-  update_leader_map, update_leader_map_unversioned, BasicIOCtx, BoundType, CoreIOCtx, GossipData,
-  KeyBound, LeaderMap, OrigP, QueryESResult, QueryPlan, ReadRegion, RemoteLeaderChangedPLm,
-  TableSchema, Timestamp, VersionedValue, WriteRegion,
+  btree_multimap_insert, lookup, map_insert, mk_qid, mk_t, remove_item, update_leader_map,
+  update_leader_map_unversioned, BasicIOCtx, BoundType, CoreIOCtx, GossipData, KeyBound, LeaderMap,
+  OrigP, QueryESResult, QueryPlan, ReadRegion, RemoteLeaderChangedPLm, TableSchema, Timestamp,
+  VersionedValue, WriteRegion,
 };
 use crate::drop_table_rm_es::{DropTableRMAction, DropTableRMES, DropTableRMInner};
 use crate::drop_table_tm_es::DropTablePayloadTypes;

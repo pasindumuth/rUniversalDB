@@ -1,4 +1,4 @@
-use crate::col_usage::{collect_top_level_cols, compute_select_schema, free_external_cols};
+use crate::col_usage::{collect_top_level_cols, free_external_cols};
 use crate::common::{
   btree_multimap_insert, lookup, mk_qid, to_table_path, CoreIOCtx, GossipData, GossipDataView,
   KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, Timestamp,
@@ -289,17 +289,19 @@ impl TableReadES {
     );
 
     // Evaluate
+    let schema = self.query_plan.col_usage_node.schema.clone();
     let eval_res = fully_evaluate_select(
       context_constructor,
       &self.context.deref(),
       subquery_results,
       &self.sql_query,
+      &schema,
     );
 
     match eval_res {
-      Ok((select_schema, res_table_views)) => {
+      Ok(res_table_views) => {
         let res = QueryESResult {
-          result: (select_schema, res_table_views),
+          result: (schema, res_table_views),
           new_rms: self.new_rms.iter().cloned().collect(),
         };
 
@@ -514,7 +516,8 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
   context: &Context,
   subquery_results: Vec<Vec<TableView>>,
   sql_query: &proc::SuperSimpleSelect,
-) -> Result<(Vec<Option<ColName>>, Vec<TableView>), EvalError> {
+  schema: &Vec<Option<ColName>>,
+) -> Result<Vec<TableView>, EvalError> {
   // These are all of the `ColNames` we need in order to evaluate the Select.
   let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
   top_level_cols_set.extend(collect_top_level_cols(&sql_query.selection));
@@ -529,8 +532,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
   // Finally, iterate over the Context Rows of the subqueries and compute the final values.
   let mut pre_agg_table_views = Vec::<TableView>::new();
   for _ in 0..context.context_rows.len() {
-    // TODO: we shouldn't need to pass in a bogus schema for intermediary tables.
-    pre_agg_table_views.push(TableView::new(Vec::new()));
+    pre_agg_table_views.push(TableView::new(schema.clone()));
   }
 
   context_constructor.run(
@@ -563,18 +565,17 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
     },
   )?;
 
-  Ok((compute_select_schema(sql_query), pre_agg_table_views))
+  Ok(pre_agg_table_views)
 }
 
 pub fn perform_aggregation(
   sql_query: &proc::SuperSimpleSelect,
   pre_agg_table_views: Vec<TableView>,
-) -> Result<(Vec<Option<ColName>>, Vec<TableView>), EvalError> {
+) -> Result<Vec<TableView>, EvalError> {
   // Produce the result table, handling aggregates and DISTINCT accordingly.
   let mut res_table_views = Vec::<TableView>::new();
-  let select_schema = compute_select_schema(sql_query);
   for pre_agg_table_view in pre_agg_table_views {
-    let mut res_table_view = TableView::new(select_schema.clone());
+    let mut res_table_view = TableView::new(pre_agg_table_view.col_names);
 
     // Handle aggregation
     if is_agg(sql_query) {
@@ -675,7 +676,7 @@ pub fn perform_aggregation(
     res_table_views.push(res_table_view);
   }
 
-  Ok((select_schema, res_table_views))
+  Ok(res_table_views)
 }
 
 /// Checks if the `SuperSimpleSelect` has aggregates in its projection.

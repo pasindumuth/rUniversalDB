@@ -193,9 +193,9 @@ impl FullMSCoordES {
           CoordState::Stage(stage) if tm_qid == stage.stage_query_id => {
             // Combine the results into a single one
             let (_, query_stage) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
-            let (schema, table_views) = match query_stage {
+            let table_views = match query_stage {
               proc::MSQueryStage::SuperSimpleSelect(sql_query) => {
-                let (_, pre_agg_table_views) = merge_table_views(results);
+                let pre_agg_table_views = merge_table_views(results);
                 match perform_aggregation(sql_query, pre_agg_table_views) {
                   Ok(result) => result,
                   Err(eval_error) => {
@@ -220,7 +220,8 @@ impl FullMSCoordES {
 
             let (trans_table_name, _) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
             let node = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
-            assert_eq!(&schema, &node.schema);
+            let schema = node.schema.clone();
+
             // Recall that since we only send out one ContextRow, there should only be one TableView.
             assert_eq!(table_views.len(), 1);
 

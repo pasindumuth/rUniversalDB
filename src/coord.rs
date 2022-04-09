@@ -1,5 +1,5 @@
 use crate::common::{
-  cur_timestamp, map_insert, merge_table_views, mk_qid, mk_t, remove_item, update_leader_map,
+  cur_timestamp, map_insert, mk_qid, mk_t, remove_item, update_leader_map,
   update_leader_map_unversioned, BasicIOCtx, GeneralTraceMessage, GossipData, LeaderMap, OrigP,
   Timestamp, VersionedValue,
 };

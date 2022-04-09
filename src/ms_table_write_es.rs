@@ -1,4 +1,4 @@
-use crate::col_usage::{collect_top_level_cols, compute_update_schema};
+use crate::col_usage::collect_top_level_cols;
 use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
@@ -157,7 +157,7 @@ impl SqlQueryInner for UpdateInner {
 
     // Setup the TableView that we are going to return and the UpdateView that we're going
     // to hold in the MSQueryES.
-    let res_col_names = compute_update_schema(&self.sql_query, &ctx.table_schema.key_cols);
+    let res_col_names = es.query_plan.col_usage_node.schema.clone();
     let mut res_table_view = TableView::new(res_col_names.clone());
     let mut update_view = GenericTable::new();
 

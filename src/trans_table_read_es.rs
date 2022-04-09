@@ -1,6 +1,4 @@
-use crate::col_usage::{
-  collect_top_level_cols, compute_select_schema, nodes_external_cols, nodes_external_trans_tables,
-};
+use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
 use crate::common::{mk_qid, remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
@@ -327,19 +325,21 @@ impl TransTableReadES {
     );
 
     // Evaluate
+    let schema = self.query_plan.col_usage_node.schema.clone();
     let eval_res = fully_evaluate_select(
       context_constructor,
       &self.context.deref(),
       subquery_results,
       &self.sql_query,
+      &schema,
     );
 
     match eval_res {
-      Ok((select_schema, res_table_views)) => {
+      Ok(res_table_views) => {
         // Signal Success and return the data.
         self.state = TransExecutionS::Done;
         TPESAction::Success(QueryESResult {
-          result: (select_schema, res_table_views),
+          result: (schema, res_table_views),
           new_rms: self.new_rms.iter().cloned().collect(),
         })
       }

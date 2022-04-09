@@ -231,8 +231,8 @@ impl GRQueryES {
     // Combine the results into a single one
     let (_, proc::GRQueryStage::SuperSimpleSelect(sql_query)) =
       self.sql_query.trans_tables.get(read_stage.stage_idx).unwrap();
-    let (_, pre_agg_table_views) = merge_table_views(results);
-    let (schema, table_views) = match perform_aggregation(sql_query, pre_agg_table_views) {
+    let pre_agg_table_views = merge_table_views(results);
+    let table_views = match perform_aggregation(sql_query, pre_agg_table_views) {
       Ok(result) => result,
       Err(eval_error) => {
         return GRQueryAction::QueryError(msg::QueryError::RuntimeError {
@@ -244,7 +244,7 @@ impl GRQueryES {
     // For now, just assert that the schema that we get corresponds to that in the QueryPlan.
     let (trans_table_name, node) =
       self.query_plan.col_usage_nodes.get(read_stage.stage_idx).unwrap();
-    assert_eq!(&schema, &node.schema);
+    let schema = node.schema.clone();
 
     // Amend the `new_trans_table_context`
     for i in 0..self.context.context_rows.len() {

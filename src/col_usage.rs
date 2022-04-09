@@ -13,18 +13,15 @@ use std::ops::Deref;
 //  ColUsagePlanner
 // -----------------------------------------------------------------------------------------------
 
-/// There are several uses of this.
-/// 1. The purpose of the `ColUsageNode` is for a parent ES to be able to compute the
-///    `Context` that should be used for a child ES. That is why `requested_cols` only contains
-///    `ColumnRef`s that can reference an ancestral `GeneralSource` if its query's table's schema
-///    does not have it. (Hence why we do not include assigned columns in UPDATE queries or
-///    inserted column in INSERT queries.)
-/// 2. When the MSCoordES creates this using its GossipData, `ColName`s in `safe_present_cols`
-///    should be present, and `free_external_cols(external_cols)` should be absent in the schema.
-///    The schemas should be checked and the Transaction aborted if the expectations fail.
-/// 3. Instead, if this is sent back with a MasterQueryPlanning, it will be hard facts that
-///    `safe_present_cols` and `free_external_cols(external_cols)` *will* align with the table
-///    schemas.
+/// The main purpose of the `ColUsageNode` is for a parent ES to be able to compute the
+/// `Context` that should be used for a child ES. That is why `requested_cols` only contains
+/// `ColumnRef`s that can reference an ancestral `GeneralSource` if its query's table's schema
+/// does not have it. (Hence why we do not include assigned columns in UPDATE queries or
+/// inserted column in INSERT queries.)
+///
+/// Instead, if this is sent back with a MasterQueryPlanning, it will be hard facts that
+/// `safe_present_cols` and `free_external_cols(external_cols)` *will* align with the table
+/// schemas.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ColUsageNode {
   /// The (Trans)Table used in the `proc::GeneralQuery` corresponding to this node.
@@ -76,25 +73,11 @@ pub enum ColUsageError {
 
 /// This algorithm computes a `Vec<(TransTableName, ColUsageNode)>`
 /// that is parallel to the provided `MSQuery`. This is a tree. Every `ColUsageNode`
-/// corresponds to an `(MS/GR)QueryStage`, and every `Vec<(TransTableName, (Vec<Option<ColName>>,
-/// ColUsageNode))>` corresponds to an `(MS/GR)Query`.
+/// corresponds to an `(MS/GR)QueryStage`, and every `Vec<(TransTableName, ColUsageNode)>`
+/// corresponds to an `(MS/GR)Query`.
 ///
-/// TODO: these docs are out of date since we elegantly propagate up an abortion if these
-///  properties don't hold.
-/// This algorithm contains the following assumptions:
-///   1. All `TablePath`s referenced in the `MSQuery` exist in `table_generation` and `db_schema`
-///      at the given `Timestamp` (by `static_read`).
-///   2. All inserted columns in `INSERT` queries and all assigned columns in `UPDATE` queries
-///      exist in the `db_schema`.
-///   3. The assigned columns in an `UPDATE` are disjoint from the Key Columns. (This algorithm
-///      does not support such queries).
-///
-/// In the above, (1) is critical (otherwise we might crash). The others might will not lead to
-/// a crash, but since we use the inserted columns and assigned columns to compute the schema
-/// of the resulting TransTable, we would like them to be present so that the resulting
-/// `ColUsageNode`s makes sense.
-///
-/// Users of this algorithm must verify these facts first.
+/// The validations in `perform_validations` needs to have been run through the `view`
+/// before this `ColUsagePlanner` should be used.
 pub struct ColUsagePlanner<ViewT: DBSchemaView> {
   pub view: ViewT,
 }
@@ -343,7 +326,7 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
   }
 }
 
-pub fn compute_select_schema(select: &proc::SuperSimpleSelect) -> Vec<Option<ColName>> {
+fn compute_select_schema(select: &proc::SuperSimpleSelect) -> Vec<Option<ColName>> {
   let mut projection = Vec::<Option<ColName>>::new();
   for (select_item, alias) in &select.projection {
     if let Some(col) = alias {
@@ -357,7 +340,7 @@ pub fn compute_select_schema(select: &proc::SuperSimpleSelect) -> Vec<Option<Col
   projection
 }
 
-pub fn compute_update_schema(
+fn compute_update_schema(
   update: &proc::Update,
   key_cols: &Vec<(ColName, ColType)>,
 ) -> Vec<Option<ColName>> {
@@ -371,11 +354,11 @@ pub fn compute_update_schema(
   projection
 }
 
-pub fn compute_insert_schema(insert: &proc::Insert) -> Vec<Option<ColName>> {
+fn compute_insert_schema(insert: &proc::Insert) -> Vec<Option<ColName>> {
   insert.columns.iter().cloned().map(|col| Some(col.clone())).collect()
 }
 
-pub fn compute_delete_schema(_: &proc::Delete) -> Vec<Option<ColName>> {
+fn compute_delete_schema(_: &proc::Delete) -> Vec<Option<ColName>> {
   vec![]
 }
 

@@ -555,24 +555,28 @@ impl OrigP {
 /// have the same length. This function essentially merges together corresponding `TableView`.
 pub fn merge_table_views(
   mut results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
-) -> (Vec<Option<ColName>>, Vec<TableView>) {
-  let (schema, mut views) = results.pop().unwrap();
-  for (cur_schema, cur_views) in results {
-    assert_eq!(cur_schema, schema);
-    assert_eq!(cur_views.len(), views.len());
-    for (idx, cur_view) in cur_views.into_iter().enumerate() {
-      let view = views.get_mut(idx).unwrap();
-      assert_eq!(view.col_names, cur_view.col_names);
-      for (cur_row_val, cur_row_count) in cur_view.rows {
-        if let Some(row_count) = view.rows.get_mut(&cur_row_val) {
-          *row_count += cur_row_count;
-        } else {
-          view.rows.insert(cur_row_val, cur_row_count);
+) -> Vec<TableView> {
+  let mut it = results.into_iter();
+  if let Some((schema, mut views)) = it.next() {
+    while let Some((cur_schema, cur_views)) = it.next() {
+      assert_eq!(cur_schema, schema);
+      assert_eq!(cur_views.len(), views.len());
+      for (idx, cur_view) in cur_views.into_iter().enumerate() {
+        let view = views.get_mut(idx).unwrap();
+        assert_eq!(view.col_names, cur_view.col_names);
+        for (cur_row_val, cur_row_count) in cur_view.rows {
+          if let Some(row_count) = view.rows.get_mut(&cur_row_val) {
+            *row_count += cur_row_count;
+          } else {
+            view.rows.insert(cur_row_val, cur_row_count);
+          }
         }
       }
     }
+    views
+  } else {
+    vec![]
   }
-  (schema, views)
 }
 
 pub fn to_table_path(source: &proc::GeneralSource) -> &TablePath {

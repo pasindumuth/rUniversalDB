@@ -130,18 +130,20 @@ impl SqlQueryInner for SelectInner {
     );
 
     // Evaluate
+    let schema = es.query_plan.col_usage_node.schema.clone();
     let eval_res = fully_evaluate_select(
       context_constructor,
       &es.context.deref(),
       subquery_results,
       &self.sql_query,
+      &schema,
     );
 
     match eval_res {
-      Ok((select_schema, res_table_views)) => {
+      Ok(res_table_views) => {
         // Signal Success and return the data.
         TPESAction::Success(QueryESResult {
-          result: (select_schema, res_table_views),
+          result: (schema, res_table_views),
           new_rms: es.new_rms.iter().cloned().collect(),
         })
       }
