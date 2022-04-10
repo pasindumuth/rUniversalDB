@@ -47,12 +47,15 @@ pub trait ReqColPresenceError {
 //  ColPresenceReq
 // -----------------------------------------------------------------------------------------------
 
+/// Here, `present_cols` and `absent_cols` are disjoint, and all elements
+/// in each vector are unique.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReqPresentAbsent {
   pub present_cols: Vec<ColName>,
   pub absent_cols: Vec<ColName>,
 }
 
+/// Here, all elements in `cols` are unique.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReqPresentExclusive {
   pub cols: Vec<ColName>,
@@ -71,6 +74,8 @@ impl Default for ColPresenceReq {
 }
 
 /// This marks the presence/absence of a ValCol `col_name` in the Table `table_path`.
+///
+/// The `col_name` and `present` must align with whatever `ColPresenceReq` currently is.
 fn mark_val_col_presence(
   col_presence_req: &mut BTreeMap<TablePath, ColPresenceReq>,
   table_path: &TablePath,
@@ -96,7 +101,10 @@ fn mark_val_col_presence(
   }
 }
 
-/// This marks the presence/absence of a ValCol `col_name` in the Table `table_path`.
+/// Changes `ColPresenceReq` to `ReqPresentExclusive` containing `all_val_cols`. Note that
+/// all elements in `all_val_cols` must be unique.
+///
+/// The `all_val_cols` must align with whatever `ColPresenceReq` currently is.
 fn mark_all_val_cols(
   col_presence_req: &mut BTreeMap<TablePath, ColPresenceReq>,
   table_path: &TablePath,
@@ -123,7 +131,17 @@ fn mark_all_val_cols(
       *col_req = ColPresenceReq::ReqPresentExclusive(ReqPresentExclusive { cols: all_val_cols });
     }
     ColPresenceReq::ReqPresentExclusive(req) => {
-      debug_assert!(all_val_cols == req.cols);
+      debug_assert!((|| {
+        if all_val_cols.len() != req.cols.len() {
+          return false;
+        }
+        for col in &req.cols {
+          if !all_val_cols.contains(col) {
+            return false;
+          }
+        }
+        return true;
+      })());
     }
   }
 }

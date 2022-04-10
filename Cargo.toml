@@ -5,6 +5,9 @@ authors = ["Pasindu Muthukuda <pasindumuth@gmail.com>"]
 edition = "2018"
 default-run = "transact"
 
+[profile.release]
+debug-assertions = true
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
