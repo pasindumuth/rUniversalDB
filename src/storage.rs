@@ -110,11 +110,12 @@ pub trait StorageView {
     }
   }
 
-  /// Note that `key_region` does need to be disjoint.
+  /// Note that `key_region` does need to be disjoint. In addition, `column_region`
+  /// need not be distinct.
   ///
   /// Preconditions:
-  ///   1. For all `ColName`s in `column_region` that are not KeyCols, the Prior Value at
-  ///      `timestamp` in `table_schema.val_cols` is `Some(_)`.
+  ///   1. For all `ColName`s in `column_region` that are not KeyCols, the Prior
+  ///      Value at `timestamp` in `table_schema.val_cols` is `Some(_)`.
   fn compute_subtable(
     &self,
     key_region: &Vec<KeyBound>,
@@ -512,7 +513,7 @@ fn prior_versions_to_presence_snapshot(
 
 /// Convert a `PresenceSnapshot` to a `TableView` by selecting the columns in `selection`.
 /// Note that every `ColName` in `selection` must either be in the key or the value in
-/// `presence_snapshot`.
+/// `presence_snapshot`. Also note that `selection` need not be distinct.
 fn presence_snapshot_to_table_view(
   presence_snapshot: PresenceSnapshot,
   table_schema: &TableSchema,

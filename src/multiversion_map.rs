@@ -1,5 +1,5 @@
-use crate::common::mk_t;
 use crate::common::Timestamp;
+use crate::common::{mk_t, update_all_eids};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::BTreeMap;
@@ -58,6 +58,10 @@ where
     } else {
       self.map.insert(key.clone(), (timestamp, vec![]));
     }
+  }
+
+  pub fn update_all_lats(&mut self, timestamp: Timestamp) {
+    todo!()
   }
 
   /// Reads the version prior to the timestamp. This function asserts that the `lat` of
@@ -138,6 +142,11 @@ where
     } else {
       mk_t(0)
     }
+  }
+
+  /// Get the smallest LAT among all keys.
+  pub fn get_min_lat(&self) -> Timestamp {
+    todo!()
   }
 
   /// Get the highest LAT of any key-value pair in the MVM.

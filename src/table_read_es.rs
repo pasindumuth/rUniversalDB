@@ -7,6 +7,8 @@ use crate::expression::{
   compress_row_region, compute_key_region, evaluate_c_expr, is_true, CExpr, EvalError,
 };
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
+use crate::master_query_planning_es::ColPresenceReq;
+use crate::model::common::proc::SelectClause;
 use crate::model::common::{
   iast, proc, CQueryPath, CTQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow,
   PaxosGroupId, PaxosGroupIdTrait, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
@@ -15,12 +17,13 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::server::{
   contains_col, contains_val_col, evaluate_super_simple_select, mk_eval_error, ContextConstructor,
+  ExtraColumnRef, LocalColumnRef,
 };
 use crate::server::{LocalTable, ServerContextBase};
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
-  compute_col_map, compute_subqueries, ColumnsLocking, Executing, Pending, RequestedReadProtected,
-  StorageLocalTable, TPESAction, TPESBase, TabletContext,
+  compute_col_map, compute_subqueries, ColSet, ColumnsLocking, Executing, Pending,
+  RequestedReadProtected, StorageLocalTable, TPESAction, TPESBase, TabletContext,
 };
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -38,19 +41,23 @@ pub fn request_lock_columns<IO: CoreIOCtx>(
   timestamp: &Timestamp,
   query_plan: &QueryPlan,
 ) -> QueryId {
-  let mut all_cols = Vec::<ColName>::new();
-  if let Some(col_presence_req) = query_plan.col_presence_req.get(&ctx.this_table_path) {
-    all_cols.extend(col_presence_req.present_cols.clone());
-    all_cols.extend(col_presence_req.absent_cols.clone());
-  }
+  let mut col_set =
+    if let Some(col_presence_req) = query_plan.col_presence_req.get(&ctx.this_table_path) {
+      match col_presence_req {
+        ColPresenceReq::ReqPresentAbsent(req) => {
+          let mut all_cols = Vec::<ColName>::new();
+          all_cols.extend(req.present_cols.clone());
+          all_cols.extend(req.absent_cols.clone());
+          ColSet::Cols(all_cols)
+        }
+        ColPresenceReq::ReqPresentExclusive(_) => ColSet::All,
+      }
+    } else {
+      ColSet::Cols(vec![])
+    };
 
-  // Even if `all_cols` is empty, we need to at least update the `presence_timestamp`.
-  ctx.add_requested_locked_columns(
-    io_ctx,
-    OrigP::new(query_id.clone()),
-    timestamp.clone(),
-    all_cols,
-  )
+  // Even if `col_set` is empty, we need to at least update the `presence_timestamp`.
+  ctx.add_requested_locked_columns(io_ctx, OrigP::new(query_id.clone()), timestamp.clone(), col_set)
 }
 
 /// Check that `col_presence_req` aligns with the local `TabletSchema`.
@@ -60,17 +67,34 @@ pub fn does_query_plan_align(
   query_plan: &QueryPlan,
 ) -> bool {
   if let Some(col_presence_req) = query_plan.col_presence_req.get(&ctx.this_table_path) {
-    // Check the `present_cols`
-    for col in &col_presence_req.present_cols {
-      if !contains_val_col(&ctx.table_schema, col, timestamp) {
-        return false;
-      }
-    }
+    match col_presence_req {
+      ColPresenceReq::ReqPresentAbsent(req) => {
+        // Check the `present_cols`
+        for col in &req.present_cols {
+          if !contains_val_col(&ctx.table_schema, col, timestamp) {
+            return false;
+          }
+        }
 
-    // Check the `absent_cols`
-    for col in &col_presence_req.absent_cols {
-      if contains_val_col(&ctx.table_schema, col, timestamp) {
-        return false;
+        // Check the `absent_cols`
+        for col in &req.absent_cols {
+          if contains_val_col(&ctx.table_schema, col, timestamp) {
+            return false;
+          }
+        }
+      }
+      ColPresenceReq::ReqPresentExclusive(req) => {
+        // Check that `req.cols` contains the exact same columns as this TableSchema.
+        let all_val_cols = ctx.table_schema.val_cols.static_snapshot_read(timestamp);
+        if req.cols.len() != all_val_cols.len() {
+          return false;
+        }
+        for col in &req.cols {
+          if !all_val_cols.contains_key(col) {
+            return false;
+          }
+        }
+        return true;
       }
     }
   }
@@ -520,16 +544,40 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
   sql_query: &proc::SuperSimpleSelect,
   schema: &Vec<Option<ColName>>,
 ) -> Result<Vec<TableView>, EvalError> {
-  // These are all of the `ColNames` we need in order to evaluate the Select.
-  let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
-  top_level_cols_set.extend(collect_top_level_cols(&sql_query.selection));
-  for (select_item, _) in &sql_query.projection {
-    top_level_cols_set.extend(collect_top_level_cols(match select_item {
-      proc::SelectItem::ValExpr(expr) => expr,
-      proc::SelectItem::UnaryAggregate(unary_agg) => &unary_agg.expr,
-    }));
+  // These are all of the `ExtraColumnRef`s we need in order to evaluate the Select.
+  let mut top_level_extra_cols_set = BTreeSet::<ExtraColumnRef>::new();
+  top_level_extra_cols_set.extend(
+    collect_top_level_cols(&sql_query.selection).into_iter().map(|c| ExtraColumnRef::Named(c)),
+  );
+  match &sql_query.projection {
+    SelectClause::SelectList(select_list) => {
+      for (select_item, _) in select_list {
+        top_level_extra_cols_set.extend(
+          collect_top_level_cols(match select_item {
+            proc::SelectItem::ValExpr(expr) => expr,
+            proc::SelectItem::UnaryAggregate(unary_agg) => &unary_agg.expr,
+          })
+          .into_iter()
+          .map(|c| ExtraColumnRef::Named(c)),
+        );
+      }
+    }
+    SelectClause::Wildcard => {
+      // For `ColName`s that are present in `schema`, read the column.
+      // Otherwise, read the index.
+      for (index, maybe_col_name) in schema.iter().enumerate() {
+        if let Some(col_name) = maybe_col_name {
+          top_level_extra_cols_set.insert(ExtraColumnRef::Named(proc::ColumnRef {
+            table_name: None,
+            col_name: col_name.clone(),
+          }));
+        } else {
+          top_level_extra_cols_set.insert(ExtraColumnRef::Unnamed(index));
+        }
+      }
+    }
   }
-  let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
+  let top_level_extra_col_refs = Vec::from_iter(top_level_extra_cols_set.into_iter());
 
   // Finally, iterate over the Context Rows of the subqueries and compute the final values.
   let mut pre_agg_table_views = Vec::<TableView>::new();
@@ -539,7 +587,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
 
   context_constructor.run(
     &context.context_rows,
-    top_level_col_names.clone(),
+    top_level_extra_col_refs.clone(),
     &mut |context_row_idx: usize,
           top_level_col_vals: Vec<ColValN>,
           contexts: Vec<(ContextRow, usize)>,
@@ -555,7 +603,8 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
       // result to this TableView (if the WHERE clause evaluates to true).
       let evaluated_select = evaluate_super_simple_select(
         &sql_query,
-        &top_level_col_names,
+        schema,
+        &top_level_extra_col_refs,
         &top_level_col_vals,
         &subquery_vals,
       )?;
@@ -586,8 +635,9 @@ pub fn perform_aggregation(
       // there are in the final result table (due to how all SelectItems must be aggregates,
       // and how all aggregates take only one argument).
       // TODO perhaps introduce a SingleColumn type.
+      let select_list = cast!(proc::SelectClause::SelectList, &sql_query.projection).unwrap();
       let mut columns = Vec::<TableView>::new();
-      for _ in 0..sql_query.projection.len() {
+      for _ in 0..select_list.len() {
         columns.push(TableView::new(Vec::new()));
       }
       for (row, count) in pre_agg_table_view.rows {
@@ -598,7 +648,7 @@ pub fn perform_aggregation(
 
       // Perform the aggregation
       let mut res_row = Vec::<ColValN>::new();
-      for ((select_item, _), mut column) in sql_query.projection.iter().zip(columns.into_iter()) {
+      for ((select_item, _), mut column) in select_list.iter().zip(columns.into_iter()) {
         let unary_agg = cast!(proc::SelectItem::UnaryAggregate, select_item).unwrap();
 
         // Handle inner DISTICT
@@ -685,9 +735,14 @@ pub fn perform_aggregation(
 /// NOTE: Recall that in this case, all elements in the projection are aggregates
 /// for now for simplicity.
 pub fn is_agg(sql_query: &proc::SuperSimpleSelect) -> bool {
-  if let Some((proc::SelectItem::UnaryAggregate(_), _)) = sql_query.projection.get(0) {
-    true
-  } else {
-    false
+  match &sql_query.projection {
+    SelectClause::SelectList(select_list) => {
+      if let Some((proc::SelectItem::UnaryAggregate(_), _)) = select_list.first() {
+        true
+      } else {
+        false
+      }
+    }
+    SelectClause::Wildcard => false,
   }
 }

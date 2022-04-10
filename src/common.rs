@@ -215,7 +215,7 @@ pub fn map_insert<'a, K: Clone + Eq + Ord, V>(
 
 /// Looks up the `key` in the `map`, and returns the value, if it is present. Otherwise,
 /// we insert a default constructed value at that `key` and return that.
-pub fn default_get<'a, K: Clone + Eq + Ord, V: Default>(
+pub fn default_get_mut<'a, K: Clone + Eq + Ord, V: Default>(
   map: &'a mut BTreeMap<K, V>,
   key: &K,
 ) -> &'a mut V {
@@ -300,6 +300,22 @@ impl TableSchema {
       .cloned()
       .map(|(col_name, _)| proc::ColumnRef { table_name: None, col_name })
       .collect()
+  }
+
+  /// Gets the `ColNames` that are present at the `timestamp` in their canonical
+  /// order. Importantly, this implies that Table columns have a well defined order
+  /// (for every `Timestamp`).
+  pub fn get_schema_static(&self, timestamp: &Timestamp) -> Vec<ColName> {
+    let mut all_cols = Vec::<ColName>::new();
+    for (col, _) in &self.key_cols {
+      all_cols.push(col.clone());
+    }
+    for (col, _) in self.val_cols.static_snapshot_read(timestamp) {
+      // In practice, a ColName should never be a ValCol if it is already a KeyCol.
+      debug_assert!(!all_cols.contains(&col));
+      add_item(&mut all_cols, &col);
+    }
+    all_cols
   }
 }
 

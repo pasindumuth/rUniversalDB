@@ -216,7 +216,17 @@ fn convert_delete(
 
 fn convert_select_clause(
   select_clause: Vec<ast::SelectItem>,
-) -> Result<Vec<(iast::SelectItem, Option<String>)>, String> {
+) -> Result<iast::SelectClause, String> {
+  // First, handle the case of a Wildcard (i.e. SELECT *)
+  if let Some(ast::SelectItem::Wildcard) = select_clause.first() {
+    if select_clause.len() > 1 {
+      return Err(format!("Cannot have other elements besides * in a SELECT."));
+    }
+
+    return Ok(iast::SelectClause::Wildcard);
+  }
+
+  // Otherwise, we assume this is a SELECT list.
   let mut select_list = Vec::<(iast::SelectItem, Option<String>)>::new();
 
   fn select_item(expr: ast::Expr) -> Result<iast::SelectItem, String> {
@@ -249,13 +259,16 @@ fn convert_select_clause(
       ast::SelectItem::ExprWithAlias { expr, alias } => {
         select_list.push((select_item(expr)?, Some(alias.value)));
       }
-      ast::SelectItem::QualifiedWildcard(_) | ast::SelectItem::Wildcard => {
+      ast::SelectItem::Wildcard => {
+        return Err(format!("Cannot have other elements besides * in a SELECT."));
+      }
+      ast::SelectItem::QualifiedWildcard(_) => {
         return Err(format!("{:?} is not supported in SelectItem", item))
       }
     }
   }
 
-  Ok(select_list)
+  Ok(iast::SelectClause::SelectList(select_list))
 }
 
 fn convert_value(value: ast::Value) -> Result<iast::Value, String> {

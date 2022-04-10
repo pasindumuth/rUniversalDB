@@ -14,7 +14,7 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::server::{CTServerContext, CommonQuery};
-use crate::table_read_es::{is_agg, perform_aggregation};
+use crate::table_read_es::perform_aggregation;
 use crate::tm_status::{SendHelper, TMStatus};
 use crate::trans_table_read_es::TransTableSource;
 use std::collections::{BTreeMap, BTreeSet};

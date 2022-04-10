@@ -415,9 +415,15 @@ pub mod proc {
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum SelectClause {
+    SelectList(Vec<(SelectItem, Option<ColName>)>),
+    Wildcard,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
     pub distinct: bool,
-    pub projection: Vec<(SelectItem, Option<ColName>)>,
+    pub projection: SelectClause,
     pub from: GeneralSource,
     pub selection: ValExpr,
   }
@@ -623,9 +629,15 @@ pub mod iast {
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum SelectClause {
+    SelectList(Vec<(SelectItem, Option<String>)>),
+    Wildcard,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
     pub distinct: bool,
-    pub projection: Vec<(SelectItem, Option<String>)>, // The select clause
+    pub projection: SelectClause,
     pub from: TableRef,
     pub selection: ValExpr, // The where clause
   }

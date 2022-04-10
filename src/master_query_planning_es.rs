@@ -3,7 +3,7 @@ use crate::col_usage::{
   GeneralStage,
 };
 use crate::common::{
-  add_item, default_get, lookup, map_insert, MasterIOCtx, RemoteLeaderChangedPLm, TableSchema,
+  add_item, default_get_mut, lookup, map_insert, MasterIOCtx, RemoteLeaderChangedPLm, TableSchema,
   Timestamp,
 };
 use crate::master::{MasterContext, MasterPLm};
@@ -44,13 +44,30 @@ pub trait ReqColPresenceError {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  DBSchemaView
+//  ColPresenceReq
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
-pub struct ColPresenceReq {
+pub struct ReqPresentAbsent {
   pub present_cols: Vec<ColName>,
   pub absent_cols: Vec<ColName>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReqPresentExclusive {
+  pub cols: Vec<ColName>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ColPresenceReq {
+  ReqPresentAbsent(ReqPresentAbsent),
+  ReqPresentExclusive(ReqPresentExclusive),
+}
+
+impl Default for ColPresenceReq {
+  fn default() -> Self {
+    ColPresenceReq::ReqPresentAbsent(ReqPresentAbsent::default())
+  }
 }
 
 /// This marks the presence/absence of a ValCol `col_name` in the Table `table_path`.
@@ -60,13 +77,50 @@ fn mark_val_col_presence(
   col_name: &ColName,
   present: bool,
 ) {
-  let col_req = default_get(col_presence_req, table_path);
-  if present {
-    add_item(&mut col_req.present_cols, col_name);
-  } else {
-    add_item(&mut col_req.absent_cols, col_name);
+  // In practice, a call to this function should align with the existing
+  // values in `ColPresenceReq`, so we `debug_assert`.
+  let col_req = default_get_mut(col_presence_req, table_path);
+  match col_req {
+    ColPresenceReq::ReqPresentAbsent(req) => {
+      if present {
+        add_item(&mut req.present_cols, col_name);
+        debug_assert!(!req.absent_cols.contains(col_name));
+      } else {
+        add_item(&mut req.absent_cols, col_name);
+        debug_assert!(!req.present_cols.contains(col_name));
+      };
+    }
+    ColPresenceReq::ReqPresentExclusive(req) => {
+      debug_assert!(present ^ req.cols.contains(col_name));
+    }
   }
 }
+
+/// This marks the presence/absence of a ValCol `col_name` in the Table `table_path`.
+fn mark_all_val_cols(
+  col_presence_req: &mut BTreeMap<TablePath, ColPresenceReq>,
+  table_path: &TablePath,
+  all_val_cols: Vec<ColName>,
+) {
+  // In practice, a call to this function should align with the existing
+  // values in `ColPresenceReq`, so we `debug_assert`.
+  let col_req = default_get_mut(col_presence_req, table_path);
+  match col_req {
+    ColPresenceReq::ReqPresentAbsent(req) => {
+      for col in &req.present_cols {
+        debug_assert!(all_val_cols.contains(col));
+      }
+      *col_req = ColPresenceReq::ReqPresentExclusive(ReqPresentExclusive { cols: all_val_cols });
+    }
+    ColPresenceReq::ReqPresentExclusive(req) => {
+      debug_assert!(all_val_cols == req.cols);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  DBSchemaView
+// -----------------------------------------------------------------------------------------------
 
 /// This exposes what is virtually an unversioned Database Schema.
 pub trait DBSchemaView {
@@ -83,6 +137,10 @@ pub trait DBSchemaView {
     table_path: &TablePath,
     col_name: &ColName,
   ) -> Result<bool, Self::ErrorT>;
+
+  /// Returns all present `ColName`s, making sure to mark the presence of these columns,
+  /// and the absence of all other columns, in the `BTreeMap<TablePath, ColPresenceReq>`.
+  fn get_all_cols(&mut self, table_path: &TablePath) -> Result<Vec<ColName>, Self::ErrorT>;
 
   fn finish(self) -> BTreeMap<TablePath, ColPresenceReq>;
 }
@@ -170,6 +228,27 @@ impl<'a> DBSchemaView for CheckingDBSchemaView<'a> {
       }
     } else {
       Ok(true)
+    }
+  }
+
+  fn get_all_cols(&mut self, table_path: &TablePath) -> Result<Vec<ColName>, Self::ErrorT> {
+    let timestamp = self.timestamp.clone();
+    let schema = self.get_table_schema(table_path)?;
+    if schema.val_cols.get_min_lat() < timestamp {
+      Err(CheckingDBSchemaViewError::InsufficientLat)
+    } else {
+      let all_cols = schema.get_schema_static(&timestamp);
+
+      // Extract ValCols
+      let mut all_val_cols = Vec::<ColName>::new();
+      for col in &all_cols {
+        if lookup(&schema.key_cols, col).is_none() {
+          all_val_cols.push(col.clone());
+        }
+      }
+
+      mark_all_val_cols(&mut self.col_presence_req, table_path, all_val_cols);
+      Ok(all_cols)
     }
   }
 
@@ -271,6 +350,24 @@ impl<'a> DBSchemaView for LockingDBSchemaView<'a> {
     }
   }
 
+  fn get_all_cols(&mut self, table_path: &TablePath) -> Result<Vec<ColName>, Self::ErrorT> {
+    let timestamp = self.timestamp.clone();
+    let schema = self.get_table_schema(table_path)?;
+    let all_cols = schema.get_schema_static(&timestamp);
+    schema.val_cols.update_all_lats(timestamp.clone());
+
+    // Extract ValCols
+    let mut all_val_cols = Vec::<ColName>::new();
+    for col in &all_cols {
+      if lookup(&schema.key_cols, col).is_none() {
+        all_val_cols.push(col.clone());
+      }
+    }
+
+    mark_all_val_cols(&mut self.col_presence_req, table_path, all_val_cols);
+    Ok(all_cols)
+  }
+
   fn finish(self) -> BTreeMap<TablePath, ColPresenceReq> {
     self.col_presence_req
   }
@@ -366,6 +463,23 @@ impl<'a> DBSchemaView for StaticDBSchemaView<'a> {
     } else {
       Ok(true)
     }
+  }
+
+  fn get_all_cols(&mut self, table_path: &TablePath) -> Result<Vec<ColName>, Self::ErrorT> {
+    let timestamp = self.timestamp.clone();
+    let schema = self.get_table_schema(table_path)?;
+    let all_cols = schema.get_schema_static(&timestamp);
+
+    // Extract ValCols
+    let mut all_val_cols = Vec::<ColName>::new();
+    for col in &all_cols {
+      if lookup(&schema.key_cols, col).is_none() {
+        all_val_cols.push(col.clone());
+      }
+    }
+
+    mark_all_val_cols(&mut self.col_presence_req, table_path, all_val_cols);
+    Ok(all_cols)
   }
 
   fn finish(self) -> BTreeMap<TablePath, ColPresenceReq> {

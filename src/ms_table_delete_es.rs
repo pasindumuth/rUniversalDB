@@ -7,7 +7,7 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
-use crate::server::{evaluate_delete, mk_eval_error, ContextConstructor};
+use crate::server::{evaluate_delete, mk_eval_error, ContextConstructor, ExtraColumnRef};
 use crate::storage::{GenericTable, MSStorageView};
 use crate::table_read_es::compute_read_region;
 use crate::tablet::{
@@ -150,6 +150,8 @@ impl SqlQueryInner for DeleteInner {
     top_level_cols_set.extend(ctx.table_schema.get_key_col_refs());
     top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
     let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
+    let top_level_extra_col_refs =
+      Vec::from_iter(top_level_col_names.iter().map(|c| ExtraColumnRef::Named(c.clone())));
 
     // Setup the TableView that we are going to return and the UpdateView that we're going
     // to hold in the MSQueryES.
@@ -160,7 +162,7 @@ impl SqlQueryInner for DeleteInner {
     // Finally, iterate over the Context Rows of the subqueries and compute the final values.
     let eval_res = context_constructor.run(
       &es.context.context_rows,
-      top_level_col_names.clone(),
+      top_level_extra_col_refs,
       &mut |context_row_idx: usize,
             top_level_col_vals: Vec<ColValN>,
             contexts: Vec<(ContextRow, usize)>,

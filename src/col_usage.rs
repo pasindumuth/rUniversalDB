@@ -1,6 +1,6 @@
 use crate::common::{lookup, TableSchema, Timestamp};
 use crate::master_query_planning_es::{ColPresenceReq, ColUsageErrorTrait, DBSchemaView};
-use crate::model::common::proc::{GeneralSourceRef, MSQueryStage};
+use crate::model::common::proc::{GeneralSourceRef, MSQueryStage, SelectClause};
 use crate::model::common::{iast, proc, ColName, ColType, Gen, TablePath, TierMap, TransTableName};
 use crate::multiversion_map::MVM;
 use crate::server::contains_col;
@@ -164,25 +164,53 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
     trans_table_ctx: &mut BTreeMap<TransTableName, Vec<Option<ColName>>>,
     select: &proc::SuperSimpleSelect,
   ) -> Result<ColUsageNode, ErrorT> {
-    let mut projection = compute_select_schema(select);
-
-    let mut exprs = Vec::new();
-    let mut val_expr_count = 0;
-    let mut unary_agg_count = 0;
-    for (select_item, _) in &select.projection {
-      match select_item {
-        proc::SelectItem::ValExpr(expr) => {
-          val_expr_count += 1;
-          exprs.push(expr.clone());
-        }
-        proc::SelectItem::UnaryAggregate(unary_agg) => {
-          unary_agg_count += 1;
-          exprs.push(unary_agg.expr.clone());
+    let mut projection = Vec::<Option<ColName>>::new();
+    match &select.projection {
+      SelectClause::SelectList(select_list) => {
+        for (select_item, alias) in select_list {
+          if let Some(col) = alias {
+            projection.push(Some(col.clone()));
+          } else if let proc::SelectItem::ValExpr(proc::ValExpr::ColumnRef(col_ref)) = select_item {
+            projection.push(Some(col_ref.col_name.clone()));
+          } else {
+            projection.push(None);
+          }
         }
       }
+      SelectClause::Wildcard => match &select.from.source_ref {
+        GeneralSourceRef::TablePath(table_path) => {
+          for col in self.view.get_all_cols(table_path)? {
+            projection.push(Some(col));
+          }
+        }
+        GeneralSourceRef::TransTableName(trans_table_name) => {
+          projection = trans_table_ctx.get(trans_table_name).unwrap().clone();
+        }
+      },
     }
-    if val_expr_count > 0 && unary_agg_count > 0 {
-      return Err(ErrorT::mk_error(ColUsageError::InvalidSelectClause));
+
+    let mut exprs = Vec::new();
+    match &select.projection {
+      SelectClause::SelectList(select_list) => {
+        let mut val_expr_count = 0;
+        let mut unary_agg_count = 0;
+        for (select_item, _) in select_list {
+          match select_item {
+            proc::SelectItem::ValExpr(expr) => {
+              val_expr_count += 1;
+              exprs.push(expr.clone());
+            }
+            proc::SelectItem::UnaryAggregate(unary_agg) => {
+              unary_agg_count += 1;
+              exprs.push(unary_agg.expr.clone());
+            }
+          }
+        }
+        if val_expr_count > 0 && unary_agg_count > 0 {
+          return Err(ErrorT::mk_error(ColUsageError::InvalidSelectClause));
+        }
+      }
+      SelectClause::Wildcard => {}
     }
 
     exprs.push(select.selection.clone());
@@ -324,20 +352,6 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
   pub fn finish(self) -> BTreeMap<TablePath, ColPresenceReq> {
     self.view.finish()
   }
-}
-
-fn compute_select_schema(select: &proc::SuperSimpleSelect) -> Vec<Option<ColName>> {
-  let mut projection = Vec::<Option<ColName>>::new();
-  for (select_item, alias) in &select.projection {
-    if let Some(col) = alias {
-      projection.push(Some(col.clone()));
-    } else if let proc::SelectItem::ValExpr(proc::ValExpr::ColumnRef(col_ref)) = select_item {
-      projection.push(Some(col_ref.col_name.clone()));
-    } else {
-      projection.push(None);
-    }
-  }
-  projection
 }
 
 fn compute_update_schema(

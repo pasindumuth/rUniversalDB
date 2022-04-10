@@ -2,6 +2,7 @@ use crate::common::{
   lookup_pos, BasicIOCtx, CoreIOCtx, GossipData, LeaderMap, TableSchema, Timestamp,
 };
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
+use crate::model::common::proc::SelectClause;
 use crate::model::common::{
   proc, CNodePath, CSubNodePath, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColVal, ColValN,
   ContextRow, ContextSchema, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
@@ -337,33 +338,6 @@ impl CommonQuery {
 //  Query Evaluations
 // -----------------------------------------------------------------------------------------------
 
-/// Maps all `ColName`s to `ColValN`s by first using that in the subtable, and then the context.
-pub fn mk_col_map(
-  column_context_schema: &Vec<ColName>,
-  column_context_row: &Vec<Option<ColVal>>,
-  subtable_schema: &Vec<ColName>,
-  subtable_row: &Vec<Option<ColVal>>,
-) -> BTreeMap<ColName, ColValN> {
-  let mut col_map = BTreeMap::<ColName, ColValN>::new();
-  assert_eq!(subtable_schema.len(), subtable_row.len());
-  for i in 0..subtable_schema.len() {
-    let col_name = subtable_schema.get(i).unwrap().clone();
-    let col_val = subtable_row.get(i).unwrap().clone();
-    col_map.insert(col_name, col_val);
-  }
-
-  assert_eq!(column_context_schema.len(), column_context_row.len());
-  for i in 0..column_context_schema.len() {
-    let col_name = column_context_schema.get(i).unwrap().clone();
-    let col_val = column_context_row.get(i).unwrap().clone();
-    if !col_map.contains_key(&col_name) {
-      // If the ColName was already in the subtable, we don't take the ColValN here.
-      col_map.insert(col_name, col_val);
-    }
-  }
-  return col_map;
-}
-
 /// Verifies that each `TableView` only contains one cell, and then extract that cell value.
 pub fn extract_subquery_vals(
   raw_subquery_vals: &Vec<TableView>,
@@ -393,19 +367,35 @@ pub struct EvaluatedSuperSimpleSelect {
   pub selection: ColValN,
 }
 
-/// This evaluates a SuperSimpleSelect completely. When a ColumnRef is encountered in the `expr`,
-/// it searches `col_names` and `col_vals` to get the value. In addition, `subquery_vals` should
-/// have a length equal to that of how many GRQuerys there are in the `expr`.
+/// This evaluates a SuperSimpleSelect completely. The given `col_refs` and `col_vals` have the
+/// same length and correspond. When a ColumnRef is encountered in the `expr`, we search the
+/// corresponding `ColValN` in `col_vals` and substitute if for evaluation. In addition,
+/// `subquery_vals` should have a length equal to that of how many GRQuerys there are
+/// in the `expr`. When a GRQuery is encoutered, we take the corresponding value in
+/// `subquery_vals` and substite it in for evaluation.
+///
+/// Note that `schema` is the Schema of the `LocalTable` that this SELECT is reading.
 pub fn evaluate_super_simple_select(
   select: &proc::SuperSimpleSelect,
-  col_names: &Vec<proc::ColumnRef>,
+  schema: &Vec<Option<ColName>>,
+  col_refs: &Vec<ExtraColumnRef>,
   col_vals: &Vec<ColValN>,
   raw_subquery_vals: &Vec<TableView>,
 ) -> Result<EvaluatedSuperSimpleSelect, EvalError> {
-  // We map all ColNames to their ColValNs using the Context and subtable.
-  let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
-  for i in 0..col_names.len() {
-    col_map.insert(col_names.get(i).unwrap().clone(), col_vals.get(i).unwrap().clone());
+  // We break apart `col_refs` based on if `ExtraColumnRef` is named or not. (Only expressions
+  // used named columns. The unnamed columns, referred to by indices, is only used for SELECT *.)
+  let mut named_col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
+  let mut index_col_map = BTreeMap::<usize, ColValN>::new();
+  for (i, col_ref) in col_refs.iter().enumerate() {
+    let col_val = col_vals.get(i).unwrap().clone();
+    match col_ref {
+      ExtraColumnRef::Named(col_name) => {
+        named_col_map.insert(col_name.clone(), col_val);
+      }
+      ExtraColumnRef::Unnamed(index) => {
+        index_col_map.insert(*index, col_val);
+      }
+    }
   }
 
   // Next, we reduce the subquery values to single values.
@@ -414,18 +404,35 @@ pub fn evaluate_super_simple_select(
   // Construct the Evaluated Select
   let mut evaluated_select = EvaluatedSuperSimpleSelect::default();
   let mut next_subquery_idx = 0;
-  for (select_item, _) in &select.projection {
-    let expr = match select_item {
-      proc::SelectItem::ValExpr(expr) => expr,
-      proc::SelectItem::UnaryAggregate(unary_agg) => &unary_agg.expr,
-    };
-    let c_expr = construct_cexpr(expr, &col_map, &subquery_vals, &mut next_subquery_idx)?;
-    evaluated_select.projection.push(evaluate_c_expr(&c_expr)?);
+  match &select.projection {
+    SelectClause::SelectList(select_list) => {
+      for (select_item, _) in select_list {
+        let expr = match select_item {
+          proc::SelectItem::ValExpr(expr) => expr,
+          proc::SelectItem::UnaryAggregate(unary_agg) => &unary_agg.expr,
+        };
+        let c_expr = construct_cexpr(expr, &named_col_map, &subquery_vals, &mut next_subquery_idx)?;
+        evaluated_select.projection.push(evaluate_c_expr(&c_expr)?);
+      }
+    }
+    SelectClause::Wildcard => {
+      for (i, maybe_col_name) in schema.iter().enumerate() {
+        let col_val = if let Some(col_name) = maybe_col_name {
+          named_col_map
+            .get(&proc::ColumnRef { table_name: None, col_name: col_name.clone() })
+            .unwrap()
+            .clone()
+        } else {
+          index_col_map.get(&i).unwrap().clone()
+        };
+        evaluated_select.projection.push(col_val);
+      }
+    }
   }
 
   evaluated_select.selection = evaluate_c_expr(&construct_cexpr(
     &select.selection,
-    &col_map,
+    &named_col_map,
     &subquery_vals,
     &mut next_subquery_idx,
   )?)?;
@@ -667,16 +674,22 @@ impl ContextConverter {
     new_context_row
   }
 
-  /// Extracts the subset of `subtable_row` whose ColNames correspond to
+  /// Extracts the subset of `subtable_row` whose `ColName`s correspond to
   /// `self.safe_present_cols` and returns it in the order of `self.safe_present_cols`.
   fn extract_child_relevent_cols(
     &self,
-    subtable_schema: &Vec<ColName>,
+    subtable_schema: &Vec<LocalColumnRef>,
     subtable_row: &Vec<ColValN>,
   ) -> Vec<ColValN> {
     let mut row = Vec::<ColValN>::new();
     for col in &self.safe_present_split {
-      let pos = subtable_schema.iter().position(|sub_col| col == sub_col).unwrap();
+      let pos = subtable_schema
+        .iter()
+        .position(|sub_col_ref| match sub_col_ref {
+          LocalColumnRef::Named(sub_col) => col == sub_col,
+          LocalColumnRef::Unnamed(_) => false,
+        })
+        .unwrap();
       row.push(subtable_row.get(pos).unwrap().clone());
     }
     row
@@ -687,14 +700,50 @@ impl ContextConverter {
 //  Context Construction
 // -----------------------------------------------------------------------------------------------
 
-pub trait LocalTable {
-  /// Checks if the given `col` is in the schema of the LocalTable.
-  fn contains_col(&self, col: &ColName) -> bool;
+/// This is an extension to `ColumnRef` that allows the user of `ContextConstructor` to
+/// reference columns in the `LocalTable` that do not have name using its position in the schema.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ExtraColumnRef {
+  Named(proc::ColumnRef),
+  Unnamed(usize),
+}
 
+impl ExtraColumnRef {
+  pub fn into_local(self) -> LocalColumnRef {
+    match self {
+      ExtraColumnRef::Named(col_name) => LocalColumnRef::Named(col_name.col_name),
+      ExtraColumnRef::Unnamed(index) => LocalColumnRef::Unnamed(index),
+    }
+  }
+}
+
+/// This allows the users to optionally read columns in the `LocalTable` using an
+/// index to its position in the schema instead.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LocalColumnRef {
+  Named(ColName),
+  Unnamed(usize),
+}
+
+pub trait LocalTable {
   /// The `GeneralSource` used in the query that this `LocalTable` is being used as a Data
   /// Source for. This is needed to interpret whether a `ColumnRef`s is referring to the
   /// Data Source or not.
   fn source(&self) -> &proc::GeneralSource;
+
+  /// Gets the schema of the `LocalTable`.
+  fn schema(&self) -> &Vec<Option<ColName>>;
+
+  /// Checks if the given `col` is in the schema of the LocalTable.
+  fn contains_col(&self, col: &ColName) -> bool;
+
+  /// Checks if the given `local_col_ref` is in the schema of the LocalTable.
+  fn contains_local_col_ref(&self, local_col_ref: &LocalColumnRef) -> bool {
+    match local_col_ref {
+      LocalColumnRef::Named(col_name) => self.contains_col(col_name),
+      LocalColumnRef::Unnamed(index) => index < &self.schema().len(),
+    }
+  }
 
   /// Checks whether this `ColumnRef` refers to a column in this `LocalTable`, taking the alias
   /// in the `source` into account.
@@ -711,8 +760,16 @@ pub trait LocalTable {
     }
   }
 
-  /// Here, every `col_names` must be in `contains_col`, and every `ColumnRef` in
-  /// `parent_context_schema` must have `contains_col_ref` evaluate to false. This function
+  /// Checks whether this `ExtraColumnRef` refers to a column in this `LocalTable`.
+  fn contains_extra_col_ref(&self, col: &ExtraColumnRef) -> bool {
+    match col {
+      ExtraColumnRef::Named(col_ref) => self.contains_col_ref(col_ref),
+      ExtraColumnRef::Unnamed(index) => index < &self.schema().len(),
+    }
+  }
+
+  /// Here, every `local_col_refs` must be in `contains_local_col_ref`, and every `ColumnRef`
+  /// in `parent_context_schema` must have `contains_col_ref` evaluate to false. This function
   /// gets all rows in the local table that is associated with the given parent ContextRow.
   /// Here, we return the value of every row (`Vec<ColValN>`), as well as the count of how
   /// many times that row occurred (this is more performant than returning the same row over
@@ -721,7 +778,7 @@ pub trait LocalTable {
     &self,
     parent_context_schema: &ContextSchema,
     parent_context_row: &ContextRow,
-    col_names: &Vec<ColName>,
+    local_col_refs: &Vec<LocalColumnRef>,
   ) -> Vec<(Vec<ColValN>, u64)>;
 }
 
@@ -772,9 +829,10 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
   ) -> Vec<BTreeMap<ContextRow, usize>> {
     // Compute the set of all columns that we have to read from the LocalTable, only for
     // context construction.
-    let mut local_schema_set = BTreeSet::<ColName>::new();
+    let mut local_schema_set = BTreeSet::<LocalColumnRef>::new();
     for conv in &self.converters {
-      local_schema_set.extend(conv.safe_present_split.clone());
+      local_schema_set
+        .extend(conv.safe_present_split.iter().map(|c| LocalColumnRef::Named(c.clone())));
     }
     let local_schema = Vec::from_iter(local_schema_set.into_iter());
 
@@ -815,7 +873,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
   }
 
   /// Here, the rows in the `parent_context_rows` must correspond to `parent_context_schema`.
-  /// The elements in `extra_cols` must be in either `parent_context_schema` or the LocalTable.
+  /// The elements in `extra_cols` must be in either `parent_context_schema` or the `LocalTable`.
   ///
   /// Consider the `callback`. The first `usize` is the parent ContextRow currently being
   /// used. The `Vec<ColValN>` correspond to `extra_cols` passed in here. The `u64` is the
@@ -826,20 +884,21 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
   >(
     &self,
     parent_context_rows: &Vec<ContextRow>,
-    extra_cols: Vec<proc::ColumnRef>,
+    extra_cols: Vec<ExtraColumnRef>,
     callback: &mut CbT,
   ) -> Result<(), EvalError> {
     // Compute the set of all columns that we have to read from the LocalTable. First,
     // figure out which of the ColNames in `extra_cols` are in the LocalTable, and then,
     // figure the which of the `ColName`s in each child are in the LocalTable.
-    let mut local_schema_set = BTreeSet::<ColName>::new();
+    let mut local_schema_set = BTreeSet::<LocalColumnRef>::new();
     for col in &extra_cols {
-      if self.local_table.contains_col_ref(col) {
-        local_schema_set.insert(col.col_name.clone());
+      if self.local_table.contains_extra_col_ref(col) {
+        local_schema_set.insert(col.clone().into_local());
       }
     }
     for conv in &self.converters {
-      local_schema_set.extend(conv.safe_present_split.clone());
+      local_schema_set
+        .extend(conv.safe_present_split.iter().map(|c| LocalColumnRef::Named(c.clone())));
     }
     let local_schema = Vec::from_iter(local_schema_set.into_iter());
     let child_context_row_maps = self.create_child_context_row_maps(parent_context_rows);
@@ -869,15 +928,17 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
         // and then the parent Context.
         let mut extra_col_vals = Vec::<ColValN>::new();
         for col in &extra_cols {
-          if self.local_table.contains_col_ref(col) {
-            let pos = local_schema.iter().position(|col_name| &col.col_name == col_name).unwrap();
+          if self.local_table.contains_extra_col_ref(col) {
+            let target_local_ref = col.clone().into_local();
+            let pos =
+              local_schema.iter().position(|local_ref| local_ref == &target_local_ref).unwrap();
             extra_col_vals.push(local_row.get(pos).unwrap().clone());
           } else {
             let pos = self
               .parent_context_schema
               .column_context_schema
               .iter()
-              .position(|parent_col| col == parent_col)
+              .position(|parent_col| cast!(ExtraColumnRef::Named, col).unwrap() == parent_col)
               .unwrap();
             extra_col_vals.push(parent_context_row.column_context_row.get(pos).unwrap().clone());
           }

@@ -10,8 +10,7 @@ use crate::model::common::{CTQueryPath, Context, QueryId, TransTableLocationPref
 use crate::model::message as msg;
 use crate::model::message::QueryError;
 use crate::server::{
-  evaluate_super_simple_select, mk_eval_error, CTServerContext, ContextConstructor, LocalTable,
-  ServerContextBase,
+  mk_eval_error, CTServerContext, ContextConstructor, LocalColumnRef, LocalTable, ServerContextBase,
 };
 use crate::table_read_es::{check_gossip, fully_evaluate_select};
 use crate::tablet::{compute_contexts, Executing, TPESAction, TPESBase, TabletContext};
@@ -86,19 +85,23 @@ impl<'a, SourceT: TransTableSource> TransLocalTable<'a, SourceT> {
 }
 
 impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> {
-  fn contains_col(&self, col: &ColName) -> bool {
-    self.schema.contains(&Some(col.clone()))
-  }
-
   fn source(&self) -> &proc::GeneralSource {
     self.source
+  }
+
+  fn schema(&self) -> &Vec<Option<ColName>> {
+    &self.schema
+  }
+
+  fn contains_col(&self, col: &ColName) -> bool {
+    self.schema.contains(&Some(col.clone()))
   }
 
   fn get_rows(
     &self,
     parent_context_schema: &ContextSchema,
     parent_context_row: &ContextRow,
-    col_names: &Vec<ColName>,
+    local_col_refs: &Vec<LocalColumnRef>,
   ) -> Vec<(Vec<ColValN>, u64)> {
     // First, we look up the TransTableInstance
     let trans_table_name_pos = parent_context_schema
@@ -112,24 +115,26 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
       self.trans_table_source.get_instance(&self.trans_table_name, *trans_table_instance_pos);
 
     // Next, we select the desired columns and compress them before returning it.
-    let mut sub_view =
-      TableView::new(col_names.iter().cloned().map(|col| Some(col.clone())).collect());
+    let mut sub_view = TableView::new(vec![]); // TODO: stop needing to specify a bogus schema.
     for (row, count) in &trans_table_instance.rows {
       let mut new_row = Vec::<ColValN>::new();
-      for col in col_names {
-        let pos = trans_table_instance
-          .col_names
-          .iter()
-          .position(
-            |maybe_cur_col| {
-              if let Some(cur_col) = maybe_cur_col {
-                cur_col == col
-              } else {
-                false
-              }
-            },
-          )
-          .unwrap();
+      for col_ref in local_col_refs {
+        let pos = match col_ref {
+          LocalColumnRef::Named(col) => trans_table_instance
+            .col_names
+            .iter()
+            .position(
+              |maybe_cur_col| {
+                if let Some(cur_col) = maybe_cur_col {
+                  cur_col == col
+                } else {
+                  false
+                }
+              },
+            )
+            .unwrap(),
+          LocalColumnRef::Unnamed(index) => *index,
+        };
         new_row.push(row.get(pos).unwrap().clone());
       }
       sub_view.add_row_multi(new_row, *count);

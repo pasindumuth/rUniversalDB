@@ -35,7 +35,8 @@ use crate::paxos2pc_rm::Paxos2PCRMAction;
 use crate::paxos2pc_tm;
 use crate::paxos2pc_tm::{Paxos2PCContainer, RMMessage, RMPLm};
 use crate::server::{
-  contains_col, CTServerContext, CommonQuery, ContextConstructor, LocalTable, ServerContextBase,
+  contains_col, CTServerContext, CommonQuery, ContextConstructor, LocalColumnRef, LocalTable,
+  ServerContextBase,
 };
 use crate::slave::{SlaveBackMessage, TabletBundleInsertion};
 use crate::stmpaxos2pc_rm;
@@ -902,11 +903,26 @@ pub struct ReadWriteRegion {
 //  Schema Change and Locking
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ColSet {
+  Cols(Vec<ColName>),
+  All,
+}
+
+impl ColSet {
+  pub fn contains(&self, col: &ColName) -> bool {
+    match &self {
+      ColSet::Cols(cols) => cols.contains(col),
+      ColSet::All => true,
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct RequestedLockedCols {
   pub query_id: QueryId,
   pub timestamp: Timestamp,
-  pub cols: Vec<ColName>,
+  pub cols: ColSet,
   pub orig_p: OrigP,
 }
 
@@ -924,6 +940,8 @@ pub struct StorageLocalTable<'a, StorageViewT: StorageView> {
   selection: &'a proc::ValExpr,
   /// This is used to compute the KeyBound
   storage: StorageViewT,
+  /// A flattened view of the Table schema
+  schema: Vec<Option<ColName>>,
 }
 
 impl<'a, StorageViewT: StorageView> StorageLocalTable<'a, StorageViewT> {
@@ -934,31 +952,48 @@ impl<'a, StorageViewT: StorageView> StorageLocalTable<'a, StorageViewT> {
     selection: &'a proc::ValExpr,
     storage: StorageViewT,
   ) -> StorageLocalTable<'a, StorageViewT> {
-    StorageLocalTable { table_schema, source, timestamp, selection, storage }
+    let schema = table_schema.get_schema_static(timestamp).into_iter().map(|c| Some(c)).collect();
+    StorageLocalTable { table_schema, source, timestamp, selection, storage, schema }
   }
 }
 
 impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, StorageViewT> {
-  fn contains_col(&self, col: &ColName) -> bool {
-    contains_col(self.table_schema, col, self.timestamp)
-  }
-
   fn source(&self) -> &proc::GeneralSource {
     self.source
+  }
+
+  fn schema(&self) -> &Vec<Option<ColName>> {
+    &self.schema
+  }
+
+  fn contains_col(&self, col: &ColName) -> bool {
+    contains_col(self.table_schema, col, self.timestamp)
   }
 
   fn get_rows(
     &self,
     parent_context_schema: &ContextSchema,
     parent_context_row: &ContextRow,
-    col_names: &Vec<ColName>,
+    local_col_refs: &Vec<LocalColumnRef>,
   ) -> Vec<(Vec<ColValN>, u64)> {
+    // Evaluate the `local_col_refs` to the `ColName`s in the Table.
+    let mut col_names = Vec::<ColName>::new();
+    for col_ref in local_col_refs {
+      match col_ref {
+        LocalColumnRef::Named(col_name) => col_names.push(col_name.clone()),
+        LocalColumnRef::Unnamed(index) => {
+          let col_name = self.schema.get(*index).unwrap().as_ref().unwrap();
+          col_names.push(col_name.clone());
+        }
+      }
+    }
+
     // Recall that since `contains_col_ref` is false for the `parent_context_schema`, this
     // `col_map` passes the precondition of `compute_key_region`.
     let col_map = compute_col_map(parent_context_schema, parent_context_row);
     let key_bounds =
       compute_key_region(&self.selection, col_map, &self.source, &self.table_schema.key_cols);
-    self.storage.compute_subtable(&key_bounds, col_names, self.timestamp)
+    self.storage.compute_subtable(&key_bounds, &col_names, self.timestamp)
   }
 }
 
@@ -991,7 +1026,7 @@ pub mod plm {
   use crate::model::common::{CQueryPath, TQueryPath};
   use crate::model::common::{ColName, QueryId};
   use crate::storage::GenericTable;
-  use crate::tablet::ReadWriteRegion;
+  use crate::tablet::{ColSet, ReadWriteRegion};
   use serde::{Deserialize, Serialize};
 
   // LockedCols
@@ -1000,7 +1035,7 @@ pub mod plm {
   pub struct LockedCols {
     pub query_id: QueryId,
     pub timestamp: Timestamp,
-    pub cols: Vec<ColName>,
+    pub cols: ColSet,
   }
 
   // ReadProtected
@@ -1330,8 +1365,15 @@ impl TabletContext {
           match paxos_log_msg {
             TabletPLm::LockedCols(locked_cols) => {
               // Increase TableSchema LATs
-              for col_name in &locked_cols.cols {
-                self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
+              match &locked_cols.cols {
+                ColSet::Cols(cols) => {
+                  for col_name in cols {
+                    self.table_schema.val_cols.update_lat(col_name, locked_cols.timestamp.clone());
+                  }
+                }
+                ColSet::All => {
+                  self.table_schema.val_cols.update_all_lats(locked_cols.timestamp.clone());
+                }
               }
 
               self.presence_timestamp = max(self.presence_timestamp.clone(), locked_cols.timestamp);
@@ -1999,7 +2041,7 @@ impl TabletContext {
     io_ctx: &mut IO,
     orig_p: OrigP,
     timestamp: Timestamp,
-    cols: Vec<ColName>,
+    cols: ColSet,
   ) -> QueryId {
     let locked_cols_qid = mk_qid(io_ctx.rand());
     self.waiting_locked_cols.insert(
@@ -2145,10 +2187,19 @@ impl TabletContext {
     for (_, req) in &self.waiting_locked_cols {
       // First, we see if we can grant GlobalLockedCols immediately.
       let mut global_locked = req.timestamp <= self.presence_timestamp;
-      for col_name in &req.cols {
-        if !(req.timestamp <= self.table_schema.val_cols.get_lat(col_name)) {
-          global_locked = false;
-          break;
+      match &req.cols {
+        ColSet::Cols(cols) => {
+          for col_name in cols {
+            if req.timestamp > self.table_schema.val_cols.get_lat(col_name) {
+              global_locked = false;
+              break;
+            }
+          }
+        }
+        ColSet::All => {
+          if req.timestamp > self.table_schema.val_cols.get_min_lat() {
+            global_locked = false;
+          }
         }
       }
 
@@ -2170,15 +2221,9 @@ impl TabletContext {
           return true;
         }
         DDLES::Alter(es) => {
-          let mut conflicts = false;
-          for col_name in &req.cols {
-            if &es.inner.alter_op.col_name == col_name
-              && req.timestamp >= es.inner.prepared_timestamp
-            {
-              conflicts = true;
-            }
-          }
-          if !conflicts {
+          if !(req.cols.contains(&es.inner.alter_op.col_name)
+            && req.timestamp >= es.inner.prepared_timestamp)
+          {
             // Grant LocalLockedCols
             let query_id = req.query_id.clone();
             self.grant_local_locked_cols(io_ctx, statuses, query_id);

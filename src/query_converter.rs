@@ -1,3 +1,4 @@
+use crate::model::common::iast::SelectClause;
 use crate::model::common::proc::SimpleSource;
 use crate::model::common::{iast, proc, ColName, TablePath, TransTableName};
 use crate::model::message as msg;
@@ -90,15 +91,20 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
       }
 
       // Rename the Projection Clause
-      for (select_item, _) in &mut select.projection {
-        match select_item {
-          iast::SelectItem::ValExpr(val_expr) => {
-            rename_trans_tables_val_expr_r(ctx, val_expr);
-          }
-          iast::SelectItem::UnaryAggregate(unary_agg) => {
-            rename_trans_tables_val_expr_r(ctx, &mut unary_agg.expr);
+      match &mut select.projection {
+        SelectClause::SelectList(select_list) => {
+          for (select_item, _) in select_list {
+            match select_item {
+              iast::SelectItem::ValExpr(val_expr) => {
+                rename_trans_tables_val_expr_r(ctx, val_expr);
+              }
+              iast::SelectItem::UnaryAggregate(unary_agg) => {
+                rename_trans_tables_val_expr_r(ctx, &mut unary_agg.expr);
+              }
+            }
           }
         }
+        SelectClause::Wildcard => {}
       }
 
       // Rename the Where Clause
@@ -323,31 +329,38 @@ fn flatten_select(
   select: &iast::SuperSimpleSelect,
   counter: &mut u32,
 ) -> Result<proc::SuperSimpleSelect, msg::ExternalAbortedData> {
-  let mut p_select = proc::SuperSimpleSelect {
+  let p_projection = match &select.projection {
+    iast::SelectClause::SelectList(select_list) => {
+      let mut p_select_list = Vec::<(proc::SelectItem, Option<ColName>)>::new();
+      for (item, alias) in select_list {
+        let select_item = match item {
+          iast::SelectItem::ValExpr(val_expr) => {
+            proc::SelectItem::ValExpr(flatten_val_expr_r(val_expr, counter)?)
+          }
+          iast::SelectItem::UnaryAggregate(unary_agg) => {
+            proc::SelectItem::UnaryAggregate(proc::UnaryAggregate {
+              distinct: unary_agg.distinct,
+              op: unary_agg.op.clone(),
+              expr: flatten_val_expr_r(&unary_agg.expr, counter)?,
+            })
+          }
+        };
+        p_select_list.push((select_item, alias.clone().map(|x| ColName(x))))
+      }
+      proc::SelectClause::SelectList(p_select_list)
+    }
+    iast::SelectClause::Wildcard => proc::SelectClause::Wildcard,
+  };
+
+  Ok(proc::SuperSimpleSelect {
     distinct: select.distinct,
-    projection: Vec::new(),
+    projection: p_projection,
     from: proc::GeneralSource {
       source_ref: to_source_ref(&select.from.source_ref),
       alias: select.from.alias.clone(),
     },
     selection: flatten_val_expr_r(&select.selection, counter)?,
-  };
-  for (item, alias) in &select.projection {
-    let select_item = match item {
-      iast::SelectItem::ValExpr(val_expr) => {
-        proc::SelectItem::ValExpr(flatten_val_expr_r(val_expr, counter)?)
-      }
-      iast::SelectItem::UnaryAggregate(unary_agg) => {
-        proc::SelectItem::UnaryAggregate(proc::UnaryAggregate {
-          distinct: unary_agg.distinct,
-          op: unary_agg.op.clone(),
-          expr: flatten_val_expr_r(&unary_agg.expr, counter)?,
-        })
-      }
-    };
-    p_select.projection.push((select_item, alias.clone().map(|x| ColName(x))))
-  }
-  Ok(p_select)
+  })
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -361,7 +374,7 @@ mod rename_test {
   fn basic_select(table_ref: &str) -> iast::SuperSimpleSelect {
     iast::SuperSimpleSelect {
       distinct: false,
-      projection: vec![],
+      projection: iast::SelectClause::SelectList(vec![]),
       from: iast::TableRef { source_ref: table_ref.to_string(), alias: None },
       selection: iast::ValExpr::Value { val: iast::Value::Boolean(true) },
     }
@@ -437,7 +450,7 @@ mod rename_test {
           TransTableName("tt\\0\\tt1".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
             distinct: false,
-            projection: vec![],
+            projection: proc::SelectClause::SelectList(vec![]),
             from: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TablePath(TablePath("t2".to_string())),
               alias: None,
@@ -449,7 +462,7 @@ mod rename_test {
           TransTableName("tt\\1\\tt1".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
             distinct: false,
-            projection: vec![],
+            projection: proc::SelectClause::SelectList(vec![]),
             from: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TransTableName(TransTableName(
                 "tt\\0\\tt1".to_string(),
@@ -463,7 +476,7 @@ mod rename_test {
           TransTableName("tt\\2\\tt2".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
             distinct: false,
-            projection: vec![],
+            projection: proc::SelectClause::SelectList(vec![]),
             from: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TransTableName(TransTableName(
                 "tt\\1\\tt1".to_string(),
@@ -477,7 +490,7 @@ mod rename_test {
           TransTableName("tt\\3\\".to_string()),
           proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
             distinct: false,
-            projection: vec![],
+            projection: proc::SelectClause::SelectList(vec![]),
             from: proc::GeneralSource {
               source_ref: proc::GeneralSourceRef::TransTableName(TransTableName(
                 "tt\\2\\tt2".to_string(),
