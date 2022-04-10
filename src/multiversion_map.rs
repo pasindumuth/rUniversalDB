@@ -5,9 +5,13 @@ use std::cmp::max;
 use std::collections::BTreeMap;
 use std::hash::Hash;
 
+/// Here, `min_lat` is used to increase the LATs of all Keys in existance (which is an
+/// infinite set). When it is incremeted, the LATs of every key that is present in `map`
+/// are updated as well so that they are always >= to `min_lat`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MVM<K: Eq + Ord + Clone, V> {
-  pub map: BTreeMap<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>,
+  min_lat: Timestamp,
+  map: BTreeMap<K, (Timestamp, Vec<(Timestamp, Option<V>)>)>,
 }
 
 impl<K, V> MVM<K, V>
@@ -16,7 +20,7 @@ where
   V: Clone,
 {
   pub fn new() -> MVM<K, V> {
-    MVM { map: BTreeMap::new() }
+    MVM { min_lat: mk_t(0), map: BTreeMap::new() }
   }
 
   pub fn init(init_vals: BTreeMap<K, V>) -> MVM<K, V> {
@@ -24,7 +28,7 @@ where
     for (key, value) in init_vals {
       map.insert(key, (mk_t(0), vec![(mk_t(0), Some(value))]));
     }
-    MVM { map }
+    MVM { min_lat: mk_t(0), map }
   }
 
   /// Performs an MVMWrite to the MVM. The user *must* be sure that `timestamp` is beyond the
@@ -35,9 +39,8 @@ where
       *lat = timestamp.clone();
       versions.push((timestamp, value));
     } else {
-      // Recall that mathematically, every key imaginable is in the MVM with no versions
-      // and a LAT of 0. Thus, we cannot do an MVM write to a timestamp of 0.
-      assert!(mk_t(0) < timestamp);
+      // Here, the `key` has a LAT of `min_lat` and contains no versions.
+      assert!(self.min_lat < timestamp);
       self.map.insert(key.clone(), (timestamp.clone(), vec![(timestamp, value)]));
     }
   }
@@ -47,7 +50,10 @@ where
       *lat = max(lat.clone(), timestamp.clone());
       find_prior_value(versions, timestamp).cloned()
     } else {
-      self.map.insert(key.clone(), (timestamp.clone(), vec![]));
+      if timestamp > &self.min_lat {
+        self.map.insert(key.clone(), (timestamp.clone(), vec![]));
+      }
+
       None
     }
   }
@@ -55,13 +61,18 @@ where
   pub fn update_lat(&mut self, key: &K, timestamp: Timestamp) {
     if let Some((lat, _)) = self.map.get_mut(key) {
       *lat = max(lat.clone(), timestamp);
-    } else {
+    } else if timestamp > self.min_lat {
       self.map.insert(key.clone(), (timestamp, vec![]));
     }
   }
 
   pub fn update_all_lats(&mut self, timestamp: Timestamp) {
-    todo!()
+    if timestamp > self.min_lat {
+      for (_, (lat, _)) in &mut self.map {
+        *lat = max(lat.clone(), timestamp.clone())
+      }
+      self.min_lat = timestamp;
+    }
   }
 
   /// Reads the version prior to the timestamp. This function asserts that the `lat` of
@@ -72,7 +83,7 @@ where
       assert!(timestamp <= lat);
       find_prior_value(versions, timestamp)
     } else {
-      assert_eq!(timestamp, &mk_t(0));
+      assert!(timestamp <= &self.min_lat);
       None
     }
   }
@@ -140,18 +151,19 @@ where
     if let Some((lat, _)) = self.map.get(key) {
       lat.clone()
     } else {
-      mk_t(0)
+      self.min_lat.clone()
     }
   }
 
-  /// Get the smallest LAT among all keys.
+  /// Get the smallest LAT among all keys. There certainly exists a key with a LAT of
+  /// `min_lat`, since there are infinite keys. Thus, we simply return `min_lat`.
   pub fn get_min_lat(&self) -> Timestamp {
-    todo!()
+    self.min_lat.clone()
   }
 
   /// Get the highest LAT of any key-value pair in the MVM.
   pub fn get_latest_lat(&self) -> Timestamp {
-    let mut latest_lat = mk_t(0);
+    let mut latest_lat = self.min_lat.clone();
     for (_, (lat, _)) in &self.map {
       latest_lat = max(latest_lat, lat.clone());
     }

@@ -386,6 +386,36 @@ fn select_projection_test(seed: [u8; 16]) {
       10000,
       exp_result,
     );
+
+    // SELECT * tests
+
+    let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
+    exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT *
+        FROM user
+        WHERE email = 'my_email_0';
+      ",
+      10000,
+      exp_result,
+    );
+
+    // Tests that SELECT * will read anonymous columns from a CTE properly.
+    let mut exp_result = TableView::new(vec![cno("e"), None]);
+    exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(100))]);
+    ctx.execute_query(
+      &mut sim,
+      " WITH
+          v1 AS (SELECT email AS e, balance * 2
+                 FROM  user
+                 WHERE email = 'my_email_0')
+        SELECT *
+        FROM v1;
+      ",
+      10000,
+      exp_result,
+    );
   }
 
   println!("Test 'select_projection_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)

@@ -52,7 +52,7 @@ fn main() {
     .get_matches();
 
   // Run Serial tests in just one thread (since these are fast).
-  let mut rand = XorShiftRng::from_seed([0; 16]);
+  let mut rand = XorShiftRng::from_seed([1; 16]);
   println!("Basic Serial Tests:");
   test_all_basic_serial(&mut rand);
   println!("\n");

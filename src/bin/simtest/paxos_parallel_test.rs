@@ -351,7 +351,7 @@ impl<'a> QueryGenCtx<'a> {
     val_cols[..].shuffle(r);
     let mut val_col_it = val_cols.into_iter();
 
-    let query_type = r.next_u32() % 3;
+    let query_type = r.next_u32() % 4;
     let query = if query_type == 0 {
       let proj_val_col = val_col_it.next()?;
       let filter_val_col = val_col_it.next()?;
@@ -387,6 +387,17 @@ impl<'a> QueryGenCtx<'a> {
         ",
         source = source,
         proj_val_col = proj_val_col.0,
+        key_col = key_col.0,
+        x1 = mk_int(r, Self::INT_BOUND / 2),
+        x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32
+      )
+    } else if query_type == 3 {
+      format!(
+        " SELECT *
+          FROM {source}
+          WHERE {key_col} >= {x1} AND {key_col} < {x2};
+        ",
+        source = source,
         key_col = key_col.0,
         x1 = mk_int(r, Self::INT_BOUND / 2),
         x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32

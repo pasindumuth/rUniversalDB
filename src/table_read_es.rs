@@ -123,12 +123,15 @@ pub fn check_gossip<'a>(gossip: &GossipDataView<'a>, query_plan: &QueryPlan) -> 
   return true;
 }
 
-/// Compute the `ReadRegion` with the given `query_plan` and `selection`.
+/// Compute the `ReadRegion` with the given `query_plan` and `selection`. The
+/// `extra_local_cols` are extra `ColName`s that need to be locked that are
+/// specific to the query.
 pub fn compute_read_region(
   key_cols: &Vec<(ColName, ColType)>,
   query_plan: &QueryPlan,
   context: &Context,
   selection: &proc::ValExpr,
+  extra_local_cols: Vec<ColName>,
 ) -> ReadRegion {
   // Compute the Row Region by taking the union across all ContextRows
   let mut row_region = Vec::<KeyBound>::new();
@@ -148,6 +151,7 @@ pub fn compute_read_region(
   // Compute the Column Region.
   let mut val_col_region = BTreeSet::<ColName>::new();
   val_col_region.extend(query_plan.col_usage_node.safe_present_cols.clone());
+  val_col_region.extend(extra_local_cols);
   for (key_col, _) in key_cols {
     val_col_region.remove(key_col);
   }
@@ -264,12 +268,19 @@ impl TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
   ) -> TPESAction {
+    // Get extra columns that must be in the region due to SELECT * .
+    let mut extra_cols = match &self.sql_query.projection {
+      SelectClause::SelectList(_) => vec![],
+      SelectClause::Wildcard => ctx.table_schema.get_schema_val_cols_static(&self.timestamp),
+    };
+
     // Compute the ReadRegion
     let read_region = compute_read_region(
       &ctx.table_schema.key_cols,
       &self.query_plan,
       &self.context,
       &self.sql_query.selection,
+      extra_cols,
     );
 
     // Move the TableReadES to the Pending state

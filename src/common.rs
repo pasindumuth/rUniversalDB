@@ -317,6 +317,13 @@ impl TableSchema {
     }
     all_cols
   }
+
+  /// Gets the `ColNames` that are present at the `timestamp` in their canonical
+  /// order. Importantly, this implies that Table columns have a well defined order
+  /// (for every `Timestamp`).
+  pub fn get_schema_val_cols_static(&self, timestamp: &Timestamp) -> Vec<ColName> {
+    self.val_cols.static_snapshot_read(timestamp).into_keys().collect()
+  }
 }
 
 // -------------------------------------------------------------------------------------------------

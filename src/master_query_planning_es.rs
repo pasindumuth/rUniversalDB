@@ -91,7 +91,7 @@ fn mark_val_col_presence(
       };
     }
     ColPresenceReq::ReqPresentExclusive(req) => {
-      debug_assert!(present ^ req.cols.contains(col_name));
+      debug_assert!(present == req.cols.contains(col_name));
     }
   }
 }
@@ -107,9 +107,19 @@ fn mark_all_val_cols(
   let col_req = default_get_mut(col_presence_req, table_path);
   match col_req {
     ColPresenceReq::ReqPresentAbsent(req) => {
-      for col in &req.present_cols {
-        debug_assert!(all_val_cols.contains(col));
-      }
+      debug_assert!((|| {
+        for col in &req.present_cols {
+          if !all_val_cols.contains(col) {
+            return false;
+          }
+        }
+        for col in &req.absent_cols {
+          if all_val_cols.contains(col) {
+            return false;
+          }
+        }
+        return true;
+      })());
       *col_req = ColPresenceReq::ReqPresentExclusive(ReqPresentExclusive { cols: all_val_cols });
     }
     ColPresenceReq::ReqPresentExclusive(req) => {

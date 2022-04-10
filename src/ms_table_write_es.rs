@@ -52,6 +52,7 @@ impl SqlQueryInner for UpdateInner {
       &es.query_plan,
       &es.context,
       &self.sql_query.selection,
+      vec![],
     );
 
     // Compute the WriteRegion

@@ -1,6 +1,7 @@
 use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
+use crate::model::common::proc::SelectClause;
 use crate::model::common::{
   proc, ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView,
   TransTableName,
@@ -46,12 +47,19 @@ impl SqlQueryInner for SelectInner {
     io_ctx: &mut IO,
     es: &GeneralQueryES,
   ) -> Result<QueryId, msg::QueryError> {
+    // Get extra columns that must be in the region due to SELECT * .
+    let mut extra_cols = match &self.sql_query.projection {
+      SelectClause::SelectList(_) => vec![],
+      SelectClause::Wildcard => ctx.table_schema.get_schema_val_cols_static(&es.timestamp),
+    };
+
     // Compute the ReadRegion
     let read_region = compute_read_region(
       &ctx.table_schema.key_cols,
       &es.query_plan,
       &es.context,
       &self.sql_query.selection,
+      extra_cols,
     );
 
     // Move the MSTableReadES to the Pending state with the given ReadRegion.
