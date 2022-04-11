@@ -5,177 +5,200 @@ use runiversal::model::message::{
   SlaveMessage, SlaveReconfig, SlaveRemotePayload, TabletMessage,
 };
 use runiversal::slave::SharedPaxosBundle;
+use std::collections::BTreeMap;
 
-#[derive(Debug, Default)]
+// -----------------------------------------------------------------------------------------------
+//  Message Statistics Keys
+// -----------------------------------------------------------------------------------------------
+// These strings are used to display the statistics.
+
+const K_EXTERNAL_QUERY_SUCCESS: &str = "external_query_success";
+const K_EXTERNAL_QUERY_ABORTED: &str = "external_query_aborted";
+const K_EXTERNAL_DDL_QUERY_SUCCESS: &str = "external_ddl_query_success";
+const K_EXTERNAL_DDL_QUERY_ABORTED: &str = "external_ddl_query_aborted";
+
+// Master
+const K_PERFORM_DDL_EXTERNAL_QUERY: &str = "perform_ddl_external_query";
+const K_CANCEL_DDL_EXTERNAL_QUERY: &str = "cancel_ddl_external_query";
+
+const K_MASTER_REMOTE_LEADER_CHANGED: &str = "master_remote_leader_changed";
+const K_MASTER_DDL: &str = "master_ddl";
+const K_MASTER_MASTER_GOSSIP: &str = "master_master_gossip";
+
+// Master Paxos
+const K_MASTER_MULTI_PAXOS_MESSAGE: &str = "master_multi_paxos_message";
+const K_MASTER_IS_LEADER: &str = "master_is_leader";
+const K_MASTER_LOG_SYNC_REQUEST: &str = "master_log_sync_request";
+const K_MASTER_LOG_SYNC_RESPONSE: &str = "master_log_sync_response";
+const K_MASTER_NEXT_INDEX_REQUEST: &str = "master_next_index_request";
+const K_MASTER_NEXT_INDEX_RESPONSE: &str = "master_next_index_response";
+const K_MASTER_INFORM_LEARNED: &str = "master_inform_learned";
+
+const K_MASTER_NEW_NODE_STARTED: &str = "master_new_node_started";
+const K_MASTER_START_NEW_NODE: &str = "master_start_new_node";
+
+const K_MASTER_NODES_DEAD: &str = "master_nodes_dead";
+const K_MASTER_SLAVE_GROUP_RECONFIGURED: &str = "master_slave_group_reconfigured";
+
+const K_MASTER_REGISTER_FREE_NODE: &str = "master_register_free_node";
+const K_MASTER_FREE_NODE_HEARTBEAT: &str = "master_free_node_heartbeat";
+const K_MASTER_CONFIRM_SLAVE_CREATION: &str = "master_confirm_slave_creation";
+
+// Slave
+const K_PERFORM_EXTERNAL_QUERY: &str = "perform_external_query";
+const K_CANCEL_EXTERNAL_QUERY: &str = "cancel_external_query";
+
+const K_SLAVE_REMOTE_LEADER_CHANGED: &str = "slave_remote_leader_changed";
+const K_SLAVE_CREATE_TABLE: &str = "slave_create_table";
+const K_SLAVE_MASTER_GOSSIP: &str = "slave_master_gossip";
+
+// Slave Paxos
+const K_SLAVE_MULTI_PAXOS_MESSAGE: &str = "slave_multi_paxos_message";
+const K_SLAVE_IS_LEADER: &str = "slave_is_leader";
+const K_SLAVE_LOG_SYNC_REQUEST: &str = "slave_log_sync_request";
+const K_SLAVE_LOG_SYNC_RESPONSE: &str = "slave_log_sync_response";
+const K_SLAVE_NEXT_INDEX_REQUEST: &str = "slave_next_index_request";
+const K_SLAVE_NEXT_INDEX_RESPONSE: &str = "slave_next_index_response";
+const K_SLAVE_INFORM_LEARNED: &str = "slave_inform_learned";
+const K_SLAVE_NEW_NODE_STARTED: &str = "slave_new_node_started";
+const K_SLAVE_START_NEW_NODE: &str = "slave_start_new_node";
+
+// Tablet
+const K_TABLET_PCSA: &str = "tablet_pcsa";
+const K_TABLET_FINISH_QUERY: &str = "tablet_finish_query";
+const K_TABLET_DDL: &str = "tablet_ddl";
+
+// Coord
+const K_COORD_PCSA: &str = "coord_pcsa";
+const K_COORD_FINISH_QUERY: &str = "coord_finish_query";
+
+// FreeNode
+const K_FREE_NODE_MASTER_LEADERSHIP: &str = "free_node_master_leadership";
+
+// Unnaccounted
+const K_UNNACCOUNTED: &str = "unnaccounted";
+
+// -----------------------------------------------------------------------------------------------
+//  Stats
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug, Default, Clone)]
 pub struct Stats {
-  external_query_success: u64,
-  external_query_aborted: u64,
-  external_ddl_query_success: u64,
-  external_ddl_query_aborted: u64,
-
-  // Master
-  perform_ddl_external_query: u64,
-  cancel_ddl_external_query: u64,
-
-  master_remote_leader_changed: u64,
-  master_ddl: u64,
-  master_master_gossip: u64,
-
-  // Master Paxos
-  master_multi_paxos_message: u64,
-  master_is_leader: u64,
-  master_log_sync_request: u64,
-  master_log_sync_response: u64,
-  master_next_index_request: u64,
-  master_next_index_response: u64,
-  master_inform_learned: u64,
-
-  master_new_node_started: u64,
-  master_start_new_node: u64,
-
-  master_nodes_dead: u64,
-  master_slave_group_reconfigured: u64,
-
-  master_register_free_node: u64,
-  master_free_node_heartbeat: u64,
-  master_confirm_slave_creation: u64,
-
-  // Slave
-  perform_external_query: u64,
-  cancel_external_query: u64,
-
-  slave_remote_leader_changed: u64,
-  slave_create_table: u64,
-  slave_master_gossip: u64,
-
-  // Slave Paxos
-  slave_multi_paxos_message: u64,
-  slave_is_leader: u64,
-  slave_log_sync_request: u64,
-  slave_log_sync_response: u64,
-  slave_next_index_request: u64,
-  slave_next_index_response: u64,
-  slave_inform_learned: u64,
-  slave_new_node_started: u64,
-  slave_start_new_node: u64,
-
-  // Tablet
-  tablet_pcsa: u64,
-  tablet_finish_query: u64,
-  tablet_ddl: u64,
-
-  // Coord
-  coord_pcsa: u64,
-  coord_finish_query: u64,
-
-  // FreeNode
-  free_node_master_leadership: u64,
-
-  // Unnaccounted
-  unnaccounted: u64,
+  /// Records the (system time) duration of the simulation.
+  pub duration: u32,
+  /// Records message frequency.
+  message_stats: BTreeMap<&'static str, u32>,
 }
 
 impl Stats {
+  pub fn get_message_stats(&self) -> &BTreeMap<&'static str, u32> {
+    &self.message_stats
+  }
+
   pub fn record(&mut self, m: &NetworkMessage) {
-    let count_ref = match m {
+    let message_key = match m {
       NetworkMessage::External(m) => match m {
-        ExternalMessage::ExternalQuerySuccess(_) => &mut self.external_query_success,
-        ExternalMessage::ExternalQueryAborted(_) => &mut self.external_query_aborted,
-        ExternalMessage::ExternalDDLQuerySuccess(_) => &mut self.external_ddl_query_success,
-        ExternalMessage::ExternalDDLQueryAborted(_) => &mut self.external_ddl_query_aborted,
-        ExternalMessage::ExternalDebugResponse(_) => &mut self.unnaccounted,
+        ExternalMessage::ExternalQuerySuccess(_) => K_EXTERNAL_QUERY_SUCCESS,
+        ExternalMessage::ExternalQueryAborted(_) => K_EXTERNAL_QUERY_ABORTED,
+        ExternalMessage::ExternalDDLQuerySuccess(_) => K_EXTERNAL_DDL_QUERY_SUCCESS,
+        ExternalMessage::ExternalDDLQueryAborted(_) => K_EXTERNAL_DDL_QUERY_ABORTED,
+        ExternalMessage::ExternalDebugResponse(_) => K_UNNACCOUNTED,
       },
       NetworkMessage::Master(m) => match m {
         MasterMessage::MasterExternalReq(m) => match m {
-          MasterExternalReq::PerformExternalDDLQuery(_) => &mut self.perform_ddl_external_query,
-          MasterExternalReq::CancelExternalDDLQuery(_) => &mut self.cancel_ddl_external_query,
-          MasterExternalReq::ExternalDebugRequest(_) => &mut self.unnaccounted,
+          MasterExternalReq::PerformExternalDDLQuery(_) => K_PERFORM_DDL_EXTERNAL_QUERY,
+          MasterExternalReq::CancelExternalDDLQuery(_) => K_CANCEL_DDL_EXTERNAL_QUERY,
+          MasterExternalReq::ExternalDebugRequest(_) => K_UNNACCOUNTED,
         },
         MasterMessage::RemoteMessage(m) => match m {
           RemoteMessage { payload: m, .. } => match m {
-            MasterRemotePayload::MasterQueryPlanning(_) => &mut self.unnaccounted,
-            MasterRemotePayload::CreateTable(_) => &mut self.master_ddl,
-            MasterRemotePayload::AlterTable(_) => &mut self.master_ddl,
-            MasterRemotePayload::DropTable(_) => &mut self.master_ddl,
-            MasterRemotePayload::MasterGossipRequest(_) => &mut self.unnaccounted,
+            MasterRemotePayload::MasterQueryPlanning(_) => K_UNNACCOUNTED,
+            MasterRemotePayload::CreateTable(_) => K_MASTER_DDL,
+            MasterRemotePayload::AlterTable(_) => K_MASTER_DDL,
+            MasterRemotePayload::DropTable(_) => K_MASTER_DDL,
+            MasterRemotePayload::MasterGossipRequest(_) => K_UNNACCOUNTED,
             MasterRemotePayload::SlaveReconfig(m) => match m {
-              SlaveReconfig::NodesDead(_) => &mut self.master_nodes_dead,
-              SlaveReconfig::SlaveGroupReconfigured(_) => &mut self.master_slave_group_reconfigured,
+              SlaveReconfig::NodesDead(_) => K_MASTER_NODES_DEAD,
+              SlaveReconfig::SlaveGroupReconfigured(_) => K_MASTER_SLAVE_GROUP_RECONFIGURED,
             },
           },
         },
-        MasterMessage::RemoteLeaderChangedGossip(_) => &mut self.master_remote_leader_changed,
+        MasterMessage::RemoteLeaderChangedGossip(_) => K_MASTER_REMOTE_LEADER_CHANGED,
         MasterMessage::PaxosDriverMessage(m) => match m {
-          PaxosDriverMessage::MultiPaxosMessage(_) => &mut self.master_multi_paxos_message,
-          PaxosDriverMessage::IsLeader(_) => &mut self.master_is_leader,
-          PaxosDriverMessage::LogSyncRequest(_) => &mut self.master_log_sync_request,
-          PaxosDriverMessage::LogSyncResponse(_) => &mut self.master_log_sync_response,
-          PaxosDriverMessage::NextIndexRequest(_) => &mut self.master_next_index_request,
-          PaxosDriverMessage::NextIndexResponse(_) => &mut self.master_next_index_response,
-          PaxosDriverMessage::InformLearned(_) => &mut self.master_inform_learned,
-          PaxosDriverMessage::NewNodeStarted(_) => &mut self.master_new_node_started,
-          PaxosDriverMessage::StartNewNode(_) => &mut self.master_start_new_node,
+          PaxosDriverMessage::MultiPaxosMessage(_) => K_MASTER_MULTI_PAXOS_MESSAGE,
+          PaxosDriverMessage::IsLeader(_) => K_MASTER_IS_LEADER,
+          PaxosDriverMessage::LogSyncRequest(_) => K_MASTER_LOG_SYNC_REQUEST,
+          PaxosDriverMessage::LogSyncResponse(_) => K_MASTER_LOG_SYNC_RESPONSE,
+          PaxosDriverMessage::NextIndexRequest(_) => K_MASTER_NEXT_INDEX_REQUEST,
+          PaxosDriverMessage::NextIndexResponse(_) => K_MASTER_NEXT_INDEX_RESPONSE,
+          PaxosDriverMessage::InformLearned(_) => K_MASTER_INFORM_LEARNED,
+          PaxosDriverMessage::NewNodeStarted(_) => K_MASTER_NEW_NODE_STARTED,
+          PaxosDriverMessage::StartNewNode(_) => K_MASTER_START_NEW_NODE,
         },
         MasterMessage::FreeNodeAssoc(m) => match m {
-          FreeNodeAssoc::RegisterFreeNode(_) => &mut self.master_register_free_node,
-          FreeNodeAssoc::FreeNodeHeartbeat(_) => &mut self.master_free_node_heartbeat,
-          FreeNodeAssoc::ConfirmSlaveCreation(_) => &mut self.master_confirm_slave_creation,
+          FreeNodeAssoc::RegisterFreeNode(_) => K_MASTER_REGISTER_FREE_NODE,
+          FreeNodeAssoc::FreeNodeHeartbeat(_) => K_MASTER_FREE_NODE_HEARTBEAT,
+          FreeNodeAssoc::ConfirmSlaveCreation(_) => K_MASTER_CONFIRM_SLAVE_CREATION,
         },
       },
       NetworkMessage::Slave(m) => match m {
         SlaveMessage::SlaveExternalReq(m) => match m {
-          SlaveExternalReq::PerformExternalQuery(_) => &mut self.perform_external_query,
-          SlaveExternalReq::CancelExternalQuery(_) => &mut self.cancel_external_query,
+          SlaveExternalReq::PerformExternalQuery(_) => K_PERFORM_EXTERNAL_QUERY,
+          SlaveExternalReq::CancelExternalQuery(_) => K_CANCEL_EXTERNAL_QUERY,
         },
         SlaveMessage::RemoteMessage(m) => match m {
           RemoteMessage { payload: m, .. } => match m {
-            SlaveRemotePayload::CreateTable(_) => &mut self.slave_create_table,
-            SlaveRemotePayload::MasterGossip(_) => &mut self.slave_master_gossip,
+            SlaveRemotePayload::CreateTable(_) => K_SLAVE_CREATE_TABLE,
+            SlaveRemotePayload::MasterGossip(_) => K_SLAVE_MASTER_GOSSIP,
             SlaveRemotePayload::TabletMessage(_, m) => match m {
-              TabletMessage::PerformQuery(_) => &mut self.tablet_pcsa,
-              TabletMessage::CancelQuery(_) => &mut self.tablet_pcsa,
-              TabletMessage::QueryAborted(_) => &mut self.tablet_pcsa,
-              TabletMessage::QuerySuccess(_) => &mut self.tablet_pcsa,
-              TabletMessage::FinishQuery(_) => &mut self.tablet_finish_query,
-              TabletMessage::AlterTable(_) => &mut self.tablet_ddl,
-              TabletMessage::DropTable(_) => &mut self.tablet_ddl,
+              TabletMessage::PerformQuery(_) => K_TABLET_PCSA,
+              TabletMessage::CancelQuery(_) => K_TABLET_PCSA,
+              TabletMessage::QueryAborted(_) => K_TABLET_PCSA,
+              TabletMessage::QuerySuccess(_) => K_TABLET_PCSA,
+              TabletMessage::FinishQuery(_) => K_TABLET_FINISH_QUERY,
+              TabletMessage::AlterTable(_) => K_TABLET_DDL,
+              TabletMessage::DropTable(_) => K_TABLET_DDL,
             },
             SlaveRemotePayload::CoordMessage(_, m) => match m {
-              CoordMessage::MasterQueryPlanningSuccess(_) => &mut self.unnaccounted,
-              CoordMessage::PerformQuery(_) => &mut self.coord_pcsa,
-              CoordMessage::CancelQuery(_) => &mut self.coord_pcsa,
-              CoordMessage::QueryAborted(_) => &mut self.coord_pcsa,
-              CoordMessage::QuerySuccess(_) => &mut self.coord_pcsa,
-              CoordMessage::FinishQuery(_) => &mut self.coord_finish_query,
-              CoordMessage::RegisterQuery(_) => &mut self.unnaccounted,
+              CoordMessage::MasterQueryPlanningSuccess(_) => K_UNNACCOUNTED,
+              CoordMessage::PerformQuery(_) => K_COORD_PCSA,
+              CoordMessage::CancelQuery(_) => K_COORD_PCSA,
+              CoordMessage::QueryAborted(_) => K_COORD_PCSA,
+              CoordMessage::QuerySuccess(_) => K_COORD_PCSA,
+              CoordMessage::FinishQuery(_) => K_COORD_FINISH_QUERY,
+              CoordMessage::RegisterQuery(_) => K_UNNACCOUNTED,
             },
-            SlaveRemotePayload::ReconfigSlaveGroup(_) => &mut self.unnaccounted,
+            SlaveRemotePayload::ReconfigSlaveGroup(_) => K_UNNACCOUNTED,
           },
         },
-        SlaveMessage::RemoteLeaderChangedGossip(_) => &mut self.slave_remote_leader_changed,
+        SlaveMessage::RemoteLeaderChangedGossip(_) => K_SLAVE_REMOTE_LEADER_CHANGED,
         SlaveMessage::PaxosDriverMessage(m) => match m {
-          PaxosDriverMessage::MultiPaxosMessage(_) => &mut self.slave_multi_paxos_message,
-          PaxosDriverMessage::IsLeader(_) => &mut self.slave_is_leader,
-          PaxosDriverMessage::LogSyncRequest(_) => &mut self.slave_log_sync_request,
-          PaxosDriverMessage::LogSyncResponse(_) => &mut self.slave_log_sync_response,
-          PaxosDriverMessage::NextIndexRequest(_) => &mut self.slave_next_index_request,
-          PaxosDriverMessage::NextIndexResponse(_) => &mut self.slave_next_index_response,
-          PaxosDriverMessage::InformLearned(_) => &mut self.slave_inform_learned,
-          PaxosDriverMessage::NewNodeStarted(_) => &mut self.slave_new_node_started,
-          PaxosDriverMessage::StartNewNode(_) => &mut self.slave_start_new_node,
+          PaxosDriverMessage::MultiPaxosMessage(_) => K_SLAVE_MULTI_PAXOS_MESSAGE,
+          PaxosDriverMessage::IsLeader(_) => K_SLAVE_IS_LEADER,
+          PaxosDriverMessage::LogSyncRequest(_) => K_SLAVE_LOG_SYNC_REQUEST,
+          PaxosDriverMessage::LogSyncResponse(_) => K_SLAVE_LOG_SYNC_RESPONSE,
+          PaxosDriverMessage::NextIndexRequest(_) => K_SLAVE_NEXT_INDEX_REQUEST,
+          PaxosDriverMessage::NextIndexResponse(_) => K_SLAVE_NEXT_INDEX_RESPONSE,
+          PaxosDriverMessage::InformLearned(_) => K_SLAVE_INFORM_LEARNED,
+          PaxosDriverMessage::NewNodeStarted(_) => K_SLAVE_NEW_NODE_STARTED,
+          PaxosDriverMessage::StartNewNode(_) => K_SLAVE_START_NEW_NODE,
         },
       },
       NetworkMessage::FreeNode(m) => match m {
-        FreeNodeMessage::StartMaster(_) => &mut self.unnaccounted,
-        FreeNodeMessage::FreeNodeRegistered(_) => &mut self.unnaccounted,
-        FreeNodeMessage::MasterLeadershipId(_) => &mut self.free_node_master_leadership,
-        FreeNodeMessage::ShutdownNode => &mut self.unnaccounted,
-        FreeNodeMessage::CreateSlaveGroup(_) => &mut self.unnaccounted,
-        FreeNodeMessage::SlaveSnapshot(_) => &mut self.unnaccounted,
-        FreeNodeMessage::MasterSnapshot(_) => &mut self.unnaccounted,
+        FreeNodeMessage::StartMaster(_) => K_UNNACCOUNTED,
+        FreeNodeMessage::FreeNodeRegistered(_) => K_UNNACCOUNTED,
+        FreeNodeMessage::MasterLeadershipId(_) => K_FREE_NODE_MASTER_LEADERSHIP,
+        FreeNodeMessage::ShutdownNode => K_UNNACCOUNTED,
+        FreeNodeMessage::CreateSlaveGroup(_) => K_UNNACCOUNTED,
+        FreeNodeMessage::SlaveSnapshot(_) => K_UNNACCOUNTED,
+        FreeNodeMessage::MasterSnapshot(_) => K_UNNACCOUNTED,
       },
     };
 
-    *count_ref += 1;
+    if let Some(count) = self.message_stats.get_mut(message_key) {
+      *count += 1;
+    } else {
+      self.message_stats.insert(message_key, 1);
+    }
   }
 }

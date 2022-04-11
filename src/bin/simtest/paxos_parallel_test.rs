@@ -1,5 +1,6 @@
 use crate::serial_test_utils::{mk_general_sim, setup, simulate_until_clean, TestContext};
 use crate::simulation::Simulation;
+use crate::stats::Stats;
 use rand::seq::SliceRandom;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -729,45 +730,66 @@ pub trait Writer {
   fn flush(&mut self);
 }
 
+pub struct ParallelTestStats {
+  pub all_stats: Vec<Stats>,
+  pub all_reconfig_stats: Vec<Stats>,
+}
+
 // -----------------------------------------------------------------------------------------------
 //  test_all_parallel
 // -----------------------------------------------------------------------------------------------
 
-pub fn test_all_basic_parallel<WriterT: Writer>(rand: &mut XorShiftRng, w: &mut WriterT) {
-  for i in 0..50 {
+pub fn test_all_basic_parallel<WriterT: Writer>(
+  rand: &mut XorShiftRng,
+  w: &mut WriterT,
+) -> Vec<Stats> {
+  let mut stats_basic = Vec::<Stats>::new();
+  const NUM_ROUNDS: u32 = 50;
+  for i in 0..NUM_ROUNDS {
     w.println(format!("Running round {:?}", i));
-    parallel_test(mk_seed(rand), 1, 0, w);
+    if let Some(stats) = parallel_test(mk_seed(rand), 1, 0, w) {
+      stats_basic.push(stats);
+    }
     w.flush();
   }
+
+  stats_basic
 }
 
-pub fn test_all_paxos_parallel<WriterT: Writer>(rand: &mut XorShiftRng, w: &mut WriterT) {
-  // Setup performance stats.
-  let mut duration = 0;
-  let mut reconfig_duration = 0;
+pub fn test_all_paxos_parallel<WriterT: Writer>(
+  rand: &mut XorShiftRng,
+  w: &mut WriterT,
+) -> ParallelTestStats {
+  // Accumulats message statistics for every round with reconfig.
+  let mut all_stats = Vec::<Stats>::new();
+  let mut all_reconfig_stats = Vec::<Stats>::new();
 
   // Execute the rounds.
   const NUM_ROUNDS: u32 = 50;
   for i in 0..NUM_ROUNDS {
     let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     w.println(format!("Running round {:?}", 2 * i));
-    parallel_test(mk_seed(rand), 5, 0, w);
+    let mut maybe_stats = parallel_test(mk_seed(rand), 5, 0, w);
     w.flush();
     let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-    duration += (end_t - start_t);
+    if let Some(mut stats) = maybe_stats {
+      stats.duration = (end_t - start_t) as u32;
+      all_stats.push(stats);
+    }
 
     let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     w.println(format!("Running reconfig round {:?}", 2 * i + 1));
-    parallel_test(mk_seed(rand), 5, 10, w);
+    let maybe_stats = parallel_test(mk_seed(rand), 5, 10, w);
     w.flush();
     let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-    reconfig_duration += (end_t - start_t);
+    if let Some(mut stats) = maybe_stats {
+      stats.duration = (end_t - start_t) as u32;
+      all_reconfig_stats.push(stats);
+    }
   }
 
-  // Print performance stats
-  w.println(format!("Avg Duration: {}", duration as u32 / NUM_ROUNDS));
-  w.println(format!("Avg Reconfig Duration: {}", reconfig_duration as u32 / NUM_ROUNDS));
-  w.flush();
+  // Return various statistics
+  ParallelTestStats { all_stats, all_reconfig_stats }
 }
 
 pub fn parallel_test<WriterT: Writer>(
@@ -775,7 +797,7 @@ pub fn parallel_test<WriterT: Writer>(
   num_paxos_nodes: u32,
   num_reconfig_free_nodes: u32,
   w: &mut WriterT,
-) {
+) -> Option<Stats> {
   w.println(format!("seed: {:?}", seed));
   let mut sim = mk_general_sim(seed, 3, 5, num_paxos_nodes, 100, num_reconfig_free_nodes);
 
@@ -1098,7 +1120,9 @@ pub fn parallel_test<WriterT: Writer>(
       queries_cancelled = res.queries_cancelled,
       ddl_queries_cancelled = res.ddl_queries_cancelled
     ));
+    Some(sim.get_stats().clone())
   } else {
     w.println(format!("Skipped Test 'test_all_paxos_parallel' due to Timestamp Conflict"));
+    None
   }
 }
