@@ -743,14 +743,21 @@ pub fn test_all_basic_parallel<WriterT: Writer>(
   rand: &mut XorShiftRng,
   w: &mut WriterT,
 ) -> Vec<Stats> {
+  // Accumulats message statistics for every round.
   let mut stats_basic = Vec::<Stats>::new();
+
+  // Execute the rounds.
   const NUM_ROUNDS: u32 = 50;
   for i in 0..NUM_ROUNDS {
+    let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     w.println(format!("Running round {:?}", i));
-    if let Some(stats) = parallel_test(mk_seed(rand), 1, 0, w) {
+    let mut maybe_stats = parallel_test(mk_seed(rand), 1, 0, w);
+    w.flush();
+    let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    if let Some(mut stats) = maybe_stats {
+      stats.duration = (end_t - start_t) as u32;
       stats_basic.push(stats);
     }
-    w.flush();
   }
 
   stats_basic
@@ -760,7 +767,7 @@ pub fn test_all_paxos_parallel<WriterT: Writer>(
   rand: &mut XorShiftRng,
   w: &mut WriterT,
 ) -> ParallelTestStats {
-  // Accumulats message statistics for every round with reconfig.
+  // Accumulats message statistics for every round.
   let mut all_stats = Vec::<Stats>::new();
   let mut all_reconfig_stats = Vec::<Stats>::new();
 
