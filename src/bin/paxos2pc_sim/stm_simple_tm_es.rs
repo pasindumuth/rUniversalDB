@@ -2,7 +2,6 @@ use crate::message as msg;
 use crate::slave::{SlaveContext, SlavePLm};
 use runiversal::common::BasicIOCtx;
 use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId};
-use runiversal::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use runiversal::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
   TMPayloadTypes, TMServerContext,
@@ -14,61 +13,10 @@ use std::collections::BTreeMap;
 //  Payloads
 // -----------------------------------------------------------------------------------------------
 
-// TM PLm
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleTMPrepared {
-  pub rms: Vec<SlaveGroupId>,
-}
+pub struct STMSimpleTMPayloadTypes {}
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleTMCommitted {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleTMAborted {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleTMClosed {}
-
-// RM PLm
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleRMPrepared {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleRMCommitted {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleRMAborted {}
-
-// TM-to-RM
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimplePrepare {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleAbort {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleCommit {}
-
-// RM-to-TM
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimplePrepared {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleAborted {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimpleClosed {}
-
-// STMSimplePayloadTypes
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMSimplePayloadTypes {}
-
-impl TMPayloadTypes for STMSimplePayloadTypes {
+impl TMPayloadTypes for STMSimpleTMPayloadTypes {
   // Master
   type RMPath = SlaveGroupId;
   type TMPath = SlaveGroupId;
@@ -92,24 +40,50 @@ impl TMPayloadTypes for STMSimplePayloadTypes {
   type Closed = STMSimpleClosed;
 }
 
-impl RMPayloadTypes for STMSimplePayloadTypes {
-  type RMContext = SlaveContext;
+// TM PLm
 
-  // Actions
-  type RMCommitActionData = ();
-
-  // RM PLm
-  type RMPreparedPLm = STMSimpleRMPrepared;
-  type RMCommittedPLm = STMSimpleRMCommitted;
-  type RMAbortedPLm = STMSimpleRMAborted;
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STMSimpleTMPrepared {
+  pub rms: Vec<SlaveGroupId>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STMSimpleTMCommitted {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STMSimpleTMAborted {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STMSimpleTMClosed {}
+
+// TM-to-RM
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STMSimplePrepare {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STMSimpleAbort {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STMSimpleCommit {}
+
+// RM-to-TM
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STMSimplePrepared {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STMSimpleAborted {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STMSimpleClosed {}
 
 // -----------------------------------------------------------------------------------------------
 //  STMTMServerContext
 // -----------------------------------------------------------------------------------------------
 
-impl TMServerContext<STMSimplePayloadTypes> for SlaveContext {
-  fn push_plm(&mut self, plm: TMPLm<STMSimplePayloadTypes>) {
+impl TMServerContext<STMSimpleTMPayloadTypes> for SlaveContext {
+  fn push_plm(&mut self, plm: TMPLm<STMSimpleTMPayloadTypes>) {
     self.slave_bundle.plms.push(SlavePLm::SimpleSTMTM(plm));
   }
 
@@ -117,7 +91,7 @@ impl TMServerContext<STMSimplePayloadTypes> for SlaveContext {
     &mut self,
     io_ctx: &mut IO,
     rm: &SlaveGroupId,
-    msg: RMMessage<STMSimplePayloadTypes>,
+    msg: RMMessage<STMSimpleTMPayloadTypes>,
   ) {
     self.send(io_ctx, rm, msg::SlaveRemotePayload::STMRMMessage(msg));
   }
@@ -144,7 +118,7 @@ pub struct ResponseData {
 //  Simple Implementation
 // -----------------------------------------------------------------------------------------------
 
-pub type STMSimpleTMES = STMPaxos2PCTMOuter<STMSimplePayloadTypes, STMSimpleTMInner>;
+pub type STMSimpleTMES = STMPaxos2PCTMOuter<STMSimpleTMPayloadTypes, STMSimpleTMInner>;
 
 #[derive(Debug)]
 pub struct STMSimpleTMInner {
@@ -152,7 +126,7 @@ pub struct STMSimpleTMInner {
   pub rms: Vec<SlaveGroupId>,
 }
 
-impl STMPaxos2PCTMInner<STMSimplePayloadTypes> for STMSimpleTMInner {
+impl STMPaxos2PCTMInner<STMSimpleTMPayloadTypes> for STMSimpleTMInner {
   fn new_follower<IO: BasicIOCtx<msg::NetworkMessage>>(
     _: &mut SlaveContext,
     _: &mut IO,
@@ -194,7 +168,7 @@ impl STMPaxos2PCTMInner<STMSimplePayloadTypes> for STMSimpleTMInner {
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
-    _: &TMCommittedPLm<STMSimplePayloadTypes>,
+    _: &TMCommittedPLm<STMSimpleTMPayloadTypes>,
   ) -> BTreeMap<SlaveGroupId, STMSimpleCommit> {
     let mut commits = BTreeMap::<SlaveGroupId, STMSimpleCommit>::new();
     for rm in &self.rms {
@@ -235,7 +209,7 @@ impl STMPaxos2PCTMInner<STMSimplePayloadTypes> for STMSimpleTMInner {
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
-    _: &TMClosedPLm<STMSimplePayloadTypes>,
+    _: &TMClosedPLm<STMSimpleTMPayloadTypes>,
   ) {
   }
 

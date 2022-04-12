@@ -1,14 +1,13 @@
 use crate::common::{cur_timestamp, Timestamp};
 use crate::common::{mk_t, BasicIOCtx};
 use crate::drop_table_tm_es::{
-  DropTableClosed, DropTableCommit, DropTablePayloadTypes, DropTablePrepare, DropTablePrepared,
-  DropTableRMAborted, DropTableRMCommitted, DropTableRMPrepared,
+  DropTableClosed, DropTableCommit, DropTablePrepare, DropTablePrepared, DropTableTMPayloadTypes,
 };
 use crate::model::common::TNodePath;
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::stmpaxos2pc_rm::{
-  RMCommittedPLm, RMPLm, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
+  RMCommittedPLm, RMPLm, RMPayloadTypes, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
   STMPaxos2PCRMOuter,
 };
 use crate::stmpaxos2pc_tm::TMMessage;
@@ -17,11 +16,46 @@ use serde::{Deserialize, Serialize};
 use std::cmp::max;
 
 // -----------------------------------------------------------------------------------------------
+//  Payloads
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableRMPayloadTypes {}
+
+impl RMPayloadTypes for DropTableRMPayloadTypes {
+  type TM = DropTableTMPayloadTypes;
+  type RMContext = TabletContext;
+
+  // Actions
+  type RMCommitActionData = Timestamp;
+
+  // RM PLm
+  type RMPreparedPLm = DropTableRMPrepared;
+  type RMCommittedPLm = DropTableRMCommitted;
+  type RMAbortedPLm = DropTableRMAborted;
+}
+
+// RM PLm
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableRMPrepared {
+  pub timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableRMCommitted {
+  pub timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableRMAborted {}
+
+// -----------------------------------------------------------------------------------------------
 //  RMServerContext DropTable
 // -----------------------------------------------------------------------------------------------
 
-impl RMServerContext<DropTablePayloadTypes> for TabletContext {
-  fn push_plm(&mut self, plm: RMPLm<DropTablePayloadTypes>) {
+impl RMServerContext<DropTableRMPayloadTypes> for TabletContext {
+  fn push_plm(&mut self, plm: RMPLm<DropTableRMPayloadTypes>) {
     self.tablet_bundle.push(TabletPLm::DropTable(plm));
   }
 
@@ -29,7 +63,7 @@ impl RMServerContext<DropTablePayloadTypes> for TabletContext {
     &mut self,
     io_ctx: &mut IO,
     _: &(),
-    msg: TMMessage<DropTablePayloadTypes>,
+    msg: TMMessage<DropTableTMPayloadTypes>,
   ) {
     self.send_to_master(io_ctx, msg::MasterRemotePayload::DropTable(msg));
   }
@@ -52,10 +86,10 @@ pub struct DropTableRMInner {
   pub prepared_timestamp: Timestamp,
 }
 
-pub type DropTableRMES = STMPaxos2PCRMOuter<DropTablePayloadTypes, DropTableRMInner>;
-pub type DropTableRMAction = STMPaxos2PCRMAction<DropTablePayloadTypes>;
+pub type DropTableRMES = STMPaxos2PCRMOuter<DropTableRMPayloadTypes, DropTableRMInner>;
+pub type DropTableRMAction = STMPaxos2PCRMAction<DropTableRMPayloadTypes>;
 
-impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
+impl STMPaxos2PCRMInner<DropTableRMPayloadTypes> for DropTableRMInner {
   fn new<IO: BasicIOCtx>(
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
@@ -115,7 +149,7 @@ impl STMPaxos2PCRMInner<DropTablePayloadTypes> for DropTableRMInner {
     &mut self,
     _: &mut TabletContext,
     _: &mut IO,
-    committed_plm: &RMCommittedPLm<DropTablePayloadTypes>,
+    committed_plm: &RMCommittedPLm<DropTableRMPayloadTypes>,
   ) -> Timestamp {
     committed_plm.payload.timestamp.clone()
   }

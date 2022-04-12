@@ -1,13 +1,13 @@
 use crate::alter_table_tm_es::{
-  AlterTableClosed, AlterTableCommit, AlterTablePayloadTypes, AlterTablePrepare,
-  AlterTablePrepared, AlterTableRMAborted, AlterTableRMCommitted, AlterTableRMPrepared,
+  AlterTableClosed, AlterTableCommit, AlterTablePrepare, AlterTablePrepared,
+  AlterTableTMPayloadTypes,
 };
 use crate::common::{cur_timestamp, mk_t, BasicIOCtx, Timestamp};
 use crate::model::common::{proc, TNodePath};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
 use crate::stmpaxos2pc_rm::{
-  RMCommittedPLm, RMPLm, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
+  RMCommittedPLm, RMPLm, RMPayloadTypes, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
   STMPaxos2PCRMOuter,
 };
 use crate::stmpaxos2pc_tm::TMMessage;
@@ -16,11 +16,47 @@ use serde::{Deserialize, Serialize};
 use std::cmp::max;
 
 // -----------------------------------------------------------------------------------------------
+//  Payloads
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableRMPayloadTypes {}
+
+impl RMPayloadTypes for AlterTableRMPayloadTypes {
+  type TM = AlterTableTMPayloadTypes;
+  type RMContext = TabletContext;
+
+  // Actions
+  type RMCommitActionData = ();
+
+  // RM PLm
+  type RMPreparedPLm = AlterTableRMPrepared;
+  type RMCommittedPLm = AlterTableRMCommitted;
+  type RMAbortedPLm = AlterTableRMAborted;
+}
+
+// RM PLm
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableRMPrepared {
+  pub alter_op: proc::AlterOp,
+  pub timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableRMCommitted {
+  pub timestamp: Timestamp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableRMAborted {}
+
+// -----------------------------------------------------------------------------------------------
 //  RMServerContext AlterTable
 // -----------------------------------------------------------------------------------------------
 
-impl RMServerContext<AlterTablePayloadTypes> for TabletContext {
-  fn push_plm(&mut self, plm: RMPLm<AlterTablePayloadTypes>) {
+impl RMServerContext<AlterTableRMPayloadTypes> for TabletContext {
+  fn push_plm(&mut self, plm: RMPLm<AlterTableRMPayloadTypes>) {
     self.tablet_bundle.push(TabletPLm::AlterTable(plm));
   }
 
@@ -28,7 +64,7 @@ impl RMServerContext<AlterTablePayloadTypes> for TabletContext {
     &mut self,
     io_ctx: &mut IO,
     _: &(),
-    msg: TMMessage<AlterTablePayloadTypes>,
+    msg: TMMessage<AlterTableTMPayloadTypes>,
   ) {
     self.send_to_master(io_ctx, msg::MasterRemotePayload::AlterTable(msg));
   }
@@ -52,10 +88,10 @@ pub struct AlterTableRMInner {
   pub prepared_timestamp: Timestamp,
 }
 
-pub type AlterTableRMES = STMPaxos2PCRMOuter<AlterTablePayloadTypes, AlterTableRMInner>;
-pub type AlterTableRMAction = STMPaxos2PCRMAction<AlterTablePayloadTypes>;
+pub type AlterTableRMES = STMPaxos2PCRMOuter<AlterTableRMPayloadTypes, AlterTableRMInner>;
+pub type AlterTableRMAction = STMPaxos2PCRMAction<AlterTableRMPayloadTypes>;
 
-impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
+impl STMPaxos2PCRMInner<AlterTableRMPayloadTypes> for AlterTableRMInner {
   fn new<IO: BasicIOCtx>(
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
@@ -120,7 +156,7 @@ impl STMPaxos2PCRMInner<AlterTablePayloadTypes> for AlterTableRMInner {
     &mut self,
     ctx: &mut TabletContext,
     _: &mut IO,
-    committed_plm: &RMCommittedPLm<AlterTablePayloadTypes>,
+    committed_plm: &RMCommittedPLm<AlterTableRMPayloadTypes>,
   ) {
     ctx.table_schema.val_cols.write(
       &self.alter_op.col_name,

@@ -5,7 +5,6 @@ use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{proc, EndpointId, RequestId, TNodePath, TSubNodePath, TablePath};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
-use crate::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use crate::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
   TMPayloadTypes, TMServerContext,
@@ -18,6 +17,33 @@ use std::collections::BTreeMap;
 // -----------------------------------------------------------------------------------------------
 //  Payloads
 // -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableTMPayloadTypes {}
+
+impl TMPayloadTypes for AlterTableTMPayloadTypes {
+  // Master
+  type RMPath = TNodePath;
+  type TMPath = ();
+  type NetworkMessageT = msg::NetworkMessage;
+  type TMContext = MasterContext;
+
+  // TM PLm
+  type TMPreparedPLm = AlterTableTMPrepared;
+  type TMCommittedPLm = AlterTableTMCommitted;
+  type TMAbortedPLm = AlterTableTMAborted;
+  type TMClosedPLm = AlterTableTMClosed;
+
+  // TM-to-RM Messages
+  type Prepare = AlterTablePrepare;
+  type Abort = AlterTableAbort;
+  type Commit = AlterTableCommit;
+
+  // RM-to-TM Messages
+  type Prepared = AlterTablePrepared;
+  type Aborted = AlterTableAborted;
+  type Closed = AlterTableClosed;
+}
 
 // TM PLm
 
@@ -37,22 +63,6 @@ pub struct AlterTableTMAborted {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableTMClosed {}
-
-// RM PLm
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableRMPrepared {
-  pub alter_op: proc::AlterOp,
-  pub timestamp: Timestamp,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableRMCommitted {
-  pub timestamp: Timestamp,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTableRMAborted {}
 
 // TM-to-RM
 
@@ -82,53 +92,12 @@ pub struct AlterTableAborted {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableClosed {}
 
-// AlterTablePayloadTypes
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AlterTablePayloadTypes {}
-
-impl TMPayloadTypes for AlterTablePayloadTypes {
-  // Master
-  type RMPath = TNodePath;
-  type TMPath = ();
-  type NetworkMessageT = msg::NetworkMessage;
-  type TMContext = MasterContext;
-
-  // TM PLm
-  type TMPreparedPLm = AlterTableTMPrepared;
-  type TMCommittedPLm = AlterTableTMCommitted;
-  type TMAbortedPLm = AlterTableTMAborted;
-  type TMClosedPLm = AlterTableTMClosed;
-
-  // TM-to-RM Messages
-  type Prepare = AlterTablePrepare;
-  type Abort = AlterTableAbort;
-  type Commit = AlterTableCommit;
-
-  // RM-to-TM Messages
-  type Prepared = AlterTablePrepared;
-  type Aborted = AlterTableAborted;
-  type Closed = AlterTableClosed;
-}
-
-impl RMPayloadTypes for AlterTablePayloadTypes {
-  type RMContext = TabletContext;
-
-  // Actions
-  type RMCommitActionData = ();
-
-  // RM PLm
-  type RMPreparedPLm = AlterTableRMPrepared;
-  type RMCommittedPLm = AlterTableRMCommitted;
-  type RMAbortedPLm = AlterTableRMAborted;
-}
-
 // -----------------------------------------------------------------------------------------------
 //  TMServerContext AlterTable
 // -----------------------------------------------------------------------------------------------
 
-impl TMServerContext<AlterTablePayloadTypes> for MasterContext {
-  fn push_plm(&mut self, plm: TMPLm<AlterTablePayloadTypes>) {
+impl TMServerContext<AlterTableTMPayloadTypes> for MasterContext {
+  fn push_plm(&mut self, plm: TMPLm<AlterTableTMPayloadTypes>) {
     self.master_bundle.plms.push(MasterPLm::AlterTable(plm));
   }
 
@@ -136,7 +105,7 @@ impl TMServerContext<AlterTablePayloadTypes> for MasterContext {
     &mut self,
     io_ctx: &mut IO,
     rm: &TNodePath,
-    msg: RMMessage<AlterTablePayloadTypes>,
+    msg: RMMessage<AlterTableTMPayloadTypes>,
   ) {
     self.send_to_t(io_ctx, rm.clone(), msg::TabletMessage::AlterTable(msg));
   }
@@ -163,7 +132,7 @@ pub struct ResponseData {
 //  AlterTable Implementation
 // -----------------------------------------------------------------------------------------------
 
-pub type AlterTableTMES = STMPaxos2PCTMOuter<AlterTablePayloadTypes, AlterTableTMInner>;
+pub type AlterTableTMES = STMPaxos2PCTMOuter<AlterTableTMPayloadTypes, AlterTableTMInner>;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableTMInner {
@@ -175,7 +144,7 @@ pub struct AlterTableTMInner {
   pub alter_op: proc::AlterOp,
 }
 
-impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
+impl STMPaxos2PCTMInner<AlterTableTMPayloadTypes> for AlterTableTMInner {
   fn new_follower<IO: BasicIOCtx>(
     _: &mut MasterContext,
     _: &mut IO,
@@ -227,7 +196,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-    committed_plm: &TMCommittedPLm<AlterTablePayloadTypes>,
+    committed_plm: &TMCommittedPLm<AlterTableTMPayloadTypes>,
   ) -> BTreeMap<TNodePath, AlterTableCommit> {
     let timestamp = ctx.gossip.update(|gossip| {
       let gen = gossip.table_generation.get_last_version(&self.table_path).unwrap();
@@ -335,7 +304,7 @@ impl STMPaxos2PCTMInner<AlterTablePayloadTypes> for AlterTableTMInner {
     &mut self,
     _: &mut MasterContext,
     _: &mut IO,
-    _: &TMClosedPLm<AlterTablePayloadTypes>,
+    _: &TMClosedPLm<AlterTableTMPayloadTypes>,
   ) {
   }
 

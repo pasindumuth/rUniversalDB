@@ -1,7 +1,7 @@
 use crate::common::{BasicIOCtx, TableSchema};
 use crate::create_table_tm_es::{
-  CreateTableClosed, CreateTableCommit, CreateTablePayloadTypes, CreateTablePrepare,
-  CreateTablePrepared, CreateTableRMAborted, CreateTableRMCommitted, CreateTableRMPrepared,
+  CreateTableClosed, CreateTableCommit, CreateTablePrepare, CreateTablePrepared,
+  CreateTableTMPayloadTypes,
 };
 use crate::model::common::{
   ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
@@ -11,7 +11,7 @@ use crate::multiversion_map::MVM;
 use crate::server::ServerContextBase;
 use crate::slave::{SlaveContext, SlavePLm};
 use crate::stmpaxos2pc_rm::{
-  RMCommittedPLm, RMPLm, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
+  RMCommittedPLm, RMPLm, RMPayloadTypes, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
   STMPaxos2PCRMOuter,
 };
 use crate::stmpaxos2pc_tm::TMMessage;
@@ -20,11 +20,50 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 // -----------------------------------------------------------------------------------------------
+//  Payloads
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableRMPayloadTypes {}
+
+impl RMPayloadTypes for CreateTableRMPayloadTypes {
+  type TM = CreateTableTMPayloadTypes;
+  type RMContext = SlaveContext;
+
+  // Actions
+  type RMCommitActionData = TabletCreateHelper;
+
+  // RM PLm
+  type RMPreparedPLm = CreateTableRMPrepared;
+  type RMCommittedPLm = CreateTableRMCommitted;
+  type RMAbortedPLm = CreateTableRMAborted;
+}
+
+// RM PLm
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableRMPrepared {
+  pub tablet_group_id: TabletGroupId,
+  pub table_path: TablePath,
+  pub gen: Gen,
+
+  pub key_range: TabletKeyRange,
+  pub key_cols: Vec<(ColName, ColType)>,
+  pub val_cols: Vec<(ColName, ColType)>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableRMCommitted {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableRMAborted {}
+
+// -----------------------------------------------------------------------------------------------
 //  RMServerContext
 // -----------------------------------------------------------------------------------------------
 
-impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
-  fn push_plm(&mut self, plm: RMPLm<CreateTablePayloadTypes>) {
+impl RMServerContext<CreateTableRMPayloadTypes> for SlaveContext {
+  fn push_plm(&mut self, plm: RMPLm<CreateTableRMPayloadTypes>) {
     self.slave_bundle.plms.push(SlavePLm::CreateTable(plm));
   }
 
@@ -32,7 +71,7 @@ impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
     &mut self,
     io_ctx: &mut IO,
     _: &(),
-    msg: TMMessage<CreateTablePayloadTypes>,
+    msg: TMMessage<CreateTableTMPayloadTypes>,
   ) {
     self.send_to_master(io_ctx, msg::MasterRemotePayload::CreateTable(msg));
   }
@@ -61,10 +100,10 @@ pub struct CreateTableRMInner {
   pub val_cols: Vec<(ColName, ColType)>,
 }
 
-pub type CreateTableRMES = STMPaxos2PCRMOuter<CreateTablePayloadTypes, CreateTableRMInner>;
-pub type CreateTableRMAction = STMPaxos2PCRMAction<CreateTablePayloadTypes>;
+pub type CreateTableRMES = STMPaxos2PCRMOuter<CreateTableRMPayloadTypes, CreateTableRMInner>;
+pub type CreateTableRMAction = STMPaxos2PCRMAction<CreateTableRMPayloadTypes>;
 
-impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
+impl STMPaxos2PCRMInner<CreateTableRMPayloadTypes> for CreateTableRMInner {
   fn new<IO: BasicIOCtx>(
     _: &mut SlaveContext,
     _: &mut IO,
@@ -136,7 +175,7 @@ impl STMPaxos2PCRMInner<CreateTablePayloadTypes> for CreateTableRMInner {
     &mut self,
     ctx: &mut SlaveContext,
     io_ctx: &mut IO,
-    _: &RMCommittedPLm<CreateTablePayloadTypes>,
+    _: &RMCommittedPLm<CreateTableRMPayloadTypes>,
   ) -> TabletCreateHelper {
     let mut rand_seed = [0; 16];
     io_ctx.rand().fill_bytes(&mut rand_seed);

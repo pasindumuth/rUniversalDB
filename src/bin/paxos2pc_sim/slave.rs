@@ -4,9 +4,9 @@ use crate::message::{ExternalMessage, SlaveMessage, SlaveRemotePayload};
 use crate::simple_rm_es::SimpleRMES;
 use crate::simple_tm_es::{SimplePayloadTypes, SimplePrepare, SimpleTMES, SimpleTMInner};
 use crate::simulation::ISlaveIOCtx;
-use crate::stm_simple_rm_es::{STMSimpleRMAction, STMSimpleRMES};
+use crate::stm_simple_rm_es::{STMSimpleRMAction, STMSimpleRMES, STMSimpleRMPayloadTypes};
 use crate::stm_simple_tm_es::{
-  STMSimpleAborted, STMSimplePayloadTypes, STMSimpleTMES, STMSimpleTMInner,
+  STMSimpleAborted, STMSimpleTMES, STMSimpleTMInner, STMSimpleTMPayloadTypes,
 };
 use rand::RngCore;
 use runiversal::common::{mk_t, BasicIOCtx, LeaderMap, RemoteLeaderChangedPLm, VersionedValue};
@@ -37,8 +37,8 @@ pub struct SlaveBundle {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlavePLm {
-  SimpleSTMTM(stmpaxos2pc_tm::TMPLm<STMSimplePayloadTypes>),
-  SimpleSTMRM(stmpaxos2pc_rm::RMPLm<STMSimplePayloadTypes>),
+  SimpleSTMTM(stmpaxos2pc_tm::TMPLm<STMSimpleTMPayloadTypes>),
+  SimpleSTMRM(stmpaxos2pc_rm::RMPLm<STMSimpleRMPayloadTypes>),
   SimpleRM(paxos2pc_tm::RMPLm<SimplePayloadTypes>),
 }
 

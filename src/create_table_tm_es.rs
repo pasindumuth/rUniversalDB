@@ -10,7 +10,6 @@ use crate::model::message as msg;
 use crate::multiversion_map::MVM;
 use crate::server::ServerContextBase;
 use crate::slave::{SlaveContext, SlavePLm};
-use crate::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use crate::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
   TMPayloadTypes, TMServerContext,
@@ -23,6 +22,33 @@ use std::collections::BTreeMap;
 // -----------------------------------------------------------------------------------------------
 //  Payloads
 // -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableTMPayloadTypes {}
+
+impl TMPayloadTypes for CreateTableTMPayloadTypes {
+  // Master
+  type RMPath = SlaveGroupId;
+  type TMPath = ();
+  type NetworkMessageT = msg::NetworkMessage;
+  type TMContext = MasterContext;
+
+  // TM PLm
+  type TMPreparedPLm = CreateTableTMPrepared;
+  type TMCommittedPLm = CreateTableTMCommitted;
+  type TMAbortedPLm = CreateTableTMAborted;
+  type TMClosedPLm = CreateTableTMClosed;
+
+  // TM-to-RM Messages
+  type Prepare = CreateTablePrepare;
+  type Abort = CreateTableAbort;
+  type Commit = CreateTableCommit;
+
+  // RM-to-TM Messages
+  type Prepared = CreateTablePrepared;
+  type Aborted = CreateTableAborted;
+  type Closed = CreateTableClosed;
+}
 
 // TM PLm
 
@@ -44,25 +70,6 @@ pub struct CreateTableTMAborted {}
 pub struct CreateTableTMClosed {
   pub timestamp_hint: Option<Timestamp>,
 }
-
-// RM PLm
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CreateTableRMPrepared {
-  pub tablet_group_id: TabletGroupId,
-  pub table_path: TablePath,
-  pub gen: Gen,
-
-  pub key_range: TabletKeyRange,
-  pub key_cols: Vec<(ColName, ColType)>,
-  pub val_cols: Vec<(ColName, ColType)>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CreateTableRMCommitted {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CreateTableRMAborted {}
 
 // TM-to-RM
 
@@ -99,53 +106,12 @@ pub struct CreateTableAborted {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CreateTableClosed {}
 
-// CreateTablePayloadTypes
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CreateTablePayloadTypes {}
-
-impl TMPayloadTypes for CreateTablePayloadTypes {
-  // Master
-  type RMPath = SlaveGroupId;
-  type TMPath = ();
-  type NetworkMessageT = msg::NetworkMessage;
-  type TMContext = MasterContext;
-
-  // TM PLm
-  type TMPreparedPLm = CreateTableTMPrepared;
-  type TMCommittedPLm = CreateTableTMCommitted;
-  type TMAbortedPLm = CreateTableTMAborted;
-  type TMClosedPLm = CreateTableTMClosed;
-
-  // TM-to-RM Messages
-  type Prepare = CreateTablePrepare;
-  type Abort = CreateTableAbort;
-  type Commit = CreateTableCommit;
-
-  // RM-to-TM Messages
-  type Prepared = CreateTablePrepared;
-  type Aborted = CreateTableAborted;
-  type Closed = CreateTableClosed;
-}
-
-impl RMPayloadTypes for CreateTablePayloadTypes {
-  type RMContext = SlaveContext;
-
-  // Actions
-  type RMCommitActionData = TabletCreateHelper;
-
-  // RM PLm
-  type RMPreparedPLm = CreateTableRMPrepared;
-  type RMCommittedPLm = CreateTableRMCommitted;
-  type RMAbortedPLm = CreateTableRMAborted;
-}
-
 // -----------------------------------------------------------------------------------------------
 //  TMServerContext CreateTable
 // -----------------------------------------------------------------------------------------------
 
-impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
-  fn push_plm(&mut self, plm: TMPLm<CreateTablePayloadTypes>) {
+impl TMServerContext<CreateTableTMPayloadTypes> for MasterContext {
+  fn push_plm(&mut self, plm: TMPLm<CreateTableTMPayloadTypes>) {
     self.master_bundle.plms.push(MasterPLm::CreateTable(plm));
   }
 
@@ -153,7 +119,7 @@ impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
     &mut self,
     io_ctx: &mut IO,
     rm: &SlaveGroupId,
-    msg: RMMessage<CreateTablePayloadTypes>,
+    msg: RMMessage<CreateTableTMPayloadTypes>,
   ) {
     self.send_to_slave_common(io_ctx, rm.clone(), msg::SlaveRemotePayload::CreateTable(msg));
   }
@@ -171,7 +137,7 @@ impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
 //  CreateTable Implementation
 // -----------------------------------------------------------------------------------------------
 
-pub type CreateTableTMES = STMPaxos2PCTMOuter<CreateTablePayloadTypes, CreateTableTMInner>;
+pub type CreateTableTMES = STMPaxos2PCTMOuter<CreateTableTMPayloadTypes, CreateTableTMInner>;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CreateTableTMInner {
@@ -233,7 +199,7 @@ impl CreateTableTMInner {
   }
 }
 
-impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
+impl STMPaxos2PCTMInner<CreateTableTMPayloadTypes> for CreateTableTMInner {
   fn new_follower<IO: BasicIOCtx>(
     _: &mut MasterContext,
     _: &mut IO,
@@ -301,7 +267,7 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
     &mut self,
     _: &mut MasterContext,
     _: &mut IO,
-    _: &TMCommittedPLm<CreateTablePayloadTypes>,
+    _: &TMCommittedPLm<CreateTableTMPayloadTypes>,
   ) -> BTreeMap<SlaveGroupId, CreateTableCommit> {
     self.did_commit = true;
 
@@ -370,7 +336,7 @@ impl STMPaxos2PCTMInner<CreateTablePayloadTypes> for CreateTableTMInner {
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-    closed_plm: &TMClosedPLm<CreateTablePayloadTypes>,
+    closed_plm: &TMClosedPLm<CreateTableTMPayloadTypes>,
   ) {
     if let Some(timestamp_hint) = &closed_plm.payload.timestamp_hint {
       // This means that the closed_plm is a result of a committing the CreateTable.

@@ -4,7 +4,6 @@ use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{TNodePath, TablePath};
 use crate::model::message as msg;
 use crate::server::ServerContextBase;
-use crate::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use crate::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
   TMPayloadTypes, TMServerContext,
@@ -17,6 +16,33 @@ use std::collections::BTreeMap;
 // -----------------------------------------------------------------------------------------------
 //  Payloads
 // -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DropTableTMPayloadTypes {}
+
+impl TMPayloadTypes for DropTableTMPayloadTypes {
+  // Master
+  type RMPath = TNodePath;
+  type TMPath = ();
+  type NetworkMessageT = msg::NetworkMessage;
+  type TMContext = MasterContext;
+
+  // TM PLm
+  type TMPreparedPLm = DropTableTMPrepared;
+  type TMCommittedPLm = DropTableTMCommitted;
+  type TMAbortedPLm = DropTableTMAborted;
+  type TMClosedPLm = DropTableTMClosed;
+
+  // TM-to-RM Messages
+  type Prepare = DropTablePrepare;
+  type Abort = DropTableAbort;
+  type Commit = DropTableCommit;
+
+  // RM-to-TM Messages
+  type Prepared = DropTablePrepared;
+  type Aborted = DropTableAborted;
+  type Closed = DropTableClosed;
+}
 
 // TM PLm
 
@@ -35,21 +61,6 @@ pub struct DropTableTMAborted {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DropTableTMClosed {}
-
-// RM PLm
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableRMPrepared {
-  pub timestamp: Timestamp,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableRMCommitted {
-  pub timestamp: Timestamp,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTableRMAborted {}
 
 // TM-to-RM
 
@@ -77,53 +88,12 @@ pub struct DropTableAborted {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DropTableClosed {}
 
-// DropTablePayloadTypes
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DropTablePayloadTypes {}
-
-impl TMPayloadTypes for DropTablePayloadTypes {
-  // Master
-  type RMPath = TNodePath;
-  type TMPath = ();
-  type NetworkMessageT = msg::NetworkMessage;
-  type TMContext = MasterContext;
-
-  // TM PLm
-  type TMPreparedPLm = DropTableTMPrepared;
-  type TMCommittedPLm = DropTableTMCommitted;
-  type TMAbortedPLm = DropTableTMAborted;
-  type TMClosedPLm = DropTableTMClosed;
-
-  // TM-to-RM Messages
-  type Prepare = DropTablePrepare;
-  type Abort = DropTableAbort;
-  type Commit = DropTableCommit;
-
-  // RM-to-TM Messages
-  type Prepared = DropTablePrepared;
-  type Aborted = DropTableAborted;
-  type Closed = DropTableClosed;
-}
-
-impl RMPayloadTypes for DropTablePayloadTypes {
-  type RMContext = TabletContext;
-
-  // Actions
-  type RMCommitActionData = Timestamp;
-
-  // RM PLm
-  type RMPreparedPLm = DropTableRMPrepared;
-  type RMCommittedPLm = DropTableRMCommitted;
-  type RMAbortedPLm = DropTableRMAborted;
-}
-
 // -----------------------------------------------------------------------------------------------
 //  TMServerContext DropTable
 // -----------------------------------------------------------------------------------------------
 
-impl TMServerContext<DropTablePayloadTypes> for MasterContext {
-  fn push_plm(&mut self, plm: TMPLm<DropTablePayloadTypes>) {
+impl TMServerContext<DropTableTMPayloadTypes> for MasterContext {
+  fn push_plm(&mut self, plm: TMPLm<DropTableTMPayloadTypes>) {
     self.master_bundle.plms.push(MasterPLm::DropTable(plm));
   }
 
@@ -131,7 +101,7 @@ impl TMServerContext<DropTablePayloadTypes> for MasterContext {
     &mut self,
     io_ctx: &mut IO,
     rm: &TNodePath,
-    msg: RMMessage<DropTablePayloadTypes>,
+    msg: RMMessage<DropTableTMPayloadTypes>,
   ) {
     self.send_to_t(io_ctx, rm.clone(), msg::TabletMessage::DropTable(msg));
   }
@@ -149,7 +119,7 @@ impl TMServerContext<DropTablePayloadTypes> for MasterContext {
 //  DropTable Implementation
 // -----------------------------------------------------------------------------------------------
 
-pub type DropTableTMES = STMPaxos2PCTMOuter<DropTablePayloadTypes, DropTableTMInner>;
+pub type DropTableTMES = STMPaxos2PCTMOuter<DropTableTMPayloadTypes, DropTableTMInner>;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DropTableTMInner {
@@ -160,7 +130,7 @@ pub struct DropTableTMInner {
   pub table_path: TablePath,
 }
 
-impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
+impl STMPaxos2PCTMInner<DropTableTMPayloadTypes> for DropTableTMInner {
   fn new_follower<IO: BasicIOCtx>(
     _: &mut MasterContext,
     _: &mut IO,
@@ -208,7 +178,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     &mut self,
     ctx: &mut MasterContext,
     io_ctx: &mut IO,
-    committed_plm: &TMCommittedPLm<DropTablePayloadTypes>,
+    committed_plm: &TMCommittedPLm<DropTableTMPayloadTypes>,
   ) -> BTreeMap<TNodePath, DropTableCommit> {
     let (timestamp, rms) = ctx.gossip.update(|gossip| {
       // Compute the resolved timestamp
@@ -308,7 +278,7 @@ impl STMPaxos2PCTMInner<DropTablePayloadTypes> for DropTableTMInner {
     &mut self,
     _: &mut MasterContext,
     _: &mut IO,
-    _: &TMClosedPLm<DropTablePayloadTypes>,
+    _: &TMClosedPLm<DropTableTMPayloadTypes>,
   ) {
   }
 

@@ -1,5 +1,7 @@
-use crate::alter_table_rm_es::{AlterTableRMAction, AlterTableRMES, AlterTableRMInner};
-use crate::alter_table_tm_es::AlterTablePayloadTypes;
+use crate::alter_table_rm_es::{
+  AlterTableRMAction, AlterTableRMES, AlterTableRMInner, AlterTableRMPayloadTypes,
+};
+use crate::alter_table_tm_es::AlterTableTMPayloadTypes;
 use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
 use crate::common::{
   btree_multimap_insert, lookup, map_insert, mk_qid, mk_t, remove_item, update_leader_map,
@@ -7,8 +9,10 @@ use crate::common::{
   OrigP, QueryESResult, QueryPlan, ReadRegion, RemoteLeaderChangedPLm, TableSchema, Timestamp,
   VersionedValue, WriteRegion,
 };
-use crate::drop_table_rm_es::{DropTableRMAction, DropTableRMES, DropTableRMInner};
-use crate::drop_table_tm_es::DropTablePayloadTypes;
+use crate::drop_table_rm_es::{
+  DropTableRMAction, DropTableRMES, DropTableRMInner, DropTableRMPayloadTypes,
+};
+use crate::drop_table_tm_es::DropTableTMPayloadTypes;
 use crate::expression::{
   compute_key_region, is_surely_isolated_multiread, is_surely_isolated_multiwrite, EvalError,
 };
@@ -40,7 +44,6 @@ use crate::server::{
 };
 use crate::slave::{SlaveBackMessage, TabletBundleInsertion};
 use crate::stmpaxos2pc_rm;
-use crate::stmpaxos2pc_tm;
 use crate::storage::{GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableReadES};
 use crate::tm_status::TMStatus;
@@ -1051,8 +1054,8 @@ pub enum TabletPLm {
   LockedCols(plm::LockedCols),
   ReadProtected(plm::ReadProtected),
   FinishQuery(paxos2pc_tm::RMPLm<FinishQueryPayloadTypes>),
-  AlterTable(stmpaxos2pc_rm::RMPLm<AlterTablePayloadTypes>),
-  DropTable(stmpaxos2pc_rm::RMPLm<DropTablePayloadTypes>),
+  AlterTable(stmpaxos2pc_rm::RMPLm<AlterTableRMPayloadTypes>),
+  DropTable(stmpaxos2pc_rm::RMPLm<DropTableRMPayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------

@@ -14,14 +14,14 @@ use std::fmt::Debug;
 pub trait RMServerContext<T: RMPayloadTypes> {
   fn push_plm(&mut self, plm: RMPLm<T>);
 
-  fn send_to_tm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn send_to_tm<IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>>(
     &mut self,
     io_ctx: &mut IO,
-    tm: &T::TMPath,
-    msg: TMMessage<T>,
+    tm: &<<T as RMPayloadTypes>::TM as TMPayloadTypes>::TMPath,
+    msg: TMMessage<T::TM>,
   );
 
-  fn mk_node_path(&self) -> T::RMPath;
+  fn mk_node_path(&self) -> <<T as RMPayloadTypes>::TM as TMPayloadTypes>::RMPath;
 
   fn is_leader(&self) -> bool;
 }
@@ -33,8 +33,9 @@ pub trait RMServerContext<T: RMPayloadTypes> {
 /// There can be multiple `RMPayloadTypes` implementations for a single `TMPayloadTypes`. (An
 /// instance where this is useful if some RMs are in the `SlaveCtx` and other RMs are in
 /// `TabletCtx`. We need a different `RMPayloadTypes` for each case.)
-pub trait RMPayloadTypes: TMPayloadTypes {
+pub trait RMPayloadTypes: Clone {
   // Meta
+  type TM: TMPayloadTypes;
   type RMContext: RMServerContext<Self>;
 
   // Actions
@@ -53,7 +54,7 @@ pub trait RMPayloadTypes: TMPayloadTypes {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RMPreparedPLm<T: RMPayloadTypes> {
   pub query_id: QueryId,
-  pub tm: T::TMPath,
+  pub tm: <<T as RMPayloadTypes>::TM as TMPayloadTypes>::TMPath,
   pub payload: T::RMPreparedPLm,
 }
 
@@ -83,15 +84,15 @@ pub enum RMPLm<T: RMPayloadTypes> {
 pub trait STMPaxos2PCRMInner<T: RMPayloadTypes> {
   /// Constructs an instance of `STMPaxos2PCRMInner` from a Prepared PLm. This is used primarily
   /// by the Follower.
-  fn new<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn new<IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>>(
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-    payload: T::Prepare,
+    payload: <<T as RMPayloadTypes>::TM as TMPayloadTypes>::Prepare,
   ) -> Self;
 
   /// Constructs an instance of `STMPaxos2PCRMInner` from a Prepared PLm. This is used primarily
   /// by the Follower.
-  fn new_follower<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn new_follower<IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>>(
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
     payload: T::RMPreparedPLm,
@@ -101,32 +102,40 @@ pub trait STMPaxos2PCRMInner<T: RMPayloadTypes> {
   /// and while in `WaitingInsertingPrepared`, when an `Abort` arrives.
   /// NOTE: this has to be a static method because it has to be sendable when the RM has cleaned
   /// up the ES, but then a late Commit/Abort message arrives.
-  fn mk_closed() -> T::Closed;
+  fn mk_closed() -> <<T as RMPayloadTypes>::TM as TMPayloadTypes>::Closed;
 
   /// Called in order to get the `RMPreparedPLm` to insert.
-  fn mk_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn mk_prepared_plm<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> T::RMPreparedPLm;
 
   /// Called after PreparedPLm is inserted.
-  fn prepared_plm_inserted<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn prepared_plm_inserted<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-  ) -> T::Prepared;
+  ) -> <<T as RMPayloadTypes>::TM as TMPayloadTypes>::Prepared;
 
   /// Called after all RMs have Prepared.
-  fn mk_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn mk_committed_plm<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-    commit: &T::Commit,
+    commit: &<<T as RMPayloadTypes>::TM as TMPayloadTypes>::Commit,
   ) -> T::RMCommittedPLm;
 
   /// Called after CommittedPLm is inserted.
-  fn committed_plm_inserted<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn committed_plm_inserted<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -134,14 +143,18 @@ pub trait STMPaxos2PCRMInner<T: RMPayloadTypes> {
   ) -> T::RMCommitActionData;
 
   /// Called if one of the RMs returned Aborted.
-  fn mk_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn mk_aborted_plm<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
   ) -> T::RMAbortedPLm;
 
   /// Called after AbortedPLm is inserted.
-  fn aborted_plm_inserted<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn aborted_plm_inserted<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -162,7 +175,7 @@ enum State<T: RMPayloadTypes> {
   Follower,
   WaitingInsertingPrepared,
   InsertingPrepared,
-  Prepared(Prepared<T>),
+  Prepared(Prepared<T::TM>),
   InsertingCommitted,
   InsertingPreparedAborted,
   InsertingAborted,
@@ -176,14 +189,18 @@ pub enum STMPaxos2PCRMAction<T: RMPayloadTypes> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct STMPaxos2PCRMOuter<T: RMPayloadTypes, InnerT> {
   pub query_id: QueryId,
-  tm: T::TMPath,
-  follower: Option<Prepared<T>>,
+  tm: <<T as RMPayloadTypes>::TM as TMPayloadTypes>::TMPath,
+  follower: Option<Prepared<T::TM>>,
   state: State<T>,
   pub inner: InnerT,
 }
 
 impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, InnerT> {
-  pub fn new(query_id: QueryId, tm: T::TMPath, inner: InnerT) -> STMPaxos2PCRMOuter<T, InnerT> {
+  pub fn new(
+    query_id: QueryId,
+    tm: <<T as RMPayloadTypes>::TM as TMPayloadTypes>::TMPath,
+    inner: InnerT,
+  ) -> STMPaxos2PCRMOuter<T, InnerT> {
     STMPaxos2PCRMOuter {
       query_id,
       tm,
@@ -194,7 +211,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
   }
 
   /// This is only called when the `PreparedPLm` is insert at a Follower node.
-  fn init_follower<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn init_follower<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -205,7 +224,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
 
   // STMPaxos2PC messages
 
-  fn handle_prepare<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_prepare<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -220,11 +241,13 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
     STMPaxos2PCRMAction::Wait
   }
 
-  fn handle_commit<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_commit<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-    commit: Commit<T>,
+    commit: Commit<T::TM>,
   ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
       State::Prepared(_) => {
@@ -240,7 +263,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
     STMPaxos2PCRMAction::Wait
   }
 
-  fn handle_abort<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_abort<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -271,11 +296,13 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
 
   /// Construct the `Prepared` RM-to-TM message to send back, and hold it
   /// in the Follower state.
-  fn _handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn _handle_prepared_plm<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-  ) -> Prepared<T> {
+  ) -> Prepared<T::TM> {
     let this_node_path = ctx.mk_node_path();
     let prepared = Prepared {
       query_id: self.query_id.clone(),
@@ -286,7 +313,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
     prepared
   }
 
-  fn handle_prepared_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_prepared_plm<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -311,7 +340,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
     STMPaxos2PCRMAction::Wait
   }
 
-  fn handle_committed_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_committed_plm<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -331,7 +362,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
     }
   }
 
-  fn handle_aborted_plm<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn handle_aborted_plm<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -352,7 +385,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
 
   // Other
 
-  pub fn start_inserting<IO: BasicIOCtx<T::NetworkMessageT>>(
+  pub fn start_inserting<
+    IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
+  >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -413,7 +448,7 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
   }
 
   // Helpers
-  fn send_closed<IO: BasicIOCtx<T::NetworkMessageT>>(
+  fn send_closed<IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>>(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
@@ -439,7 +474,7 @@ pub fn handle_rm_plm<
   T: RMPayloadTypes,
   InnerT: STMPaxos2PCRMInner<T>,
   ConT: Paxos2PCContainer<STMPaxos2PCRMOuter<T, InnerT>>,
-  IO: BasicIOCtx<T::NetworkMessageT>,
+  IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
 >(
   ctx: &mut T::RMContext,
   io_ctx: &mut IO,
@@ -481,12 +516,12 @@ pub fn handle_rm_msg<
   T: RMPayloadTypes,
   InnerT: STMPaxos2PCRMInner<T>,
   ConT: Paxos2PCContainer<STMPaxos2PCRMOuter<T, InnerT>>,
-  IO: BasicIOCtx<T::NetworkMessageT>,
+  IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
 >(
   ctx: &mut T::RMContext,
   io_ctx: &mut IO,
   con: &mut ConT,
-  msg: RMMessage<T>,
+  msg: RMMessage<T::TM>,
 ) -> (QueryId, STMPaxos2PCRMAction<T>) {
   match msg {
     RMMessage::Prepare(prepare) => {

@@ -1,8 +1,8 @@
-use crate::alter_table_tm_es::AlterTablePayloadTypes;
+use crate::alter_table_tm_es::AlterTableTMPayloadTypes;
 use crate::col_usage::ColUsageNode;
 use crate::common::{GossipData, LeaderMap, QueryPlan, RemoteLeaderChangedPLm, Timestamp};
-use crate::create_table_tm_es::CreateTablePayloadTypes;
-use crate::drop_table_tm_es::DropTablePayloadTypes;
+use crate::create_table_tm_es::CreateTableTMPayloadTypes;
+use crate::drop_table_tm_es::DropTableTMPayloadTypes;
 use crate::expression::EvalError;
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::free_node_manager::FreeNodeType;
@@ -211,9 +211,9 @@ pub enum MasterRemotePayload {
   MasterQueryPlanning(MasterQueryPlanningRequest),
 
   // DDL STMPaxos2PC
-  CreateTable(stmpaxos2pc_tm::TMMessage<CreateTablePayloadTypes>),
-  AlterTable(stmpaxos2pc_tm::TMMessage<AlterTablePayloadTypes>),
-  DropTable(stmpaxos2pc_tm::TMMessage<DropTablePayloadTypes>),
+  CreateTable(stmpaxos2pc_tm::TMMessage<CreateTableTMPayloadTypes>),
+  AlterTable(stmpaxos2pc_tm::TMMessage<AlterTableTMPayloadTypes>),
+  DropTable(stmpaxos2pc_tm::TMMessage<DropTableTMPayloadTypes>),
 
   // Reconfig
   SlaveReconfig(SlaveReconfig),
@@ -234,7 +234,7 @@ pub enum SlaveReconfig {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveRemotePayload {
   // CreateTable RM Messages
-  CreateTable(stmpaxos2pc_tm::RMMessage<CreateTablePayloadTypes>),
+  CreateTable(stmpaxos2pc_tm::RMMessage<CreateTableTMPayloadTypes>),
 
   // Reconfig
   ReconfigSlaveGroup(ReconfigSlaveGroup),
@@ -259,8 +259,8 @@ pub enum TabletMessage {
   FinishQuery(paxos2pc_tm::RMMessage<FinishQueryPayloadTypes>),
 
   // DDL RM Messages
-  AlterTable(stmpaxos2pc_tm::RMMessage<AlterTablePayloadTypes>),
-  DropTable(stmpaxos2pc_tm::RMMessage<DropTablePayloadTypes>),
+  AlterTable(stmpaxos2pc_tm::RMMessage<AlterTableTMPayloadTypes>),
+  DropTable(stmpaxos2pc_tm::RMMessage<DropTableTMPayloadTypes>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

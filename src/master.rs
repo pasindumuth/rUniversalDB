@@ -1,13 +1,13 @@
 use crate::alter_table_tm_es::{
-  AlterTablePayloadTypes, AlterTableTMES, AlterTableTMInner, ResponseData,
+  AlterTableTMES, AlterTableTMInner, AlterTableTMPayloadTypes, ResponseData,
 };
 use crate::common::{
   lookup_pos, map_insert, mk_qid, mk_t, mk_tid, remove_item, update_all_eids, GeneralTraceMessage,
   GossipData, LeaderMap, MasterIOCtx, MasterTraceMessage, TableSchema, Timestamp, VersionedValue,
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
-use crate::create_table_tm_es::{CreateTablePayloadTypes, CreateTableTMES, CreateTableTMInner};
-use crate::drop_table_tm_es::{DropTablePayloadTypes, DropTableTMES, DropTableTMInner};
+use crate::create_table_tm_es::{CreateTableTMES, CreateTableTMInner, CreateTableTMPayloadTypes};
+use crate::drop_table_tm_es::{DropTableTMES, DropTableTMInner, DropTableTMPayloadTypes};
 use crate::free_node_manager::{FreeNodeManager, FreeNodeManagerPLm, FreeNodeType};
 use crate::master_query_planning_es::{MasterQueryPlanning, MasterQueryPlanningESS};
 use crate::model::common::{
@@ -57,9 +57,9 @@ pub enum MasterPLm {
   MasterQueryPlanning(MasterQueryPlanning),
 
   // DDL and STMPaxos2PC
-  CreateTable(paxos2pc::TMPLm<CreateTablePayloadTypes>),
-  AlterTable(paxos2pc::TMPLm<AlterTablePayloadTypes>),
-  DropTable(paxos2pc::TMPLm<DropTablePayloadTypes>),
+  CreateTable(paxos2pc::TMPLm<CreateTableTMPayloadTypes>),
+  AlterTable(paxos2pc::TMPLm<AlterTableTMPayloadTypes>),
+  DropTable(paxos2pc::TMPLm<DropTableTMPayloadTypes>),
 
   // FreeNode
   FreeNodeManagerPLm(FreeNodeManagerPLm),

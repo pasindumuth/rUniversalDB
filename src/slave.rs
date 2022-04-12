@@ -3,8 +3,8 @@ use crate::common::{
   LeaderMap, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp, VersionedValue,
 };
 use crate::coord::CoordForwardMsg;
-use crate::create_table_rm_es::{CreateTableRMAction, CreateTableRMES};
-use crate::create_table_tm_es::CreateTablePayloadTypes;
+use crate::create_table_rm_es::{CreateTableRMAction, CreateTableRMES, CreateTableRMPayloadTypes};
+use crate::create_table_tm_es::CreateTableTMPayloadTypes;
 use crate::model::common::{
   CoordGroupId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TabletGroupId,
 };
@@ -13,10 +13,8 @@ use crate::model::message as msg;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use crate::server::ServerContextBase;
-use crate::stmpaxos2pc_rm::RMServerContext;
-use crate::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
+use crate::stmpaxos2pc_rm;
 use crate::tablet::{TabletBundle, TabletForwardMsg, TabletSnapshot};
-use crate::{stmpaxos2pc_rm, stmpaxos2pc_tm as paxos2pc};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,7 +38,7 @@ pub struct SlaveBundle {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlavePLm {
-  CreateTable(stmpaxos2pc_rm::RMPLm<CreateTablePayloadTypes>),
+  CreateTable(stmpaxos2pc_rm::RMPLm<CreateTableRMPayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -750,7 +748,7 @@ impl SlaveContext {
           match paxos_log_msg {
             SlavePLm::CreateTable(plm) => {
               let (query_id, action) =
-                handle_rm_plm(self, io_ctx, &mut statuses.create_table_ess, plm);
+                stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.create_table_ess, plm);
               self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
             }
           }
@@ -785,7 +783,7 @@ impl SlaveContext {
         match payload {
           msg::SlaveRemotePayload::CreateTable(message) => {
             let (query_id, action) =
-              handle_rm_msg(self, io_ctx, &mut statuses.create_table_ess, message);
+              stmpaxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.create_table_ess, message);
             self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
           }
           msg::SlaveRemotePayload::MasterGossip(master_gossip) => {

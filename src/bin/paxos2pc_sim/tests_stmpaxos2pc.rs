@@ -1,7 +1,8 @@
 use crate::message as msg;
 use crate::simulation::Simulation;
 use crate::slave::SlavePLm;
-use crate::stm_simple_tm_es::STMSimplePayloadTypes;
+use crate::stm_simple_rm_es::STMSimpleRMPayloadTypes;
+use crate::stm_simple_tm_es::STMSimpleTMPayloadTypes;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::mk_qid;
@@ -27,8 +28,8 @@ fn check_completion(
   rms: &Vec<SlaveGroupId>,
   tm: &SlaveGroupId,
 ) -> CompletionResult {
-  let mut tm_plms = Vec::<TMPLm<STMSimplePayloadTypes>>::new();
-  let mut rms_plms = BTreeMap::<SlaveGroupId, Vec<RMPLm<STMSimplePayloadTypes>>>::new();
+  let mut tm_plms = Vec::<TMPLm<STMSimpleTMPayloadTypes>>::new();
+  let mut rms_plms = BTreeMap::<SlaveGroupId, Vec<RMPLm<STMSimpleRMPayloadTypes>>>::new();
 
   // Add TMPLms
   for pl_entry in sim.global_pls.get(tm).unwrap() {

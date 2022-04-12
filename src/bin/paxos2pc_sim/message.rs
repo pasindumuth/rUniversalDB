@@ -1,5 +1,5 @@
 use crate::simple_tm_es::SimplePayloadTypes;
-use crate::stm_simple_tm_es::STMSimplePayloadTypes;
+use crate::stm_simple_tm_es::STMSimpleTMPayloadTypes;
 use runiversal::model::common::{QueryId, SlaveGroupId};
 use runiversal::model::message as msg;
 use runiversal::paxos2pc_tm as paxos2pc;
@@ -32,8 +32,8 @@ pub enum SlaveMessage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlaveRemotePayload {
   // Simple STMPaxos2PC
-  STMRMMessage(stmpaxos2pc::RMMessage<STMSimplePayloadTypes>),
-  STMTMMessage(stmpaxos2pc::TMMessage<STMSimplePayloadTypes>),
+  STMRMMessage(stmpaxos2pc::RMMessage<STMSimpleTMPayloadTypes>),
+  STMTMMessage(stmpaxos2pc::TMMessage<STMSimpleTMPayloadTypes>),
 
   // Simple Paxos2PC
   RMMessage(paxos2pc::RMMessage<SimplePayloadTypes>),
