@@ -149,6 +149,7 @@ pub enum SlaveExternalReq {
 pub enum SlaveMessage {
   SlaveExternalReq(SlaveExternalReq),
   RemoteMessage(RemoteMessage<SlaveRemotePayload>),
+  MasterGossip(MasterGossip),
   RemoteLeaderChangedGossip(RemoteLeaderChangedGossip),
   PaxosDriverMessage(PaxosDriverMessage<SharedPaxosBundle>),
 }
@@ -158,6 +159,7 @@ impl SlaveMessage {
     match self {
       Self::PaxosDriverMessage(PaxosDriverMessage::InformLearned(_)) => true,
       Self::PaxosDriverMessage(PaxosDriverMessage::LogSyncResponse(_)) => true,
+      Self::MasterGossip(_) => true,
       Self::RemoteMessage(remote_message) => {
         // We pass MasterGossip through to avoid the case where the Master Leadership
         // changes to a newly reconfigured node, but the Slave never learned about it
@@ -237,7 +239,8 @@ pub enum SlaveRemotePayload {
   // Reconfig
   ReconfigSlaveGroup(ReconfigSlaveGroup),
 
-  // Gossip
+  /// Gossip. This is different from the one at `SlaveMessage` (which is for general
+  /// broadcasting) because this is a response to `MasterGossipRequest`.
   MasterGossip(MasterGossip),
 
   // Forwarding Messages

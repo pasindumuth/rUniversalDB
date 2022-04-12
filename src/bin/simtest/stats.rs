@@ -171,6 +171,7 @@ impl Stats {
             SlaveRemotePayload::ReconfigSlaveGroup(_) => K_UNNACCOUNTED,
           },
         },
+        SlaveMessage::MasterGossip(_) => K_SLAVE_MASTER_GOSSIP,
         SlaveMessage::RemoteLeaderChangedGossip(_) => K_SLAVE_REMOTE_LEADER_CHANGED,
         SlaveMessage::PaxosDriverMessage(m) => match m {
           PaxosDriverMessage::MultiPaxosMessage(_) => K_SLAVE_MULTI_PAXOS_MESSAGE,

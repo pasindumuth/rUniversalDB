@@ -10,7 +10,6 @@ use crate::model::common::{
 };
 use crate::model::common::{EndpointId, QueryId};
 use crate::model::message as msg;
-use crate::model::message::PLEntry;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use crate::server::ServerContextBase;
@@ -505,6 +504,11 @@ impl SlaveContext {
           }
         }
       }
+      msg::SlaveMessage::MasterGossip(master_gossip) => {
+        if self.is_leader() {
+          self.handle_master_gossip(master_gossip);
+        }
+      }
       msg::SlaveMessage::PaxosDriverMessage(paxos_message) => {
         let bundles = self.paxos_driver.handle_paxos_message(
           &mut SlavePaxosContext { io_ctx, this_eid: &self.this_eid },
@@ -807,18 +811,7 @@ impl SlaveContext {
             self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
           }
           msg::SlaveRemotePayload::MasterGossip(master_gossip) => {
-            let incoming_gossip = master_gossip.gossip_data;
-            let incoming_leader_map = master_gossip.leader_map;
-            if self.gossip.get_gen() < incoming_gossip.get_gen() {
-              if let Some((cur_next_gossip, _)) = &self.slave_bundle.gossip_data {
-                // Check if there is an existing GossipData about to be inserted.
-                if cur_next_gossip.get_gen() < incoming_gossip.get_gen() {
-                  self.slave_bundle.gossip_data = Some((incoming_gossip, incoming_leader_map));
-                }
-              } else {
-                self.slave_bundle.gossip_data = Some((incoming_gossip, incoming_leader_map));
-              }
-            }
+            self.handle_master_gossip(master_gossip);
           }
           msg::SlaveRemotePayload::TabletMessage(tid, tablet_msg) => {
             io_ctx.tablet_forward(&tid, TabletForwardMsg::TabletMessage(tablet_msg))
@@ -1055,6 +1048,23 @@ impl SlaveContext {
           // We amend tablet_bundles with an initial value, as per SharedPaxosInserter
           self.tablet_bundles.insert(this_tid, TabletBundle::default());
         }
+      }
+    }
+  }
+
+  /// Checks if the incoming `master_gossip` has a more recent `gen`, and starts inserting
+  /// that into the `slave_bundle` if so.
+  fn handle_master_gossip(&mut self, master_gossip: msg::MasterGossip) {
+    let incoming_gossip = master_gossip.gossip_data;
+    let incoming_leader_map = master_gossip.leader_map;
+    if self.gossip.get_gen() < incoming_gossip.get_gen() {
+      if let Some((cur_next_gossip, _)) = &self.slave_bundle.gossip_data {
+        // Check if there is an existing GossipData about to be inserted.
+        if cur_next_gossip.get_gen() < incoming_gossip.get_gen() {
+          self.slave_bundle.gossip_data = Some((incoming_gossip, incoming_leader_map));
+        }
+      } else {
+        self.slave_bundle.gossip_data = Some((incoming_gossip, incoming_leader_map));
       }
     }
   }

@@ -125,9 +125,13 @@ pub enum MasterTimerInput {
   /// This is used to periodically propagate out RemoteLeaderChanged. It is
   /// only used by the Leader.
   RemoteLeaderChanged,
-  /// This is used to periodically broadcast the `GossipData` to the Slave Leaderships. This
-  /// ensures all Slave Nodes eventually get the latest `GossipData`.
-  BroadcastGossip,
+  /// This is used to periodically broadcast the `GossipData` to the Slave Leaderships. Most
+  /// Slaves will get the latest `GossipData` this way. Nevertheless, some rare conditions can
+  /// make this fail for a given Slave, at which point we need the `GeneralBroadcastGossip`.
+  FastBroadcastGossip,
+  /// A less frequent but more reliable way of broadcasting `GossipData`
+  /// than `FastBroadcastGossip`.
+  GeneralBroadcastGossip,
   /// A Time event to detect if the Master PaxosGroup has a failed node.
   PaxosGroupFailureDetector,
   /// A timer event to detect if there are any `unconfirmed_eids` in the PaxosDriver. We
@@ -449,7 +453,8 @@ impl MasterState {
     // Start other time events
     for event in [
       MasterTimerInput::RemoteLeaderChanged,
-      MasterTimerInput::BroadcastGossip,
+      MasterTimerInput::FastBroadcastGossip,
+      MasterTimerInput::GeneralBroadcastGossip,
       MasterTimerInput::PaxosGroupFailureDetector,
       MasterTimerInput::CheckUnconfirmedEids,
       MasterTimerInput::FreeNodeHeartbeatTimer,
@@ -703,16 +708,27 @@ impl MasterContext {
           let defer_time = mk_t(self.master_config.remote_leader_changed_period_ms);
           io_ctx.defer(defer_time, MasterTimerInput::RemoteLeaderChanged);
         }
-        MasterTimerInput::BroadcastGossip => {
+        MasterTimerInput::FastBroadcastGossip => {
           if self.is_leader() {
-            // If this node is the Leader, then send out GossipData to all Slaves.
+            // If this node is the Leader, then send out GossipData to all Slaves Leaderships.
             self.broadcast_gossip(io_ctx);
           }
 
           // We schedule this both for all nodes, not just Leaders, so that when a Follower
           // becomes the Leader, these timer events will already be working.
           let defer_time = mk_t(self.master_config.gossip_data_period_ms);
-          io_ctx.defer(defer_time, MasterTimerInput::BroadcastGossip);
+          io_ctx.defer(defer_time, MasterTimerInput::FastBroadcastGossip);
+        }
+        MasterTimerInput::GeneralBroadcastGossip => {
+          if self.is_leader() {
+            // If this node is the Leader, then send out GossipData to all Slaves Nodes.
+            self.general_broadcast_gossip(io_ctx);
+          }
+
+          // We schedule this both for all nodes, not just Leaders, so that when a Follower
+          // becomes the Leader, these timer events will already be working.
+          let defer_time = mk_t(self.master_config.gossip_data_period_ms * 100);
+          io_ctx.defer(defer_time, MasterTimerInput::GeneralBroadcastGossip);
         }
         MasterTimerInput::PaxosGroupFailureDetector => {
           if self.is_leader() {
@@ -1457,6 +1473,22 @@ impl MasterContext {
     let sids: Vec<SlaveGroupId> = self.gossip.get().slave_address_config.keys().cloned().collect();
     for sid in sids {
       self.send_gossip(io_ctx, sid);
+    }
+  }
+
+  /// Broadcast out `MasterGossip` to *all* Slave Nodes.
+  pub fn general_broadcast_gossip<IO: BasicIOCtx<msg::NetworkMessage>>(&self, io_ctx: &mut IO) {
+    // Send to SlaveGroups
+    for (_, eids) in self.gossip.get().slave_address_config {
+      for eid in eids {
+        io_ctx.send(
+          eid,
+          msg::NetworkMessage::Slave(msg::SlaveMessage::MasterGossip(msg::MasterGossip {
+            gossip_data: self.gossip.clone(),
+            leader_map: self.leader_map.value().clone(),
+          })),
+        )
+      }
     }
   }
 
