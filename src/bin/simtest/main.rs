@@ -54,6 +54,11 @@ fn main() {
         .required(false)
         .help("Indicates if the simulation tests should be run in parallel."),
     )
+    .arg(
+      arg!(-r --rounds <VALUE>)
+        .required(false)
+        .help("The number of rounds to execute the parallel tests."),
+    )
     .get_matches();
 
   // Run Serial tests in just one thread (since these are fast).
@@ -66,11 +71,18 @@ fn main() {
   println!("\n");
 
   // Run parallel tests, potentially in multiple threads if requested.
+  const DEFAUL_NUM_ROUNDS: u32 = 50;
+  let rounds: u32 = if let Some(rounds) = matches.value_of("rounds") {
+    rounds.parse().unwrap()
+  } else {
+    DEFAUL_NUM_ROUNDS
+  };
+
   if let Some(instances) = matches.value_of("instances") {
     let instances: u32 = instances.parse().unwrap();
-    execute_multi(instances, &mut rand);
+    execute_multi(&mut rand, instances, rounds);
   } else {
-    execute_once(&mut rand)
+    execute_once(&mut rand, rounds);
   }
 
   // TODO: this test grinds to a halt when we use the many-messages delivery scheme.
@@ -200,18 +212,18 @@ enum ParallelTestMessage {
 }
 
 /// Execute parallel tests in a single thread.
-fn execute_once(rand: &mut XorShiftRng) {
+fn execute_once(rand: &mut XorShiftRng, rounds: u32) {
   let mut writer = BasicPrintWriter {};
   println!("Paxos Parallel Tests:");
-  test_all_paxos_parallel(rand, &mut writer);
+  test_all_paxos_parallel(rand, &mut writer, rounds);
   println!("\n");
   println!("Basic Parallel Tests:");
-  test_all_basic_parallel(rand, &mut writer);
+  test_all_basic_parallel(rand, &mut writer, rounds);
   println!("\n");
 }
 
 /// Execute parallel tests in multiple threads.
-fn execute_multi(instances: u32, rand: &mut XorShiftRng) {
+fn execute_multi(rand: &mut XorShiftRng, instances: u32, rounds: u32) {
   let (sender, receiver) = mpsc::channel::<ParallelTestMessage>();
 
   // Create `instances` number of threads to run the test in parallel.
@@ -225,10 +237,10 @@ fn execute_multi(instances: u32, rand: &mut XorShiftRng) {
       // Catch any panics or errors that happen inside
       let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         println!("Paxos Parallel Tests:");
-        let parallel_stats = test_all_paxos_parallel(&mut rand, &mut writer);
+        let parallel_stats = test_all_paxos_parallel(&mut rand, &mut writer, rounds);
         println!("\n");
         println!("Basic Parallel Tests:");
-        let stats_basic = test_all_basic_parallel(&mut rand, &mut writer);
+        let stats_basic = test_all_basic_parallel(&mut rand, &mut writer, rounds);
         println!("\n");
 
         (parallel_stats, stats_basic)
