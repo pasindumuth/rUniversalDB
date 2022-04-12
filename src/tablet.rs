@@ -1101,12 +1101,17 @@ pub struct TabletCreateHelper {
 // -----------------------------------------------------------------------------------------------
 
 impl stmpaxos2pc_tm::RMServerContext<AlterTablePayloadTypes> for TabletContext {
-  fn push_plm(&mut self, plm: TabletPLm) {
-    self.tablet_bundle.push(plm);
+  fn push_plm(&mut self, plm: stmpaxos2pc_tm::RMPLm<AlterTablePayloadTypes>) {
+    self.tablet_bundle.push(TabletPLm::AlterTable(plm));
   }
 
-  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, _: &(), msg: msg::MasterRemotePayload) {
-    self.send_to_master(io_ctx, msg);
+  fn send_to_tm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    _: &(),
+    msg: stmpaxos2pc_tm::TMMessage<AlterTablePayloadTypes>,
+  ) {
+    self.send_to_master(io_ctx, msg::MasterRemotePayload::AlterTable(msg));
   }
 
   fn mk_node_path(&self) -> TNodePath {
@@ -1123,12 +1128,17 @@ impl stmpaxos2pc_tm::RMServerContext<AlterTablePayloadTypes> for TabletContext {
 // -----------------------------------------------------------------------------------------------
 
 impl stmpaxos2pc_tm::RMServerContext<DropTablePayloadTypes> for TabletContext {
-  fn push_plm(&mut self, plm: TabletPLm) {
-    self.tablet_bundle.push(plm);
+  fn push_plm(&mut self, plm: stmpaxos2pc_tm::RMPLm<DropTablePayloadTypes>) {
+    self.tablet_bundle.push(TabletPLm::DropTable(plm));
   }
 
-  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, _: &(), msg: msg::MasterRemotePayload) {
-    self.send_to_master(io_ctx, msg);
+  fn send_to_tm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    _: &(),
+    msg: stmpaxos2pc_tm::TMMessage<DropTablePayloadTypes>,
+  ) {
+    self.send_to_master(io_ctx, msg::MasterRemotePayload::DropTable(msg));
   }
 
   fn mk_node_path(&self) -> TNodePath {

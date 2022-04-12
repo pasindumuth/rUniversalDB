@@ -90,7 +90,7 @@ pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum State<T: PayloadTypes> {
+enum State<T: PayloadTypes> {
   Follower,
   WaitingInsertingPrepared,
   InsertingPrepared,
@@ -108,9 +108,9 @@ pub enum STMPaxos2PCRMAction<T: PayloadTypes> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct STMPaxos2PCRMOuter<T: PayloadTypes, InnerT> {
   pub query_id: QueryId,
-  pub tm: T::TMPath,
-  pub follower: Option<Prepared<T>>,
-  pub state: State<T>,
+  tm: T::TMPath,
+  follower: Option<Prepared<T>>,
+  state: State<T>,
   pub inner: InnerT,
 }
 
@@ -145,7 +145,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     match &self.state {
       State::Prepared(prepared) => {
         // Populate with TM. Hold it here in the RM.
-        ctx.send_to_tm(io_ctx, &self.tm, T::tm_msg(TMMessage::Prepared(prepared.clone())));
+        ctx.send_to_tm(io_ctx, &self.tm, TMMessage::Prepared(prepared.clone()));
       }
       _ => {}
     }
@@ -160,10 +160,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
   ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
       State::Prepared(_) => {
-        let committed_plm = T::rm_plm(RMPLm::Committed(RMCommittedPLm {
+        let committed_plm = RMPLm::Committed(RMCommittedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_committed_plm(ctx, io_ctx, &commit.payload),
-        }));
+        });
         ctx.push_plm(committed_plm);
         self.state = State::InsertingCommitted;
       }
@@ -187,10 +187,10 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
         STMPaxos2PCRMAction::Wait
       }
       State::Prepared(_) => {
-        let aborted_plm = T::rm_plm(RMPLm::Aborted(RMAbortedPLm {
+        let aborted_plm = RMPLm::Aborted(RMAbortedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_aborted_plm(ctx, io_ctx),
-        }));
+        });
         ctx.push_plm(aborted_plm);
         self.state = State::InsertingAborted;
         STMPaxos2PCRMAction::Wait
@@ -226,15 +226,15 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     match &self.state {
       State::InsertingPrepared => {
         let prepared = self._handle_prepared_plm(ctx, io_ctx);
-        ctx.send_to_tm(io_ctx, &self.tm, T::tm_msg(TMMessage::Prepared(prepared.clone())));
+        ctx.send_to_tm(io_ctx, &self.tm, TMMessage::Prepared(prepared.clone()));
         self.state = State::Prepared(prepared);
       }
       State::InsertingPreparedAborted => {
         self._handle_prepared_plm(ctx, io_ctx);
-        let aborted_plm = T::rm_plm(RMPLm::Aborted(RMAbortedPLm {
+        let aborted_plm = RMPLm::Aborted(RMAbortedPLm {
           query_id: self.query_id.clone(),
           payload: self.inner.mk_aborted_plm(ctx, io_ctx),
-        }));
+        });
         ctx.push_plm(aborted_plm);
         self.state = State::InsertingAborted;
       }
@@ -296,7 +296,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
           tm: self.tm.clone(),
           payload: self.inner.mk_prepared_plm(ctx, io_ctx),
         };
-        ctx.push_plm(T::rm_plm(RMPLm::Prepared(prepared_plm)));
+        ctx.push_plm(RMPLm::Prepared(prepared_plm));
         self.state = State::InsertingPrepared;
       }
       _ => {}
@@ -354,11 +354,11 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
     ctx.send_to_tm(
       io_ctx,
       &self.tm,
-      T::tm_msg(TMMessage::Closed(Closed {
+      TMMessage::Closed(Closed {
         query_id: self.query_id.clone(),
         rm: this_node_path,
         payload: InnerT::mk_closed(),
-      })),
+      }),
     );
   }
 }
@@ -442,11 +442,11 @@ pub fn handle_rm_msg<
         ctx.send_to_tm(
           io_ctx,
           &abort.tm,
-          T::tm_msg(TMMessage::Closed(Closed {
+          TMMessage::Closed(Closed {
             query_id: abort.query_id.clone(),
             rm: this_node_path,
             payload: InnerT::mk_closed(),
-          })),
+          }),
         );
         (abort.query_id, STMPaxos2PCRMAction::Wait)
       }
@@ -460,11 +460,11 @@ pub fn handle_rm_msg<
         ctx.send_to_tm(
           io_ctx,
           &commit.tm,
-          T::tm_msg(TMMessage::Closed(Closed {
+          TMMessage::Closed(Closed {
             query_id: query_id.clone(),
             rm: this_node_path,
             payload: InnerT::mk_closed(),
-          })),
+          }),
         );
         (query_id, STMPaxos2PCRMAction::Wait)
       }

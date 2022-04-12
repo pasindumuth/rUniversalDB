@@ -1,4 +1,5 @@
 use crate::message as msg;
+use crate::message::NetworkMessage::Slave;
 use crate::message::{ExternalMessage, SlaveMessage, SlaveRemotePayload};
 use crate::simple_rm_es::SimpleRMES;
 use crate::simple_tm_es::{SimplePayloadTypes, SimplePrepare, SimpleTMES, SimpleTMInner};
@@ -87,17 +88,17 @@ pub struct Statuses {
 // -----------------------------------------------------------------------------------------------
 
 impl stmpaxos2pc_tm::TMServerContext<STMSimplePayloadTypes> for SlaveContext {
-  fn push_plm(&mut self, plm: SlavePLm) {
-    self.slave_bundle.plms.push(plm);
+  fn push_plm(&mut self, plm: stmpaxos2pc_tm::TMPLm<STMSimplePayloadTypes>) {
+    self.slave_bundle.plms.push(SlavePLm::SimpleSTMTM(plm));
   }
 
   fn send_to_rm<IO: BasicIOCtx<msg::NetworkMessage>>(
     &mut self,
     io_ctx: &mut IO,
     rm: &SlaveGroupId,
-    msg: msg::SlaveRemotePayload,
+    msg: stmpaxos2pc_tm::RMMessage<STMSimplePayloadTypes>,
   ) {
-    self.send(io_ctx, rm, msg);
+    self.send(io_ctx, rm, msg::SlaveRemotePayload::STMRMMessage(msg));
   }
 
   fn mk_node_path(&self) -> SlaveGroupId {
@@ -114,17 +115,17 @@ impl stmpaxos2pc_tm::TMServerContext<STMSimplePayloadTypes> for SlaveContext {
 // -----------------------------------------------------------------------------------------------
 
 impl stmpaxos2pc_tm::RMServerContext<STMSimplePayloadTypes> for SlaveContext {
-  fn push_plm(&mut self, plm: SlavePLm) {
-    self.slave_bundle.plms.push(plm);
+  fn push_plm(&mut self, plm: stmpaxos2pc_tm::RMPLm<STMSimplePayloadTypes>) {
+    self.slave_bundle.plms.push(SlavePLm::SimpleSTMRM(plm));
   }
 
   fn send_to_tm<IO: BasicIOCtx<msg::NetworkMessage>>(
     &mut self,
     io_ctx: &mut IO,
     tm: &SlaveGroupId,
-    msg: msg::SlaveRemotePayload,
+    msg: stmpaxos2pc_tm::TMMessage<STMSimplePayloadTypes>,
   ) {
-    self.send(io_ctx, tm, msg);
+    self.send(io_ctx, tm, msg::SlaveRemotePayload::STMTMMessage(msg));
   }
 
   fn mk_node_path(&self) -> SlaveGroupId {

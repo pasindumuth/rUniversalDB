@@ -151,17 +151,17 @@ pub enum FullMasterInput {
 // -----------------------------------------------------------------------------------------------
 
 impl TMServerContext<AlterTablePayloadTypes> for MasterContext {
-  fn push_plm(&mut self, plm: MasterPLm) {
-    self.master_bundle.plms.push(plm);
+  fn push_plm(&mut self, plm: paxos2pc::TMPLm<AlterTablePayloadTypes>) {
+    self.master_bundle.plms.push(MasterPLm::AlterTable(plm));
   }
 
   fn send_to_rm<IO: BasicIOCtx>(
     &mut self,
     io_ctx: &mut IO,
     rm: &TNodePath,
-    msg: msg::TabletMessage,
+    msg: paxos2pc::RMMessage<AlterTablePayloadTypes>,
   ) {
-    self.send_to_t(io_ctx, rm.clone(), msg);
+    self.send_to_t(io_ctx, rm.clone(), msg::TabletMessage::AlterTable(msg));
   }
 
   fn mk_node_path(&self) -> () {
@@ -178,17 +178,17 @@ impl TMServerContext<AlterTablePayloadTypes> for MasterContext {
 // -----------------------------------------------------------------------------------------------
 
 impl TMServerContext<DropTablePayloadTypes> for MasterContext {
-  fn push_plm(&mut self, plm: MasterPLm) {
-    self.master_bundle.plms.push(plm);
+  fn push_plm(&mut self, plm: paxos2pc::TMPLm<DropTablePayloadTypes>) {
+    self.master_bundle.plms.push(MasterPLm::DropTable(plm));
   }
 
   fn send_to_rm<IO: BasicIOCtx>(
     &mut self,
     io_ctx: &mut IO,
     rm: &TNodePath,
-    msg: msg::TabletMessage,
+    msg: paxos2pc::RMMessage<DropTablePayloadTypes>,
   ) {
-    self.send_to_t(io_ctx, rm.clone(), msg);
+    self.send_to_t(io_ctx, rm.clone(), msg::TabletMessage::DropTable(msg));
   }
 
   fn mk_node_path(&self) -> () {
@@ -205,17 +205,17 @@ impl TMServerContext<DropTablePayloadTypes> for MasterContext {
 // -----------------------------------------------------------------------------------------------
 
 impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
-  fn push_plm(&mut self, plm: MasterPLm) {
-    self.master_bundle.plms.push(plm);
+  fn push_plm(&mut self, plm: paxos2pc::TMPLm<CreateTablePayloadTypes>) {
+    self.master_bundle.plms.push(MasterPLm::CreateTable(plm));
   }
 
   fn send_to_rm<IO: BasicIOCtx>(
     &mut self,
     io_ctx: &mut IO,
     rm: &SlaveGroupId,
-    msg: msg::SlaveRemotePayload,
+    msg: paxos2pc::RMMessage<CreateTablePayloadTypes>,
   ) {
-    self.send_to_slave_common(io_ctx, rm.clone(), msg);
+    self.send_to_slave_common(io_ctx, rm.clone(), msg::SlaveRemotePayload::CreateTable(msg));
   }
 
   fn mk_node_path(&self) -> () {

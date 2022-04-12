@@ -69,12 +69,8 @@ pub struct STMSimplePayloadTypes {}
 
 impl PayloadTypes for STMSimplePayloadTypes {
   // Master
-  type RMPLm = SlavePLm;
-  type TMPLm = SlavePLm;
   type RMPath = SlaveGroupId;
   type TMPath = SlaveGroupId;
-  type RMMessage = msg::SlaveRemotePayload;
-  type TMMessage = msg::SlaveRemotePayload;
   type NetworkMessageT = msg::NetworkMessage;
   type RMContext = SlaveContext;
   type TMContext = SlaveContext;
@@ -88,36 +84,20 @@ impl PayloadTypes for STMSimplePayloadTypes {
   type TMAbortedPLm = STMSimpleTMAborted;
   type TMClosedPLm = STMSimpleTMClosed;
 
-  fn tm_plm(plm: TMPLm<Self>) -> Self::TMPLm {
-    SlavePLm::SimpleSTMTM(plm)
-  }
-
   // RM PLm
   type RMPreparedPLm = STMSimpleRMPrepared;
   type RMCommittedPLm = STMSimpleRMCommitted;
   type RMAbortedPLm = STMSimpleRMAborted;
-
-  fn rm_plm(plm: RMPLm<Self>) -> Self::RMPLm {
-    SlavePLm::SimpleSTMRM(plm)
-  }
 
   // TM-to-RM Messages
   type Prepare = STMSimplePrepare;
   type Abort = STMSimpleAbort;
   type Commit = STMSimpleCommit;
 
-  fn rm_msg(msg: RMMessage<Self>) -> Self::RMMessage {
-    msg::SlaveRemotePayload::STMRMMessage(msg)
-  }
-
   // RM-to-TM Messages
   type Prepared = STMSimplePrepared;
   type Aborted = STMSimpleAborted;
   type Closed = STMSimpleClosed;
-
-  fn tm_msg(msg: TMMessage<Self>) -> Self::TMMessage {
-    msg::SlaveRemotePayload::STMTMMessage(msg)
-  }
 }
 
 // -----------------------------------------------------------------------------------------------

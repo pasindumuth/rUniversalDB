@@ -193,12 +193,17 @@ pub struct Statuses {
 // -----------------------------------------------------------------------------------------------
 
 impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
-  fn push_plm(&mut self, plm: SlavePLm) {
-    self.slave_bundle.plms.push(plm);
+  fn push_plm(&mut self, plm: paxos2pc::RMPLm<CreateTablePayloadTypes>) {
+    self.slave_bundle.plms.push(SlavePLm::CreateTable(plm));
   }
 
-  fn send_to_tm<IO: BasicIOCtx>(&mut self, io_ctx: &mut IO, _: &(), msg: msg::MasterRemotePayload) {
-    self.send_to_master(io_ctx, msg);
+  fn send_to_tm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    _: &(),
+    msg: paxos2pc::TMMessage<CreateTablePayloadTypes>,
+  ) {
+    self.send_to_master(io_ctx, msg::MasterRemotePayload::CreateTable(msg));
   }
 
   fn mk_node_path(&self) -> SlaveGroupId {

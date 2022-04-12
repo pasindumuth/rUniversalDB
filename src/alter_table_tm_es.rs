@@ -87,12 +87,8 @@ pub struct AlterTablePayloadTypes {}
 
 impl PayloadTypes for AlterTablePayloadTypes {
   // Master
-  type RMPLm = TabletPLm;
-  type TMPLm = MasterPLm;
   type RMPath = TNodePath;
   type TMPath = ();
-  type RMMessage = msg::TabletMessage;
-  type TMMessage = msg::MasterRemotePayload;
   type NetworkMessageT = msg::NetworkMessage;
   type RMContext = TabletContext;
   type TMContext = MasterContext;
@@ -106,36 +102,20 @@ impl PayloadTypes for AlterTablePayloadTypes {
   type TMAbortedPLm = AlterTableTMAborted;
   type TMClosedPLm = AlterTableTMClosed;
 
-  fn tm_plm(plm: TMPLm<Self>) -> Self::TMPLm {
-    MasterPLm::AlterTable(plm)
-  }
-
   // RM PLm
   type RMPreparedPLm = AlterTableRMPrepared;
   type RMCommittedPLm = AlterTableRMCommitted;
   type RMAbortedPLm = AlterTableRMAborted;
-
-  fn rm_plm(plm: RMPLm<Self>) -> Self::RMPLm {
-    TabletPLm::AlterTable(plm)
-  }
 
   // TM-to-RM Messages
   type Prepare = AlterTablePrepare;
   type Abort = AlterTableAbort;
   type Commit = AlterTableCommit;
 
-  fn rm_msg(msg: RMMessage<Self>) -> Self::RMMessage {
-    msg::TabletMessage::AlterTable(msg)
-  }
-
   // RM-to-TM Messages
   type Prepared = AlterTablePrepared;
   type Aborted = AlterTableAborted;
   type Closed = AlterTableClosed;
-
-  fn tm_msg(msg: TMMessage<Self>) -> Self::TMMessage {
-    msg::MasterRemotePayload::AlterTable(msg)
-  }
 }
 
 // -----------------------------------------------------------------------------------------------

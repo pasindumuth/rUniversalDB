@@ -104,12 +104,8 @@ pub struct CreateTablePayloadTypes {}
 
 impl PayloadTypes for CreateTablePayloadTypes {
   // Master
-  type RMPLm = SlavePLm;
-  type TMPLm = MasterPLm;
   type RMPath = SlaveGroupId;
   type TMPath = ();
-  type RMMessage = msg::SlaveRemotePayload;
-  type TMMessage = msg::MasterRemotePayload;
   type NetworkMessageT = msg::NetworkMessage;
   type RMContext = SlaveContext;
   type TMContext = MasterContext;
@@ -123,36 +119,20 @@ impl PayloadTypes for CreateTablePayloadTypes {
   type TMAbortedPLm = CreateTableTMAborted;
   type TMClosedPLm = CreateTableTMClosed;
 
-  fn tm_plm(plm: TMPLm<Self>) -> Self::TMPLm {
-    MasterPLm::CreateTable(plm)
-  }
-
   // RM PLm
   type RMPreparedPLm = CreateTableRMPrepared;
   type RMCommittedPLm = CreateTableRMCommitted;
   type RMAbortedPLm = CreateTableRMAborted;
-
-  fn rm_plm(plm: RMPLm<Self>) -> Self::RMPLm {
-    SlavePLm::CreateTable(plm)
-  }
 
   // TM-to-RM Messages
   type Prepare = CreateTablePrepare;
   type Abort = CreateTableAbort;
   type Commit = CreateTableCommit;
 
-  fn rm_msg(msg: RMMessage<Self>) -> Self::RMMessage {
-    msg::SlaveRemotePayload::CreateTable(msg)
-  }
-
   // RM-to-TM Messages
   type Prepared = CreateTablePrepared;
   type Aborted = CreateTableAborted;
   type Closed = CreateTableClosed;
-
-  fn tm_msg(msg: TMMessage<Self>) -> Self::TMMessage {
-    msg::MasterRemotePayload::CreateTable(msg)
-  }
 }
 
 // -----------------------------------------------------------------------------------------------

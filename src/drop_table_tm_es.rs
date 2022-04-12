@@ -82,12 +82,8 @@ pub struct DropTablePayloadTypes {}
 
 impl PayloadTypes for DropTablePayloadTypes {
   // Master
-  type RMPLm = TabletPLm;
-  type TMPLm = MasterPLm;
   type RMPath = TNodePath;
   type TMPath = ();
-  type RMMessage = msg::TabletMessage;
-  type TMMessage = msg::MasterRemotePayload;
   type NetworkMessageT = msg::NetworkMessage;
   type RMContext = TabletContext;
   type TMContext = MasterContext;
@@ -101,36 +97,20 @@ impl PayloadTypes for DropTablePayloadTypes {
   type TMAbortedPLm = DropTableTMAborted;
   type TMClosedPLm = DropTableTMClosed;
 
-  fn tm_plm(plm: TMPLm<Self>) -> Self::TMPLm {
-    MasterPLm::DropTable(plm)
-  }
-
   // RM PLm
   type RMPreparedPLm = DropTableRMPrepared;
   type RMCommittedPLm = DropTableRMCommitted;
   type RMAbortedPLm = DropTableRMAborted;
-
-  fn rm_plm(plm: RMPLm<Self>) -> Self::RMPLm {
-    TabletPLm::DropTable(plm)
-  }
 
   // TM-to-RM Messages
   type Prepare = DropTablePrepare;
   type Abort = DropTableAbort;
   type Commit = DropTableCommit;
 
-  fn rm_msg(msg: RMMessage<Self>) -> Self::RMMessage {
-    msg::TabletMessage::DropTable(msg)
-  }
-
   // RM-to-TM Messages
   type Prepared = DropTablePrepared;
   type Aborted = DropTableAborted;
   type Closed = DropTableClosed;
-
-  fn tm_msg(msg: TMMessage<Self>) -> Self::TMMessage {
-    msg::MasterRemotePayload::DropTable(msg)
-  }
 }
 
 // -----------------------------------------------------------------------------------------------
