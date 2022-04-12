@@ -6,8 +6,8 @@ use crate::create_table_tm_es::{
 use crate::model::common::{ColName, ColType, Gen, TablePath, TabletGroupId, TabletKeyRange};
 use crate::multiversion_map::MVM;
 use crate::slave::SlaveContext;
+use crate::stmpaxos2pc_rm::RMCommittedPLm;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
-use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::{TabletConfig, TabletCreateHelper};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};

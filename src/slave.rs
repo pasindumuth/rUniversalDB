@@ -13,10 +13,10 @@ use crate::model::message as msg;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use crate::server::ServerContextBase;
+use crate::stmpaxos2pc_rm::RMServerContext;
 use crate::stmpaxos2pc_rm::{handle_rm_msg, handle_rm_plm, STMPaxos2PCRMAction};
-use crate::stmpaxos2pc_tm as paxos2pc;
-use crate::stmpaxos2pc_tm::RMServerContext;
 use crate::tablet::{TabletBundle, TabletForwardMsg, TabletSnapshot};
+use crate::{stmpaxos2pc_rm, stmpaxos2pc_tm as paxos2pc};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,7 +40,7 @@ pub struct SlaveBundle {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlavePLm {
-  CreateTable(paxos2pc::RMPLm<CreateTablePayloadTypes>),
+  CreateTable(stmpaxos2pc_rm::RMPLm<CreateTablePayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -193,7 +193,7 @@ pub struct Statuses {
 // -----------------------------------------------------------------------------------------------
 
 impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
-  fn push_plm(&mut self, plm: paxos2pc::RMPLm<CreateTablePayloadTypes>) {
+  fn push_plm(&mut self, plm: stmpaxos2pc_rm::RMPLm<CreateTablePayloadTypes>) {
     self.slave_bundle.plms.push(SlavePLm::CreateTable(plm));
   }
 

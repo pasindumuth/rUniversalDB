@@ -7,29 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
 // -----------------------------------------------------------------------------------------------
-//  RMServerContext
-// -----------------------------------------------------------------------------------------------
-
-pub trait RMServerContext<T: PayloadTypes> {
-  fn push_plm(&mut self, plm: RMPLm<T>);
-
-  fn send_to_tm<IO: BasicIOCtx<T::NetworkMessageT>>(
-    &mut self,
-    io_ctx: &mut IO,
-    tm: &T::TMPath,
-    msg: TMMessage<T>,
-  );
-
-  fn mk_node_path(&self) -> T::RMPath;
-
-  fn is_leader(&self) -> bool;
-}
-
-// -----------------------------------------------------------------------------------------------
 //  TMServerContext
 // -----------------------------------------------------------------------------------------------
 
-pub trait TMServerContext<T: PayloadTypes> {
+pub trait TMServerContext<T: TMPayloadTypes> {
   fn push_plm(&mut self, plm: TMPLm<T>);
 
   fn send_to_rm<IO: BasicIOCtx<T::NetworkMessageT>>(
@@ -45,10 +26,10 @@ pub trait TMServerContext<T: PayloadTypes> {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  STMPaxos2PC
+//  STMPaxos2PCTM
 // -----------------------------------------------------------------------------------------------
 
-pub trait PayloadTypes: Clone {
+pub trait TMPayloadTypes: Clone {
   // Meta
   type RMPath: Serialize
     + DeserializeOwned
@@ -61,25 +42,13 @@ pub trait PayloadTypes: Clone {
     + PaxosGroupIdTrait;
   type TMPath: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
   type NetworkMessageT;
-  type RMContext: RMServerContext<Self>;
   type TMContext: TMServerContext<Self>;
-
-  // Actions
-  /// These are sent out from the `Inner` and propagated out of the `Outer`. We
-  /// sometimes need this for when the `Inner` would otherwise need to access a
-  /// more specific `IOCtx` than `BasicIOCtx` (which it cannot).
-  type RMCommitActionData;
 
   // TM PLm
   type TMPreparedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
   type TMCommittedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
   type TMAbortedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
   type TMClosedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
-
-  // RM PLm
-  type RMPreparedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
-  type RMCommittedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
-  type RMAbortedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
 
   // TM-to-RM Messages
   type Prepare: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
@@ -94,88 +63,61 @@ pub trait PayloadTypes: Clone {
 
 // TM PLm
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct TMPreparedPLm<T: PayloadTypes> {
+pub struct TMPreparedPLm<T: TMPayloadTypes> {
   pub query_id: QueryId,
   pub payload: T::TMPreparedPLm,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct TMCommittedPLm<T: PayloadTypes> {
+pub struct TMCommittedPLm<T: TMPayloadTypes> {
   pub query_id: QueryId,
   pub payload: T::TMCommittedPLm,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct TMAbortedPLm<T: PayloadTypes> {
+pub struct TMAbortedPLm<T: TMPayloadTypes> {
   pub query_id: QueryId,
   pub payload: T::TMAbortedPLm,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct TMClosedPLm<T: PayloadTypes> {
+pub struct TMClosedPLm<T: TMPayloadTypes> {
   pub query_id: QueryId,
   pub payload: T::TMClosedPLm,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum TMPLm<T: PayloadTypes> {
+pub enum TMPLm<T: TMPayloadTypes> {
   Prepared(TMPreparedPLm<T>),
   Committed(TMCommittedPLm<T>),
   Aborted(TMAbortedPLm<T>),
   Closed(TMClosedPLm<T>),
 }
 
-// RM PLm
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct RMPreparedPLm<T: PayloadTypes> {
-  pub query_id: QueryId,
-  pub tm: T::TMPath,
-  pub payload: T::RMPreparedPLm,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct RMCommittedPLm<T: PayloadTypes> {
-  pub query_id: QueryId,
-  pub payload: T::RMCommittedPLm,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct RMAbortedPLm<T: PayloadTypes> {
-  pub query_id: QueryId,
-  pub payload: T::RMAbortedPLm,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum RMPLm<T: PayloadTypes> {
-  Prepared(RMPreparedPLm<T>),
-  Committed(RMCommittedPLm<T>),
-  Aborted(RMAbortedPLm<T>),
-}
-
 // TM-to-RM Messages
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Prepare<T: PayloadTypes> {
+pub struct Prepare<T: TMPayloadTypes> {
   pub query_id: QueryId,
   pub tm: T::TMPath,
   pub payload: T::Prepare,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Abort<T: PayloadTypes> {
+pub struct Abort<T: TMPayloadTypes> {
   pub query_id: QueryId,
   pub tm: T::TMPath,
   pub payload: T::Abort,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Commit<T: PayloadTypes> {
+pub struct Commit<T: TMPayloadTypes> {
   pub query_id: QueryId,
   pub tm: T::TMPath,
   pub payload: T::Commit,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum RMMessage<T: PayloadTypes> {
+pub enum RMMessage<T: TMPayloadTypes> {
   Prepare(Prepare<T>),
   Abort(Abort<T>),
   Commit(Commit<T>),
@@ -183,27 +125,27 @@ pub enum RMMessage<T: PayloadTypes> {
 
 // RM-to-TM Messages
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Prepared<T: PayloadTypes> {
+pub struct Prepared<T: TMPayloadTypes> {
   pub query_id: QueryId,
   pub rm: T::RMPath,
   pub payload: T::Prepared,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Aborted<T: PayloadTypes> {
+pub struct Aborted<T: TMPayloadTypes> {
   pub query_id: QueryId,
   pub payload: T::Aborted,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Closed<T: PayloadTypes> {
+pub struct Closed<T: TMPayloadTypes> {
   pub query_id: QueryId,
   pub rm: T::RMPath,
   pub payload: T::Closed,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum TMMessage<T: PayloadTypes> {
+pub enum TMMessage<T: TMPayloadTypes> {
   Prepared(Prepared<T>),
   Aborted(Aborted<T>),
   Closed(Closed<T>),
@@ -216,7 +158,7 @@ pub enum TMMessage<T: PayloadTypes> {
 /// Properties that must be satisfied by an implementation.
 /// 1. All calls to `*_plm_inserted` must return the same set of keys, i.e. RMs.
 /// 2. The set of RMs must be non-empty (otherwise we deadlock).
-pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
+pub trait STMPaxos2PCTMInner<T: TMPayloadTypes> {
   /// Constructs an instance of `STMPaxos2PCTMInner` from a Prepared PLm. This is used primarily
   /// by the Follower.
   fn new_follower<IO: BasicIOCtx<T::NetworkMessageT>>(
@@ -302,30 +244,30 @@ pub trait STMPaxos2PCTMInner<T: PayloadTypes> {
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct PreparingSt<T: PayloadTypes> {
+pub struct PreparingSt<T: TMPayloadTypes> {
   rms_remaining: BTreeSet<T::RMPath>,
   prepared: BTreeMap<T::RMPath, T::Prepared>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct CommittedSt<T: PayloadTypes> {
+pub struct CommittedSt<T: TMPayloadTypes> {
   rms_remaining: BTreeSet<T::RMPath>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct AbortedSt<T: PayloadTypes> {
+pub struct AbortedSt<T: TMPayloadTypes> {
   rms_remaining: BTreeSet<T::RMPath>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum FollowerState<T: PayloadTypes> {
+pub enum FollowerState<T: TMPayloadTypes> {
   Preparing(BTreeMap<T::RMPath, T::Prepare>),
   Committed(BTreeMap<T::RMPath, T::Commit>),
   Aborted(BTreeMap<T::RMPath, T::Abort>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum State<T: PayloadTypes> {
+pub enum State<T: TMPayloadTypes> {
   Following,
   Start,
   WaitingInsertTMPrepared,
@@ -344,7 +286,7 @@ pub enum STMPaxos2PCTMAction {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMPaxos2PCTMOuter<T: PayloadTypes, InnerT> {
+pub struct STMPaxos2PCTMOuter<T: TMPayloadTypes, InnerT> {
   pub query_id: QueryId,
   /// This is only `None` when no related paxos messages have been inserted.
   pub follower: Option<FollowerState<T>>,
@@ -352,7 +294,7 @@ pub struct STMPaxos2PCTMOuter<T: PayloadTypes, InnerT> {
   pub inner: InnerT,
 }
 
-impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, InnerT> {
+impl<T: TMPayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, InnerT> {
   pub fn new(query_id: QueryId, inner: InnerT) -> STMPaxos2PCTMOuter<T, InnerT> {
     STMPaxos2PCTMOuter { query_id, follower: None, state: State::Start, inner }
   }
@@ -711,7 +653,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>> STMPaxos2PCTMOuter<T, Inner
 // Utilities
 
 /// Handles the actions specified by a AlterTableES.
-fn handle_action<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>>(
+fn handle_action<T: TMPayloadTypes, InnerT: STMPaxos2PCTMInner<T>>(
   query_id: &QueryId,
   con: &mut BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>,
   action: STMPaxos2PCTMAction,
@@ -728,7 +670,7 @@ fn handle_action<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>>(
 
 /// Function to handle the arrive of an `TMMessage` for a given `AggregateContainer`.
 pub fn handle_msg<
-  T: PayloadTypes,
+  T: TMPayloadTypes,
   InnerT: STMPaxos2PCTMInner<T>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
@@ -759,7 +701,7 @@ pub fn handle_msg<
 }
 
 pub fn handle_bundle_processed<
-  T: PayloadTypes,
+  T: TMPayloadTypes,
   InnerT: STMPaxos2PCTMInner<T>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
@@ -776,7 +718,7 @@ pub fn handle_bundle_processed<
 
 /// Function to handle the insertion of an `TMPLm` for a given `AggregateContainer`.
 pub fn handle_plm<
-  T: PayloadTypes,
+  T: TMPayloadTypes,
   InnerT: STMPaxos2PCTMInner<T>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
@@ -820,7 +762,7 @@ pub fn handle_plm<
 }
 
 pub fn handle_rlc<
-  T: PayloadTypes,
+  T: TMPayloadTypes,
   InnerT: STMPaxos2PCTMInner<T>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
@@ -838,7 +780,7 @@ pub fn handle_rlc<
 }
 
 pub fn handle_lc<
-  T: PayloadTypes,
+  T: TMPayloadTypes,
   InnerT: STMPaxos2PCTMInner<T>,
   IO: BasicIOCtx<T::NetworkMessageT>,
 >(
@@ -855,7 +797,7 @@ pub fn handle_lc<
 }
 
 /// Add in the `STMPaxos2PCTMOuter`s that have at least been Prepared.
-pub fn handle_reconfig_snapshot<T: PayloadTypes, InnerT: STMPaxos2PCTMInner<T>>(
+pub fn handle_reconfig_snapshot<T: TMPayloadTypes, InnerT: STMPaxos2PCTMInner<T>>(
   con: &BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>>,
 ) -> BTreeMap<QueryId, STMPaxos2PCTMOuter<T, InnerT>> {
   let mut ess = BTreeMap::<QueryId, STMPaxos2PCTMOuter<T, InnerT>>::new();

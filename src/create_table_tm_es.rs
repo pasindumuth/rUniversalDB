@@ -9,9 +9,10 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
 use crate::slave::{SlaveContext, SlavePLm};
+use crate::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use crate::stmpaxos2pc_tm::{
-  PayloadTypes, RMMessage, RMPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm,
-  TMCommittedPLm, TMMessage, TMPLm,
+  RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
+  TMPayloadTypes,
 };
 use crate::tablet::TabletCreateHelper;
 use serde::{Deserialize, Serialize};
@@ -102,27 +103,18 @@ pub struct CreateTableClosed {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CreateTablePayloadTypes {}
 
-impl PayloadTypes for CreateTablePayloadTypes {
+impl TMPayloadTypes for CreateTablePayloadTypes {
   // Master
   type RMPath = SlaveGroupId;
   type TMPath = ();
   type NetworkMessageT = msg::NetworkMessage;
-  type RMContext = SlaveContext;
   type TMContext = MasterContext;
-
-  // Actions
-  type RMCommitActionData = TabletCreateHelper;
 
   // TM PLm
   type TMPreparedPLm = CreateTableTMPrepared;
   type TMCommittedPLm = CreateTableTMCommitted;
   type TMAbortedPLm = CreateTableTMAborted;
   type TMClosedPLm = CreateTableTMClosed;
-
-  // RM PLm
-  type RMPreparedPLm = CreateTableRMPrepared;
-  type RMCommittedPLm = CreateTableRMCommitted;
-  type RMAbortedPLm = CreateTableRMAborted;
 
   // TM-to-RM Messages
   type Prepare = CreateTablePrepare;
@@ -133,6 +125,18 @@ impl PayloadTypes for CreateTablePayloadTypes {
   type Prepared = CreateTablePrepared;
   type Aborted = CreateTableAborted;
   type Closed = CreateTableClosed;
+}
+
+impl RMPayloadTypes for CreateTablePayloadTypes {
+  type RMContext = SlaveContext;
+
+  // Actions
+  type RMCommitActionData = TabletCreateHelper;
+
+  // RM PLm
+  type RMPreparedPLm = CreateTableRMPrepared;
+  type RMCommittedPLm = CreateTableRMCommitted;
+  type RMAbortedPLm = CreateTableRMAborted;
 }
 
 // -----------------------------------------------------------------------------------------------

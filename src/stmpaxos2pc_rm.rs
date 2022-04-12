@@ -1,18 +1,86 @@
 use crate::common::BasicIOCtx;
 use crate::model::common::QueryId;
 use crate::paxos2pc_tm::Paxos2PCContainer;
-use crate::stmpaxos2pc_tm::{
-  Closed, Commit, PayloadTypes, Prepared, RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm,
-  RMPreparedPLm, RMServerContext, TMMessage,
-};
+use crate::stmpaxos2pc_tm::{Closed, Commit, Prepared, RMMessage, TMMessage, TMPayloadTypes};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt::Debug;
+
+// -----------------------------------------------------------------------------------------------
+//  RMServerContext
+// -----------------------------------------------------------------------------------------------
+
+pub trait RMServerContext<T: RMPayloadTypes> {
+  fn push_plm(&mut self, plm: RMPLm<T>);
+
+  fn send_to_tm<IO: BasicIOCtx<T::NetworkMessageT>>(
+    &mut self,
+    io_ctx: &mut IO,
+    tm: &T::TMPath,
+    msg: TMMessage<T>,
+  );
+
+  fn mk_node_path(&self) -> T::RMPath;
+
+  fn is_leader(&self) -> bool;
+}
+
+// -----------------------------------------------------------------------------------------------
+//  STMPaxos2PCRM
+// -----------------------------------------------------------------------------------------------
+
+/// There can be multiple `RMPayloadTypes` implementations for a single `TMPayloadTypes`. (An
+/// instance where this is useful if some RMs are in the `SlaveCtx` and other RMs are in
+/// `TabletCtx`. We need a different `RMPayloadTypes` for each case.)
+pub trait RMPayloadTypes: TMPayloadTypes {
+  // Meta
+  type RMContext: RMServerContext<Self>;
+
+  // Actions
+  /// These are sent out from the `Inner` and propagated out of the `Outer`. We
+  /// sometimes need this for when the `Inner` would otherwise need to access a
+  /// more specific `IOCtx` than `BasicIOCtx` (which it cannot).
+  type RMCommitActionData;
+
+  // RM PLm
+  type RMPreparedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type RMCommittedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+  type RMAbortedPLm: Serialize + DeserializeOwned + Debug + Clone + PartialEq + Eq;
+}
+
+// RM PLm
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RMPreparedPLm<T: RMPayloadTypes> {
+  pub query_id: QueryId,
+  pub tm: T::TMPath,
+  pub payload: T::RMPreparedPLm,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RMCommittedPLm<T: RMPayloadTypes> {
+  pub query_id: QueryId,
+  pub payload: T::RMCommittedPLm,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RMAbortedPLm<T: RMPayloadTypes> {
+  pub query_id: QueryId,
+  pub payload: T::RMAbortedPLm,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum RMPLm<T: RMPayloadTypes> {
+  Prepared(RMPreparedPLm<T>),
+  Committed(RMCommittedPLm<T>),
+  Aborted(RMAbortedPLm<T>),
+}
 
 // -----------------------------------------------------------------------------------------------
 //  STMPaxos2PCRMInner
 // -----------------------------------------------------------------------------------------------
 
-pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
+pub trait STMPaxos2PCRMInner<T: RMPayloadTypes> {
   /// Constructs an instance of `STMPaxos2PCRMInner` from a Prepared PLm. This is used primarily
   /// by the Follower.
   fn new<IO: BasicIOCtx<T::NetworkMessageT>>(
@@ -90,7 +158,7 @@ pub trait STMPaxos2PCRMInner<T: PayloadTypes> {
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-enum State<T: PayloadTypes> {
+enum State<T: RMPayloadTypes> {
   Follower,
   WaitingInsertingPrepared,
   InsertingPrepared,
@@ -100,13 +168,13 @@ enum State<T: PayloadTypes> {
   InsertingAborted,
 }
 
-pub enum STMPaxos2PCRMAction<T: PayloadTypes> {
+pub enum STMPaxos2PCRMAction<T: RMPayloadTypes> {
   Wait,
   Exit(Option<T::RMCommitActionData>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct STMPaxos2PCRMOuter<T: PayloadTypes, InnerT> {
+pub struct STMPaxos2PCRMOuter<T: RMPayloadTypes, InnerT> {
   pub query_id: QueryId,
   tm: T::TMPath,
   follower: Option<Prepared<T>>,
@@ -114,7 +182,7 @@ pub struct STMPaxos2PCRMOuter<T: PayloadTypes, InnerT> {
   pub inner: InnerT,
 }
 
-impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, InnerT> {
+impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, InnerT> {
   pub fn new(query_id: QueryId, tm: T::TMPath, inner: InnerT) -> STMPaxos2PCRMOuter<T, InnerT> {
     STMPaxos2PCRMOuter {
       query_id,
@@ -368,7 +436,7 @@ impl<T: PayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inner
 // -----------------------------------------------------------------------------------------------
 /// Function to handle the insertion of an `RMPLm` for a given `AggregateContainer`.
 pub fn handle_rm_plm<
-  T: PayloadTypes,
+  T: RMPayloadTypes,
   InnerT: STMPaxos2PCRMInner<T>,
   ConT: Paxos2PCContainer<STMPaxos2PCRMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,
@@ -410,7 +478,7 @@ pub fn handle_rm_plm<
 
 /// Function to handle the arrive of an `RMMessage` for a given `AggregateContainer`.
 pub fn handle_rm_msg<
-  T: PayloadTypes,
+  T: RMPayloadTypes,
   InnerT: STMPaxos2PCRMInner<T>,
   ConT: Paxos2PCContainer<STMPaxos2PCRMOuter<T, InnerT>>,
   IO: BasicIOCtx<T::NetworkMessageT>,

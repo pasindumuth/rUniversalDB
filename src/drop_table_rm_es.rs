@@ -4,8 +4,8 @@ use crate::drop_table_tm_es::{
   DropTableClosed, DropTableCommit, DropTablePayloadTypes, DropTablePrepare, DropTablePrepared,
   DropTableRMAborted, DropTableRMCommitted, DropTableRMPrepared,
 };
+use crate::stmpaxos2pc_rm::RMCommittedPLm;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
-use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::TabletContext;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;

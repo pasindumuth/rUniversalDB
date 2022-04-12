@@ -8,7 +8,8 @@ use runiversal::common::mk_qid;
 use runiversal::model::common::{EndpointId, SlaveGroupId};
 use runiversal::simulation_utils::{mk_client_eid, mk_slave_eid};
 use runiversal::slave::SlaveConfig;
-use runiversal::stmpaxos2pc_tm::{RMPLm, TMPLm};
+use runiversal::stmpaxos2pc_rm::RMPLm;
+use runiversal::stmpaxos2pc_tm::TMPLm;
 use runiversal::test_utils::mk_sid;
 use std::collections::BTreeMap;
 

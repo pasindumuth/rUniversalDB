@@ -2,9 +2,10 @@ use crate::message as msg;
 use crate::slave::{SlaveContext, SlavePLm};
 use runiversal::common::BasicIOCtx;
 use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId};
+use runiversal::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use runiversal::stmpaxos2pc_tm::{
-  PayloadTypes, RMMessage, RMPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm,
-  TMCommittedPLm, TMMessage, TMPLm,
+  RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
+  TMPayloadTypes,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -67,27 +68,18 @@ pub struct STMSimpleClosed {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct STMSimplePayloadTypes {}
 
-impl PayloadTypes for STMSimplePayloadTypes {
+impl TMPayloadTypes for STMSimplePayloadTypes {
   // Master
   type RMPath = SlaveGroupId;
   type TMPath = SlaveGroupId;
   type NetworkMessageT = msg::NetworkMessage;
-  type RMContext = SlaveContext;
   type TMContext = SlaveContext;
-
-  // Actions
-  type RMCommitActionData = ();
 
   // TM PLm
   type TMPreparedPLm = STMSimpleTMPrepared;
   type TMCommittedPLm = STMSimpleTMCommitted;
   type TMAbortedPLm = STMSimpleTMAborted;
   type TMClosedPLm = STMSimpleTMClosed;
-
-  // RM PLm
-  type RMPreparedPLm = STMSimpleRMPrepared;
-  type RMCommittedPLm = STMSimpleRMCommitted;
-  type RMAbortedPLm = STMSimpleRMAborted;
 
   // TM-to-RM Messages
   type Prepare = STMSimplePrepare;
@@ -98,6 +90,18 @@ impl PayloadTypes for STMSimplePayloadTypes {
   type Prepared = STMSimplePrepared;
   type Aborted = STMSimpleAborted;
   type Closed = STMSimpleClosed;
+}
+
+impl RMPayloadTypes for STMSimplePayloadTypes {
+  type RMContext = SlaveContext;
+
+  // Actions
+  type RMCommitActionData = ();
+
+  // RM PLm
+  type RMPreparedPLm = STMSimpleRMPrepared;
+  type RMCommittedPLm = STMSimpleRMCommitted;
+  type RMAbortedPLm = STMSimpleRMAborted;
 }
 
 // -----------------------------------------------------------------------------------------------

@@ -4,8 +4,8 @@ use crate::alter_table_tm_es::{
 };
 use crate::common::{cur_timestamp, mk_t, BasicIOCtx, Timestamp};
 use crate::model::common::proc;
+use crate::stmpaxos2pc_rm::RMCommittedPLm;
 use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
-use crate::stmpaxos2pc_tm::RMCommittedPLm;
 use crate::tablet::TabletContext;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;

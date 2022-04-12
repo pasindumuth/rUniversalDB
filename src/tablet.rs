@@ -40,9 +40,7 @@ use crate::server::{
 };
 use crate::slave::{SlaveBackMessage, TabletBundleInsertion};
 use crate::stmpaxos2pc_rm;
-use crate::stmpaxos2pc_rm::STMPaxos2PCRMAction;
 use crate::stmpaxos2pc_tm;
-use crate::stmpaxos2pc_tm::RMServerContext;
 use crate::storage::{GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableReadES};
 use crate::tm_status::TMStatus;
@@ -1053,8 +1051,8 @@ pub enum TabletPLm {
   LockedCols(plm::LockedCols),
   ReadProtected(plm::ReadProtected),
   FinishQuery(paxos2pc_tm::RMPLm<FinishQueryPayloadTypes>),
-  AlterTable(stmpaxos2pc_tm::RMPLm<AlterTablePayloadTypes>),
-  DropTable(stmpaxos2pc_tm::RMPLm<DropTablePayloadTypes>),
+  AlterTable(stmpaxos2pc_rm::RMPLm<AlterTablePayloadTypes>),
+  DropTable(stmpaxos2pc_rm::RMPLm<DropTablePayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1100,8 +1098,8 @@ pub struct TabletCreateHelper {
 //  RMServerContext AlterTable
 // -----------------------------------------------------------------------------------------------
 
-impl stmpaxos2pc_tm::RMServerContext<AlterTablePayloadTypes> for TabletContext {
-  fn push_plm(&mut self, plm: stmpaxos2pc_tm::RMPLm<AlterTablePayloadTypes>) {
+impl stmpaxos2pc_rm::RMServerContext<AlterTablePayloadTypes> for TabletContext {
+  fn push_plm(&mut self, plm: stmpaxos2pc_rm::RMPLm<AlterTablePayloadTypes>) {
     self.tablet_bundle.push(TabletPLm::AlterTable(plm));
   }
 
@@ -1127,8 +1125,8 @@ impl stmpaxos2pc_tm::RMServerContext<AlterTablePayloadTypes> for TabletContext {
 //  RMServerContext DropTable
 // -----------------------------------------------------------------------------------------------
 
-impl stmpaxos2pc_tm::RMServerContext<DropTablePayloadTypes> for TabletContext {
-  fn push_plm(&mut self, plm: stmpaxos2pc_tm::RMPLm<DropTablePayloadTypes>) {
+impl stmpaxos2pc_rm::RMServerContext<DropTablePayloadTypes> for TabletContext {
+  fn push_plm(&mut self, plm: stmpaxos2pc_rm::RMPLm<DropTablePayloadTypes>) {
     self.tablet_bundle.push(TabletPLm::DropTable(plm));
   }
 

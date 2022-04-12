@@ -5,8 +5,8 @@ use crate::stm_simple_tm_es::{
   STMSimpleRMAborted, STMSimpleRMCommitted, STMSimpleRMPrepared,
 };
 use runiversal::common::BasicIOCtx;
+use runiversal::stmpaxos2pc_rm::RMCommittedPLm;
 use runiversal::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
-use runiversal::stmpaxos2pc_tm::RMCommittedPLm;
 
 // -----------------------------------------------------------------------------------------------
 //  SimpleES Implementation

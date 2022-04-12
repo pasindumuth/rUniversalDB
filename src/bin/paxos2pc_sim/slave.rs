@@ -38,7 +38,7 @@ pub struct SlaveBundle {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlavePLm {
   SimpleSTMTM(stmpaxos2pc_tm::TMPLm<STMSimplePayloadTypes>),
-  SimpleSTMRM(stmpaxos2pc_tm::RMPLm<STMSimplePayloadTypes>),
+  SimpleSTMRM(stmpaxos2pc_rm::RMPLm<STMSimplePayloadTypes>),
   SimpleRM(paxos2pc_tm::RMPLm<SimplePayloadTypes>),
 }
 
@@ -114,8 +114,8 @@ impl stmpaxos2pc_tm::TMServerContext<STMSimplePayloadTypes> for SlaveContext {
 //  STM RMServerContext
 // -----------------------------------------------------------------------------------------------
 
-impl stmpaxos2pc_tm::RMServerContext<STMSimplePayloadTypes> for SlaveContext {
-  fn push_plm(&mut self, plm: stmpaxos2pc_tm::RMPLm<STMSimplePayloadTypes>) {
+impl stmpaxos2pc_rm::RMServerContext<STMSimplePayloadTypes> for SlaveContext {
+  fn push_plm(&mut self, plm: stmpaxos2pc_rm::RMPLm<STMSimplePayloadTypes>) {
     self.slave_bundle.plms.push(SlavePLm::SimpleSTMRM(plm));
   }
 

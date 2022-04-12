@@ -3,9 +3,10 @@ use crate::common::{cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, Timest
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{TNodePath, TablePath};
 use crate::model::message as msg;
+use crate::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use crate::stmpaxos2pc_tm::{
-  PayloadTypes, RMMessage, RMPLm, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm,
-  TMCommittedPLm, TMMessage, TMPLm,
+  RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
+  TMPayloadTypes,
 };
 use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
@@ -80,27 +81,18 @@ pub struct DropTableClosed {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DropTablePayloadTypes {}
 
-impl PayloadTypes for DropTablePayloadTypes {
+impl TMPayloadTypes for DropTablePayloadTypes {
   // Master
   type RMPath = TNodePath;
   type TMPath = ();
   type NetworkMessageT = msg::NetworkMessage;
-  type RMContext = TabletContext;
   type TMContext = MasterContext;
-
-  // Actions
-  type RMCommitActionData = Timestamp;
 
   // TM PLm
   type TMPreparedPLm = DropTableTMPrepared;
   type TMCommittedPLm = DropTableTMCommitted;
   type TMAbortedPLm = DropTableTMAborted;
   type TMClosedPLm = DropTableTMClosed;
-
-  // RM PLm
-  type RMPreparedPLm = DropTableRMPrepared;
-  type RMCommittedPLm = DropTableRMCommitted;
-  type RMAbortedPLm = DropTableRMAborted;
 
   // TM-to-RM Messages
   type Prepare = DropTablePrepare;
@@ -111,6 +103,18 @@ impl PayloadTypes for DropTablePayloadTypes {
   type Prepared = DropTablePrepared;
   type Aborted = DropTableAborted;
   type Closed = DropTableClosed;
+}
+
+impl RMPayloadTypes for DropTablePayloadTypes {
+  type RMContext = TabletContext;
+
+  // Actions
+  type RMCommitActionData = Timestamp;
+
+  // RM PLm
+  type RMPreparedPLm = DropTableRMPrepared;
+  type RMCommittedPLm = DropTableRMCommitted;
+  type RMAbortedPLm = DropTableRMAborted;
 }
 
 // -----------------------------------------------------------------------------------------------
