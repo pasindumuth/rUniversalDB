@@ -84,60 +84,6 @@ pub struct Statuses {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  STM TMServerContext
-// -----------------------------------------------------------------------------------------------
-
-impl stmpaxos2pc_tm::TMServerContext<STMSimplePayloadTypes> for SlaveContext {
-  fn push_plm(&mut self, plm: stmpaxos2pc_tm::TMPLm<STMSimplePayloadTypes>) {
-    self.slave_bundle.plms.push(SlavePLm::SimpleSTMTM(plm));
-  }
-
-  fn send_to_rm<IO: BasicIOCtx<msg::NetworkMessage>>(
-    &mut self,
-    io_ctx: &mut IO,
-    rm: &SlaveGroupId,
-    msg: stmpaxos2pc_tm::RMMessage<STMSimplePayloadTypes>,
-  ) {
-    self.send(io_ctx, rm, msg::SlaveRemotePayload::STMRMMessage(msg));
-  }
-
-  fn mk_node_path(&self) -> SlaveGroupId {
-    self.this_sid.clone()
-  }
-
-  fn is_leader(&self) -> bool {
-    SlaveContext::is_leader(self)
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
-//  STM RMServerContext
-// -----------------------------------------------------------------------------------------------
-
-impl stmpaxos2pc_rm::RMServerContext<STMSimplePayloadTypes> for SlaveContext {
-  fn push_plm(&mut self, plm: stmpaxos2pc_rm::RMPLm<STMSimplePayloadTypes>) {
-    self.slave_bundle.plms.push(SlavePLm::SimpleSTMRM(plm));
-  }
-
-  fn send_to_tm<IO: BasicIOCtx<msg::NetworkMessage>>(
-    &mut self,
-    io_ctx: &mut IO,
-    tm: &SlaveGroupId,
-    msg: stmpaxos2pc_tm::TMMessage<STMSimplePayloadTypes>,
-  ) {
-    self.send(io_ctx, tm, msg::SlaveRemotePayload::STMTMMessage(msg));
-  }
-
-  fn mk_node_path(&self) -> SlaveGroupId {
-    self.this_sid.clone()
-  }
-
-  fn is_leader(&self) -> bool {
-    SlaveContext::is_leader(self)
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
 //  TMServerContext
 // -----------------------------------------------------------------------------------------------
 

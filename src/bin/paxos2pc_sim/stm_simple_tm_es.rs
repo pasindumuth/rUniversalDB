@@ -5,7 +5,7 @@ use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId};
 use runiversal::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use runiversal::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
-  TMPayloadTypes,
+  TMPayloadTypes, TMServerContext,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -102,6 +102,33 @@ impl RMPayloadTypes for STMSimplePayloadTypes {
   type RMPreparedPLm = STMSimpleRMPrepared;
   type RMCommittedPLm = STMSimpleRMCommitted;
   type RMAbortedPLm = STMSimpleRMAborted;
+}
+
+// -----------------------------------------------------------------------------------------------
+//  STMTMServerContext
+// -----------------------------------------------------------------------------------------------
+
+impl TMServerContext<STMSimplePayloadTypes> for SlaveContext {
+  fn push_plm(&mut self, plm: TMPLm<STMSimplePayloadTypes>) {
+    self.slave_bundle.plms.push(SlavePLm::SimpleSTMTM(plm));
+  }
+
+  fn send_to_rm<IO: BasicIOCtx<msg::NetworkMessage>>(
+    &mut self,
+    io_ctx: &mut IO,
+    rm: &SlaveGroupId,
+    msg: RMMessage<STMSimplePayloadTypes>,
+  ) {
+    self.send(io_ctx, rm, msg::SlaveRemotePayload::STMRMMessage(msg));
+  }
+
+  fn mk_node_path(&self) -> SlaveGroupId {
+    self.this_sid.clone()
+  }
+
+  fn is_leader(&self) -> bool {
+    SlaveContext::is_leader(self)
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

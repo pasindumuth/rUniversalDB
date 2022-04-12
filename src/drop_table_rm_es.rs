@@ -4,11 +4,44 @@ use crate::drop_table_tm_es::{
   DropTableClosed, DropTableCommit, DropTablePayloadTypes, DropTablePrepare, DropTablePrepared,
   DropTableRMAborted, DropTableRMCommitted, DropTableRMPrepared,
 };
-use crate::stmpaxos2pc_rm::RMCommittedPLm;
-use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
-use crate::tablet::TabletContext;
+use crate::model::common::TNodePath;
+use crate::model::message as msg;
+use crate::server::ServerContextBase;
+use crate::stmpaxos2pc_rm::{
+  RMCommittedPLm, RMPLm, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
+  STMPaxos2PCRMOuter,
+};
+use crate::stmpaxos2pc_tm::TMMessage;
+use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
+
+// -----------------------------------------------------------------------------------------------
+//  RMServerContext DropTable
+// -----------------------------------------------------------------------------------------------
+
+impl RMServerContext<DropTablePayloadTypes> for TabletContext {
+  fn push_plm(&mut self, plm: RMPLm<DropTablePayloadTypes>) {
+    self.tablet_bundle.push(TabletPLm::DropTable(plm));
+  }
+
+  fn send_to_tm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    _: &(),
+    msg: TMMessage<DropTablePayloadTypes>,
+  ) {
+    self.send_to_master(io_ctx, msg::MasterRemotePayload::DropTable(msg));
+  }
+
+  fn mk_node_path(&self) -> TNodePath {
+    TabletContext::mk_node_path(self)
+  }
+
+  fn is_leader(&self) -> bool {
+    TabletContext::is_leader(self)
+  }
+}
 
 // -----------------------------------------------------------------------------------------------
 //  DropTableES Implementation

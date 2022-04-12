@@ -4,10 +4,11 @@ use crate::common::{
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{proc, EndpointId, RequestId, TNodePath, TSubNodePath, TablePath};
 use crate::model::message as msg;
+use crate::server::ServerContextBase;
 use crate::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use crate::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
-  TMPayloadTypes,
+  TMPayloadTypes, TMServerContext,
 };
 use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
@@ -120,6 +121,33 @@ impl RMPayloadTypes for AlterTablePayloadTypes {
   type RMPreparedPLm = AlterTableRMPrepared;
   type RMCommittedPLm = AlterTableRMCommitted;
   type RMAbortedPLm = AlterTableRMAborted;
+}
+
+// -----------------------------------------------------------------------------------------------
+//  TMServerContext AlterTable
+// -----------------------------------------------------------------------------------------------
+
+impl TMServerContext<AlterTablePayloadTypes> for MasterContext {
+  fn push_plm(&mut self, plm: TMPLm<AlterTablePayloadTypes>) {
+    self.master_bundle.plms.push(MasterPLm::AlterTable(plm));
+  }
+
+  fn send_to_rm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    rm: &TNodePath,
+    msg: RMMessage<AlterTablePayloadTypes>,
+  ) {
+    self.send_to_t(io_ctx, rm.clone(), msg::TabletMessage::AlterTable(msg));
+  }
+
+  fn mk_node_path(&self) -> () {
+    ()
+  }
+
+  fn is_leader(&self) -> bool {
+    MasterContext::is_leader(self)
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

@@ -3,14 +3,48 @@ use crate::create_table_tm_es::{
   CreateTableClosed, CreateTableCommit, CreateTablePayloadTypes, CreateTablePrepare,
   CreateTablePrepared, CreateTableRMAborted, CreateTableRMCommitted, CreateTableRMPrepared,
 };
-use crate::model::common::{ColName, ColType, Gen, TablePath, TabletGroupId, TabletKeyRange};
+use crate::model::common::{
+  ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
+};
+use crate::model::message as msg;
 use crate::multiversion_map::MVM;
-use crate::slave::SlaveContext;
-use crate::stmpaxos2pc_rm::RMCommittedPLm;
-use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
+use crate::server::ServerContextBase;
+use crate::slave::{SlaveContext, SlavePLm};
+use crate::stmpaxos2pc_rm::{
+  RMCommittedPLm, RMPLm, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
+  STMPaxos2PCRMOuter,
+};
+use crate::stmpaxos2pc_tm::TMMessage;
 use crate::tablet::{TabletConfig, TabletCreateHelper};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+
+// -----------------------------------------------------------------------------------------------
+//  RMServerContext
+// -----------------------------------------------------------------------------------------------
+
+impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
+  fn push_plm(&mut self, plm: RMPLm<CreateTablePayloadTypes>) {
+    self.slave_bundle.plms.push(SlavePLm::CreateTable(plm));
+  }
+
+  fn send_to_tm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    _: &(),
+    msg: TMMessage<CreateTablePayloadTypes>,
+  ) {
+    self.send_to_master(io_ctx, msg::MasterRemotePayload::CreateTable(msg));
+  }
+
+  fn mk_node_path(&self) -> SlaveGroupId {
+    self.this_sid.clone()
+  }
+
+  fn is_leader(&self) -> bool {
+    SlaveContext::is_leader(self)
+  }
+}
 
 // -----------------------------------------------------------------------------------------------
 //  CreateTableES Implementation

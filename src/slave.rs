@@ -189,33 +189,6 @@ pub struct Statuses {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  RMServerContext
-// -----------------------------------------------------------------------------------------------
-
-impl RMServerContext<CreateTablePayloadTypes> for SlaveContext {
-  fn push_plm(&mut self, plm: stmpaxos2pc_rm::RMPLm<CreateTablePayloadTypes>) {
-    self.slave_bundle.plms.push(SlavePLm::CreateTable(plm));
-  }
-
-  fn send_to_tm<IO: BasicIOCtx>(
-    &mut self,
-    io_ctx: &mut IO,
-    _: &(),
-    msg: paxos2pc::TMMessage<CreateTablePayloadTypes>,
-  ) {
-    self.send_to_master(io_ctx, msg::MasterRemotePayload::CreateTable(msg));
-  }
-
-  fn mk_node_path(&self) -> SlaveGroupId {
-    self.this_sid.clone()
-  }
-
-  fn is_leader(&self) -> bool {
-    SlaveContext::is_leader(self)
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
 //  SlaveConfig
 // -----------------------------------------------------------------------------------------------
 

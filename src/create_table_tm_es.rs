@@ -8,11 +8,12 @@ use crate::model::common::{
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
+use crate::server::ServerContextBase;
 use crate::slave::{SlaveContext, SlavePLm};
 use crate::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use crate::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
-  TMPayloadTypes,
+  TMPayloadTypes, TMServerContext,
 };
 use crate::tablet::TabletCreateHelper;
 use serde::{Deserialize, Serialize};
@@ -137,6 +138,33 @@ impl RMPayloadTypes for CreateTablePayloadTypes {
   type RMPreparedPLm = CreateTableRMPrepared;
   type RMCommittedPLm = CreateTableRMCommitted;
   type RMAbortedPLm = CreateTableRMAborted;
+}
+
+// -----------------------------------------------------------------------------------------------
+//  TMServerContext CreateTable
+// -----------------------------------------------------------------------------------------------
+
+impl TMServerContext<CreateTablePayloadTypes> for MasterContext {
+  fn push_plm(&mut self, plm: TMPLm<CreateTablePayloadTypes>) {
+    self.master_bundle.plms.push(MasterPLm::CreateTable(plm));
+  }
+
+  fn send_to_rm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    rm: &SlaveGroupId,
+    msg: RMMessage<CreateTablePayloadTypes>,
+  ) {
+    self.send_to_slave_common(io_ctx, rm.clone(), msg::SlaveRemotePayload::CreateTable(msg));
+  }
+
+  fn mk_node_path(&self) -> () {
+    ()
+  }
+
+  fn is_leader(&self) -> bool {
+    MasterContext::is_leader(self)
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

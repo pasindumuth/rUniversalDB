@@ -3,10 +3,11 @@ use crate::common::{cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, Timest
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{TNodePath, TablePath};
 use crate::model::message as msg;
+use crate::server::ServerContextBase;
 use crate::stmpaxos2pc_rm::{RMPLm, RMPayloadTypes};
 use crate::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
-  TMPayloadTypes,
+  TMPayloadTypes, TMServerContext,
 };
 use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
@@ -115,6 +116,33 @@ impl RMPayloadTypes for DropTablePayloadTypes {
   type RMPreparedPLm = DropTableRMPrepared;
   type RMCommittedPLm = DropTableRMCommitted;
   type RMAbortedPLm = DropTableRMAborted;
+}
+
+// -----------------------------------------------------------------------------------------------
+//  TMServerContext DropTable
+// -----------------------------------------------------------------------------------------------
+
+impl TMServerContext<DropTablePayloadTypes> for MasterContext {
+  fn push_plm(&mut self, plm: TMPLm<DropTablePayloadTypes>) {
+    self.master_bundle.plms.push(MasterPLm::DropTable(plm));
+  }
+
+  fn send_to_rm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    rm: &TNodePath,
+    msg: RMMessage<DropTablePayloadTypes>,
+  ) {
+    self.send_to_t(io_ctx, rm.clone(), msg::TabletMessage::DropTable(msg));
+  }
+
+  fn mk_node_path(&self) -> () {
+    ()
+  }
+
+  fn is_leader(&self) -> bool {
+    MasterContext::is_leader(self)
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

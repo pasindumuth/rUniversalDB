@@ -3,12 +3,44 @@ use crate::alter_table_tm_es::{
   AlterTablePrepared, AlterTableRMAborted, AlterTableRMCommitted, AlterTableRMPrepared,
 };
 use crate::common::{cur_timestamp, mk_t, BasicIOCtx, Timestamp};
-use crate::model::common::proc;
-use crate::stmpaxos2pc_rm::RMCommittedPLm;
-use crate::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
-use crate::tablet::TabletContext;
+use crate::model::common::{proc, TNodePath};
+use crate::model::message as msg;
+use crate::server::ServerContextBase;
+use crate::stmpaxos2pc_rm::{
+  RMCommittedPLm, RMPLm, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
+  STMPaxos2PCRMOuter,
+};
+use crate::stmpaxos2pc_tm::TMMessage;
+use crate::tablet::{TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
+
+// -----------------------------------------------------------------------------------------------
+//  RMServerContext AlterTable
+// -----------------------------------------------------------------------------------------------
+
+impl RMServerContext<AlterTablePayloadTypes> for TabletContext {
+  fn push_plm(&mut self, plm: RMPLm<AlterTablePayloadTypes>) {
+    self.tablet_bundle.push(TabletPLm::AlterTable(plm));
+  }
+
+  fn send_to_tm<IO: BasicIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    _: &(),
+    msg: TMMessage<AlterTablePayloadTypes>,
+  ) {
+    self.send_to_master(io_ctx, msg::MasterRemotePayload::AlterTable(msg));
+  }
+
+  fn mk_node_path(&self) -> TNodePath {
+    TabletContext::mk_node_path(self)
+  }
+
+  fn is_leader(&self) -> bool {
+    TabletContext::is_leader(self)
+  }
+}
 
 // -----------------------------------------------------------------------------------------------
 //  AlterTableES Implementation

@@ -1,12 +1,43 @@
 use crate::message as msg;
-use crate::slave::SlaveContext;
+use crate::slave::{SlaveContext, SlavePLm};
 use crate::stm_simple_tm_es::{
   STMSimpleClosed, STMSimpleCommit, STMSimplePayloadTypes, STMSimplePrepare, STMSimplePrepared,
   STMSimpleRMAborted, STMSimpleRMCommitted, STMSimpleRMPrepared,
 };
 use runiversal::common::BasicIOCtx;
-use runiversal::stmpaxos2pc_rm::RMCommittedPLm;
-use runiversal::stmpaxos2pc_rm::{STMPaxos2PCRMAction, STMPaxos2PCRMInner, STMPaxos2PCRMOuter};
+use runiversal::model::common::SlaveGroupId;
+use runiversal::stmpaxos2pc_rm::{
+  RMCommittedPLm, RMPLm, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
+  STMPaxos2PCRMOuter,
+};
+use runiversal::stmpaxos2pc_tm::TMMessage;
+
+// -----------------------------------------------------------------------------------------------
+//  RMServerContext
+// -----------------------------------------------------------------------------------------------
+
+impl RMServerContext<STMSimplePayloadTypes> for SlaveContext {
+  fn push_plm(&mut self, plm: RMPLm<STMSimplePayloadTypes>) {
+    self.slave_bundle.plms.push(SlavePLm::SimpleSTMRM(plm));
+  }
+
+  fn send_to_tm<IO: BasicIOCtx<msg::NetworkMessage>>(
+    &mut self,
+    io_ctx: &mut IO,
+    tm: &SlaveGroupId,
+    msg: TMMessage<STMSimplePayloadTypes>,
+  ) {
+    self.send(io_ctx, tm, msg::SlaveRemotePayload::STMTMMessage(msg));
+  }
+
+  fn mk_node_path(&self) -> SlaveGroupId {
+    self.this_sid.clone()
+  }
+
+  fn is_leader(&self) -> bool {
+    SlaveContext::is_leader(self)
+  }
+}
 
 // -----------------------------------------------------------------------------------------------
 //  SimpleES Implementation
