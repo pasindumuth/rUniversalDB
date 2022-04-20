@@ -57,7 +57,7 @@ use std::ops::Bound;
 use std::rc::Rc;
 use std::sync::Arc;
 
-#[path = "./tablet_test.rs"]
+#[path = "./test/tablet_test.rs"]
 pub mod tablet_test;
 
 // -----------------------------------------------------------------------------------------------
@@ -1503,7 +1503,7 @@ impl TabletContext {
             ) -> TabletAction {
               TabletAction::TPESAction(es.gossip_data_changed(ctx, io_ctx, es_ctx))
             }
-          };
+          }
 
           statuses.execute_all_ctx::<_, _, Cb>(self, io_ctx, &());
 
@@ -1549,7 +1549,7 @@ impl TabletContext {
                     TabletAction::Wait
                   }
                 }
-              };
+              }
 
               statuses.execute_all::<_, _, Cb>(self, io_ctx, &sid);
 
@@ -2385,7 +2385,7 @@ impl TabletContext {
       ) -> TabletAction {
         TabletAction::TPESAction(es.local_locked_cols(ctx, io_ctx, locked_cols_qid))
       }
-    };
+    }
 
     statuses.execute_once::<_, _, Cb>(self, io_ctx, req.orig_p.query_id, locked_cols_qid);
   }
@@ -2408,7 +2408,7 @@ impl TabletContext {
       ) -> TabletAction {
         TabletAction::TPESAction(es.global_locked_cols(ctx, io_ctx, locked_cols_qid))
       }
-    };
+    }
 
     statuses.execute_once::<_, _, Cb>(self, io_ctx, orig_p.query_id, locked_cols_qid);
   }
@@ -2430,7 +2430,7 @@ impl TabletContext {
       ) -> TabletAction {
         TabletAction::TPESAction(es.table_dropped(ctx))
       }
-    };
+    }
 
     statuses.execute_once::<_, _, Cb>(self, io_ctx, orig_p.query_id, ());
   }
@@ -2463,7 +2463,7 @@ impl TabletContext {
       ) -> TabletAction {
         TabletAction::TPESAction(es.local_read_protected(ctx, io_ctx, es_ctx, protect_qid))
       }
-    };
+    }
 
     statuses.execute_once_ctx::<_, _, Cb>(
       self,
@@ -2490,7 +2490,7 @@ impl TabletContext {
       ) -> TabletAction {
         TabletAction::TPESAction(es.global_read_protected(ctx, io_ctx, protect_qid))
       }
-    };
+    }
 
     statuses.execute_once::<_, _, Cb>(self, io_ctx, req.orig_p.query_id, req.query_id);
   }
@@ -2519,7 +2519,7 @@ impl TabletContext {
       ) -> TabletAction {
         TabletAction::TPESAction(es.m_local_read_protected(ctx, io_ctx, es_ctx, protect_qid))
       }
-    };
+    }
 
     statuses.execute_once_ctx::<_, _, Cb>(
       self,
@@ -2632,7 +2632,7 @@ impl TabletContext {
           result,
         ))
       }
-    };
+    }
 
     statuses.execute_once_ctx::<_, _, Cb>(
       self,
@@ -2662,7 +2662,7 @@ impl TabletContext {
         es.remove_subquery(&subquery_id);
         TabletAction::TPESAction(es.handle_internal_query_error(ctx, io_ctx, query_error))
       }
-    };
+    }
 
     statuses.execute_once::<_, _, Cb>(self, io_ctx, orig_p.query_id, (subquery_id, query_error));
   }
@@ -2838,7 +2838,7 @@ impl TabletContext {
             );
             TabletAction::ExitAll(child_queries)
           }
-        };
+        }
 
         statuses.execute_remove_ctx::<_, _, Cb>(self, io_ctx, query_id, success);
       }
@@ -2866,7 +2866,7 @@ impl TabletContext {
             );
             TabletAction::ExitAll(child_queries)
           }
-        };
+        }
 
         statuses.execute_remove_ctx::<_, _, Cb>(self, io_ctx, query_id, query_error);
       }
@@ -2984,7 +2984,7 @@ impl TabletContext {
           let (_, _, child_queries) = es.deregister(es_ctx);
           TabletAction::ExitAll(child_queries)
         }
-      };
+      }
 
       statuses.execute_remove_ctx::<_, _, Cb>(self, io_ctx, query_id, ());
     }

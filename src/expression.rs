@@ -9,7 +9,7 @@ use std::iter::FromIterator;
 use std::ops::Deref;
 
 #[cfg(test)]
-#[path = "./expression_test.rs"]
+#[path = "./test/expression_test.rs"]
 mod expression_test;
 
 // -----------------------------------------------------------------------------------------------
