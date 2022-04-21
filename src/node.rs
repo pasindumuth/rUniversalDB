@@ -14,7 +14,7 @@ use crate::tablet::TabletConfig;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[path = "./test/node_test.rs"]
+#[path = "test/node_test.rs"]
 pub mod node_test;
 
 const SERVER_PORT: u32 = 1610;

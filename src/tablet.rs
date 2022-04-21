@@ -57,7 +57,7 @@ use std::ops::Bound;
 use std::rc::Rc;
 use std::sync::Arc;
 
-#[path = "./test/tablet_test.rs"]
+#[path = "test/tablet_test.rs"]
 pub mod tablet_test;
 
 // -----------------------------------------------------------------------------------------------

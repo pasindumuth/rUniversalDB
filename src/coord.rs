@@ -37,7 +37,7 @@ use std::convert::TryInto;
 use std::rc::Rc;
 use std::sync::Arc;
 
-#[path = "./test/coord_test.rs"]
+#[path = "test/coord_test.rs"]
 pub mod coord_test;
 
 // -----------------------------------------------------------------------------------------------

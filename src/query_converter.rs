@@ -5,7 +5,7 @@ use crate::model::message as msg;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
 
-#[path = "./test/query_converter_test.rs"]
+#[path = "test/query_converter_test.rs"]
 pub mod query_converter_test;
 
 pub fn convert_to_msquery(query: iast::Query) -> Result<proc::MSQuery, msg::ExternalAbortedData> {

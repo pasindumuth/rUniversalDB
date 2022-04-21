@@ -6,7 +6,7 @@ use std::cmp::max;
 use std::collections::{BTreeMap, Bound};
 
 #[cfg(test)]
-#[path = "./test/storage_test.rs"]
+#[path = "test/storage_test.rs"]
 mod storage_test;
 
 // -----------------------------------------------------------------------------------------------

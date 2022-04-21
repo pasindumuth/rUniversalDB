@@ -39,7 +39,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter};
 use std::iter::FromIterator;
 
-#[path = "./test/master_test.rs"]
+#[path = "test/master_test.rs"]
 pub mod master_test;
 
 // -----------------------------------------------------------------------------------------------

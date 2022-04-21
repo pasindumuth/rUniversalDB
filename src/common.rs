@@ -25,7 +25,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
 
-#[path = "./test/common_test.rs"]
+#[path = "test/common_test.rs"]
 pub mod common_test;
 
 // -----------------------------------------------------------------------------------------------

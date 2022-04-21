@@ -22,7 +22,7 @@ use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-#[path = "./test/slave_test.rs"]
+#[path = "test/slave_test.rs"]
 pub mod slave_test;
 
 // -----------------------------------------------------------------------------------------------
