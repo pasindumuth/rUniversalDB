@@ -104,8 +104,8 @@ impl STMPaxos2PCRMInner<STMSimpleRMPayloadTypes> for STMSimpleRMInner {
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
-  ) -> STMSimpleRMPrepared {
-    STMSimpleRMPrepared {}
+  ) -> Option<STMSimpleRMPrepared> {
+    Some(STMSimpleRMPrepared {})
   }
 
   fn prepared_plm_inserted<IO: BasicIOCtx<msg::NetworkMessage>>(

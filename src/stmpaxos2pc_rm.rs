@@ -104,14 +104,16 @@ pub trait STMPaxos2PCRMInner<T: RMPayloadTypes> {
   /// up the ES, but then a late Commit/Abort message arrives.
   fn mk_closed() -> <<T as RMPayloadTypes>::TM as TMPayloadTypes>::Closed;
 
-  /// Called in order to get the `RMPreparedPLm` to insert.
+  /// This is called when the `STMPaxos2PCRMOuter` is in `Working` and an opportunity to insert
+  /// a `RMPreparedPLm` occurs. If the `Inner` is ready to move passed `Working`, it should
+  /// return `Some`, otherwise it should return `None`.
   fn mk_prepared_plm<
     IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
   >(
     &mut self,
     ctx: &mut T::RMContext,
     io_ctx: &mut IO,
-  ) -> T::RMPreparedPLm;
+  ) -> Option<T::RMPreparedPLm>;
 
   /// Called after PreparedPLm is inserted.
   fn prepared_plm_inserted<
@@ -173,7 +175,7 @@ pub trait STMPaxos2PCRMInner<T: RMPayloadTypes> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 enum State<T: RMPayloadTypes> {
   Follower,
-  WaitingInsertingPrepared,
+  Working,
   InsertingPrepared,
   Prepared(Prepared<T::TM>),
   InsertingCommitted,
@@ -201,13 +203,7 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
     tm: <<T as RMPayloadTypes>::TM as TMPayloadTypes>::TMPath,
     inner: InnerT,
   ) -> STMPaxos2PCRMOuter<T, InnerT> {
-    STMPaxos2PCRMOuter {
-      query_id,
-      tm,
-      follower: None,
-      state: State::WaitingInsertingPrepared,
-      inner,
-    }
+    STMPaxos2PCRMOuter { query_id, tm, follower: None, state: State::Working, inner }
   }
 
   /// This is only called when the `PreparedPLm` is insert at a Follower node.
@@ -271,7 +267,7 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
     io_ctx: &mut IO,
   ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
-      State::WaitingInsertingPrepared => {
+      State::Working => {
         self.send_closed(ctx, io_ctx);
         STMPaxos2PCRMAction::Exit(None)
       }
@@ -385,6 +381,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
 
   // Other
 
+  /// This is called when the user of this `Outer` is ready to build the next bundle to
+  /// insert into Paxos. We move beyond `Working` if the `inner` is ready, otherwise we
+  /// do nothing.
   pub fn start_inserting<
     IO: BasicIOCtx<<<T as RMPayloadTypes>::TM as TMPayloadTypes>::NetworkMessageT>,
   >(
@@ -393,14 +392,16 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
     io_ctx: &mut IO,
   ) -> STMPaxos2PCRMAction<T> {
     match &self.state {
-      State::WaitingInsertingPrepared => {
-        let prepared_plm = RMPreparedPLm {
-          query_id: self.query_id.clone(),
-          tm: self.tm.clone(),
-          payload: self.inner.mk_prepared_plm(ctx, io_ctx),
-        };
-        ctx.push_plm(RMPLm::Prepared(prepared_plm));
-        self.state = State::InsertingPrepared;
+      State::Working => {
+        if let Some(prepared) = self.inner.mk_prepared_plm(ctx, io_ctx) {
+          let prepared_plm = RMPreparedPLm {
+            query_id: self.query_id.clone(),
+            tm: self.tm.clone(),
+            payload: prepared,
+          };
+          ctx.push_plm(RMPLm::Prepared(prepared_plm));
+          self.state = State::InsertingPrepared;
+        }
       }
       _ => {}
     }
@@ -416,9 +417,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
         }
         STMPaxos2PCRMAction::Wait
       }
-      State::WaitingInsertingPrepared
-      | State::InsertingPrepared
-      | State::InsertingPreparedAborted => STMPaxos2PCRMAction::Exit(None),
+      State::Working | State::InsertingPrepared | State::InsertingPreparedAborted => {
+        STMPaxos2PCRMAction::Exit(None)
+      }
       State::Prepared(_) | State::InsertingCommitted | State::InsertingAborted => {
         self.state = State::Follower;
         STMPaxos2PCRMAction::Wait
@@ -431,9 +432,7 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
   /// Leadership is returned (i.e. after calling `leader_changed`).
   pub fn reconfig_snapshot(&self) -> Option<STMPaxos2PCRMOuter<T, InnerT>> {
     match &self.state {
-      State::WaitingInsertingPrepared
-      | State::InsertingPreparedAborted
-      | State::InsertingPrepared => None,
+      State::Working | State::InsertingPreparedAborted | State::InsertingPrepared => None,
       State::Follower
       | State::Prepared(_)
       | State::InsertingCommitted

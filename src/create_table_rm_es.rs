@@ -142,15 +142,15 @@ impl STMPaxos2PCRMInner<CreateTableRMPayloadTypes> for CreateTableRMInner {
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
-  ) -> CreateTableRMPrepared {
-    CreateTableRMPrepared {
+  ) -> Option<CreateTableRMPrepared> {
+    Some(CreateTableRMPrepared {
       tablet_group_id: self.tablet_group_id.clone(),
       table_path: self.table_path.clone(),
       gen: self.gen.clone(),
       key_range: self.key_range.clone(),
       key_cols: self.key_cols.clone(),
       val_cols: self.val_cols.clone(),
-    }
+    })
   }
 
   fn prepared_plm_inserted<IO: BasicIOCtx>(

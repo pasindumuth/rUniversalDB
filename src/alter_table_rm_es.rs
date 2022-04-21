@@ -127,11 +127,11 @@ impl STMPaxos2PCRMInner<AlterTableRMPayloadTypes> for AlterTableRMInner {
     &mut self,
     _: &mut TabletContext,
     _: &mut IO,
-  ) -> AlterTableRMPrepared {
-    AlterTableRMPrepared {
+  ) -> Option<AlterTableRMPrepared> {
+    Some(AlterTableRMPrepared {
       alter_op: self.alter_op.clone(),
       timestamp: self.prepared_timestamp.clone(),
-    }
+    })
   }
 
   fn prepared_plm_inserted<IO: BasicIOCtx>(
