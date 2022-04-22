@@ -4,13 +4,11 @@ use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_rid, mk_t, read_index, TableSchema, Timestamp};
+use runiversal::common::{ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TableView};
 use runiversal::coord::CoordConfig;
 use runiversal::master::MasterConfig;
-use runiversal::model::common::{
-  ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TableView,
-};
-use runiversal::model::message as msg;
-use runiversal::model::message::ExternalAbortedData;
+use runiversal::message as msg;
+use runiversal::message::ExternalAbortedData;
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::mk_slave_eid;
 use runiversal::slave::SlaveConfig;

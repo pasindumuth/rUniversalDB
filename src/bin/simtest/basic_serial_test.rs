@@ -6,12 +6,12 @@ use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_t, remove_item, TableSchema, Timestamp};
-use runiversal::model::common::{
+use runiversal::common::{
   ColName, ColType, EndpointId, Gen, LeadershipId, PaxosGroupIdTrait, PrimaryKey, RequestId,
   SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
 };
-use runiversal::model::message as msg;
-use runiversal::model::message::{ExternalAbortedData, NetworkMessage};
+use runiversal::message as msg;
+use runiversal::message::{ExternalAbortedData, NetworkMessage};
 use runiversal::paxos::PaxosConfig;
 use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_seed, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;

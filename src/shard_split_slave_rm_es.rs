@@ -1,7 +1,7 @@
 use crate::common::{cur_timestamp, Timestamp};
 use crate::common::{mk_t, BasicIOCtx};
-use crate::model::common::{TNodePath, TabletGroupId};
-use crate::model::message as msg;
+use crate::common::{TNodePath, TabletGroupId};
+use crate::message as msg;
 use crate::server::ServerContextBase;
 use crate::shard_split_tm_es::{
   ShardNodePath, ShardSplitClosed, ShardSplitCommit, ShardSplitPrepare, ShardSplitPrepared,

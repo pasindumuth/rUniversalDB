@@ -6,7 +6,7 @@ use crate::stm_simple_tm_es::STMSimpleTMPayloadTypes;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::mk_qid;
-use runiversal::model::common::{EndpointId, SlaveGroupId};
+use runiversal::common::{EndpointId, SlaveGroupId};
 use runiversal::simulation_utils::{mk_client_eid, mk_slave_eid};
 use runiversal::slave::SlaveConfig;
 use runiversal::stmpaxos2pc_rm::RMPLm;

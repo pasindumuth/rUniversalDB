@@ -5,13 +5,13 @@ use runiversal::common::{
   GeneralTraceMessage, GossipData, MasterIOCtx, MasterTraceMessage, NodeIOCtx, SlaveIOCtx,
   SlaveTraceMessage, Timestamp,
 };
-use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
-use runiversal::master::{FullMasterInput, MasterTimerInput};
-use runiversal::model::common::{
+use runiversal::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId,
   TabletGroupId,
 };
-use runiversal::model::message as msg;
+use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
+use runiversal::master::{FullMasterInput, MasterTimerInput};
+use runiversal::message as msg;
 use runiversal::multiversion_map::MVM;
 use runiversal::net::{recv, send_bytes, send_msg};
 use runiversal::node::{GenericInput, GenericTimerInput};

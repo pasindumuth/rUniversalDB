@@ -1,7 +1,7 @@
 use crate::common::{
   lookup, lookup_pos, ColBound, KeyBound, PolyColBound, SingleBound, TableSchema, Timestamp,
 };
-use crate::model::common::{ColName, ColType, ColVal, ColValN, PrimaryKey, TableView};
+use crate::common::{ColName, ColType, ColVal, ColValN, PrimaryKey, TableView};
 use std::cmp::max;
 use std::collections::{BTreeMap, Bound};
 

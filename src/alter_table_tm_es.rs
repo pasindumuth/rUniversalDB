@@ -1,10 +1,11 @@
 use crate::common::{
   cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, GossipData, GossipDataView, Timestamp,
 };
+use crate::common::{EndpointId, RequestId, TNodePath, TSubNodePath, TablePath};
 use crate::master::{MasterContext, MasterPLm};
-use crate::model::common::{proc, EndpointId, RequestId, TNodePath, TSubNodePath, TablePath};
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::server::ServerContextBase;
+use crate::sql_ast::proc;
 use crate::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
   TMPayloadTypes, TMServerContext,

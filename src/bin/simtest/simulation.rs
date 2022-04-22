@@ -6,6 +6,10 @@ use runiversal::common::{
   GossipDataView, LeaderMap, MasterIOCtx, MasterTraceMessage, NodeIOCtx, RangeEnds, SlaveIOCtx,
   SlaveTraceMessage, Timestamp,
 };
+use runiversal::common::{
+  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId,
+  SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
+};
 use runiversal::coord::coord_test::{assert_coord_consistency, check_coord_clean};
 use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
 use runiversal::free_node_manager::FreeNodeType;
@@ -13,12 +17,8 @@ use runiversal::master::master_test::check_master_clean;
 use runiversal::master::{
   FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput,
 };
-use runiversal::model::common::{
-  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId,
-  SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
-};
-use runiversal::model::message as msg;
-use runiversal::model::message::NetworkMessage;
+use runiversal::message as msg;
+use runiversal::message::NetworkMessage;
 use runiversal::multiversion_map::MVM;
 use runiversal::node::node_test::check_node_clean;
 use runiversal::node::{GenericInput, GenericTimerInput, NodeConfig, NodeState};

@@ -1,10 +1,10 @@
+use crate::common::TNodePath;
 use crate::common::{cur_timestamp, Timestamp};
 use crate::common::{mk_t, BasicIOCtx};
 use crate::drop_table_tm_es::{
   DropTableClosed, DropTableCommit, DropTablePrepare, DropTablePrepared, DropTableTMPayloadTypes,
 };
-use crate::model::common::TNodePath;
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::server::ServerContextBase;
 use crate::stmpaxos2pc_rm::{
   RMCommittedPLm, RMPLm, RMPayloadTypes, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,

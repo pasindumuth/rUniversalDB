@@ -6,17 +6,17 @@ use crate::common::{
   GossipData, LeaderMap, MasterIOCtx, MasterTraceMessage, TableSchema, Timestamp, VersionedValue,
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
+use crate::common::{
+  ColName, ColType, ColVal, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
+  PrimaryKey, QueryId, RequestId, SlaveGroupId, TNodePath, TablePath, TabletGroupId,
+  TabletKeyRange,
+};
 use crate::create_table_tm_es::{CreateTableTMES, CreateTableTMInner, CreateTableTMPayloadTypes};
 use crate::drop_table_tm_es::{DropTableTMES, DropTableTMInner, DropTableTMPayloadTypes};
 use crate::free_node_manager::{FreeNodeManager, FreeNodeManagerPLm, FreeNodeType};
 use crate::master_query_planning_es::{MasterQueryPlanning, MasterQueryPlanningESS};
-use crate::model::common::{
-  proc, ColName, ColType, ColVal, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
-  PrimaryKey, QueryId, RequestId, SlaveGroupId, TNodePath, TablePath, TabletGroupId,
-  TabletKeyRange,
-};
-use crate::model::message as msg;
-use crate::model::message::{
+use crate::message as msg;
+use crate::message::{
   ExternalDDLQueryAbortData, FreeNodeAssoc, MasterExternalReq, MasterMessage, MasterRemotePayload,
   PLEntry, ShardingOp,
 };
@@ -27,6 +27,7 @@ use crate::server::{contains_col_latest, ServerContextBase};
 use crate::shard_split_tm_es::{ShardSplitTMES, ShardSplitTMInner, ShardSplitTMPayloadTypes};
 use crate::slave_group_create_es::{ConfirmCreateGroup, SlaveGroupCreateESS};
 use crate::slave_reconfig_es::{SlaveReconfigESS, SlaveReconfigPLm};
+use crate::sql_ast::proc;
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
 use crate::stmpaxos2pc_tm::{STMPaxos2PCTMAction, State, TMServerContext};

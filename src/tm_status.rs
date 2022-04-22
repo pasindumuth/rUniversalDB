@@ -1,9 +1,9 @@
 use crate::common::{mk_qid, CoreIOCtx, OrigP};
-use crate::model::common::{
+use crate::common::{
   CQueryPath, CTNodePath, ColName, LeadershipId, PaxosGroupIdTrait, QueryId, SlaveGroupId,
   TQueryPath, TableView, TabletGroupId, TransTableLocationPrefix,
 };
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::server::{CTServerContext, CommonQuery};
 use std::collections::{BTreeMap, BTreeSet};
 

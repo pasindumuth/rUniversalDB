@@ -1,6 +1,6 @@
+use crate::common::{EndpointId, Gen, LeadershipId, PaxosGroupId};
 use crate::common::{LeaderMap, RemoteLeaderChangedPLm, VersionedValue};
-use crate::model::common::{EndpointId, Gen, LeadershipId, PaxosGroupId};
-use crate::model::message as msg;
+use crate::message as msg;
 use std::collections::BTreeMap;
 
 pub struct NetworkDriverContext<'a> {

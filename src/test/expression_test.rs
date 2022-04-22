@@ -1,10 +1,11 @@
+use crate::common::ColVal;
 use crate::common::{ColBound, SingleBound};
 use crate::expression::{
   col_bound_intersect_interval, construct_cexpr, construct_colvaln, does_col_regions_intersect,
   evaluate_binary_op, evaluate_c_expr, CExpr, EvalError,
 };
-use crate::model::common::{iast, proc, ColVal};
 use crate::query_converter::flatten_val_expr_r;
+use crate::sql_ast::{iast, proc};
 use crate::sql_parser::convert_expr;
 use crate::test_utils::cn;
 use sqlparser::ast;

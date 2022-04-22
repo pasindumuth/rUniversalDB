@@ -1,11 +1,12 @@
 use crate::common::{remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp};
-use crate::gr_query_es::GRQueryES;
-use crate::model::common::{
-  proc, CQueryPath, CTQueryPath, ColName, Context, PaxosGroupId, PaxosGroupIdTrait, QueryId,
+use crate::common::{
+  CQueryPath, CTQueryPath, ColName, Context, PaxosGroupId, PaxosGroupIdTrait, QueryId,
   SlaveGroupId, TQueryPath, TablePath, TableView, TransTableName,
 };
-use crate::model::message as msg;
+use crate::gr_query_es::GRQueryES;
+use crate::message as msg;
 use crate::server::ServerContextBase;
+use crate::sql_ast::proc;
 use crate::table_read_es::{check_gossip, does_query_plan_align, request_lock_columns};
 use crate::tablet::{
   ColumnsLocking, Executing, MSQueryES, Pending, TPESAction, TPESBase, TabletContext,

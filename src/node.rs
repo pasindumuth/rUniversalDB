@@ -1,11 +1,9 @@
 use crate::common::{mk_t, FreeNodeIOCtx, GossipDataView, MasterIOCtx, NodeIOCtx, SlaveIOCtx};
+use crate::common::{CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait};
 use crate::coord::{CoordConfig, CoordContext};
 use crate::master::{FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput};
-use crate::model::common::{
-  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
-};
-use crate::model::message as msg;
-use crate::model::message::FreeNodeMessage;
+use crate::message as msg;
+use crate::message::FreeNodeMessage;
 use crate::paxos::PaxosConfig;
 use crate::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,

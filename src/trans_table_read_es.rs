@@ -1,17 +1,18 @@
 use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
 use crate::common::{mk_qid, remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp};
-use crate::expression::{is_true, EvalError};
-use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
-use crate::model::common::{
-  proc, CQueryPath, ColName, ColValN, ContextRow, ContextSchema, PaxosGroupId, PaxosGroupIdTrait,
+use crate::common::{
+  CQueryPath, ColName, ColValN, ContextRow, ContextSchema, PaxosGroupId, PaxosGroupIdTrait,
   SlaveGroupId, TQueryPath, TableView, TransTableName,
 };
-use crate::model::common::{CTQueryPath, Context, QueryId, TransTableLocationPrefix};
-use crate::model::message as msg;
-use crate::model::message::QueryError;
+use crate::common::{CTQueryPath, Context, QueryId, TransTableLocationPrefix};
+use crate::expression::{is_true, EvalError};
+use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
+use crate::message as msg;
+use crate::message::QueryError;
 use crate::server::{
   mk_eval_error, CTServerContext, ContextConstructor, LocalColumnRef, LocalTable, ServerContextBase,
 };
+use crate::sql_ast::proc;
 use crate::table_read_es::{check_gossip, fully_evaluate_select};
 use crate::tablet::{compute_contexts, Executing, TPESAction, TPESBase, TabletContext};
 use std::collections::BTreeSet;

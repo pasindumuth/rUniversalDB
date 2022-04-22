@@ -1,7 +1,7 @@
 use crate::common::{mk_cid, mk_sid, LeaderMap, MasterIOCtx, MasterTraceMessage};
+use crate::common::{CoordGroupId, EndpointId, LeadershipId, PaxosGroupId, SlaveGroupId};
 use crate::master::{MasterBundle, MasterConfig, MasterContext, MasterPLm};
-use crate::model::common::{CoordGroupId, EndpointId, LeadershipId, PaxosGroupId, SlaveGroupId};
-use crate::model::message as msg;
+use crate::message as msg;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 

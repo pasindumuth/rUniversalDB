@@ -1,5 +1,6 @@
-use crate::model::common::{iast, ColName, ColType};
-use crate::model::common::{proc, TablePath};
+use crate::common::TablePath;
+use crate::common::{ColName, ColType};
+use crate::sql_ast::{iast, proc};
 use sqlparser::ast;
 use sqlparser::test_utils::table;
 use std::collections::BTreeMap;

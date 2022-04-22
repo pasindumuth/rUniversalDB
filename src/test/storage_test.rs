@@ -1,6 +1,6 @@
 use super::add_version;
 use crate::common::{mk_t, Timestamp};
-use crate::model::common::{ColVal, ColValN};
+use crate::common::{ColVal, ColValN};
 
 #[test]
 fn add_version_test() {

@@ -1,8 +1,8 @@
 use crate::common::{remove_item, update_all_eids, MasterIOCtx, RemoteLeaderChangedPLm};
+use crate::common::{EndpointId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId};
 use crate::free_node_manager::FreeNodeManager;
 use crate::master::{MasterContext, MasterPLm};
-use crate::model::common::{EndpointId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId};
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::server::ServerContextBase;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

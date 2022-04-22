@@ -1,5 +1,10 @@
 use crate::alter_table_tm_es::AlterTableTMPayloadTypes;
 use crate::col_usage::ColUsageNode;
+use crate::common::{
+  CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
+  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
+  TabletKeyRange, TierMap, TransTableLocationPrefix, TransTableName,
+};
 use crate::common::{FullGen, GossipData, LeaderMap, QueryPlan, RemoteLeaderChangedPLm, Timestamp};
 use crate::create_table_tm_es::CreateTableTMPayloadTypes;
 use crate::drop_table_tm_es::DropTableTMPayloadTypes;
@@ -8,14 +13,10 @@ use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::free_node_manager::FreeNodeType;
 use crate::master::{MasterBundle, MasterSnapshot};
 use crate::master_query_planning_es::ColPresenceReq;
-use crate::model::common::{
-  proc, CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
-  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
-  TabletKeyRange, TierMap, TransTableLocationPrefix, TransTableName,
-};
 use crate::paxos2pc_tm;
 use crate::shard_split_tm_es::ShardSplitTMPayloadTypes;
 use crate::slave::{SharedPaxosBundle, SlaveSnapshot};
+use crate::sql_ast::proc;
 use crate::stmpaxos2pc_tm;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

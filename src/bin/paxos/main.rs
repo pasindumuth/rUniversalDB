@@ -3,8 +3,8 @@
 use crate::simulation::{SimConfig, SimpleBundle, Simulation};
 use rand::RngCore;
 use rand_xorshift::XorShiftRng;
-use runiversal::model::common::{Gen, LeadershipId};
-use runiversal::model::message as msg;
+use runiversal::common::{Gen, LeadershipId};
+use runiversal::message as msg;
 use std::iter::FromIterator;
 
 mod simulation;

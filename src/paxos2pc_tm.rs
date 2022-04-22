@@ -1,5 +1,5 @@
 use crate::common::{BasicIOCtx, LeaderMap, RemoteLeaderChangedPLm};
-use crate::model::common::{LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, SlaveGroupId};
+use crate::common::{LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, SlaveGroupId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

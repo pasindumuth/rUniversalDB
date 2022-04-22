@@ -1,5 +1,5 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
-use crate::model::common::{LeadershipId, PaxosGroupIdTrait, QueryId};
+use crate::common::{LeadershipId, PaxosGroupIdTrait, QueryId};
 use crate::paxos2pc_tm::{
   Aborted, CheckPrepared, Commit, InformPrepared, Paxos2PCContainer, PayloadTypes, Prepared,
   RMAbortedPLm, RMCommittedPLm, RMMessage, RMPLm, RMPreparedPLm, RMServerContext, TMMessage, Wait,

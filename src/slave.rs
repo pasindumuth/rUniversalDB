@@ -2,15 +2,15 @@ use crate::common::{
   lookup, mk_t, update_all_eids, update_leader_map, BasicIOCtx, GeneralTraceMessage, GossipData,
   LeaderMap, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp, VersionedValue,
 };
+use crate::common::{
+  CoordGroupId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TabletGroupId,
+};
+use crate::common::{EndpointId, QueryId};
 use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::{CreateTableRMAction, CreateTableRMES, CreateTableRMPayloadTypes};
 use crate::create_table_tm_es::CreateTableTMPayloadTypes;
-use crate::model::common::{
-  CoordGroupId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TabletGroupId,
-};
-use crate::model::common::{EndpointId, QueryId};
-use crate::model::message as msg;
-use crate::model::message::SlaveRemotePayload;
+use crate::message as msg;
+use crate::message::SlaveRemotePayload;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use crate::server::ServerContextBase;

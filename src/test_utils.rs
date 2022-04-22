@@ -1,4 +1,4 @@
-use crate::model::common::{
+use crate::common::{
   ColName, ColVal, EndpointId, SlaveGroupId, TablePath, TabletGroupId, TransTableName,
 };
 use rand::RngCore;

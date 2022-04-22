@@ -1,7 +1,8 @@
-use crate::model::common::iast::SelectClause;
-use crate::model::common::proc::SimpleSource;
-use crate::model::common::{iast, proc, ColName, TablePath, TransTableName};
-use crate::model::message as msg;
+use crate::common::{ColName, TablePath, TransTableName};
+use crate::message as msg;
+use crate::sql_ast::iast::SelectClause;
+use crate::sql_ast::proc::SimpleSource;
+use crate::sql_ast::{iast, proc};
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
 

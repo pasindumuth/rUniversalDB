@@ -1,5 +1,5 @@
 use crate::common::BasicIOCtx;
-use crate::model::common::QueryId;
+use crate::common::QueryId;
 use crate::paxos2pc_tm::Paxos2PCContainer;
 use crate::stmpaxos2pc_tm::{Closed, Commit, Prepared, RMMessage, TMMessage, TMPayloadTypes};
 use serde::de::DeserializeOwned;

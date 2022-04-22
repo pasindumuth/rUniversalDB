@@ -1,7 +1,7 @@
 use crate::simple_tm_es::SimplePayloadTypes;
 use crate::stm_simple_tm_es::STMSimpleTMPayloadTypes;
-use runiversal::model::common::{QueryId, SlaveGroupId};
-use runiversal::model::message as msg;
+use runiversal::common::{QueryId, SlaveGroupId};
+use runiversal::message as msg;
 use runiversal::paxos2pc_tm as paxos2pc;
 use runiversal::stmpaxos2pc_tm as stmpaxos2pc;
 use serde::{Deserialize, Serialize};

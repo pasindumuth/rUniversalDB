@@ -1,5 +1,5 @@
 use runiversal::master::MasterBundle;
-use runiversal::model::message::{
+use runiversal::message::{
   CoordMessage, ExternalMessage, FreeNodeAssoc, FreeNodeMessage, MasterExternalReq, MasterMessage,
   MasterRemotePayload, NetworkMessage, PaxosDriverMessage, RemoteMessage, SlaveExternalReq,
   SlaveMessage, SlaveReconfig, SlaveRemotePayload, TabletMessage,

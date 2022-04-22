@@ -1,4 +1,4 @@
-use crate::model::common::EndpointId;
+use crate::common::EndpointId;
 use std::collections::{BTreeMap, VecDeque};
 
 // -----------------------------------------------------------------------------------------------

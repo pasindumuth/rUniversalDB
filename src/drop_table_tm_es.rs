@@ -1,8 +1,8 @@
 use crate::alter_table_tm_es::{get_rms, ResponseData};
 use crate::common::{cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, Timestamp};
+use crate::common::{TNodePath, TablePath};
 use crate::master::{MasterContext, MasterPLm};
-use crate::model::common::{TNodePath, TablePath};
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::server::ServerContextBase;
 use crate::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,

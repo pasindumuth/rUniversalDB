@@ -1,10 +1,10 @@
 use crate::simulation::Simulation;
 use runiversal::common::{mk_t, RangeEnds};
+use runiversal::common::{EndpointId, PaxosGroupId, RequestId, SlaveGroupId, TableView};
 use runiversal::coord::CoordConfig;
 use runiversal::free_node_manager::FreeNodeType;
 use runiversal::master::MasterConfig;
-use runiversal::model::common::{EndpointId, PaxosGroupId, RequestId, SlaveGroupId, TableView};
-use runiversal::model::message as msg;
+use runiversal::message as msg;
 use runiversal::node::NodeConfig;
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::{mk_client_eid, mk_node_eid};

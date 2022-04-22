@@ -1,14 +1,14 @@
 use crate::col_usage::collect_top_level_cols;
 use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
+use crate::common::{
+  ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView, TransTableName,
+};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
-use crate::model::common::{
-  proc, ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView,
-  TransTableName,
-};
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
 use crate::server::{evaluate_update, mk_eval_error, ContextConstructor, ExtraColumnRef};
+use crate::sql_ast::proc;
 use crate::storage::{GenericTable, MSStorageView};
 use crate::table_read_es::compute_read_region;
 use crate::tablet::{

@@ -3,18 +3,17 @@ use crate::common::{
   update_leader_map_unversioned, BasicIOCtx, GeneralTraceMessage, GossipData, LeaderMap, OrigP,
   Timestamp, VersionedValue,
 };
+use crate::common::{
+  CNodePath, CQueryPath, CSubNodePath, CTSubNodePath, ColName, CoordGroupId, Gen, LeadershipId,
+  PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TNodePath, TQueryPath, TableView,
+};
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
+use crate::common::{EndpointId, QueryId, RequestId};
 use crate::finish_query_tm_es::{
   FinishQueryPayloadTypes, FinishQueryPrepare, FinishQueryTMES, FinishQueryTMInner, ResponseData,
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
-use crate::model::common::iast::Query;
-use crate::model::common::{
-  proc, CNodePath, CQueryPath, CSubNodePath, CTSubNodePath, ColName, CoordGroupId, Gen,
-  LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TNodePath, TQueryPath, TableView,
-};
-use crate::model::common::{EndpointId, QueryId, RequestId};
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::ms_query_coord_es::{
   FullMSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
@@ -22,6 +21,8 @@ use crate::paxos2pc_tm as paxos2pc;
 use crate::paxos2pc_tm::{Paxos2PCTMAction, TMMessage};
 use crate::query_converter::convert_to_msquery;
 use crate::server::{CTServerContext, CommonQuery, ServerContextBase};
+use crate::sql_ast::iast::Query;
+use crate::sql_ast::proc;
 use crate::sql_parser::convert_ast;
 use crate::tablet::TPESAction;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};

@@ -1,5 +1,5 @@
-use crate::model::common::EndpointId;
-use crate::model::message as msg;
+use crate::common::EndpointId;
+use crate::message as msg;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};

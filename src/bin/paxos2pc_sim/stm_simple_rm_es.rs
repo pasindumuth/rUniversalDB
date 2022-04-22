@@ -4,7 +4,7 @@ use crate::stm_simple_tm_es::{
   STMSimpleClosed, STMSimpleCommit, STMSimplePrepare, STMSimplePrepared, STMSimpleTMPayloadTypes,
 };
 use runiversal::common::BasicIOCtx;
-use runiversal::model::common::SlaveGroupId;
+use runiversal::common::SlaveGroupId;
 use runiversal::stmpaxos2pc_rm::{
   RMCommittedPLm, RMPLm, RMPayloadTypes, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
   STMPaxos2PCRMOuter,

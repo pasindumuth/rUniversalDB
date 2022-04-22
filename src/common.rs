@@ -2,18 +2,13 @@ use crate::col_usage::ColUsageNode;
 use crate::coord::{CoordContext, CoordForwardMsg, CoordState};
 use crate::master::MasterTimerInput;
 use crate::master_query_planning_es::ColPresenceReq;
-use crate::model::common::{
-  proc, CQueryPath, CTNodePath, ColName, ColType, ColVal, ColValN, CoordGroupId, EndpointId, Gen,
-  LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId, ShardingGen, SlaveGroupId,
-  TQueryPath, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap,
-  TransTableLocationPrefix,
-};
-use crate::model::message as msg;
-use crate::model::message::NetworkMessage;
+use crate::message as msg;
+use crate::message::NetworkMessage;
 use crate::multiversion_map::MVM;
 use crate::node::{GenericInput, GenericTimerInput};
 use crate::server::{CTServerContext, CommonQuery};
 use crate::slave::{SlaveBackMessage, SlaveTimerInput};
+use crate::sql_ast::proc;
 use crate::tablet::{
   TabletConfig, TabletContext, TabletCreateHelper, TabletForwardMsg, TabletSnapshot, TabletState,
 };
@@ -266,6 +261,344 @@ pub fn read_index<K: Ord, V>(map: &BTreeMap<K, V>, idx: usize) -> Option<(&K, &V
     it.next();
   }
   it.next()
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Relational Tablet
+// -------------------------------------------------------------------------------------------------
+
+/// A global identifier of a Table (across tables and databases).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TablePath(pub String);
+
+/// A global identifier of a TransTable (across tables and databases).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TransTableName(pub String);
+
+/// The types that the columns of a Relational Tablet can take on.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ColType {
+  Int,
+  Bool,
+  String,
+}
+
+/// The values that the columns of a Relational Tablet can take on.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ColVal {
+  Int(i32),
+  Bool(bool),
+  String(String),
+}
+
+/// This is a nullable `ColVal`. We use this alias for self-documentation
+pub type ColValN = Option<ColVal>;
+
+/// The name of a column.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ColName(pub String);
+
+/// The Primary Key of a Relational Tablet. Note that we don't use
+/// Vec<Option<ColValue>> because values of a key column can't be NULL.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrimaryKey {
+  pub cols: Vec<ColVal>,
+}
+
+impl PrimaryKey {
+  pub fn new(cols: Vec<ColVal>) -> PrimaryKey {
+    PrimaryKey { cols }
+  }
+}
+
+/// The key range that a tablet manages. The `start` and `end` are
+/// PrimaryKey types, which are convenient for splitting the key-space.
+/// If either `start` or `end` is `None`, that means there is no bound
+/// for that direction. This is a half-open interval, where `start`
+/// is inclusive and `end` is exclusive.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TabletKeyRange {
+  pub start: Option<PrimaryKey>,
+  pub end: Option<PrimaryKey>,
+}
+
+/// A Type used to represent a generation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
+pub struct Gen(pub u64);
+
+/// A Type used to represent a generation of a `sharding_config` for a Table.
+pub type ShardingGen = Gen;
+
+// -------------------------------------------------------------------------------------------------
+//  Transaction Data Structures
+// -------------------------------------------------------------------------------------------------
+
+/// See `compute_all_tier_maps` to see how this is used in the `QueryPlan`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TierMap {
+  pub map: BTreeMap<TablePath, u32>,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  ID Types
+// -------------------------------------------------------------------------------------------------
+
+/// A global identifer of a network node. This includes Slaves, Clients, Admin
+/// clients, and other nodes in the network.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EndpointId(pub String);
+
+/// A global identfier of a Tablet.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TabletGroupId(pub String);
+
+/// A global identfier of a Tablet.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryId(pub String);
+
+/// A global identfier of a Slave.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SlaveGroupId(pub String);
+
+/// A global identfier of a Coord.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CoordGroupId(pub String);
+
+/// A request ID used to help the sender cancel the query if they wanted to.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RequestId(pub String);
+
+// -------------------------------------------------------------------------------------------------
+//  PaxosGroupIdTrait
+// -------------------------------------------------------------------------------------------------
+
+pub trait PaxosGroupIdTrait {
+  fn to_gid(&self) -> PaxosGroupId;
+}
+
+impl PaxosGroupIdTrait for SlaveGroupId {
+  fn to_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.clone())
+  }
+}
+
+impl PaxosGroupIdTrait for TNodePath {
+  fn to_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.sid.clone())
+  }
+}
+
+impl PaxosGroupIdTrait for CNodePath {
+  fn to_gid(&self) -> PaxosGroupId {
+    PaxosGroupId::Slave(self.sid.clone())
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
+//  QueryPath
+// -------------------------------------------------------------------------------------------------
+
+// SubNodePaths
+
+// SubNodePaths point to a specific thread besides the main thread that is running in a
+// server. Here, we define the `main` thread to be the one that messages come into.
+
+/// `CTSubNodePath`
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CTSubNodePath {
+  Tablet(TabletGroupId),
+  Coord(CoordGroupId),
+}
+
+pub trait IntoCTSubNodePath {
+  fn into_ct(self) -> CTSubNodePath;
+}
+
+/// `TSubNodePath`
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TSubNodePath {
+  Tablet(TabletGroupId),
+}
+
+impl IntoCTSubNodePath for TSubNodePath {
+  fn into_ct(self) -> CTSubNodePath {
+    match self {
+      TSubNodePath::Tablet(tid) => CTSubNodePath::Tablet(tid),
+    }
+  }
+}
+
+/// `CSubNodePath`
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CSubNodePath {
+  Coord(CoordGroupId),
+}
+
+impl IntoCTSubNodePath for CSubNodePath {
+  fn into_ct(self) -> CTSubNodePath {
+    match self {
+      CSubNodePath::Coord(cid) => CTSubNodePath::Coord(cid),
+    }
+  }
+}
+
+// SlaveNodePath
+
+/// `SlaveNodePath`
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SlaveNodePath<SubNodePathT> {
+  pub sid: SlaveGroupId,
+  pub sub: SubNodePathT,
+}
+
+impl<SubNodePathT: IntoCTSubNodePath> SlaveNodePath<SubNodePathT> {
+  pub fn into_ct(self) -> CTNodePath {
+    SlaveNodePath { sid: self.sid, sub: self.sub.into_ct() }
+  }
+}
+
+/// `CTNodePath`
+pub type CTNodePath = SlaveNodePath<CTSubNodePath>;
+
+/// `TNodePath`
+pub type TNodePath = SlaveNodePath<TSubNodePath>;
+
+/// `CNodePath`
+pub type CNodePath = SlaveNodePath<CSubNodePath>;
+
+// QueryPaths
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SlaveQueryPath<SubNodePathT> {
+  pub node_path: SlaveNodePath<SubNodePathT>,
+  pub query_id: QueryId,
+}
+
+impl<SubNodePathT: IntoCTSubNodePath> SlaveQueryPath<SubNodePathT> {
+  pub fn into_ct(self) -> CTQueryPath {
+    CTQueryPath {
+      node_path: CTNodePath { sid: self.node_path.sid, sub: self.node_path.sub.into_ct() },
+      query_id: self.query_id,
+    }
+  }
+}
+
+/// `CTQueryPath`
+pub type CTQueryPath = SlaveQueryPath<CTSubNodePath>;
+
+/// `TQueryPath`
+pub type TQueryPath = SlaveQueryPath<TSubNodePath>;
+
+/// `CQueryPath`
+pub type CQueryPath = SlaveQueryPath<CSubNodePath>;
+
+// Gen
+impl Gen {
+  pub fn next(&self) -> Gen {
+    Gen(self.0 + 1)
+  }
+
+  pub fn inc(&mut self) {
+    self.0 += 1;
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Paxos
+// -------------------------------------------------------------------------------------------------
+
+/// Used to identify a Leadership in a given PaxosGroup.
+/// The default total ordering is works, since `Gen` is compared first.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LeadershipId {
+  pub gen: Gen,
+  pub eid: EndpointId,
+}
+
+impl LeadershipId {
+  pub fn mk_first(eid: EndpointId) -> LeadershipId {
+    LeadershipId { gen: Gen(0), eid }
+  }
+}
+
+/// Used to identify a PaxosGroup in the system.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PaxosGroupId {
+  Master,
+  Slave(SlaveGroupId),
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Subquery Context
+// -------------------------------------------------------------------------------------------------
+
+/// `Context` to send subqueries
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Context {
+  pub context_schema: ContextSchema,
+  pub context_rows: Vec<ContextRow>,
+}
+
+impl Context {
+  pub fn new(context_schema: ContextSchema) -> Context {
+    Context { context_schema, context_rows: vec![] }
+  }
+}
+
+/// The schema of the `Context`.
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContextSchema {
+  pub column_context_schema: Vec<proc::ColumnRef>,
+  pub trans_table_context_schema: Vec<TransTableLocationPrefix>,
+}
+
+impl ContextSchema {
+  pub fn trans_table_names(&self) -> Vec<TransTableName> {
+    self.trans_table_context_schema.iter().map(|prefix| prefix.trans_table_name.clone()).collect()
+  }
+}
+
+/// A Row in the `Context`
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContextRow {
+  pub column_context_row: Vec<ColValN>,
+  pub trans_table_context_row: Vec<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TransTableLocationPrefix {
+  pub source: CTQueryPath,
+  pub trans_table_name: TransTableName,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Table View
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TableView {
+  /// The keys are the rows, and the values are the number of repetitions.
+  pub col_names: Vec<Option<ColName>>,
+  /// The keys are the rows, and the values are the number of repetitions.
+  pub rows: BTreeMap<Vec<ColValN>, u64>,
+}
+
+impl TableView {
+  pub fn new(col_names: Vec<Option<ColName>>) -> TableView {
+    TableView { col_names, rows: Default::default() }
+  }
+
+  pub fn add_row(&mut self, row: Vec<ColValN>) {
+    self.add_row_multi(row, 1);
+  }
+
+  pub fn add_row_multi(&mut self, row: Vec<ColValN>, row_count: u64) {
+    if let Some(count) = self.rows.get_mut(&row) {
+      *count += row_count;
+    } else if row_count > 0 {
+      self.rows.insert(row, row_count);
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

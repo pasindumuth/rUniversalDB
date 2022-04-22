@@ -1,4 +1,4 @@
-use crate::model::common::proc;
+use crate::sql_ast::proc;
 use std::mem;
 use std::ops::Deref;
 

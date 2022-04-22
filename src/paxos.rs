@@ -1,9 +1,7 @@
 use crate::common::{mk_t, mk_uuid, remove_item, Timestamp, UUID};
-use crate::model::common::{EndpointId, Gen, LeadershipId};
-use crate::model::message as msg;
-use crate::model::message::{
-  LeaderChanged, PLEntry, PLIndex, PaxosDriverMessage, PaxosMessage, Rnd,
-};
+use crate::common::{EndpointId, Gen, LeadershipId};
+use crate::message as msg;
+use crate::message::{LeaderChanged, PLEntry, PLIndex, PaxosDriverMessage, PaxosMessage, Rnd};
 use rand::RngCore;
 use sqlparser::dialect::keywords::Keyword::NEXT;
 use std::cmp::{max, min};

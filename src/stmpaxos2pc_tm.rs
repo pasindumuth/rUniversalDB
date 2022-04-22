@@ -1,5 +1,5 @@
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
-use crate::model::common::{PaxosGroupId, PaxosGroupIdTrait, QueryId};
+use crate::common::{PaxosGroupId, PaxosGroupIdTrait, QueryId};
 use crate::paxos2pc_tm::Paxos2PCContainer;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

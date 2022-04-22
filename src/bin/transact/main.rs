@@ -12,16 +12,14 @@ use rand_xorshift::XorShiftRng;
 use runiversal::common::{
   mk_t, BasicIOCtx, FreeNodeIOCtx, GossipData, MasterIOCtx, NodeIOCtx, SlaveIOCtx,
 };
+use runiversal::common::{CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId};
 use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
 use runiversal::free_node_manager::FreeNodeType;
 use runiversal::master::{
   FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput,
 };
-use runiversal::model::common::{
-  CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId,
-};
-use runiversal::model::message as msg;
-use runiversal::model::message::FreeNodeMessage;
+use runiversal::message as msg;
+use runiversal::message::FreeNodeMessage;
 use runiversal::net::{recv, send_bytes, send_msg, SERVER_PORT};
 use runiversal::node::{get_prod_configs, GenericInput, NodeConfig, NodeState};
 use runiversal::paxos::PaxosConfig;

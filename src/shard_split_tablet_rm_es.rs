@@ -1,9 +1,9 @@
 use crate::common::{cur_timestamp, Timestamp};
 use crate::common::{mk_t, BasicIOCtx};
-use crate::model::common::{
+use crate::common::{
   ShardingGen, SlaveGroupId, TNodePath, TablePath, TabletGroupId, TabletKeyRange,
 };
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::server::ServerContextBase;
 use crate::shard_split_tm_es::{
   ShardNodePath, ShardSplitClosed, ShardSplitCommit, ShardSplitPrepare, ShardSplitPrepared,

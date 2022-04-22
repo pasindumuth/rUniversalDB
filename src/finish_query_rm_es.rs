@@ -1,11 +1,12 @@
+use crate::common::QueryId;
 use crate::common::{BasicIOCtx, GeneralTraceMessage, Timestamp};
 use crate::finish_query_tm_es::{
   FinishQueryPayloadTypes, FinishQueryPrepare, FinishQueryRMAborted, FinishQueryRMCommitted,
   FinishQueryRMPrepared,
 };
-use crate::model::common::{proc, QueryId};
 use crate::paxos2pc_rm::{Paxos2PCRMInner, Paxos2PCRMOuter};
 use crate::paxos2pc_tm::PayloadTypes;
+use crate::sql_ast::proc;
 use crate::storage::{commit_to_storage, compress_updates_views, GenericTable};
 use crate::tablet::{MSQueryES, ReadWriteRegion, TabletContext};
 use serde::{Deserialize, Serialize};

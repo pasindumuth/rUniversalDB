@@ -3,10 +3,10 @@ use crate::slave::{FullSlaveInput, SlaveBundle, SlaveContext, SlaveState, SlaveT
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_t, BasicIOCtx, GeneralTraceMessage, RangeEnds, Timestamp};
-use runiversal::model::common::{
+use runiversal::common::{
   EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId,
 };
-use runiversal::model::message::LeaderChanged;
+use runiversal::message::LeaderChanged;
 use runiversal::simulation_utils::{add_msg, mk_client_eid};
 use runiversal::slave::SlaveConfig;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

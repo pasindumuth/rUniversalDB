@@ -3,11 +3,11 @@ use crate::common::{
   cur_timestamp, mk_t, BasicIOCtx, FullGen, GeneralTraceMessage, GossipDataMutView, TableSchema,
   Timestamp,
 };
-use crate::master::{MasterContext, MasterPLm};
-use crate::model::common::{
+use crate::common::{
   ColName, ColType, Gen, ShardingGen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
 };
-use crate::model::message as msg;
+use crate::master::{MasterContext, MasterPLm};
+use crate::message as msg;
 use crate::multiversion_map::MVM;
 use crate::server::ServerContextBase;
 use crate::slave::{SlaveContext, SlavePLm};

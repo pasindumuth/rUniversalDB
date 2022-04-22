@@ -1,12 +1,11 @@
 use crate::common::{BasicIOCtx, Timestamp};
+use crate::common::{CNodePath, EndpointId, QueryId, RequestId, TNodePath, TQueryPath, TableView};
 use crate::coord::CoordContext;
-use crate::model::common::{
-  proc, CNodePath, EndpointId, QueryId, RequestId, TNodePath, TQueryPath, TableView,
-};
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::paxos2pc_tm::{
   Paxos2PCTMInner, Paxos2PCTMOuter, PayloadTypes, RMMessage, RMPLm, TMMessage,
 };
+use crate::sql_ast::proc;
 use crate::storage::GenericTable;
 use crate::tablet::{MSQueryES, ReadWriteRegion, TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};

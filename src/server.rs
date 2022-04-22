@@ -1,15 +1,16 @@
 use crate::common::{
   lookup_pos, BasicIOCtx, CoreIOCtx, FullGen, GossipData, LeaderMap, TableSchema, Timestamp,
 };
-use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
-use crate::model::common::proc::SelectClause;
-use crate::model::common::{
-  proc, CNodePath, CSubNodePath, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColVal, ColValN,
+use crate::common::{
+  CNodePath, CSubNodePath, CTNodePath, CTQueryPath, CTSubNodePath, ColName, ColVal, ColValN,
   ContextRow, ContextSchema, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait,
   QueryId, SlaveGroupId, TNodePath, TSubNodePath, TablePath, TableView, TabletGroupId,
   TransTableName,
 };
-use crate::model::message as msg;
+use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
+use crate::message as msg;
+use crate::sql_ast::proc;
+use crate::sql_ast::proc::SelectClause;
 use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;

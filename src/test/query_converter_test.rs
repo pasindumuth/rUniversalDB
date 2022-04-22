@@ -1,7 +1,7 @@
-use crate::model::common::proc;
-use crate::model::common::{iast, TablePath, TransTableName};
-use crate::model::message as msg;
+use crate::common::{TablePath, TransTableName};
+use crate::message as msg;
 use crate::query_converter::{flatten_top_level_query, rename_trans_tables_query_r, RenameContext};
+use crate::sql_ast::{iast, proc};
 
 // -----------------------------------------------------------------------------------------------
 //  Common

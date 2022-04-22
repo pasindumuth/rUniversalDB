@@ -3,23 +3,23 @@ use crate::common::{
   btree_multimap_insert, lookup, mk_qid, to_table_path, CoreIOCtx, GossipData, GossipDataView,
   KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, Timestamp,
 };
+use crate::common::{
+  CQueryPath, CTQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow, PaxosGroupId,
+  PaxosGroupIdTrait, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TransTableName,
+};
 use crate::expression::{
   compress_row_region, compute_key_region, evaluate_c_expr, is_true, CExpr, EvalError,
 };
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::master_query_planning_es::ColPresenceReq;
-use crate::model::common::proc::SelectClause;
-use crate::model::common::{
-  iast, proc, CQueryPath, CTQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow,
-  PaxosGroupId, PaxosGroupIdTrait, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView,
-  TransTableName,
-};
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::server::{
   contains_col, contains_val_col, evaluate_super_simple_select, mk_eval_error, ContextConstructor,
   ExtraColumnRef, LocalColumnRef,
 };
 use crate::server::{LocalTable, ServerContextBase};
+use crate::sql_ast::proc::SelectClause;
+use crate::sql_ast::{iast, proc};
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
   compute_col_map, compute_subqueries, ColSet, ColumnsLocking, Executing, Pending,

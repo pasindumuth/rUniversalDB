@@ -2,8 +2,9 @@ use crate::common::{
   lookup, BoundType, ColBound, KeyBound, PolyColBound, ReadRegion, SingleBound, WriteRegion,
   WriteRegionType,
 };
-use crate::model::common::proc::ValExpr;
-use crate::model::common::{iast, proc, ColName, ColType, ColVal, ColValN};
+use crate::common::{ColName, ColType, ColVal, ColValN};
+use crate::sql_ast::proc::ValExpr;
+use crate::sql_ast::{iast, proc};
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
 use std::ops::Deref;

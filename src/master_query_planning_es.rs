@@ -6,19 +6,20 @@ use crate::common::{
   add_item, default_get_mut, lookup, map_insert, FullGen, MasterIOCtx, RemoteLeaderChangedPLm,
   TableSchema, Timestamp,
 };
-use crate::master::{MasterContext, MasterPLm};
-use crate::model::common::proc::MSQueryStage;
-use crate::model::common::{
-  proc, CQueryPath, ColName, ColType, Gen, PaxosGroupId, PaxosGroupIdTrait, QueryId, TablePath,
+use crate::common::{
+  CQueryPath, ColName, ColType, Gen, PaxosGroupId, PaxosGroupIdTrait, QueryId, TablePath,
   TransTableName,
 };
-use crate::model::message as msg;
+use crate::master::{MasterContext, MasterPLm};
+use crate::message as msg;
 use crate::multiversion_map::MVM;
 use crate::query_planning::{
   collect_table_paths, compute_all_tier_maps, compute_table_location_map, perform_validations,
   StaticValidationError,
 };
 use crate::server::ServerContextBase;
+use crate::sql_ast::proc;
+use crate::sql_ast::proc::MSQueryStage;
 use serde::{Deserialize, Serialize};
 use sqlparser::test_utils::table;
 use std::collections::BTreeMap;

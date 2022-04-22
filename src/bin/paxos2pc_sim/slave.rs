@@ -10,8 +10,8 @@ use crate::stm_simple_tm_es::{
 };
 use rand::RngCore;
 use runiversal::common::{mk_t, BasicIOCtx, LeaderMap, RemoteLeaderChangedPLm, VersionedValue};
-use runiversal::model::common::{EndpointId, Gen, PaxosGroupIdTrait, QueryId};
-use runiversal::model::common::{LeadershipId, PaxosGroupId, SlaveGroupId};
+use runiversal::common::{EndpointId, Gen, PaxosGroupIdTrait, QueryId};
+use runiversal::common::{LeadershipId, PaxosGroupId, SlaveGroupId};
 use runiversal::network_driver::{NetworkDriver, NetworkDriverContext};
 use runiversal::paxos2pc_rm;
 use runiversal::paxos2pc_rm::Paxos2PCRMAction;

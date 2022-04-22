@@ -2,10 +2,11 @@ use crate::alter_table_tm_es::{
   AlterTableClosed, AlterTableCommit, AlterTablePrepare, AlterTablePrepared,
   AlterTableTMPayloadTypes,
 };
+use crate::common::TNodePath;
 use crate::common::{cur_timestamp, mk_t, BasicIOCtx, Timestamp};
-use crate::model::common::{proc, TNodePath};
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::server::ServerContextBase;
+use crate::sql_ast::proc;
 use crate::stmpaxos2pc_rm::{
   RMCommittedPLm, RMPLm, RMPayloadTypes, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
   STMPaxos2PCRMOuter,

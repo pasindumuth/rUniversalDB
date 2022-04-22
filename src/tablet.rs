@@ -9,6 +9,14 @@ use crate::common::{
   OrigP, QueryESResult, QueryPlan, ReadRegion, RemoteLeaderChangedPLm, TableSchema, Timestamp,
   VersionedValue, WriteRegion,
 };
+use crate::common::{
+  CNodePath, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColVal, ColValN, Context, ContextRow,
+  ContextSchema, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, PrimaryKey, TNodePath,
+  TQueryPath, TSubNodePath, TableView, TransTableName,
+};
+use crate::common::{
+  ColName, EndpointId, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
+};
 use crate::drop_table_rm_es::{
   DropTableRMAction, DropTableRMES, DropTableRMInner, DropTableRMPayloadTypes,
 };
@@ -19,15 +27,7 @@ use crate::expression::{
 use crate::finish_query_rm_es::{FinishQueryRMES, FinishQueryRMInner};
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
-use crate::model::common::{
-  proc, CNodePath, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColVal, ColValN, Context,
-  ContextRow, ContextSchema, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, PrimaryKey,
-  TNodePath, TQueryPath, TSubNodePath, TableView, TransTableName,
-};
-use crate::model::common::{
-  ColName, EndpointId, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
-};
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::ms_table_delete_es::{DeleteInner, MSTableDeleteES};
 use crate::ms_table_es::{GeneralQueryES, MSTableES, MSTableExecutionS, SqlQueryInner};
 use crate::ms_table_insert_es::{InsertInner, MSTableInsertES};
@@ -45,6 +45,7 @@ use crate::shard_split_tablet_rm_es::{
   ShardSplitTabletRMAction, ShardSplitTabletRMES, ShardSplitTabletRMPayloadTypes,
 };
 use crate::slave::{SlaveBackMessage, TabletBundleInsertion};
+use crate::sql_ast::proc;
 use crate::stmpaxos2pc_rm;
 use crate::storage::{GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableReadES};
@@ -1054,9 +1055,9 @@ pub fn compute_col_map(
 // -----------------------------------------------------------------------------------------------
 
 pub mod plm {
+  use crate::common::{CQueryPath, TQueryPath};
+  use crate::common::{ColName, QueryId};
   use crate::common::{ReadRegion, Timestamp};
-  use crate::model::common::{CQueryPath, TQueryPath};
-  use crate::model::common::{ColName, QueryId};
   use crate::storage::GenericTable;
   use crate::tablet::{ColSet, ReadWriteRegion};
   use serde::{Deserialize, Serialize};

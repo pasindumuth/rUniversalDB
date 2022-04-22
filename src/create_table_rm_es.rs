@@ -1,12 +1,12 @@
 use crate::common::{BasicIOCtx, TableSchema};
+use crate::common::{
+  ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
+};
 use crate::create_table_tm_es::{
   CreateTableClosed, CreateTableCommit, CreateTablePrepare, CreateTablePrepared,
   CreateTableTMPayloadTypes,
 };
-use crate::model::common::{
-  ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
-};
-use crate::model::message as msg;
+use crate::message as msg;
 use crate::multiversion_map::MVM;
 use crate::server::ServerContextBase;
 use crate::slave::{SlaveContext, SlavePLm};

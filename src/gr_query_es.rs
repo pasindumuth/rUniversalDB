@@ -5,15 +5,16 @@ use crate::col_usage::{
 use crate::common::{
   lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, FullGen, OrigP, QueryPlan, Timestamp,
 };
-use crate::master_query_planning_es::ColPresenceReq;
-use crate::model::common::{
-  proc, CQueryPath, ColName, Context, ContextRow, ContextSchema, Gen, LeadershipId,
-  PaxosGroupIdTrait, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TierMap,
-  TransTableLocationPrefix, TransTableName,
+use crate::common::{
+  CQueryPath, ColName, Context, ContextRow, ContextSchema, Gen, LeadershipId, PaxosGroupIdTrait,
+  QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TierMap, TransTableLocationPrefix,
+  TransTableName,
 };
-use crate::model::message as msg;
+use crate::master_query_planning_es::ColPresenceReq;
+use crate::message as msg;
 use crate::server::ServerContextBase;
 use crate::server::{CTServerContext, CommonQuery};
+use crate::sql_ast::proc;
 use crate::table_read_es::perform_aggregation;
 use crate::tm_status::{SendHelper, TMStatus};
 use crate::trans_table_read_es::TransTableSource;

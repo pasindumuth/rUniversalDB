@@ -1,9 +1,10 @@
 use crate::common::{lookup, TableSchema, Timestamp};
+use crate::common::{ColName, ColType, Gen, TablePath, TierMap, TransTableName};
 use crate::master_query_planning_es::{ColPresenceReq, ColUsageErrorTrait, DBSchemaView};
-use crate::model::common::proc::{GeneralSourceRef, MSQueryStage, SelectClause};
-use crate::model::common::{iast, proc, ColName, ColType, Gen, TablePath, TierMap, TransTableName};
 use crate::multiversion_map::MVM;
 use crate::server::contains_col;
+use crate::sql_ast::proc::{GeneralSourceRef, MSQueryStage, SelectClause};
+use crate::sql_ast::{iast, proc};
 use serde::{Deserialize, Serialize};
 use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};

@@ -1,7 +1,7 @@
 use crate::message as msg;
 use crate::slave::{SlaveContext, SlavePLm};
 use runiversal::common::BasicIOCtx;
-use runiversal::model::common::{EndpointId, RequestId, SlaveGroupId};
+use runiversal::common::{EndpointId, RequestId, SlaveGroupId};
 use runiversal::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
   TMPayloadTypes, TMServerContext,
