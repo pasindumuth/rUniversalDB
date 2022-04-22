@@ -941,8 +941,8 @@ impl MasterContext {
                     ShardSplitTMInner {
                       response_data: Some(ResponseData { request_id, sender_eid }),
                       table_path: split.table_path,
-                      old: split.old,
-                      new: split.new,
+                      target_old: split.target_old,
+                      target_new: split.target_new,
                       did_commit: false,
                     },
                   ),
@@ -1465,18 +1465,20 @@ impl MasterContext {
               let shards = gossip.sharding_config.get(&tablet_path_full_gen).unwrap();
 
               // See if the `es.inner.old` TabletGroupId is a part of `es.inner.table_path`.
-              if let Some((orig_range, _)) = shards.iter().find(|(_, t)| t == &es.inner.old.0) {
+              if let Some((orig_range, _)) =
+                shards.iter().find(|(_, t)| t == &es.inner.target_old.tid)
+              {
                 // Check that the SlaveGroupId of `es.inner.new` exists, but not the TabletGroupId
-                if gossip.slave_address_config.contains_key(&es.inner.new.0)
-                  && !gossip.tablet_address_config.contains_key(&es.inner.new.1)
+                if gossip.slave_address_config.contains_key(&es.inner.target_new.sid)
+                  && !gossip.tablet_address_config.contains_key(&es.inner.target_new.tid)
                 {
                   // Check that the `orig_range` is split perfectly.
-                  if orig_range.start == es.inner.old.1.start
-                    && es.inner.old.1.end == es.inner.new.2.start
-                    && es.inner.new.2.end == orig_range.end
+                  if orig_range.start == es.inner.target_old.range.start
+                    && es.inner.target_old.range.end == es.inner.target_new.range.start
+                    && es.inner.target_new.range.end == orig_range.end
                   {
                     // Check that the split point is between the original range.
-                    let split_key = &es.inner.old.1.end;
+                    let split_key = &es.inner.target_old.range.end;
                     if &orig_range.start < split_key && split_key < &orig_range.end {
                       // Start the ES.
                       es.state = paxos2pc::State::WaitingInsertTMPrepared;

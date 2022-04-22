@@ -6,8 +6,8 @@ use crate::common::{
 use crate::message as msg;
 use crate::server::ServerContextBase;
 use crate::shard_split_tm_es::{
-  ShardNodePath, ShardSplitClosed, ShardSplitCommit, ShardSplitPrepare, ShardSplitPrepared,
-  ShardSplitTMPayloadTypes,
+  STRange, ShardNodePath, ShardSplitClosed, ShardSplitCommit, ShardSplitPrepare,
+  ShardSplitPrepared, ShardSplitTMPayloadTypes,
 };
 use crate::stmpaxos2pc_rm::{
   RMCommittedPLm, RMPLm, RMPayloadTypes, RMServerContext, STMPaxos2PCRMAction, STMPaxos2PCRMInner,
@@ -46,8 +46,8 @@ pub struct ShardSplitTabletRMPrepared {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ShardSplitTabletRMCommitted {
   pub sharding_gen: ShardingGen,
-  pub new_old_range: TabletKeyRange,
-  pub new_tablet: (SlaveGroupId, TabletGroupId, TabletKeyRange),
+  pub target_old: STRange,
+  pub target_new: STRange,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -136,8 +136,8 @@ impl STMPaxos2PCRMInner<ShardSplitTabletRMPayloadTypes> for ShardSplitTabletRMIn
   ) -> ShardSplitTabletRMCommitted {
     ShardSplitTabletRMCommitted {
       sharding_gen: commit.sharding_gen.clone(),
-      new_old_range: commit.new_old_range.clone(),
-      new_tablet: commit.new_tablet.clone(),
+      target_old: commit.target_old.clone(),
+      target_new: commit.target_new.clone(),
     }
   }
 

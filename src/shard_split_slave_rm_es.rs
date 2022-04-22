@@ -131,7 +131,7 @@ impl STMPaxos2PCRMInner<ShardSplitSlaveRMPayloadTypes> for ShardSplitSlaveRMInne
     _: &mut IO,
     commit: &ShardSplitCommit,
   ) -> ShardSplitSlaveRMCommitted {
-    ShardSplitSlaveRMCommitted { tid: commit.new_tablet.1.clone() }
+    ShardSplitSlaveRMCommitted { tid: commit.target_new.tid.clone() }
   }
 
   fn committed_plm_inserted<IO: BasicIOCtx>(

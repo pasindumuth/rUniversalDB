@@ -52,8 +52,8 @@ impl TMPayloadTypes for ShardSplitTMPayloadTypes {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ShardSplitTMPrepared {
   pub table_path: TablePath,
-  pub old: (TabletGroupId, TabletKeyRange),
-  pub new: (SlaveGroupId, TabletGroupId, TabletKeyRange),
+  pub target_old: STRange,
+  pub target_new: STRange,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -78,8 +78,8 @@ pub struct ShardSplitAbort {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ShardSplitCommit {
   pub sharding_gen: ShardingGen,
-  pub new_old_range: TabletKeyRange,
-  pub new_tablet: (SlaveGroupId, TabletGroupId, TabletKeyRange),
+  pub target_old: STRange,
+  pub target_new: STRange,
 }
 
 // RM-to-TM
@@ -148,6 +148,15 @@ impl TMServerContext<ShardSplitTMPayloadTypes> for MasterContext {
 
 pub type ShardSplitTMES = STMPaxos2PCTMOuter<ShardSplitTMPayloadTypes, ShardSplitTMInner>;
 
+/// A Slave-Tablet-Range struct, used to point to a `TabletKeyRange`
+/// in a fully-qualified manner.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct STRange {
+  pub sid: SlaveGroupId,
+  pub tid: TabletGroupId,
+  pub range: TabletKeyRange,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ShardSplitTMInner {
   // Response data
@@ -155,8 +164,8 @@ pub struct ShardSplitTMInner {
 
   // ShardSplit Query data
   pub table_path: TablePath,
-  pub old: (TabletGroupId, TabletKeyRange),
-  pub new: (SlaveGroupId, TabletGroupId, TabletKeyRange),
+  pub target_old: STRange,
+  pub target_new: STRange,
 
   /// This is set when `Committed` or `Aborted` gets inserted
   /// for use when constructing `Closed`.
@@ -174,7 +183,7 @@ impl ShardSplitTMInner {
     let mut messages = BTreeMap::<ShardNodePath, MsgT>::new();
 
     // Add the old Tablet as an RM
-    let tid = self.old.0.clone();
+    let tid = self.target_old.tid.clone();
     let sid = ctx.gossip.get().tablet_address_config.get(&tid).unwrap().clone();
     messages.insert(
       ShardNodePath::Tablet(TNodePath { sid, sub: TSubNodePath::Tablet(tid.clone()) }),
@@ -182,7 +191,7 @@ impl ShardSplitTMInner {
     );
 
     // Add the new Tablet's Slave as an RM
-    let sid = self.new.0.clone();
+    let sid = self.target_new.sid.clone();
     messages.insert(ShardNodePath::Slave(sid), message);
 
     messages
@@ -218,9 +227,9 @@ impl ShardSplitTMInner {
       for shard in shards {
         // If this is the old Tablet, we update the `tablet_key_range` and add the new shard.
         let (_, tid) = shard;
-        if &self.old.0 == tid {
-          new_shards.push((self.old.1.clone(), self.old.0.clone()));
-          new_shards.push((self.new.2.clone(), self.new.1.clone()));
+        if &self.target_old.tid == tid {
+          new_shards.push((self.target_old.range.clone(), self.target_old.tid.clone()));
+          new_shards.push((self.target_new.range.clone(), self.target_new.tid.clone()));
         } else {
           // Otherwise, we just copy the current shard.
           new_shards.push(shard.clone());
@@ -230,7 +239,7 @@ impl ShardSplitTMInner {
       gossip.sharding_config.insert(next_table_path_full_gen, new_shards);
 
       // Update `tablet_address_config`.
-      gossip.tablet_address_config.insert(self.new.1.clone(), self.new.0.clone());
+      gossip.tablet_address_config.insert(self.target_new.tid.clone(), self.target_new.sid.clone());
 
       commit_timestamp
     })
@@ -246,8 +255,8 @@ impl STMPaxos2PCTMInner<ShardSplitTMPayloadTypes> for ShardSplitTMInner {
     ShardSplitTMInner {
       response_data: None,
       table_path: payload.table_path,
-      old: payload.old,
-      new: payload.new,
+      target_old: payload.target_old,
+      target_new: payload.target_new,
       did_commit: false,
     }
   }
@@ -259,8 +268,8 @@ impl STMPaxos2PCTMInner<ShardSplitTMPayloadTypes> for ShardSplitTMInner {
   ) -> ShardSplitTMPrepared {
     ShardSplitTMPrepared {
       table_path: self.table_path.clone(),
-      old: self.old.clone(),
-      new: self.new.clone(),
+      target_old: self.target_old.clone(),
+      target_new: self.target_new.clone(),
     }
   }
 
@@ -296,8 +305,8 @@ impl STMPaxos2PCTMInner<ShardSplitTMPayloadTypes> for ShardSplitTMInner {
     let (_, sharding_gen) = full_gen;
     let commit = ShardSplitCommit {
       sharding_gen: sharding_gen.clone(),
-      new_old_range: self.old.1.clone(),
-      new_tablet: self.new.clone(),
+      target_old: self.target_old.clone(),
+      target_new: self.target_new.clone(),
     };
 
     // Construct message map
@@ -398,8 +407,8 @@ impl STMPaxos2PCTMInner<ShardSplitTMPayloadTypes> for ShardSplitTMInner {
     ShardSplitTMInner {
       response_data: None,
       table_path: self.table_path.clone(),
-      old: self.old.clone(),
-      new: self.new.clone(),
+      target_old: self.target_old.clone(),
+      target_new: self.target_new.clone(),
       did_commit: self.did_commit.clone(),
     }
   }

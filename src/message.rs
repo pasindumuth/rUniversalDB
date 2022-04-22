@@ -14,7 +14,7 @@ use crate::free_node_manager::FreeNodeType;
 use crate::master::{MasterBundle, MasterSnapshot};
 use crate::master_query_planning_es::ColPresenceReq;
 use crate::paxos2pc_tm;
-use crate::shard_split_tm_es::ShardSplitTMPayloadTypes;
+use crate::shard_split_tm_es::{STRange, ShardSplitTMPayloadTypes};
 use crate::slave::{SharedPaxosBundle, SlaveSnapshot};
 use crate::sql_ast::proc;
 use crate::stmpaxos2pc_tm;
@@ -766,12 +766,12 @@ pub struct ExternalDDLQuerySuccess {
 // -------------------------------------------------------------------------------------------------
 
 /// Constructed by the Admin as a command to Split off a
-/// part of the `old` into a `new` Tablet.
+/// part of the `target_old` into a `target_new` Tablet.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SplitShardingOp {
   pub table_path: TablePath,
-  pub old: (TabletGroupId, TabletKeyRange),
-  pub new: (SlaveGroupId, TabletGroupId, TabletKeyRange),
+  pub target_old: STRange,
+  pub target_new: STRange,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
