@@ -1,6 +1,6 @@
 use crate::alter_table_tm_es::AlterTableTMPayloadTypes;
 use crate::col_usage::ColUsageNode;
-use crate::common::{GossipData, LeaderMap, QueryPlan, RemoteLeaderChangedPLm, Timestamp};
+use crate::common::{FullGen, GossipData, LeaderMap, QueryPlan, RemoteLeaderChangedPLm, Timestamp};
 use crate::create_table_tm_es::CreateTableTMPayloadTypes;
 use crate::drop_table_tm_es::DropTableTMPayloadTypes;
 use crate::expression::EvalError;
@@ -11,9 +11,10 @@ use crate::master_query_planning_es::ColPresenceReq;
 use crate::model::common::{
   proc, CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
   PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
-  TierMap, TransTableLocationPrefix, TransTableName,
+  TabletKeyRange, TierMap, TransTableLocationPrefix, TransTableName,
 };
 use crate::paxos2pc_tm;
+use crate::shard_split_tm_es::ShardSplitTMPayloadTypes;
 use crate::slave::{SharedPaxosBundle, SlaveSnapshot};
 use crate::stmpaxos2pc_tm;
 use serde::{Deserialize, Serialize};
@@ -37,8 +38,12 @@ pub enum NetworkMessage {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum MasterExternalReq {
+  // DDL
   PerformExternalDDLQuery(PerformExternalDDLQuery),
   CancelExternalDDLQuery(CancelExternalDDLQuery),
+  /// Sharding
+  PerformExternalSharding(PerformExternalSharding),
+  CancelExternalSharding(CancelExternalSharding),
   /// This is used for debugging purposes during development.
   ExternalDebugRequest(ExternalDebugRequest),
 }
@@ -182,11 +187,16 @@ impl SlaveMessage {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ExternalMessage {
+  /// DQL
   ExternalQuerySuccess(ExternalQuerySuccess),
   ExternalQueryAborted(ExternalQueryAborted),
+  /// DDL
   ExternalDDLQuerySuccess(ExternalDDLQuerySuccess),
   ExternalDDLQueryAborted(ExternalDDLQueryAborted),
-  /// This is used for debugging purposes during development.
+  /// Sharding
+  ExternalShardingSuccess(ExternalShardingSuccess),
+  ExternalShardingAborted(ExternalShardingAborted),
+  /// Debug. This is used for debugging purposes during development.
   ExternalDebugResponse(ExternalDebugResponse),
 }
 
@@ -214,6 +224,7 @@ pub enum MasterRemotePayload {
   CreateTable(stmpaxos2pc_tm::TMMessage<CreateTableTMPayloadTypes>),
   AlterTable(stmpaxos2pc_tm::TMMessage<AlterTableTMPayloadTypes>),
   DropTable(stmpaxos2pc_tm::TMMessage<DropTableTMPayloadTypes>),
+  ShardSplit(stmpaxos2pc_tm::TMMessage<ShardSplitTMPayloadTypes>),
 
   // Reconfig
   SlaveReconfig(SlaveReconfig),
@@ -235,6 +246,7 @@ pub enum SlaveReconfig {
 pub enum SlaveRemotePayload {
   // CreateTable RM Messages
   CreateTable(stmpaxos2pc_tm::RMMessage<CreateTableTMPayloadTypes>),
+  ShardSplit(stmpaxos2pc_tm::RMMessage<ShardSplitTMPayloadTypes>),
 
   // Reconfig
   ReconfigSlaveGroup(ReconfigSlaveGroup),
@@ -261,6 +273,7 @@ pub enum TabletMessage {
   // DDL RM Messages
   AlterTable(stmpaxos2pc_tm::RMMessage<AlterTableTMPayloadTypes>),
   DropTable(stmpaxos2pc_tm::RMMessage<DropTableTMPayloadTypes>),
+  ShardSplit(stmpaxos2pc_tm::RMMessage<ShardSplitTMPayloadTypes>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -651,7 +664,7 @@ pub struct CancelMasterQueryPlanning {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterQueryPlan {
   pub all_tier_maps: BTreeMap<TransTableName, TierMap>,
-  pub table_location_map: BTreeMap<TablePath, Gen>,
+  pub table_location_map: BTreeMap<TablePath, FullGen>,
   pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
   pub col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
@@ -743,6 +756,57 @@ pub struct ExternalDDLQueryAborted {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ExternalDDLQuerySuccess {
+  pub request_id: RequestId,
+  pub timestamp: Timestamp,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  External Sharding
+// -------------------------------------------------------------------------------------------------
+
+/// Constructed by the Admin as a command to Split off a
+/// part of the `old` into a `new` Tablet.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SplitShardingOp {
+  pub table_path: TablePath,
+  pub old: (TabletGroupId, TabletKeyRange),
+  pub new: (SlaveGroupId, TabletGroupId, TabletKeyRange),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ShardingOp {
+  Split(SplitShardingOp),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PerformExternalSharding {
+  pub sender_eid: EndpointId,
+  pub request_id: RequestId,
+  pub op: ShardingOp,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CancelExternalSharding {
+  pub sender_eid: EndpointId,
+  pub request_id: RequestId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ExternalShardingAbortData {
+  NonUniqueRequestId,
+  InvalidShardingOp,
+  CancelConfirmed,
+  Unknown,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ExternalShardingAborted {
+  pub request_id: RequestId,
+  pub payload: ExternalShardingAbortData,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ExternalShardingSuccess {
   pub request_id: RequestId,
   pub timestamp: Timestamp,
 }

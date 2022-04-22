@@ -125,5 +125,6 @@ pub fn check_tablet_clean(tablet: &TabletState, check_ctx: &mut CheckCtx) {
     DDLES::Alter(_) => false,
     DDLES::Drop(_) => false,
     DDLES::Dropped(_) => true,
+    DDLES::ShardSplit(_) => false,
   });
 }

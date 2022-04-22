@@ -106,8 +106,8 @@ pub fn does_query_plan_align(
 /// necessary to handle the `QueryPlan`.
 pub fn check_gossip<'a>(gossip: &GossipDataView<'a>, query_plan: &QueryPlan) -> bool {
   // Check that all tables in the `table_location_map` are present.
-  for (table_path, gen) in &query_plan.table_location_map {
-    if !gossip.sharding_config.contains_key(&(table_path.clone(), gen.clone())) {
+  for (table_path, full_gen) in &query_plan.table_location_map {
+    if !gossip.sharding_config.contains_key(&(table_path.clone(), full_gen.clone())) {
       return false;
     };
   }

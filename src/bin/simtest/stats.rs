@@ -16,13 +16,19 @@ const K_EXTERNAL_QUERY_SUCCESS: &str = "external_query_success";
 const K_EXTERNAL_QUERY_ABORTED: &str = "external_query_aborted";
 const K_EXTERNAL_DDL_QUERY_SUCCESS: &str = "external_ddl_query_success";
 const K_EXTERNAL_DDL_QUERY_ABORTED: &str = "external_ddl_query_aborted";
+const K_EXTERNAL_SHARDING_SUCCESS: &str = "external_sharding_success";
+const K_EXTERNAL_SHARDING_ABORTED: &str = "external_sharding_aborted";
 
 // Master
-const K_PERFORM_DDL_EXTERNAL_QUERY: &str = "perform_ddl_external_query";
-const K_CANCEL_DDL_EXTERNAL_QUERY: &str = "cancel_ddl_external_query";
+const K_PERFORM_EXTERNAL_DDL_QUERY: &str = "perform_external_ddl_query";
+const K_CANCEL_EXTERNAL_DDL_QUERY: &str = "cancel_external_ddl_query";
+
+const K_PERFORM_EXTERNAL_SHARDING: &str = "perform_external_sharding";
+const K_CANCEL_EXTERNAL_SHARDING: &str = "cancel_external_sharding";
 
 const K_MASTER_REMOTE_LEADER_CHANGED: &str = "master_remote_leader_changed";
 const K_MASTER_DDL: &str = "master_ddl";
+const K_MASTER_SHARDING: &str = "master_sharding";
 const K_MASTER_MASTER_GOSSIP: &str = "master_master_gossip";
 
 // Master Paxos
@@ -50,6 +56,7 @@ const K_CANCEL_EXTERNAL_QUERY: &str = "cancel_external_query";
 
 const K_SLAVE_REMOTE_LEADER_CHANGED: &str = "slave_remote_leader_changed";
 const K_SLAVE_CREATE_TABLE: &str = "slave_create_table";
+const K_SLAVE_SHARDING: &str = "slave_master_sharding";
 const K_SLAVE_MASTER_GOSSIP: &str = "slave_master_gossip";
 
 // Slave Paxos
@@ -67,6 +74,7 @@ const K_SLAVE_START_NEW_NODE: &str = "slave_start_new_node";
 const K_TABLET_PCSA: &str = "tablet_pcsa";
 const K_TABLET_FINISH_QUERY: &str = "tablet_finish_query";
 const K_TABLET_DDL: &str = "tablet_ddl";
+const K_TABLET_SHARDING: &str = "tablet_sharding";
 
 // Coord
 const K_COORD_PCSA: &str = "coord_pcsa";
@@ -102,13 +110,17 @@ impl Stats {
         ExternalMessage::ExternalQueryAborted(_) => K_EXTERNAL_QUERY_ABORTED,
         ExternalMessage::ExternalDDLQuerySuccess(_) => K_EXTERNAL_DDL_QUERY_SUCCESS,
         ExternalMessage::ExternalDDLQueryAborted(_) => K_EXTERNAL_DDL_QUERY_ABORTED,
+        ExternalMessage::ExternalShardingSuccess(_) => K_EXTERNAL_SHARDING_SUCCESS,
+        ExternalMessage::ExternalShardingAborted(_) => K_EXTERNAL_SHARDING_ABORTED,
         ExternalMessage::ExternalDebugResponse(_) => K_UNNACCOUNTED,
       },
       NetworkMessage::Master(m) => match m {
         MasterMessage::MasterExternalReq(m) => match m {
-          MasterExternalReq::PerformExternalDDLQuery(_) => K_PERFORM_DDL_EXTERNAL_QUERY,
-          MasterExternalReq::CancelExternalDDLQuery(_) => K_CANCEL_DDL_EXTERNAL_QUERY,
+          MasterExternalReq::PerformExternalDDLQuery(_) => K_PERFORM_EXTERNAL_DDL_QUERY,
+          MasterExternalReq::CancelExternalDDLQuery(_) => K_CANCEL_EXTERNAL_DDL_QUERY,
           MasterExternalReq::ExternalDebugRequest(_) => K_UNNACCOUNTED,
+          MasterExternalReq::PerformExternalSharding(_) => K_PERFORM_EXTERNAL_SHARDING,
+          MasterExternalReq::CancelExternalSharding(_) => K_CANCEL_EXTERNAL_SHARDING,
         },
         MasterMessage::RemoteMessage(m) => match m {
           RemoteMessage { payload: m, .. } => match m {
@@ -121,6 +133,7 @@ impl Stats {
               SlaveReconfig::NodesDead(_) => K_MASTER_NODES_DEAD,
               SlaveReconfig::SlaveGroupReconfigured(_) => K_MASTER_SLAVE_GROUP_RECONFIGURED,
             },
+            MasterRemotePayload::ShardSplit(_) => K_MASTER_SHARDING,
           },
         },
         MasterMessage::RemoteLeaderChangedGossip(_) => K_MASTER_REMOTE_LEADER_CHANGED,
@@ -158,6 +171,7 @@ impl Stats {
               TabletMessage::FinishQuery(_) => K_TABLET_FINISH_QUERY,
               TabletMessage::AlterTable(_) => K_TABLET_DDL,
               TabletMessage::DropTable(_) => K_TABLET_DDL,
+              TabletMessage::ShardSplit(_) => K_TABLET_SHARDING,
             },
             SlaveRemotePayload::CoordMessage(_, m) => match m {
               CoordMessage::MasterQueryPlanningSuccess(_) => K_UNNACCOUNTED,
@@ -169,6 +183,7 @@ impl Stats {
               CoordMessage::RegisterQuery(_) => K_UNNACCOUNTED,
             },
             SlaveRemotePayload::ReconfigSlaveGroup(_) => K_UNNACCOUNTED,
+            SlaveRemotePayload::ShardSplit(_) => K_SLAVE_SHARDING,
           },
         },
         SlaveMessage::MasterGossip(_) => K_SLAVE_MASTER_GOSSIP,

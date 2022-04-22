@@ -68,6 +68,9 @@ pub struct TabletKeyRange {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub struct Gen(pub u64);
 
+/// A Type used to represent a generation of a `sharding_config` for a Table.
+pub type ShardingGen = Gen;
+
 // -------------------------------------------------------------------------------------------------
 //  Transaction Data Structures
 // -------------------------------------------------------------------------------------------------

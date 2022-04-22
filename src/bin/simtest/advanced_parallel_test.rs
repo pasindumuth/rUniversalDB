@@ -498,7 +498,7 @@ impl QueryGenerator {
     let full_db_schema = sim.full_db_schema();
     let cur_tables = full_db_schema.table_generation.static_snapshot_read(&timestamp);
     let mut table_schemas = BTreeMap::<TablePath, &TableSchema>::new();
-    for (table_path, gen) in cur_tables {
+    for (table_path, (gen, _)) in cur_tables {
       let table_schema = full_db_schema.db_schema.get(&(table_path.clone(), gen)).unwrap();
       table_schemas.insert(table_path, table_schema);
     }

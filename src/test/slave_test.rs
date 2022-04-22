@@ -10,4 +10,5 @@ pub fn check_slave_clean(slave: &SlaveState, check_ctx: &mut CheckCtx) {
 
   // Check `Statuses` clean
   check_ctx.check(statuses.create_table_ess.is_empty());
+  check_ctx.check(statuses.shard_split_ess.is_empty());
 }

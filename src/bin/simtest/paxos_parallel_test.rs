@@ -846,7 +846,7 @@ pub fn parallel_test<WriterT: Writer>(
       let full_db_schema = sim.full_db_schema();
       let cur_tables = full_db_schema.table_generation.static_snapshot_read(&timestamp);
       let mut table_schemas = BTreeMap::<TablePath, &TableSchema>::new();
-      for (table_path, gen) in cur_tables {
+      for (table_path, (gen, _)) in cur_tables {
         let table_schema = full_db_schema.db_schema.get(&(table_path.clone(), gen)).unwrap();
         table_schemas.insert(table_path, table_schema);
       }
@@ -1017,6 +1017,8 @@ pub fn parallel_test<WriterT: Writer>(
           msg::ExternalMessage::ExternalQueryAborted(aborted) => &aborted.request_id,
           msg::ExternalMessage::ExternalDDLQuerySuccess(success) => &success.request_id,
           msg::ExternalMessage::ExternalDDLQueryAborted(aborted) => &aborted.request_id,
+          msg::ExternalMessage::ExternalShardingSuccess(success) => &success.request_id,
+          msg::ExternalMessage::ExternalShardingAborted(aborted) => &aborted.request_id,
           msg::ExternalMessage::ExternalDebugResponse(_) => panic!(),
         };
 
@@ -1057,6 +1059,8 @@ pub fn parallel_test<WriterT: Writer>(
             msg::ExternalMessage::ExternalQueryAborted(aborted) => &aborted.request_id,
             msg::ExternalMessage::ExternalDDLQuerySuccess(success) => &success.request_id,
             msg::ExternalMessage::ExternalDDLQueryAborted(aborted) => &aborted.request_id,
+            msg::ExternalMessage::ExternalShardingSuccess(success) => &success.request_id,
+            msg::ExternalMessage::ExternalShardingAborted(aborted) => &aborted.request_id,
             msg::ExternalMessage::ExternalDebugResponse(_) => panic!(),
           };
 

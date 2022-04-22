@@ -3,7 +3,7 @@ use crate::col_usage::{
   node_external_trans_tables, ColUsageNode,
 };
 use crate::common::{
-  lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, OrigP, QueryPlan, Timestamp,
+  lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, FullGen, OrigP, QueryPlan, Timestamp,
 };
 use crate::master_query_planning_es::ColPresenceReq;
 use crate::model::common::{
@@ -71,7 +71,7 @@ pub enum GRExecutionS {
 pub struct GRQueryPlan {
   pub tier_map: TierMap,
   pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
-  pub table_location_map: BTreeMap<TablePath, Gen>,
+  pub table_location_map: BTreeMap<TablePath, FullGen>,
   pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
   pub col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
@@ -485,9 +485,13 @@ impl GRQueryES {
             sql_query: child_sql_query.clone(),
             query_plan,
           });
-        let gen = self.query_plan.table_location_map.get(table_path).unwrap();
-        let tids =
-          ctx.get_min_tablets(table_path, gen, &child_sql_query.from, &child_sql_query.selection);
+        let full_gen = self.query_plan.table_location_map.get(table_path).unwrap();
+        let tids = ctx.get_min_tablets(
+          table_path,
+          full_gen,
+          &child_sql_query.from,
+          &child_sql_query.selection,
+        );
         SendHelper::TableQuery(general_query, tids)
       }
       proc::GeneralSourceRef::TransTableName(trans_table_name) => {

@@ -2,7 +2,7 @@ use crate::col_usage::{
   iterate_stage_ms_query, node_external_trans_tables, ColUsageError, ColUsageNode, ColUsagePlanner,
   GeneralStage,
 };
-use crate::common::{lookup, merge_table_views, mk_qid, OrigP, QueryPlan, Timestamp};
+use crate::common::{lookup, merge_table_views, mk_qid, FullGen, OrigP, QueryPlan, Timestamp};
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::expression::EvalError;
@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct CoordQueryPlan {
   all_tier_maps: BTreeMap<TransTableName, TierMap>,
   query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
-  table_location_map: BTreeMap<TablePath, Gen>,
+  table_location_map: BTreeMap<TablePath, FullGen>,
   col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
   col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
@@ -722,7 +722,7 @@ impl QueryPlanningES {
   fn compute_query_leader_map(
     &mut self,
     ctx: &mut CoordContext,
-    table_location_map: &BTreeMap<TablePath, Gen>,
+    table_location_map: &BTreeMap<TablePath, FullGen>,
   ) -> BTreeMap<SlaveGroupId, LeadershipId> {
     let gossip = ctx.gossip.get();
     let mut query_leader_map = BTreeMap::<SlaveGroupId, LeadershipId>::new();

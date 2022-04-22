@@ -28,7 +28,6 @@ use crate::model::common::{
   ColName, EndpointId, QueryId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
 };
 use crate::model::message as msg;
-use crate::model::message::TabletMessage;
 use crate::ms_table_delete_es::{DeleteInner, MSTableDeleteES};
 use crate::ms_table_es::{GeneralQueryES, MSTableES, MSTableExecutionS, SqlQueryInner};
 use crate::ms_table_insert_es::{InsertInner, MSTableInsertES};
@@ -41,6 +40,9 @@ use crate::paxos2pc_tm::{Paxos2PCContainer, RMMessage, RMPLm};
 use crate::server::{
   contains_col, CTServerContext, CommonQuery, ContextConstructor, LocalColumnRef, LocalTable,
   ServerContextBase,
+};
+use crate::shard_split_tablet_rm_es::{
+  ShardSplitTabletRMAction, ShardSplitTabletRMES, ShardSplitTabletRMPayloadTypes,
 };
 use crate::slave::{SlaveBackMessage, TabletBundleInsertion};
 use crate::stmpaxos2pc_rm;
@@ -432,10 +434,14 @@ pub struct Statuses {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum DDLES {
+  /// DDL ESs
   None,
   Alter(AlterTableRMES),
   Drop(DropTableRMES),
   Dropped(Timestamp),
+
+  /// Shard ESs
+  ShardSplit(ShardSplitTabletRMES),
 }
 
 impl Default for DDLES {
@@ -831,13 +837,13 @@ impl Statuses {
 impl Paxos2PCContainer<AlterTableRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut AlterTableRMES> {
     if let DDLES::Alter(es) = self {
-      // Recall that our DDL Coordination scheme requires the previous DDL
+      // Recall that our DDL and Sharding Coordination scheme requires the previous
       // STMPaxos2PC to be totally done before the next, so we should never get
       // mismatching QueryId's here.
       debug_assert_eq!(&es.query_id, query_id);
       Some(es)
     } else {
-      // Similarly, if there is no AlterTable, there should not be a DropTable here either.
+      // Similarly, if there is no running ShardSplit, no other ESs should be here.
       match self {
         DDLES::None => (),
         _ => debug_assert!(false),
@@ -854,13 +860,15 @@ impl Paxos2PCContainer<AlterTableRMES> for DDLES {
 impl Paxos2PCContainer<DropTableRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut DropTableRMES> {
     if let DDLES::Drop(es) = self {
-      // Recall that our DDL Coordination scheme requires the previous DDL
+      // Recall that our DDL and Sharding Coordination scheme requires the previous
       // STMPaxos2PC to be totally done before the next, so we should never get
       // mismatching QueryId's here.
       debug_assert_eq!(&es.query_id, query_id);
       Some(es)
     } else {
-      // Similarly, if there is no running DropTable, there should not be a AlterTable here either.
+      // Similarly, if there is no running DropTable, no other ESs should be here. Note
+      // that this Tablet can be `Dropped` by now (as a consequence of `DropTable` having
+      // already committed).
       match self {
         DDLES::None | DDLES::Dropped(_) => (),
         _ => debug_assert!(false),
@@ -871,6 +879,29 @@ impl Paxos2PCContainer<DropTableRMES> for DDLES {
 
   fn insert(&mut self, _: QueryId, es: DropTableRMES) {
     *self = DDLES::Drop(es);
+  }
+}
+
+impl Paxos2PCContainer<ShardSplitTabletRMES> for DDLES {
+  fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut ShardSplitTabletRMES> {
+    if let DDLES::ShardSplit(es) = self {
+      // Recall that our DDL and Sharding Coordination scheme requires the previous
+      // STMPaxos2PC to be totally done before the next, so we should never get
+      // mismatching QueryId's here.
+      debug_assert_eq!(&es.query_id, query_id);
+      Some(es)
+    } else {
+      // Similarly, if there is no running ShardSplit, no other ESs should be here.
+      match self {
+        DDLES::None => (),
+        _ => debug_assert!(false),
+      }
+      None
+    }
+  }
+
+  fn insert(&mut self, _: QueryId, es: ShardSplitTabletRMES) {
+    *self = DDLES::ShardSplit(es);
   }
 }
 
@@ -1056,6 +1087,7 @@ pub enum TabletPLm {
   FinishQuery(paxos2pc_tm::RMPLm<FinishQueryPayloadTypes>),
   AlterTable(stmpaxos2pc_rm::RMPLm<AlterTableRMPayloadTypes>),
   DropTable(stmpaxos2pc_rm::RMPLm<DropTableRMPayloadTypes>),
+  ShardSplit(stmpaxos2pc_rm::RMPLm<ShardSplitTabletRMPayloadTypes>),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1377,6 +1409,12 @@ impl TabletContext {
                 stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
               self.handle_drop_table_es_action(statuses, query_id, action);
             }
+            // ShardSplit
+            TabletPLm::ShardSplit(plm) => {
+              let (query_id, action) =
+                stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
+              self.handle_shard_split_es_action(statuses, query_id, action);
+            }
           }
         }
 
@@ -1397,6 +1435,9 @@ impl TabletContext {
               es.start_inserting(self, io_ctx);
             }
             DDLES::Dropped(_) => {}
+            DDLES::ShardSplit(es) => {
+              es.start_inserting(self, io_ctx);
+            }
           }
 
           // Dispatch the TabletBundle for insertion and start a new one.
@@ -1458,6 +1499,11 @@ impl TabletContext {
             let (query_id, action) =
               stmpaxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.ddl_es, message);
             self.handle_drop_table_es_action(statuses, query_id, action);
+          }
+          msg::TabletMessage::ShardSplit(message) => {
+            let (query_id, action) =
+              stmpaxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.ddl_es, message);
+            self.handle_shard_split_es_action(statuses, query_id, action);
           }
         }
 
@@ -1630,6 +1676,9 @@ impl TabletContext {
             es.leader_changed(self);
           }
           DDLES::Dropped(_) => {}
+          DDLES::ShardSplit(es) => {
+            es.leader_changed(self);
+          }
         }
 
         // Check if this node just lost Leadership
@@ -1714,6 +1763,13 @@ impl TabletContext {
             }
           }
           DDLES::Dropped(timestamp) => DDLES::Dropped(timestamp.clone()),
+          DDLES::ShardSplit(es) => {
+            if let Some(es) = es.reconfig_snapshot() {
+              DDLES::ShardSplit(es)
+            } else {
+              DDLES::None
+            }
+          }
         };
 
         io_ctx.slave_forward(SlaveBackMessage::TabletSnapshot(snapshot));
@@ -2171,7 +2227,7 @@ impl TabletContext {
       // Next, we see if we can grant LocalLockedCols. When there is no DDL ES, we can always
       // grant LocalLockedCols. Otherwise, we must verify the `req` does not conflict.
       match &statuses.ddl_es {
-        DDLES::None => {
+        DDLES::None | DDLES::ShardSplit(_) => {
           // Grant LocalLockedCols
           let query_id = req.query_id.clone();
           self.grant_local_locked_cols(io_ctx, statuses, query_id);
@@ -2694,7 +2750,7 @@ impl TabletContext {
     }
   }
 
-  /// Handles the actions produced by a AlterTableES.
+  /// Handles the actions produced by a DropTableES.
   fn handle_drop_table_es_action(
     &mut self,
     statuses: &mut Statuses,
@@ -2726,6 +2782,27 @@ impl TabletContext {
       AlterTableRMAction::Wait => {}
       AlterTableRMAction::Exit(_) => {
         statuses.ddl_es = DDLES::None;
+      }
+    }
+  }
+
+  /// Handles the actions produced by a ShardSplitTabletES.
+  fn handle_shard_split_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    _: QueryId,
+    action: ShardSplitTabletRMAction,
+  ) {
+    match action {
+      ShardSplitTabletRMAction::Wait => {}
+      ShardSplitTabletRMAction::Exit(maybe_commit_action) => {
+        if let Some(_) = maybe_commit_action {
+          // The ES Committed, and so we should finish the ShardSplit.
+          // TODO: finish.
+        } else {
+          // The ES Aborted, so we just reset it to `None`.
+          statuses.ddl_es = DDLES::None;
+        }
       }
     }
   }

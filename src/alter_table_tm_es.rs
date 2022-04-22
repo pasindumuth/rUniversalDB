@@ -199,7 +199,7 @@ impl STMPaxos2PCTMInner<AlterTableTMPayloadTypes> for AlterTableTMInner {
     committed_plm: &TMCommittedPLm<AlterTableTMPayloadTypes>,
   ) -> BTreeMap<TNodePath, AlterTableCommit> {
     let timestamp = ctx.gossip.update(|gossip| {
-      let gen = gossip.table_generation.get_last_version(&self.table_path).unwrap();
+      let (gen, _) = gossip.table_generation.get_last_version(&self.table_path).unwrap();
       let table_schema = gossip.db_schema.get_mut(&(self.table_path.clone(), gen.clone())).unwrap();
 
       // Compute the timestamp to commit at
@@ -324,9 +324,9 @@ impl STMPaxos2PCTMInner<AlterTableTMPayloadTypes> for AlterTableTMInner {
 /// This returns the current set of RMs associated with the given `TablePath`. Recall that while
 /// the ES is alive, we ensure that this is idempotent.
 pub fn get_rms<IO: BasicIOCtx>(gossip: &GossipDataView, table_path: &TablePath) -> Vec<TNodePath> {
-  let gen = gossip.table_generation.get_last_version(table_path).unwrap();
+  let full_gen = gossip.table_generation.get_last_version(table_path).unwrap();
   let mut rms = Vec::<TNodePath>::new();
-  for (_, tid) in gossip.sharding_config.get(&(table_path.clone(), gen.clone())).unwrap() {
+  for (_, tid) in gossip.sharding_config.get(&(table_path.clone(), full_gen.clone())).unwrap() {
     let sid = gossip.tablet_address_config.get(&tid).unwrap().clone();
     rms.push(TNodePath { sid, sub: TSubNodePath::Tablet(tid.clone()) });
   }

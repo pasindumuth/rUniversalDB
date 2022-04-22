@@ -1,5 +1,5 @@
 use crate::col_usage::{iterate_stage_ms_query, GeneralStage};
-use crate::common::{lookup, TableSchema, Timestamp};
+use crate::common::{lookup, FullGen, TableSchema, Timestamp};
 use crate::master_query_planning_es::{
   DBSchemaView, ReqColPresenceError, ReqTablePresenceError, StaticValidationErrorTrait,
 };
@@ -84,8 +84,8 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
 pub fn compute_table_location_map<ViewT: DBSchemaView>(
   view: &mut ViewT,
   table_paths: &BTreeSet<TablePath>,
-) -> Result<BTreeMap<TablePath, Gen>, ViewT::ErrorT> {
-  let mut table_location_map = BTreeMap::<TablePath, Gen>::new();
+) -> Result<BTreeMap<TablePath, FullGen>, ViewT::ErrorT> {
+  let mut table_location_map = BTreeMap::<TablePath, FullGen>::new();
   for table_path in table_paths {
     table_location_map.insert(table_path.clone(), view.get_gen(table_path)?);
   }

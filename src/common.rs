@@ -4,8 +4,9 @@ use crate::master::MasterTimerInput;
 use crate::master_query_planning_es::ColPresenceReq;
 use crate::model::common::{
   proc, CQueryPath, CTNodePath, ColName, ColType, ColVal, ColValN, CoordGroupId, EndpointId, Gen,
-  LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId, SlaveGroupId, TQueryPath,
-  TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, TransTableLocationPrefix,
+  LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId, RequestId, ShardingGen, SlaveGroupId,
+  TQueryPath, TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap,
+  TransTableLocationPrefix,
 };
 use crate::model::message as msg;
 use crate::model::message::NetworkMessage;
@@ -330,12 +331,17 @@ impl TableSchema {
 // Gossip
 // -------------------------------------------------------------------------------------------------
 
+/// This is the `TablePath` `Gen` combined with a particular `ShardingGen`.
+pub type FullGen = (Gen, ShardingGen);
+
 /// Holds system Metadata that is Gossiped out from the Master to the Slaves. It is very
 /// important, containing the database schema, Paxos configuration, etc.
 ///
 /// Properties:
-///   1. The set of keys in `db_schema` is equal to the key-value pairs in `table_generation`.
-///   2. The set of keys in `db_schema` is equal to keys in `sharding_config`.
+///   1. The set of keys in `db_schema` is equal to the set key-value pairs in `table_generation`
+///      where we remove the `ShardingGen` from the latter.
+///   2. The set of keys in `db_schema` is equal to set of keys in `sharding_config`
+///      where we remove the `ShardingGen` from the latter.
 ///   3. The `PrimaryKey`s in `TabletKeyRange` have the right schema according to `db_schema`.
 ///   4. Every `TabletGroupId` in `sharding_config` is a key in `tablet_address_config`.
 ///   5. Every `SlaveGroupId` in `tablet_address_config` is a key in `slave_address_config`.
@@ -344,10 +350,10 @@ pub struct GossipData {
   /// Database Schema
   gen: Gen,
   db_schema: BTreeMap<(TablePath, Gen), TableSchema>,
-  table_generation: MVM<TablePath, Gen>,
+  table_generation: MVM<TablePath, FullGen>,
 
   /// Distribution
-  sharding_config: BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
+  sharding_config: BTreeMap<(TablePath, FullGen), Vec<(TabletKeyRange, TabletGroupId)>>,
   tablet_address_config: BTreeMap<TabletGroupId, SlaveGroupId>,
   slave_address_config: BTreeMap<SlaveGroupId, Vec<EndpointId>>,
   master_address_config: Vec<EndpointId>,
@@ -404,10 +410,10 @@ impl GossipData {
 pub struct GossipDataView<'a> {
   /// Database Schema
   pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: &'a MVM<TablePath, Gen>,
+  pub table_generation: &'a MVM<TablePath, FullGen>,
 
   /// Distribution
-  pub sharding_config: &'a BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub sharding_config: &'a BTreeMap<(TablePath, FullGen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: &'a BTreeMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: &'a BTreeMap<SlaveGroupId, Vec<EndpointId>>,
   pub master_address_config: &'a Vec<EndpointId>,
@@ -419,10 +425,10 @@ pub struct GossipDataView<'a> {
 pub struct GossipDataMutView<'a> {
   /// Database Schema
   pub db_schema: &'a mut BTreeMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: &'a mut MVM<TablePath, Gen>,
+  pub table_generation: &'a mut MVM<TablePath, FullGen>,
 
   /// Distribution
-  pub sharding_config: &'a mut BTreeMap<(TablePath, Gen), Vec<(TabletKeyRange, TabletGroupId)>>,
+  pub sharding_config: &'a mut BTreeMap<(TablePath, FullGen), Vec<(TabletKeyRange, TabletGroupId)>>,
   pub tablet_address_config: &'a mut BTreeMap<TabletGroupId, SlaveGroupId>,
   pub slave_address_config: &'a mut BTreeMap<SlaveGroupId, Vec<EndpointId>>,
   pub master_address_config: &'a mut Vec<EndpointId>,
@@ -674,6 +680,8 @@ pub fn mk_t(time_ms: u128) -> Timestamp {
 /// between transactions. Importantly, a server should not expect that consecutive calls
 /// to `cur_timestamp` would result in non-decreasing `Timestamp`; only the `time_ms`
 /// will be non-decreasing
+/// TODO: make this a method of the `BasicIOCtx`, where structs that implement
+///  `BasicIOCTx` will contain the `timestmap_suffix_divisor` underneath.
 pub fn cur_timestamp<IO: BasicIOCtx>(io_ctx: &mut IO, timestamp_suffix_divisor: u64) -> Timestamp {
   let mut now_timestamp = io_ctx.now();
   now_timestamp.suffix = io_ctx.rand().next_u64() % timestamp_suffix_divisor;
@@ -689,7 +697,7 @@ pub struct QueryPlan {
   pub tier_map: TierMap,
   /// See the `compute_query_leader_map` in `QueryPlanningES`.
   pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
-  pub table_location_map: BTreeMap<TablePath, Gen>,
+  pub table_location_map: BTreeMap<TablePath, FullGen>,
   /// These are additional required columns that the QueryPlan expects that these `TablePaths`
   /// to have. These are columns that are not already present in the `col_usage_node`, such as
   /// projected columns in SELECT queries or assigned columns in UPDATE queries. While a TP is

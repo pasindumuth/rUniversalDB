@@ -1,10 +1,11 @@
 use crate::alter_table_tm_es::ResponseData;
 use crate::common::{
-  cur_timestamp, mk_t, BasicIOCtx, GeneralTraceMessage, GossipDataMutView, TableSchema, Timestamp,
+  cur_timestamp, mk_t, BasicIOCtx, FullGen, GeneralTraceMessage, GossipDataMutView, TableSchema,
+  Timestamp,
 };
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::{
-  ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
+  ColName, ColType, Gen, ShardingGen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
 };
 use crate::model::message as msg;
 use crate::multiversion_map::MVM;
@@ -168,12 +169,17 @@ impl CreateTableTMInner {
       let commit_timestamp =
         max(timestamp_hint, gossip.table_generation.get_lat(&self.table_path).add(mk_t(1)));
       let gen = next_gen(gossip.table_generation.get_last_present_version(&self.table_path));
+      let full_gen = (gen.clone(), Gen(0));
 
       // Update `table_generation`
-      gossip.table_generation.write(&self.table_path, Some(gen.clone()), commit_timestamp.clone());
+      gossip.table_generation.write(
+        &self.table_path,
+        Some(full_gen.clone()),
+        commit_timestamp.clone(),
+      );
 
       // Update `db_schema`
-      let table_path_gen = (self.table_path.clone(), gen.clone());
+      let table_path_gen = (self.table_path.clone(), gen);
       debug_assert!(!gossip.db_schema.contains_key(&table_path_gen));
       let mut val_cols = MVM::new();
       for (col_name, col_type) in &self.val_cols {
@@ -183,11 +189,12 @@ impl CreateTableTMInner {
       gossip.db_schema.insert(table_path_gen.clone(), table_schema);
 
       // Update `sharding_config`.
+      let table_path_full_gen = (self.table_path.clone(), full_gen);
       let mut stripped_shards = Vec::<(TabletKeyRange, TabletGroupId)>::new();
       for (key_range, tid, _) in &self.shards {
         stripped_shards.push((key_range.clone(), tid.clone()));
       }
-      gossip.sharding_config.insert(table_path_gen, stripped_shards);
+      gossip.sharding_config.insert(table_path_full_gen, stripped_shards);
 
       // Update `tablet_address_config`.
       for (_, tid, sid) in &self.shards {
@@ -339,7 +346,7 @@ impl STMPaxos2PCTMInner<CreateTableTMPayloadTypes> for CreateTableTMInner {
     closed_plm: &TMClosedPLm<CreateTableTMPayloadTypes>,
   ) {
     if let Some(timestamp_hint) = &closed_plm.payload.timestamp_hint {
-      // This means that the closed_plm is a result of a committing the CreateTable.
+      // This means that the closed_plm is a result of committing the CreateTable.
       let commit_timestamp = self.apply_create(ctx, io_ctx, timestamp_hint.clone());
 
       // Potentially respond to the External if we are the leader.
@@ -389,8 +396,8 @@ impl STMPaxos2PCTMInner<CreateTableTMPayloadTypes> for CreateTableTMInner {
 }
 
 /// Compute the next generating, taking it as 0 if it does not exist yet.
-fn next_gen(m_cur_gen: Option<&Gen>) -> Gen {
-  if let Some(gen) = m_cur_gen {
+fn next_gen(m_cur_full_gen: Option<&FullGen>) -> Gen {
+  if let Some((gen, _)) = m_cur_full_gen {
     gen.next()
   } else {
     Gen(0)

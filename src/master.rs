@@ -18,12 +18,13 @@ use crate::model::common::{
 use crate::model::message as msg;
 use crate::model::message::{
   ExternalDDLQueryAbortData, FreeNodeAssoc, MasterExternalReq, MasterMessage, MasterRemotePayload,
-  PLEntry,
+  PLEntry, ShardingOp,
 };
 use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
 use crate::server::{contains_col_latest, ServerContextBase};
+use crate::shard_split_tm_es::{ShardSplitTMES, ShardSplitTMInner, ShardSplitTMPayloadTypes};
 use crate::slave_group_create_es::{ConfirmCreateGroup, SlaveGroupCreateESS};
 use crate::slave_reconfig_es::{SlaveReconfigESS, SlaveReconfigPLm};
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
@@ -56,10 +57,11 @@ pub struct MasterBundle {
 pub enum MasterPLm {
   MasterQueryPlanning(MasterQueryPlanning),
 
-  // DDL and STMPaxos2PC
+  // DDL and Sharding STMPaxos2PC
   CreateTable(paxos2pc::TMPLm<CreateTableTMPayloadTypes>),
   AlterTable(paxos2pc::TMPLm<AlterTableTMPayloadTypes>),
   DropTable(paxos2pc::TMPLm<DropTableTMPayloadTypes>),
+  ShardSplit(paxos2pc::TMPLm<ShardSplitTMPayloadTypes>),
 
   // FreeNode
   FreeNodeManagerPLm(FreeNodeManagerPLm),
@@ -189,6 +191,9 @@ pub struct MasterSnapshot {
   pub create_table_tm_ess: BTreeMap<QueryId, CreateTableTMES>,
   pub alter_table_tm_ess: BTreeMap<QueryId, AlterTableTMES>,
   pub drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
+  pub shard_split_tm_ess: BTreeMap<QueryId, ShardSplitTMES>,
+
+  // ESS
   pub slave_group_create_ess: SlaveGroupCreateESS,
   pub slave_reconfig_ess: SlaveReconfigESS,
 }
@@ -218,11 +223,14 @@ impl ServerContextBase for MasterContext {
 /// NOTE: When adding a new element here, amend the `MasterSnapshot` accordingly.
 #[derive(Debug)]
 pub struct Statuses {
+  // DDL ES and Sharding
   pub create_table_tm_ess: BTreeMap<QueryId, CreateTableTMES>,
   pub alter_table_tm_ess: BTreeMap<QueryId, AlterTableTMES>,
   pub drop_table_tm_ess: BTreeMap<QueryId, DropTableTMES>,
-  pub planning_ess: MasterQueryPlanningESS,
+  pub shard_split_tm_ess: BTreeMap<QueryId, ShardSplitTMES>,
 
+  // ESS
+  pub planning_ess: MasterQueryPlanningESS,
   pub slave_group_create_ess: SlaveGroupCreateESS,
   pub slave_reconfig_ess: SlaveReconfigESS,
 
@@ -297,6 +305,7 @@ impl MasterState {
         create_table_tm_ess: Default::default(),
         alter_table_tm_ess: Default::default(),
         drop_table_tm_ess: Default::default(),
+        shard_split_tm_ess: Default::default(),
         planning_ess: MasterQueryPlanningESS::new(),
         slave_group_create_ess: SlaveGroupCreateESS::new(),
         slave_reconfig_ess: SlaveReconfigESS::new(),
@@ -319,6 +328,7 @@ impl MasterState {
       create_table_tm_ess: snapshot.create_table_tm_ess,
       alter_table_tm_ess: snapshot.alter_table_tm_ess,
       drop_table_tm_ess: snapshot.drop_table_tm_ess,
+      shard_split_tm_ess: snapshot.shard_split_tm_ess,
       planning_ess: MasterQueryPlanningESS::new(),
       slave_group_create_ess: snapshot.slave_group_create_ess,
       slave_reconfig_ess: snapshot.slave_reconfig_ess,
@@ -711,6 +721,10 @@ impl MasterContext {
             MasterPLm::DropTable(plm) => {
               paxos2pc::handle_plm(self, io_ctx, &mut statuses.drop_table_tm_ess, plm);
             }
+            // ShardSplit
+            MasterPLm::ShardSplit(plm) => {
+              paxos2pc::handle_plm(self, io_ctx, &mut statuses.shard_split_tm_ess, plm);
+            }
             // FreeNode PLms
             MasterPLm::FreeNodeManagerPLm(plm) => {
               let new_slave_groups = statuses.free_node_manager.handle_plm(self, io_ctx, plm);
@@ -735,6 +749,8 @@ impl MasterContext {
           paxos2pc::handle_bundle_processed(self, io_ctx, &mut statuses.alter_table_tm_ess);
           // DropTable
           paxos2pc::handle_bundle_processed(self, io_ctx, &mut statuses.drop_table_tm_ess);
+          // ShardSplit
+          paxos2pc::handle_bundle_processed(self, io_ctx, &mut statuses.shard_split_tm_ess);
           // MasterQueryPlanningES
           statuses.planning_ess.handle_bundle_processed(self);
 
@@ -900,6 +916,69 @@ impl MasterContext {
               }
             }
           }
+          msg::MasterExternalReq::PerformExternalSharding(external_query) => {
+            let query_id = mk_qid(io_ctx.rand());
+            let sender_eid = external_query.sender_eid;
+            let request_id = external_query.request_id;
+
+            // Update the QueryId that's stored in the `external_request_id_map` and trace it.
+            self.external_request_id_map.insert(request_id.clone(), query_id.clone());
+            io_ctx.general_trace(GeneralTraceMessage::RequestIdQueryId(
+              request_id.clone(),
+              query_id.clone(),
+            ));
+
+            // For each type of `ShardingOp`, simply construct the corresponding
+            // ES. The Main Loop will validate them, abort them, and start them.
+            match external_query.op {
+              ShardingOp::Split(split) => {
+                map_insert(
+                  &mut statuses.shard_split_tm_ess,
+                  &query_id,
+                  ShardSplitTMES::new(
+                    query_id.clone(),
+                    ShardSplitTMInner {
+                      response_data: Some(ResponseData { request_id, sender_eid }),
+                      table_path: split.table_path,
+                      old: split.old,
+                      new: split.new,
+                      did_commit: false,
+                    },
+                  ),
+                );
+              }
+            }
+          }
+          msg::MasterExternalReq::CancelExternalSharding(cancel) => {
+            if let Some(query_id) = self.external_request_id_map.remove(&cancel.request_id) {
+              // Utility to send a `ConfirmCancelled` back to the External referred to by `cancel`.
+              fn respond_cancelled<IO: MasterIOCtx>(
+                io_ctx: &mut IO,
+                cancel: msg::CancelExternalSharding,
+              ) {
+                io_ctx.send(
+                  &cancel.sender_eid,
+                  msg::NetworkMessage::External(msg::ExternalMessage::ExternalShardingAborted(
+                    msg::ExternalShardingAborted {
+                      request_id: cancel.request_id,
+                      payload: msg::ExternalShardingAbortData::NonUniqueRequestId,
+                    },
+                  )),
+                );
+              }
+
+              // If the query_id corresponds to an early ShardSplit, then abort it.
+              if let Some(es) = statuses.shard_split_tm_ess.get(&query_id) {
+                match &es.state {
+                  State::Start | State::WaitingInsertTMPrepared => {
+                    statuses.shard_split_tm_ess.remove(&query_id);
+                    respond_cancelled(io_ctx, cancel);
+                  }
+                  _ => {}
+                }
+              }
+            }
+          }
           msg::MasterExternalReq::ExternalDebugRequest(request) => {
             // Send back debug data.
             let debug_str = format!("{:#?}", self);
@@ -937,6 +1016,10 @@ impl MasterContext {
           MasterRemotePayload::DropTable(message) => {
             paxos2pc::handle_msg(self, io_ctx, &mut statuses.drop_table_tm_ess, message);
           }
+          // ShardSplit
+          MasterRemotePayload::ShardSplit(message) => {
+            paxos2pc::handle_msg(self, io_ctx, &mut statuses.shard_split_tm_ess, message);
+          }
           // MasterGossipRequest
           MasterRemotePayload::MasterGossipRequest(gossip_req) => {
             self.send_gossip(io_ctx, gossip_req.sender_path);
@@ -973,6 +1056,8 @@ impl MasterContext {
             paxos2pc::handle_rlc(self, io_ctx, &mut statuses.alter_table_tm_ess, rlc.clone());
             // DropTable
             paxos2pc::handle_rlc(self, io_ctx, &mut statuses.drop_table_tm_ess, rlc.clone());
+            // ShardSplit
+            paxos2pc::handle_rlc(self, io_ctx, &mut statuses.shard_split_tm_ess, rlc.clone());
             // SlaveReconfigES
             statuses.slave_reconfig_ess.handle_rlc(self, io_ctx, rlc.clone());
             // MasterQueryPlanningES
@@ -996,6 +1081,8 @@ impl MasterContext {
         paxos2pc::handle_lc(self, io_ctx, &mut statuses.alter_table_tm_ess);
         // DropTable
         paxos2pc::handle_lc(self, io_ctx, &mut statuses.drop_table_tm_ess);
+        // ShardSplit
+        paxos2pc::handle_lc(self, io_ctx, &mut statuses.shard_split_tm_ess);
         // SlaveGroupCreate
         statuses.slave_group_create_ess.handle_lc(self, io_ctx);
         // SlaveReconfig
@@ -1229,13 +1316,17 @@ impl MasterContext {
     io_ctx: &mut IO,
     statuses: &mut Statuses,
   ) -> bool {
-    self.advance_ddl_ess(io_ctx, statuses);
+    self.advance_ddl_sharding_ess(io_ctx, statuses);
     false
   }
 
-  /// This function advances the DDL ESs as far as possible. Properties:
+  /// This function advances the DDL and Sharding ESs as far as possible. Properties:
   ///    1. Running this function again should not modify anything.
-  fn advance_ddl_ess<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO, statuses: &mut Statuses) {
+  fn advance_ddl_sharding_ess<IO: MasterIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+  ) {
     // First, we accumulate all TablePaths that currently have a a DDL Query running for them.
     let mut tables_being_modified = BTreeSet::<TablePath>::new();
     for (_, es) in &statuses.create_table_tm_ess {
@@ -1253,6 +1344,13 @@ impl MasterContext {
     }
 
     for (_, es) in &statuses.drop_table_tm_ess {
+      if let paxos2pc::State::Start = &es.state {
+      } else {
+        tables_being_modified.insert(es.inner.table_path.clone());
+      }
+    }
+
+    for (_, es) in &statuses.shard_split_tm_ess {
       if let paxos2pc::State::Start = &es.state {
       } else {
         tables_being_modified.insert(es.inner.table_path.clone());
@@ -1295,7 +1393,7 @@ impl MasterContext {
             // Check Column Validity (which is where the Table exists and the column exists
             // or does not exist, depending on if alter_op is a DROP COLUMN or ADD COLUMN).
             let gossip = self.gossip.get();
-            if let Some(gen) = gossip.table_generation.get_last_version(&es.inner.table_path) {
+            if let Some((gen, _)) = gossip.table_generation.get_last_version(&es.inner.table_path) {
               // The Table Exists.
               let schema =
                 gossip.db_schema.get(&(es.inner.table_path.clone(), gen.clone())).unwrap();
@@ -1351,6 +1449,56 @@ impl MasterContext {
         }
       }
     }
+
+    // Move `ShardSplit`s forward for `TablePath`s not in `tables_being_modified`
+    {
+      let mut ess_to_remove = Vec::<QueryId>::new();
+      for (_, es) in &mut statuses.shard_split_tm_ess {
+        if let paxos2pc::State::Start = &es.state {
+          if !tables_being_modified.contains(&es.inner.table_path) {
+            // Check that the Table Exists
+            let gossip = self.gossip.get();
+            if let Some(full_gen) = gossip.table_generation.get_last_version(&es.inner.table_path) {
+              // Check that the old TabletGroupId is present
+              let tablet_path_full_gen = (es.inner.table_path.clone(), full_gen.clone());
+              let shards = gossip.sharding_config.get(&tablet_path_full_gen).unwrap();
+
+              // See if the `es.inner.old` TabletGroupId is a part of `es.inner.table_path`.
+              if let Some((orig_range, _)) = shards.iter().find(|(_, t)| t == &es.inner.old.0) {
+                // Check that the SlaveGroupId of `es.inner.new` exists, but not the TabletGroupId
+                if gossip.slave_address_config.contains_key(&es.inner.new.0)
+                  && !gossip.tablet_address_config.contains_key(&es.inner.new.1)
+                {
+                  // Check that the `orig_range` is split perfectly.
+                  if orig_range.start == es.inner.old.1.start
+                    && es.inner.old.1.end == es.inner.new.2.start
+                    && es.inner.new.2.end == orig_range.end
+                  {
+                    // Check that the split point is between the original range.
+                    let split_key = &es.inner.old.1.end;
+                    if &orig_range.start < split_key && split_key < &orig_range.end {
+                      // Start the ES.
+                      es.state = paxos2pc::State::WaitingInsertTMPrepared;
+                      tables_being_modified.insert(es.inner.table_path.clone());
+                      continue;
+                    }
+                  }
+                }
+              }
+            }
+
+            // Otherwise, we abort the Sharding ES because of the checks above failed.
+            ess_to_remove.push(es.query_id.clone())
+          }
+        }
+      }
+      for query_id in ess_to_remove {
+        let es = statuses.shard_split_tm_ess.remove(&query_id).unwrap();
+        if let Some(response_data) = &es.inner.response_data {
+          self.respond_invalid_sharding(io_ctx, response_data);
+        }
+      }
+    }
   }
 
   /// Creates and sends a `MasterSnapshot` to all `unconfirmed_eids` that map to `false.
@@ -1368,6 +1516,7 @@ impl MasterContext {
       create_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.create_table_tm_ess),
       alter_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.alter_table_tm_ess),
       drop_table_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.drop_table_tm_ess),
+      shard_split_tm_ess: paxos2pc::handle_reconfig_snapshot(&statuses.shard_split_tm_ess),
       slave_group_create_ess: statuses.slave_group_create_ess.handle_reconfig_snapshot(),
       slave_reconfig_ess: statuses.slave_reconfig_ess.handle_reconfig_snapshot(),
     };
@@ -1435,7 +1584,25 @@ impl MasterContext {
       msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQueryAborted(
         msg::ExternalDDLQueryAborted {
           request_id: response_data.request_id.clone(),
-          payload: ExternalDDLQueryAbortData::InvalidDDLQuery,
+          payload: msg::ExternalDDLQueryAbortData::InvalidDDLQuery,
+        },
+      )),
+    )
+  }
+
+  /// Send `InvalidShardingOp` to the given `ResponseData`
+  fn respond_invalid_sharding<IO: MasterIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    response_data: &ResponseData,
+  ) {
+    self.external_request_id_map.remove(&response_data.request_id);
+    io_ctx.send(
+      &response_data.sender_eid,
+      msg::NetworkMessage::External(msg::ExternalMessage::ExternalShardingAborted(
+        msg::ExternalShardingAborted {
+          request_id: response_data.request_id.clone(),
+          payload: msg::ExternalShardingAbortData::InvalidShardingOp,
         },
       )),
     )

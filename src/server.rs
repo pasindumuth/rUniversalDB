@@ -1,5 +1,5 @@
 use crate::common::{
-  lookup_pos, BasicIOCtx, CoreIOCtx, GossipData, LeaderMap, TableSchema, Timestamp,
+  lookup_pos, BasicIOCtx, CoreIOCtx, FullGen, GossipData, LeaderMap, TableSchema, Timestamp,
 };
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::model::common::proc::SelectClause;
@@ -269,22 +269,23 @@ pub trait CTServerContext: ServerContextBase {
   fn get_min_tablets(
     &self,
     table_path: &TablePath,
-    gen: &Gen,
+    full_gen: &FullGen,
     table_ref: &proc::GeneralSource,
     selection: &proc::ValExpr,
   ) -> Vec<TabletGroupId> {
     // Compute the Row Region that this selection is accessing.
+    let (gen, _) = full_gen;
     let table_path_gen = (table_path.clone(), gen.clone());
     let key_cols = &self.gossip().get().db_schema.get(&table_path_gen).unwrap().key_cols;
 
     // TODO: We use a trivial implementation for now. Do a proper implementation later.
     let _ = compute_key_region(selection, BTreeMap::new(), table_ref, key_cols);
-    self.get_all_tablets(table_path, gen)
+    self.get_all_tablets(table_path, full_gen)
   }
 
   /// Simply returns all `TabletGroupId`s for a `TablePath` and `Gen`
-  fn get_all_tablets(&self, table_path: &TablePath, gen: &Gen) -> Vec<TabletGroupId> {
-    let table_path_gen = (table_path.clone(), gen.clone());
+  fn get_all_tablets(&self, table_path: &TablePath, full_gen: &FullGen) -> Vec<TabletGroupId> {
+    let table_path_gen = (table_path.clone(), full_gen.clone());
     let tablet_groups = self.gossip().get().sharding_config.get(&table_path_gen).unwrap();
     tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone()).collect()
   }

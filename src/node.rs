@@ -539,6 +539,7 @@ impl NodeState {
                   snapshot.leader_map.clone(),
                   snapshot.paxos_driver_start.clone(),
                   snapshot.create_table_ess,
+                  snapshot.shard_split_ess,
                   self.this_eid.clone(),
                   self.node_config.slave_config.clone(),
                   self.node_config.paxos_config.clone(),

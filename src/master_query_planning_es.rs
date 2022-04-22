@@ -3,8 +3,8 @@ use crate::col_usage::{
   GeneralStage,
 };
 use crate::common::{
-  add_item, default_get_mut, lookup, map_insert, MasterIOCtx, RemoteLeaderChangedPLm, TableSchema,
-  Timestamp,
+  add_item, default_get_mut, lookup, map_insert, FullGen, MasterIOCtx, RemoteLeaderChangedPLm,
+  TableSchema, Timestamp,
 };
 use crate::master::{MasterContext, MasterPLm};
 use crate::model::common::proc::MSQueryStage;
@@ -156,7 +156,7 @@ pub trait DBSchemaView {
 
   fn key_cols(&mut self, table_path: &TablePath) -> Result<&Vec<(ColName, ColType)>, Self::ErrorT>;
 
-  fn get_gen(&mut self, table_path: &TablePath) -> Result<Gen, Self::ErrorT>;
+  fn get_gen(&mut self, table_path: &TablePath) -> Result<FullGen, Self::ErrorT>;
 
   fn contains_table(&mut self, table_path: &TablePath) -> Result<bool, Self::ErrorT>;
 
@@ -197,7 +197,7 @@ pub enum CheckingDBSchemaViewError {
 /// same arguments, the output will be the same.
 struct CheckingDBSchemaView<'a> {
   pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: &'a MVM<TablePath, Gen>,
+  pub table_generation: &'a MVM<TablePath, FullGen>,
   pub timestamp: Timestamp,
   pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
 }
@@ -207,7 +207,7 @@ impl<'a> CheckingDBSchemaView<'a> {
     &mut self,
     table_path: &TablePath,
   ) -> Result<&TableSchema, CheckingDBSchemaViewError> {
-    let gen = self.get_gen(table_path)?;
+    let (gen, _) = self.get_gen(table_path)?;
     Ok(self.db_schema.get(&(table_path.clone(), gen)).unwrap())
   }
 }
@@ -219,12 +219,13 @@ impl<'a> DBSchemaView for CheckingDBSchemaView<'a> {
     Ok(&self.get_table_schema(table_path)?.key_cols)
   }
 
-  fn get_gen(&mut self, table_path: &TablePath) -> Result<Gen, CheckingDBSchemaViewError> {
+  fn get_gen(&mut self, table_path: &TablePath) -> Result<FullGen, CheckingDBSchemaViewError> {
     if self.table_generation.get_lat(table_path) < self.timestamp {
       Err(CheckingDBSchemaViewError::InsufficientLat)
     } else {
-      if let Some(gen) = self.table_generation.strong_static_read(table_path, &self.timestamp) {
-        Ok(gen.clone())
+      if let Some(full_gen) = self.table_generation.strong_static_read(table_path, &self.timestamp)
+      {
+        Ok(full_gen.clone())
       } else {
         Err(CheckingDBSchemaViewError::TableDNE(table_path.clone()))
       }
@@ -328,7 +329,7 @@ pub enum LockingDBSchemaViewError {
 /// See `CheckingDBSchemaView` for a description of idempotence.
 struct LockingDBSchemaView<'a> {
   pub db_schema: &'a mut BTreeMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: &'a mut MVM<TablePath, Gen>,
+  pub table_generation: &'a mut MVM<TablePath, FullGen>,
   pub timestamp: Timestamp,
   pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
 }
@@ -338,7 +339,7 @@ impl<'a> LockingDBSchemaView<'a> {
     &mut self,
     table_path: &TablePath,
   ) -> Result<&mut TableSchema, LockingDBSchemaViewError> {
-    let gen = self.get_gen(table_path)?;
+    let (gen, _) = self.get_gen(table_path)?;
     Ok(self.db_schema.get_mut(&(table_path.clone(), gen)).unwrap())
   }
 }
@@ -350,9 +351,9 @@ impl<'a> DBSchemaView for LockingDBSchemaView<'a> {
     Ok(&self.get_table_schema(table_path)?.key_cols)
   }
 
-  fn get_gen(&mut self, table_path: &TablePath) -> Result<Gen, LockingDBSchemaViewError> {
-    if let Some(gen) = self.table_generation.read(table_path, &self.timestamp) {
-      Ok(gen)
+  fn get_gen(&mut self, table_path: &TablePath) -> Result<FullGen, LockingDBSchemaViewError> {
+    if let Some(full_gen) = self.table_generation.read(table_path, &self.timestamp) {
+      Ok(full_gen)
     } else {
       Err(LockingDBSchemaViewError::TableDNE(table_path.clone()))
     }
@@ -443,7 +444,7 @@ pub enum StaticDBSchemaViewError {
 /// Importantly, the data members are immutable.
 pub struct StaticDBSchemaView<'a> {
   pub db_schema: &'a BTreeMap<(TablePath, Gen), TableSchema>,
-  pub table_generation: &'a MVM<TablePath, Gen>,
+  pub table_generation: &'a MVM<TablePath, FullGen>,
   pub timestamp: Timestamp,
   pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
 }
@@ -453,7 +454,7 @@ impl<'a> StaticDBSchemaView<'a> {
     &mut self,
     table_path: &TablePath,
   ) -> Result<&TableSchema, StaticDBSchemaViewError> {
-    let gen = self.get_gen(table_path)?;
+    let (gen, _) = self.get_gen(table_path)?;
     Ok(self.db_schema.get(&(table_path.clone(), gen)).unwrap())
   }
 }
@@ -465,9 +466,9 @@ impl<'a> DBSchemaView for StaticDBSchemaView<'a> {
     Ok(&self.get_table_schema(table_path)?.key_cols)
   }
 
-  fn get_gen(&mut self, table_path: &TablePath) -> Result<Gen, StaticDBSchemaViewError> {
-    if let Some(gen) = self.table_generation.static_read(table_path, &self.timestamp) {
-      Ok(gen.clone())
+  fn get_gen(&mut self, table_path: &TablePath) -> Result<FullGen, StaticDBSchemaViewError> {
+    if let Some(full_gen) = self.table_generation.static_read(table_path, &self.timestamp) {
+      Ok(full_gen.clone())
     } else {
       Err(StaticDBSchemaViewError::TableDNE(table_path.clone()))
     }
