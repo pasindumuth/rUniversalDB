@@ -15,7 +15,6 @@ use crate::stmpaxos2pc_tm::{
   RMMessage, STMPaxos2PCTMInner, STMPaxos2PCTMOuter, TMClosedPLm, TMCommittedPLm, TMMessage, TMPLm,
   TMPayloadTypes, TMServerContext,
 };
-use crate::tablet::TabletCreateHelper;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::BTreeMap;

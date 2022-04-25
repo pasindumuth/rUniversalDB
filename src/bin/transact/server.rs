@@ -20,7 +20,7 @@ use runiversal::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
 };
 use runiversal::tablet::{
-  TabletConfig, TabletContext, TabletCreateHelper, TabletForwardMsg, TabletSnapshot, TabletState,
+  TabletConfig, TabletContext, TabletForwardMsg, TabletSnapshot, TabletState,
 };
 use runiversal::test_utils::mk_seed;
 use std::collections::BTreeMap;
@@ -216,20 +216,19 @@ impl SlaveIOCtx for ProdIOCtx {
     self.exited
   }
 
-  fn create_tablet(&mut self, helper: TabletCreateHelper) {
+  fn create_tablet(&mut self, tablet_ctx: TabletContext) {
     // Create mpsc queue for Slave-Tablet communication.
     let (to_tablet_sender, to_tablet_receiver) = mpsc::channel::<TabletForwardMsg>();
-    self.tablet_map.insert(helper.this_tid.clone(), to_tablet_sender);
+    self.tablet_map.insert(tablet_ctx.this_tid.clone(), to_tablet_sender);
 
     // Spawn a new thread and create the Tablet.
-    let tablet_context = TabletContext::new(helper);
     let mut io_ctx = ProdCoreIOCtx {
       out_conn_map: self.out_conn_map.clone(),
       rand: XorShiftRng::from_entropy(),
       to_top: self.to_top.clone(),
     };
     thread::spawn(move || {
-      let mut tablet = TabletState::new(tablet_context);
+      let mut tablet = TabletState::new(tablet_ctx);
       loop {
         let tablet_msg = to_tablet_receiver.recv().unwrap();
         tablet.handle_input(&mut io_ctx, tablet_msg);
@@ -237,8 +236,17 @@ impl SlaveIOCtx for ProdIOCtx {
     });
   }
 
-  fn tablet_forward(&mut self, tablet_group_id: &TabletGroupId, msg: TabletForwardMsg) {
-    self.tablet_map.get(tablet_group_id).unwrap().send(msg).unwrap();
+  fn tablet_forward(
+    &mut self,
+    tablet_group_id: &TabletGroupId,
+    forward_msg: TabletForwardMsg,
+  ) -> Result<(), TabletForwardMsg> {
+    if let Some(tablet) = self.tablet_map.get(tablet_group_id) {
+      tablet.send(forward_msg).unwrap();
+      Ok(())
+    } else {
+      Err(forward_msg)
+    }
   }
 
   fn all_tids(&self) -> Vec<TabletGroupId> {

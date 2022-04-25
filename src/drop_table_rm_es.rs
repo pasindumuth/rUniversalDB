@@ -121,10 +121,14 @@ impl STMPaxos2PCRMInner<DropTableRMPayloadTypes> for DropTableRMInner {
 
   fn mk_prepared_plm<IO: BasicIOCtx>(
     &mut self,
-    _: &mut TabletContext,
+    ctx: &mut TabletContext,
     _: &mut IO,
   ) -> Option<DropTableRMPrepared> {
-    Some(DropTableRMPrepared { timestamp: self.prepared_timestamp.clone() })
+    if ctx.pause_ddl() {
+      None
+    } else {
+      Some(DropTableRMPrepared { timestamp: self.prepared_timestamp.clone() })
+    }
   }
 
   fn prepared_plm_inserted<IO: BasicIOCtx>(

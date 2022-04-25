@@ -2,8 +2,8 @@ use crate::alter_table_tm_es::AlterTableTMPayloadTypes;
 use crate::col_usage::ColUsageNode;
 use crate::common::{
   CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
-  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId,
-  TabletKeyRange, TierMap, TransTableLocationPrefix, TransTableName,
+  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TNodePath, TQueryPath, TablePath, TableView,
+  TabletGroupId, TabletKeyRange, TierMap, TransTableLocationPrefix, TransTableName,
 };
 use crate::common::{FullGen, GossipData, LeaderMap, QueryPlan, RemoteLeaderChangedPLm, Timestamp};
 use crate::create_table_tm_es::CreateTableTMPayloadTypes;
@@ -18,6 +18,7 @@ use crate::shard_split_tm_es::{STRange, ShardSplitTMPayloadTypes};
 use crate::slave::{SharedPaxosBundle, SlaveSnapshot};
 use crate::sql_ast::proc;
 use crate::stmpaxos2pc_tm;
+use crate::tablet::ShardingSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -252,6 +253,9 @@ pub enum SlaveRemotePayload {
   // Reconfig
   ReconfigSlaveGroup(ReconfigSlaveGroup),
 
+  /// Sharding. This brings up new Tablets in the target Slave.
+  ShardingMessage(ShardingMessage),
+
   /// Gossip. This is different from the one at `SlaveMessage` (which is for general
   /// broadcasting) because this is a response to `MasterGossipRequest`.
   MasterGossip(MasterGossip),
@@ -275,6 +279,9 @@ pub enum TabletMessage {
   AlterTable(stmpaxos2pc_tm::RMMessage<AlterTableTMPayloadTypes>),
   DropTable(stmpaxos2pc_tm::RMMessage<DropTableTMPayloadTypes>),
   ShardSplit(stmpaxos2pc_tm::RMMessage<ShardSplitTMPayloadTypes>),
+
+  /// Sharding.
+  ShardingConfirmed(ShardingConfirmed),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -702,6 +709,25 @@ pub struct ReconfigSlaveGroup {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SlaveGroupReconfigured {
   pub sid: SlaveGroupId,
+}
+
+// -------------------------------------------------------------------------------------------------
+//  Reconfig messages
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ShardingMessage {
+  /// The `QueryId` of the Sharding*ES
+  pub query_id: QueryId,
+  /// The `TNodePath` to the Tablet that sent this snapshot.
+  pub node_path: TNodePath,
+  pub snapshot: ShardingSnapshot,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ShardingConfirmed {
+  /// The `QueryId` of the ShardSplit that this confirmation is responding to.
+  pub qid: QueryId,
 }
 
 // -------------------------------------------------------------------------------------------------

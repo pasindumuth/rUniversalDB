@@ -1477,9 +1477,10 @@ impl MasterContext {
                     && es.inner.target_old.range.end == es.inner.target_new.range.start
                     && es.inner.target_new.range.end == orig_range.end
                   {
-                    // Check that the split point is between the original range.
+                    // Check that the split point is not `None` and that it is contained
+                    // within the original range.
                     let split_key = &es.inner.target_old.range.end;
-                    if &orig_range.start < split_key && split_key < &orig_range.end {
+                    if split_key.is_some() && orig_range.contains(split_key.as_ref().unwrap()) {
                       // Start the ES.
                       es.state = paxos2pc::State::WaitingInsertTMPrepared;
                       tables_being_modified.insert(es.inner.table_path.clone());

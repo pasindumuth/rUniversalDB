@@ -36,6 +36,8 @@ pub mod paxos2pc_tm;
 pub mod query_converter;
 pub mod query_planning;
 pub mod server;
+pub mod shard_pending_es;
+pub mod shard_snapshot_es;
 pub mod shard_split_slave_rm_es;
 pub mod shard_split_tablet_rm_es;
 pub mod shard_split_tm_es;

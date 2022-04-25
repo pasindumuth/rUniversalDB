@@ -30,7 +30,7 @@ use runiversal::slave::{
 };
 use runiversal::tablet::tablet_test::{assert_tablet_consistency, check_tablet_clean};
 use runiversal::tablet::{
-  TabletConfig, TabletContext, TabletCreateHelper, TabletForwardMsg, TabletSnapshot, TabletState,
+  TabletConfig, TabletContext, TabletForwardMsg, TabletSnapshot, TabletState,
 };
 use runiversal::test_utils::CheckCtx;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -131,23 +131,31 @@ impl<'a> SlaveIOCtx for TestIOCtx<'a> {
     *self.exited
   }
 
-  fn create_tablet(&mut self, helper: TabletCreateHelper) {
-    let tid = helper.this_tid.clone();
-    self.tablet_states.insert(tid, TabletState::new(TabletContext::new(helper)));
+  fn create_tablet(&mut self, tablet_ctx: TabletContext) {
+    let tid = tablet_ctx.this_tid.clone();
+    self.tablet_states.insert(tid, TabletState::new(tablet_ctx));
   }
 
-  fn tablet_forward(&mut self, tid: &TabletGroupId, forward_msg: TabletForwardMsg) {
-    let tablet = self.tablet_states.get_mut(tid).unwrap();
-    let mut io_ctx = TestCoreIOCtx {
-      rand: self.rand,
-      current_time: self.current_time.clone(),
-      queues: self.queues,
-      nonempty_queues: self.nonempty_queues,
-      this_eid: self.this_eid,
-      tracer: self.tracer,
-      to_node: self.to_node,
-    };
-    tablet.handle_input(&mut io_ctx, forward_msg);
+  fn tablet_forward(
+    &mut self,
+    tid: &TabletGroupId,
+    forward_msg: TabletForwardMsg,
+  ) -> Result<(), TabletForwardMsg> {
+    if let Some(tablet) = self.tablet_states.get_mut(tid) {
+      let mut io_ctx = TestCoreIOCtx {
+        rand: self.rand,
+        current_time: self.current_time.clone(),
+        queues: self.queues,
+        nonempty_queues: self.nonempty_queues,
+        this_eid: self.this_eid,
+        tracer: self.tracer,
+        to_node: self.to_node,
+      };
+      tablet.handle_input(&mut io_ctx, forward_msg);
+      Ok(())
+    } else {
+      Err(forward_msg)
+    }
   }
 
   fn all_tids(&self) -> Vec<TabletGroupId> {

@@ -1,4 +1,4 @@
-use crate::common::{BasicIOCtx, TableSchema};
+use crate::common::{mk_t, BasicIOCtx, CTSubNodePath, PaxosGroupIdTrait, TableSchema};
 use crate::common::{
   ColName, ColType, Gen, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
 };
@@ -15,7 +15,8 @@ use crate::stmpaxos2pc_rm::{
   STMPaxos2PCRMOuter,
 };
 use crate::stmpaxos2pc_tm::TMMessage;
-use crate::tablet::{TabletConfig, TabletCreateHelper};
+use crate::storage::GenericMVTable;
+use crate::tablet::{TabletConfig, TabletContext};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +32,7 @@ impl RMPayloadTypes for CreateTableRMPayloadTypes {
   type RMContext = SlaveContext;
 
   // Actions
-  type RMCommitActionData = TabletCreateHelper;
+  type RMCommitActionData = TabletContext;
 
   // RM PLm
   type RMPreparedPLm = CreateTableRMPrepared;
@@ -170,30 +171,49 @@ impl STMPaxos2PCRMInner<CreateTableRMPayloadTypes> for CreateTableRMInner {
     CreateTableRMCommitted {}
   }
 
-  /// Construct `TabletCreateHelper` so an appropriate Tablet can be constructed.
+  /// Construct `TabletContext` so a Tablet be constructed. We return the `TabletContext`
+  /// in the `RMCommitActionData` rather than construct the Tablet here, since we do not have
+  /// access to the `SlaveIOCtx`.
   fn committed_plm_inserted<IO: BasicIOCtx>(
     &mut self,
     ctx: &mut SlaveContext,
     io_ctx: &mut IO,
     _: &RMCommittedPLm<CreateTableRMPayloadTypes>,
-  ) -> TabletCreateHelper {
+  ) -> TabletContext {
     let mut rand_seed = [0; 16];
     io_ctx.rand().fill_bytes(&mut rand_seed);
-    TabletCreateHelper {
+    TabletContext {
       tablet_config: TabletConfig {
         timestamp_suffix_divisor: ctx.slave_config.timestamp_suffix_divisor,
       },
       this_sid: ctx.this_sid.clone(),
+      this_gid: ctx.this_sid.to_gid(),
       this_tid: self.tablet_group_id.clone(),
+      sub_node_path: CTSubNodePath::Tablet(self.tablet_group_id.clone()),
       this_eid: ctx.this_eid.clone(),
       gossip: ctx.gossip.clone(),
       leader_map: ctx.leader_map.value().clone(),
+      storage: GenericMVTable::new(),
       this_table_path: self.table_path.clone(),
-      this_table_key_range: self.key_range.clone(),
+      this_sharding_gen: Gen(0),
+      this_tablet_key_range: self.key_range.clone(),
+      sharding_done: true,
       table_schema: TableSchema {
         key_cols: self.key_cols.clone(),
         val_cols: MVM::init(self.val_cols.clone().into_iter().collect()),
       },
+      presence_timestamp: mk_t(0),
+      verifying_writes: Default::default(),
+      inserting_prepared_writes: Default::default(),
+      prepared_writes: Default::default(),
+      committed_writes: Default::default(),
+      waiting_read_protected: Default::default(),
+      inserting_read_protected: Default::default(),
+      read_protected: Default::default(),
+      waiting_locked_cols: Default::default(),
+      inserting_locked_cols: Default::default(),
+      ms_root_query_map: Default::default(),
+      tablet_bundle: vec![],
     }
   }
 

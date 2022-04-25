@@ -1,6 +1,7 @@
 use crate::common::{
-  lookup, mk_t, update_all_eids, update_leader_map, BasicIOCtx, GeneralTraceMessage, GossipData,
-  LeaderMap, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp, VersionedValue,
+  lookup, mk_t, update_all_eids, update_leader_map, BasicIOCtx, CTSubNodePath, GeneralTraceMessage,
+  GossipData, LeaderMap, RemoteLeaderChangedPLm, SlaveIOCtx, SlaveTraceMessage, Timestamp,
+  VersionedValue,
 };
 use crate::common::{
   CoordGroupId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId, TabletGroupId,
@@ -10,15 +11,20 @@ use crate::coord::CoordForwardMsg;
 use crate::create_table_rm_es::{CreateTableRMAction, CreateTableRMES, CreateTableRMPayloadTypes};
 use crate::create_table_tm_es::CreateTableTMPayloadTypes;
 use crate::message as msg;
-use crate::message::SlaveRemotePayload;
+use crate::message::{SlaveRemotePayload, TabletMessage};
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
+use crate::paxos2pc_tm::Paxos2PCContainer;
 use crate::server::ServerContextBase;
+use crate::shard_pending_es::{ShardSplitESS, ShardingSplitPLm};
 use crate::shard_split_slave_rm_es::{
   ShardSplitSlaveRMAction, ShardSplitSlaveRMES, ShardSplitSlaveRMPayloadTypes,
 };
 use crate::stmpaxos2pc_rm;
-use crate::tablet::{TabletBundle, TabletForwardMsg, TabletSnapshot};
+use crate::storage::GenericMVTable;
+use crate::tablet::{
+  ShardingSnapshot, TabletBundle, TabletContext, TabletForwardMsg, TabletSnapshot,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,7 +49,7 @@ pub struct SlaveBundle {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SlavePLm {
   CreateTable(stmpaxos2pc_rm::RMPLm<CreateTableRMPayloadTypes>),
-  ShardSplit(stmpaxos2pc_rm::RMPLm<ShardSplitSlaveRMPayloadTypes>),
+  ShardingSplitPLm(ShardingSplitPLm),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -160,7 +166,7 @@ pub struct SlaveSnapshot {
   /// is the Leader, we compute the ESs that would result as a result of a Leadership
   /// change and populate the below.
   pub create_table_ess: BTreeMap<QueryId, CreateTableRMES>,
-  pub shard_split_ess: BTreeMap<QueryId, ShardSplitSlaveRMES>,
+  pub shard_split_ess: ShardSplitESS,
 
   /// We remember the set of Tablets to wait for here so that.
   pub tablet_snapshots: BTreeMap<TabletGroupId, TabletSnapshot>,
@@ -176,7 +182,7 @@ pub struct SlaveSnapshot {
 #[derive(Debug, Default)]
 pub struct Statuses {
   create_table_ess: BTreeMap<QueryId, CreateTableRMES>,
-  shard_split_ess: BTreeMap<QueryId, ShardSplitSlaveRMES>,
+  shard_split_ess: ShardSplitESS,
 
   /// We create this once a `ReconfigSlaveGroup` arrives that contains a new config. We use
   /// `do_reconfig` to communicate to the point of `SharedPaxosBundle` to insert a `ReconfigBundle`
@@ -303,7 +309,7 @@ impl SlaveState {
     mut leader_map: LeaderMap,
     paxos_driver_start: msg::StartNewNode<SharedPaxosBundle>,
     create_table_ess: BTreeMap<QueryId, CreateTableRMES>,
-    shard_split_ess: BTreeMap<QueryId, ShardSplitSlaveRMES>,
+    shard_split_ess: ShardSplitESS,
     this_eid: EndpointId,
     slave_config: SlaveConfig,
     paxos_config: PaxosConfig,
@@ -760,10 +766,8 @@ impl SlaveContext {
                 stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.create_table_ess, plm);
               self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
             }
-            SlavePLm::ShardSplit(plm) => {
-              let (query_id, action) =
-                stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.shard_split_ess, plm);
-              self.handle_shard_split_es_action(io_ctx, statuses, query_id, action);
+            SlavePLm::ShardingSplitPLm(plm) => {
+              statuses.shard_split_ess.handle_plm(self, io_ctx, plm);
             }
           }
         }
@@ -773,9 +777,9 @@ impl SlaveContext {
           for (_, es) in &mut statuses.create_table_ess {
             es.start_inserting(self, io_ctx);
           }
-          for (_, es) in &mut statuses.shard_split_ess {
-            es.start_inserting(self, io_ctx);
-          }
+
+          // Inform Sharding
+          statuses.shard_split_ess.handle_bundle_processed(self, io_ctx);
 
           // Continue the insert cycle if there are no Tablets.
           self.maybe_start_insert(io_ctx, statuses);
@@ -804,15 +808,13 @@ impl SlaveContext {
             self.handle_create_table_es_action(io_ctx, statuses, query_id, action);
           }
           msg::SlaveRemotePayload::ShardSplit(message) => {
-            let (query_id, action) =
-              stmpaxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.shard_split_ess, message);
-            self.handle_shard_split_es_action(io_ctx, statuses, query_id, action);
+            statuses.shard_split_ess.handle_rm_msg(self, io_ctx, message);
           }
           msg::SlaveRemotePayload::MasterGossip(master_gossip) => {
             self.handle_master_gossip(master_gossip);
           }
           msg::SlaveRemotePayload::TabletMessage(tid, tablet_msg) => {
-            io_ctx.tablet_forward(&tid, TabletForwardMsg::TabletMessage(tablet_msg))
+            statuses.shard_split_ess.handle_tablet_msg(io_ctx, tid, tablet_msg);
           }
           msg::SlaveRemotePayload::CoordMessage(cid, coord_msg) => {
             io_ctx.coord_forward(&cid, CoordForwardMsg::CoordMessage(coord_msg))
@@ -838,6 +840,9 @@ impl SlaveContext {
                 statuses.do_reconfig = Some((reconfig.rem_eids, reconfig.new_eids));
               }
             }
+          }
+          msg::SlaveRemotePayload::ShardingMessage(sharding_msg) => {
+            statuses.shard_split_ess.handle_sharding_msg(self, io_ctx, sharding_msg);
           }
         }
       }
@@ -902,13 +907,8 @@ impl SlaveContext {
           self.handle_create_table_es_action(io_ctx, statuses, query_id.clone(), action);
         }
 
-        // Inform ShardSplitSlaveRMES
-        let query_ids: Vec<QueryId> = statuses.shard_split_ess.keys().cloned().collect();
-        for query_id in query_ids {
-          let es = statuses.shard_split_ess.get_mut(&query_id).unwrap();
-          let action = es.leader_changed(self);
-          self.handle_shard_split_es_action(io_ctx, statuses, query_id.clone(), action);
-        }
+        // Inform ShardSplitESS
+        statuses.shard_split_ess.handle_leader_changed(self, io_ctx);
 
         // MasterReconfig
         statuses.do_reconfig = None;
@@ -1003,7 +1003,7 @@ impl SlaveContext {
         leader_map: self.leader_map.value().clone(),
         paxos_driver_start,
         create_table_ess: Default::default(),
-        shard_split_ess: Default::default(),
+        shard_split_ess: statuses.shard_split_ess.reconfig_snapshot(),
         tablet_snapshots: Default::default(),
       };
 
@@ -1011,13 +1011,6 @@ impl SlaveContext {
       for (qid, es) in &statuses.create_table_ess {
         if let Some(es) = es.reconfig_snapshot() {
           snapshot.create_table_ess.insert(qid.clone(), es);
-        }
-      }
-
-      // Add in the ShardSplitSlaveRMES that have at least been Prepared.
-      for (qid, es) in &statuses.shard_split_ess {
-        if let Some(es) = es.reconfig_snapshot() {
-          snapshot.shard_split_ess.insert(qid.clone(), es);
         }
       }
 
@@ -1054,33 +1047,12 @@ impl SlaveContext {
       CreateTableRMAction::Wait => {}
       CreateTableRMAction::Exit(maybe_commit_action) => {
         statuses.create_table_ess.remove(&query_id);
-        if let Some(helper) = maybe_commit_action {
-          // This means the ES had Committed, and we should use this `helper`
-          // to construct the Tablet.
-          let this_tid = helper.this_tid.clone();
-          io_ctx.create_tablet(helper);
+        if let Some(tablet_ctx) = maybe_commit_action {
+          // This means the ES had Committed, so we create the Tablet.
+          let this_tid = tablet_ctx.this_tid.clone();
+          io_ctx.create_tablet(tablet_ctx);
           // We amend tablet_bundles with an initial value, as per SharedPaxosInserter
           self.tablet_bundles.insert(this_tid, TabletBundle::default());
-        }
-      }
-    }
-  }
-
-  /// Handles the actions produced by a ShardSplitSlaveRMES.
-  fn handle_shard_split_es_action<IO: SlaveIOCtx>(
-    &mut self,
-    _: &mut IO,
-    statuses: &mut Statuses,
-    query_id: QueryId,
-    action: ShardSplitSlaveRMAction,
-  ) {
-    match action {
-      ShardSplitSlaveRMAction::Wait => {}
-      ShardSplitSlaveRMAction::Exit(maybe_commit_action) => {
-        statuses.shard_split_ess.remove(&query_id);
-        if let Some(_) = maybe_commit_action {
-          // This means the ES had Committed
-          // TODO: finish.
         }
       }
     }

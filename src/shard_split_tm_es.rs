@@ -162,7 +162,8 @@ pub struct ShardSplitTMInner {
   // Response data
   pub response_data: Option<ResponseData>,
 
-  // ShardSplit Query data
+  /// ShardSplit Query data. The range in `target_old` has to be
+  /// lexicographically prior to `target_new`.
   pub table_path: TablePath,
   pub target_old: STRange,
   pub target_new: STRange,

@@ -1,4 +1,4 @@
-use crate::common::{BasicIOCtx, Timestamp};
+use crate::common::{BasicIOCtx, ShardingGen, Timestamp};
 use crate::common::{CNodePath, EndpointId, QueryId, RequestId, TNodePath, TQueryPath, TableView};
 use crate::coord::CoordContext;
 use crate::message as msg;
@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 // RM PLm
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FinishQueryRMPrepared {
+  pub sharding_gen: ShardingGen,
   pub region_lock: ReadWriteRegion,
   pub timestamp: Timestamp,
   pub update_view: GenericTable,

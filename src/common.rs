@@ -9,9 +9,7 @@ use crate::node::{GenericInput, GenericTimerInput};
 use crate::server::{CTServerContext, CommonQuery};
 use crate::slave::{SlaveBackMessage, SlaveTimerInput};
 use crate::sql_ast::proc;
-use crate::tablet::{
-  TabletConfig, TabletContext, TabletCreateHelper, TabletForwardMsg, TabletSnapshot, TabletState,
-};
+use crate::tablet::{TabletConfig, TabletContext, TabletForwardMsg, TabletSnapshot, TabletState};
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -87,9 +85,14 @@ pub trait SlaveIOCtx: BasicIOCtx {
   fn did_exit(&mut self) -> bool;
 
   // Tablet
-  fn create_tablet(&mut self, helper: TabletCreateHelper);
-  /// Forwards `forward_msg` to the Tablet. This function asserts that the Tablet exists.
-  fn tablet_forward(&mut self, tablet_group_id: &TabletGroupId, forward_msg: TabletForwardMsg);
+  fn create_tablet(&mut self, tablet_ctx: TabletContext);
+  /// Forwards `forward_msg` to the Tablet. This function returns an error if the Tablet
+  /// does not exist, and with it, it will return the `forward_msg` that failed to be processed.
+  fn tablet_forward(
+    &mut self,
+    tablet_group_id: &TabletGroupId,
+    forward_msg: TabletForwardMsg,
+  ) -> Result<(), TabletForwardMsg>;
   fn all_tids(&self) -> Vec<TabletGroupId>;
   fn num_tablets(&self) -> usize;
 
@@ -320,6 +323,25 @@ impl PrimaryKey {
 pub struct TabletKeyRange {
   pub start: Option<PrimaryKey>,
   pub end: Option<PrimaryKey>,
+}
+
+impl TabletKeyRange {
+  /// Checks whether the given `key` is inside of `range`. Importantly, the schemas
+  /// of the keys in the `range` have to the same as that of `key`. Recall that the
+  /// `TabletKeyRange` are inclusive of beginning and exclusive of end.
+  pub fn contains(&self, key: &PrimaryKey) -> bool {
+    if let Some(start_key) = &self.start {
+      if key < start_key {
+        return false;
+      }
+    }
+    if let Some(end_key) = &self.end {
+      if end_key <= key {
+        return false;
+      }
+    }
+    true
+  }
 }
 
 /// A Type used to represent a generation.

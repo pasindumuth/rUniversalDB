@@ -6,8 +6,8 @@ use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_extern
 use crate::common::{
   btree_multimap_insert, lookup, map_insert, mk_qid, mk_t, remove_item, update_leader_map,
   update_leader_map_unversioned, BasicIOCtx, BoundType, CoreIOCtx, GossipData, KeyBound, LeaderMap,
-  OrigP, QueryESResult, QueryPlan, ReadRegion, RemoteLeaderChangedPLm, TableSchema, Timestamp,
-  VersionedValue, WriteRegion,
+  OrigP, QueryESResult, QueryPlan, ReadRegion, RemoteLeaderChangedPLm, ShardingGen, TableSchema,
+  Timestamp, VersionedValue, WriteRegion,
 };
 use crate::common::{
   CNodePath, CQueryPath, CTQueryPath, CTSubNodePath, ColType, ColVal, ColValN, Context, ContextRow,
@@ -28,6 +28,7 @@ use crate::finish_query_rm_es::{FinishQueryRMES, FinishQueryRMInner};
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
 use crate::message as msg;
+use crate::message::TabletMessage;
 use crate::ms_table_delete_es::{DeleteInner, MSTableDeleteES};
 use crate::ms_table_es::{GeneralQueryES, MSTableES, MSTableExecutionS, SqlQueryInner};
 use crate::ms_table_insert_es::{InsertInner, MSTableInsertES};
@@ -41,6 +42,7 @@ use crate::server::{
   contains_col, CTServerContext, CommonQuery, ContextConstructor, LocalColumnRef, LocalTable,
   ServerContextBase,
 };
+use crate::shard_snapshot_es::{ShardingConfirmedPLm, ShardingSnapshotAction, ShardingSnapshotES};
 use crate::shard_split_tablet_rm_es::{
   ShardSplitTabletRMAction, ShardSplitTabletRMES, ShardSplitTabletRMPayloadTypes,
 };
@@ -152,6 +154,7 @@ impl Executing {
 #[derive(Debug)]
 pub struct MSQueryES {
   pub root_query_path: CQueryPath,
+  pub sharding_gen: ShardingGen,
   // The LeadershipId of the root PaxosNode.
   pub root_lid: LeadershipId,
   pub query_id: QueryId,
@@ -196,11 +199,17 @@ pub struct TabletSnapshot {
   pub this_tid: TabletGroupId,
   pub sub_node_path: CTSubNodePath, // Wraps `this_tablet_group_id` for expedience
   pub leader_map: LeaderMap,
+  pub this_table_path: TablePath,
+
+  // Sharding
+  pub this_sharding_gen: ShardingGen,
+  pub this_table_key_range: TabletKeyRange,
+  pub sharding_done: bool,
 
   // Storage
   pub storage: GenericMVTable,
-  pub this_table_path: TablePath,
-  pub this_table_key_range: TabletKeyRange,
+
+  // Schema
   pub table_schema: TableSchema,
   pub presence_timestamp: Timestamp,
 
@@ -215,6 +224,36 @@ pub struct TabletSnapshot {
   /// change and populate the below.
   pub finish_query_ess: BTreeMap<QueryId, FinishQueryRMES>,
   pub ddl_es: DDLES,
+  pub sharding_state: ShardingState,
+}
+
+// -----------------------------------------------------------------------------------------------
+//  ShardingSnapshot
+// -----------------------------------------------------------------------------------------------
+
+/// When data from this `Tablet` needs to be sent to another one for the purpose
+/// of Sharding, this is what is used.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ShardingSnapshot {
+  /// Metadata
+  pub this_tid: TabletGroupId, // The `TabletGroupId` of the new Tablet.
+  pub this_table_path: TablePath,
+
+  /// Sharding. Here, `this_table_key_range` is that of the target Tablet.  
+  pub this_sharding_gen: ShardingGen,
+  pub this_table_key_range: TabletKeyRange,
+
+  /// Storage. This only contains the data that is being
+  /// split off from the sending Tablet.
+  pub storage: GenericMVTable,
+
+  // Schema
+  pub table_schema: TableSchema,
+  pub presence_timestamp: Timestamp,
+
+  // Region Isolation Algorithm
+  pub committed_writes: BTreeMap<Timestamp, ReadWriteRegion>,
+  pub read_protected: BTreeMap<Timestamp, BTreeSet<ReadRegion>>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -431,6 +470,9 @@ pub struct Statuses {
 
   // DDL
   ddl_es: DDLES,
+
+  // Sharding
+  sharding_state: ShardingState,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -448,6 +490,18 @@ pub enum DDLES {
 impl Default for DDLES {
   fn default() -> Self {
     DDLES::None
+  }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ShardingState {
+  None,
+  ShardingSnapshotES(ShardingSnapshotES),
+}
+
+impl Default for ShardingState {
+  fn default() -> Self {
+    ShardingState::None
   }
 }
 
@@ -1089,6 +1143,7 @@ pub enum TabletPLm {
   AlterTable(stmpaxos2pc_rm::RMPLm<AlterTableRMPayloadTypes>),
   DropTable(stmpaxos2pc_rm::RMPLm<DropTableRMPayloadTypes>),
   ShardSplit(stmpaxos2pc_rm::RMPLm<ShardSplitTabletRMPayloadTypes>),
+  ShardingConfirmedPLm(ShardingConfirmedPLm),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1104,30 +1159,6 @@ pub enum TabletForwardMsg {
   RemoteLeaderChanged(RemoteLeaderChangedPLm),
   LeaderChanged(msg::LeaderChanged),
   ConstructTabletSnapshot,
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Misc
-// -----------------------------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub struct TabletCreateHelper {
-  /// Metadata
-  pub tablet_config: TabletConfig,
-  pub this_sid: SlaveGroupId,
-  pub this_tid: TabletGroupId,
-  pub this_eid: EndpointId,
-
-  /// Gossip
-  pub gossip: Arc<GossipData>,
-
-  /// LeaderMap
-  pub leader_map: LeaderMap,
-
-  // Storage
-  pub this_table_path: TablePath,
-  pub this_table_key_range: TabletKeyRange,
-  pub table_schema: TableSchema,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1224,6 +1255,7 @@ pub struct TabletContext {
   pub this_tid: TabletGroupId,
   pub sub_node_path: CTSubNodePath, // Wraps `this_tablet_group_id` for expedience
   pub this_eid: EndpointId,
+  pub this_table_path: TablePath,
 
   /// Gossip
   pub gossip: Arc<GossipData>,
@@ -1231,10 +1263,19 @@ pub struct TabletContext {
   /// LeaderMap
   pub leader_map: LeaderMap,
 
+  // Sharding.
+  /// These are Purely Derived form `ShardSplitTabletRMES`
+  pub this_sharding_gen: ShardingGen,
+  pub this_tablet_key_range: TabletKeyRange,
+  /// This is `true` iff `sharding_state` is `None`. Notice that this is Purely Derived State.
+  /// When this is `true`, all `row_regions` across all non-commit `*_writes` and
+  /// `*_read_protected` will be within the `this_tablet_key_range`.
+  pub sharding_done: bool,
+
   // Storage
   pub storage: GenericMVTable,
-  pub this_table_path: TablePath,
-  pub this_table_key_range: TabletKeyRange,
+
+  // Schema
   pub table_schema: TableSchema,
   pub presence_timestamp: Timestamp,
 
@@ -1276,6 +1317,7 @@ impl TabletState {
     let mut statuses = Statuses::default();
     statuses.finish_query_ess = snapshot.finish_query_ess;
     statuses.ddl_es = snapshot.ddl_es;
+    statuses.sharding_state = snapshot.sharding_state;
 
     // Create the TabletCtx
     let ctx = TabletContext {
@@ -1289,7 +1331,9 @@ impl TabletState {
       leader_map: snapshot.leader_map,
       storage: snapshot.storage,
       this_table_path: snapshot.this_table_path,
-      this_table_key_range: snapshot.this_table_key_range,
+      this_sharding_gen: snapshot.this_sharding_gen,
+      sharding_done: snapshot.sharding_done,
+      this_tablet_key_range: snapshot.this_table_key_range,
       table_schema: snapshot.table_schema,
       presence_timestamp: snapshot.presence_timestamp,
       verifying_writes: Default::default(),
@@ -1314,35 +1358,6 @@ impl TabletState {
 }
 
 impl TabletContext {
-  pub fn new(helper: TabletCreateHelper) -> TabletContext {
-    TabletContext {
-      tablet_config: helper.tablet_config,
-      this_sid: helper.this_sid.clone(),
-      this_gid: helper.this_sid.to_gid(),
-      this_tid: helper.this_tid.clone(),
-      sub_node_path: CTSubNodePath::Tablet(helper.this_tid),
-      this_eid: helper.this_eid,
-      gossip: helper.gossip,
-      leader_map: helper.leader_map,
-      storage: GenericMVTable::new(),
-      this_table_path: helper.this_table_path,
-      this_table_key_range: helper.this_table_key_range,
-      table_schema: helper.table_schema,
-      presence_timestamp: mk_t(0),
-      verifying_writes: Default::default(),
-      inserting_prepared_writes: Default::default(),
-      prepared_writes: Default::default(),
-      committed_writes: Default::default(),
-      waiting_read_protected: Default::default(),
-      inserting_read_protected: Default::default(),
-      read_protected: Default::default(),
-      waiting_locked_cols: Default::default(),
-      inserting_locked_cols: Default::default(),
-      ms_root_query_map: Default::default(),
-      tablet_bundle: vec![],
-    }
-  }
-
   fn handle_input<IO: CoreIOCtx>(
     &mut self,
     io_ctx: &mut IO,
@@ -1414,8 +1429,17 @@ impl TabletContext {
             TabletPLm::ShardSplit(plm) => {
               let (query_id, action) =
                 stmpaxos2pc_rm::handle_rm_plm(self, io_ctx, &mut statuses.ddl_es, plm);
-              self.handle_shard_split_es_action(statuses, query_id, action);
+              self.handle_shard_split_es_action(io_ctx, statuses, query_id, action);
             }
+            // ShardingSnapshotES
+            TabletPLm::ShardingConfirmedPLm(plm) => match &mut statuses.sharding_state {
+              ShardingState::None => {}
+              ShardingState::ShardingSnapshotES(es) => {
+                let action = es.handle_plm(self, plm);
+                let query_id = es.query_id.clone();
+                self.handle_shard_send_es_action(statuses, query_id, action);
+              }
+            },
           }
         }
 
@@ -1438,6 +1462,16 @@ impl TabletContext {
             DDLES::Dropped(_) => {}
             DDLES::ShardSplit(es) => {
               es.start_inserting(self, io_ctx);
+            }
+          }
+
+          // Inform the ShardingSnapshotES that it might be able to advance.
+          match &mut statuses.sharding_state {
+            ShardingState::None => {}
+            ShardingState::ShardingSnapshotES(es) => {
+              let action = es.handle_bundle_processed(self, io_ctx, &statuses.finish_query_ess);
+              let query_id = es.query_id.clone();
+              self.handle_shard_send_es_action(statuses, query_id, action);
             }
           }
 
@@ -1504,8 +1538,16 @@ impl TabletContext {
           msg::TabletMessage::ShardSplit(message) => {
             let (query_id, action) =
               stmpaxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.ddl_es, message);
-            self.handle_shard_split_es_action(statuses, query_id, action);
+            self.handle_shard_split_es_action(io_ctx, statuses, query_id, action);
           }
+          TabletMessage::ShardingConfirmed(message) => match &mut statuses.sharding_state {
+            ShardingState::None => {}
+            ShardingState::ShardingSnapshotES(es) => {
+              let action = es.handle_msg(self, message);
+              let query_id = es.query_id.clone();
+              self.handle_shard_send_es_action(statuses, query_id, action);
+            }
+          },
         }
 
         // Run Main Loop
@@ -1644,6 +1686,16 @@ impl TabletContext {
                 self.handle_finish_query_es_action(statuses, query_id.clone(), action);
               }
 
+              // Inform ShardingState
+              match &mut statuses.sharding_state {
+                ShardingState::None => {}
+                ShardingState::ShardingSnapshotES(es) => {
+                  let action = es.handle_rlc(self, io_ctx, remote_leader_changed.clone());
+                  let query_id = es.query_id.clone();
+                  self.handle_shard_send_es_action(statuses, query_id, action);
+                }
+              }
+
               // Run Main Loop
               self.run_main_loop(io_ctx, statuses);
             }
@@ -1679,6 +1731,16 @@ impl TabletContext {
           DDLES::Dropped(_) => {}
           DDLES::ShardSplit(es) => {
             es.leader_changed(self);
+          }
+        }
+
+        // Inform ShardingState
+        match &mut statuses.sharding_state {
+          ShardingState::None => {}
+          ShardingState::ShardingSnapshotES(es) => {
+            let action = es.handle_lc(self, io_ctx, &statuses.finish_query_ess);
+            let query_id = es.query_id.clone();
+            self.handle_shard_send_es_action(statuses, query_id, action);
           }
         }
 
@@ -1729,14 +1791,17 @@ impl TabletContext {
           leader_map: self.leader_map.clone(),
           storage: self.storage.clone(),
           this_table_path: self.this_table_path.clone(),
-          this_table_key_range: self.this_table_key_range.clone(),
           table_schema: self.table_schema.clone(),
           presence_timestamp: self.presence_timestamp.clone(),
+          this_sharding_gen: self.this_sharding_gen.clone(),
+          this_table_key_range: self.this_tablet_key_range.clone(),
+          sharding_done: self.sharding_done.clone(),
           prepared_writes: self.prepared_writes.clone(),
           committed_writes: self.committed_writes.clone(),
           read_protected: self.read_protected.clone(),
           finish_query_ess: Default::default(),
           ddl_es: DDLES::None,
+          sharding_state: ShardingState::None,
         };
 
         // Add in the FinishQueryRMES that have at least been Prepared.
@@ -1770,6 +1835,14 @@ impl TabletContext {
             } else {
               DDLES::None
             }
+          }
+        };
+
+        // Created ShardingState Reconfig Snapshot
+        snapshot.sharding_state = match &statuses.sharding_state {
+          ShardingState::None => ShardingState::None,
+          ShardingState::ShardingSnapshotES(es) => {
+            ShardingState::ShardingSnapshotES(es.reconfig_snapshot())
           }
         };
 
@@ -1926,7 +1999,7 @@ impl TabletContext {
       statuses,
       root_query_path.clone(),
       timestamp.clone(),
-      &query_plan.query_leader_map,
+      &query_plan,
     ) {
       Ok(ms_query_id) => {
         // Lookup the MSQueryES and add the new Query into `pending_queries`.
@@ -1978,7 +2051,7 @@ impl TabletContext {
     statuses: &mut Statuses,
     root_query_path: CQueryPath,
     timestamp: Timestamp,
-    query_leader_map: &BTreeMap<SlaveGroupId, LeadershipId>,
+    query_plan: &QueryPlan,
   ) -> Result<QueryId, msg::QueryError> {
     let root_query_id = root_query_path.query_id.clone();
     if let Some(ms_query_id) = self.ms_root_query_map.get(&root_query_id) {
@@ -2001,7 +2074,7 @@ impl TabletContext {
     // We check that the original Leadership of root_query_path is not dead,
     // returning a QueryError if so.
     let root_sid = root_query_path.node_path.sid.clone();
-    let root_lid = query_leader_map.get(&root_sid).unwrap().clone();
+    let root_lid = query_plan.query_leader_map.get(&root_sid).unwrap().clone();
     if self.leader_map.get(&root_sid.to_gid()).unwrap() > &root_lid {
       return Err(msg::QueryError::InvalidLeadershipId);
     }
@@ -2019,10 +2092,13 @@ impl TabletContext {
     );
 
     // This means that we can add an MSQueryES at the Timestamp
+    let full_gen = query_plan.table_location_map.get(&self.this_table_path).unwrap();
+    let (_, sharding_gen) = full_gen.clone();
     statuses.ms_query_ess.insert(
       ms_query_id.clone(),
       MSQueryES {
         root_query_path,
+        sharding_gen,
         root_lid,
         query_id: ms_query_id.clone(),
         timestamp: timestamp.clone(),
@@ -2788,22 +2864,65 @@ impl TabletContext {
   }
 
   /// Handles the actions produced by a ShardSplitTabletES.
-  fn handle_shard_split_es_action(
+  fn handle_shard_split_es_action<IO: CoreIOCtx>(
     &mut self,
+    io_ctx: &mut IO,
     statuses: &mut Statuses,
-    _: QueryId,
+    query_id: QueryId,
     action: ShardSplitTabletRMAction,
   ) {
     match action {
       ShardSplitTabletRMAction::Wait => {}
       ShardSplitTabletRMAction::Exit(maybe_commit_action) => {
-        if let Some(_) = maybe_commit_action {
-          // The ES Committed, and so we should finish the ShardSplit.
-          // TODO: finish.
-        } else {
-          // The ES Aborted, so we just reset it to `None`.
-          statuses.ddl_es = DDLES::None;
+        // In both the case of Commit and Abort, ddl_es should be cleared
+        statuses.ddl_es = DDLES::None;
+
+        // The ES Committed, and so we should create a `ShardingSnapshotES`
+        // and finish the ShardSplit.
+        if let Some(target_new) = maybe_commit_action {
+          // If this is the Leader, abort all non-Prepared TPESs, including any `PerformQuerys`
+          // that are buffered. These will all inevitably have a `ShardingGen` that is too old
+          // anyways. (In constract, we will let the Prepared ESs finish, since it's too
+          // late to abort them.)
+          if self.is_leader() {
+            let mut qids = Vec::<QueryId>::new();
+            qids.extend(statuses.perform_query_buffer.keys().cloned());
+            qids.extend(statuses.ms_query_ess.keys().cloned());
+            qids.extend(statuses.top.table_read_ess.keys().cloned());
+            qids.extend(statuses.top.trans_table_read_ess.keys().cloned());
+            for qid in qids {
+              self.exit_and_clean_up(io_ctx, statuses, qid);
+            }
+          }
+
+          // Construct a ShardingStateES and mark `sharding_done` as not done.
+          self.sharding_done = false;
+          statuses.sharding_state =
+            ShardingState::ShardingSnapshotES(ShardingSnapshotES::create_split(
+              self,
+              io_ctx,
+              &statuses.finish_query_ess,
+              query_id,
+              target_new,
+            ));
         }
+      }
+    }
+  }
+
+  /// Handles the actions produced by a ShardSplitTabletES.
+  fn handle_shard_send_es_action(
+    &mut self,
+    statuses: &mut Statuses,
+    _: QueryId,
+    action: ShardingSnapshotAction,
+  ) {
+    match action {
+      ShardingSnapshotAction::Wait => {}
+      ShardingSnapshotAction::Exit => {
+        // Mark the sharding as finished.
+        self.sharding_done = true;
+        statuses.sharding_state = ShardingState::None
       }
     }
   }
@@ -3087,7 +3206,13 @@ impl TabletContext {
   /// Check whether the `pkey` falls in the range of this Tablet's `TabletKeyRange`. The `pkey`
   /// must conform the tablets KeyCol schema (which the `TabletKeyRange` also does).
   pub fn check_range_inclusion(&self, pkey: &PrimaryKey) -> bool {
-    check_range_inclusion(&self.this_table_key_range, pkey)
+    check_range_inclusion(&self.this_tablet_key_range, pkey)
+  }
+
+  /// If any Sharding operations are still in the process of finishing, we avoid
+  /// advancing any other DDLES beyond `Working` until it is finished.
+  pub fn pause_ddl(&self) -> bool {
+    !self.sharding_done
   }
 }
 

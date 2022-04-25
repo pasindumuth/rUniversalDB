@@ -1,5 +1,5 @@
-use crate::common::QueryId;
 use crate::common::{BasicIOCtx, GeneralTraceMessage, Timestamp};
+use crate::common::{QueryId, ShardingGen};
 use crate::finish_query_tm_es::{
   FinishQueryPayloadTypes, FinishQueryPrepare, FinishQueryRMAborted, FinishQueryRMCommitted,
   FinishQueryRMPrepared,
@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FinishQueryRMInner {
+  pub sharding_gen: ShardingGen,
   pub region_lock: ReadWriteRegion,
   pub timestamp: Timestamp,
   pub update_view: GenericTable,
@@ -53,6 +54,7 @@ impl Paxos2PCRMInner<FinishQueryPayloadTypes> for FinishQueryRMInner {
       ctx.inserting_prepared_writes.insert(timestamp.clone(), region_lock.clone());
 
       Some(FinishQueryRMInner {
+        sharding_gen: ms_query_es.sharding_gen,
         region_lock,
         timestamp,
         update_view: compress_updates_views(ms_query_es.update_views),
@@ -69,6 +71,7 @@ impl Paxos2PCRMInner<FinishQueryPayloadTypes> for FinishQueryRMInner {
     payload: FinishQueryRMPrepared,
   ) -> FinishQueryRMInner {
     FinishQueryRMInner {
+      sharding_gen: payload.sharding_gen,
       region_lock: payload.region_lock,
       timestamp: payload.timestamp,
       update_view: payload.update_view,
@@ -85,6 +88,7 @@ impl Paxos2PCRMInner<FinishQueryPayloadTypes> for FinishQueryRMInner {
     _: &mut IO,
   ) -> FinishQueryRMPrepared {
     FinishQueryRMPrepared {
+      sharding_gen: self.sharding_gen.clone(),
       region_lock: self.region_lock.clone(),
       timestamp: self.timestamp.clone(),
       update_view: self.update_view.clone(),

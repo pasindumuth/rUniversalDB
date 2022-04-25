@@ -1,6 +1,6 @@
 use crate::common::{
-  lookup, BoundType, ColBound, KeyBound, PolyColBound, ReadRegion, SingleBound, WriteRegion,
-  WriteRegionType,
+  lookup, BoundType, ColBound, KeyBound, PolyColBound, PrimaryKey, ReadRegion, SingleBound,
+  TabletKeyRange, WriteRegion, WriteRegionType,
 };
 use crate::common::{ColName, ColType, ColVal, ColValN};
 use crate::sql_ast::proc::ValExpr;
@@ -971,4 +971,23 @@ pub fn is_surely_isolated_multiwrite(
     }
   }
   true
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Sharding Keybound Utils
+// -----------------------------------------------------------------------------------------------
+
+fn range_intersects_key_bound(range: &TabletKeyRange, key_bound: &KeyBound) -> bool {
+  // TODO:
+  true
+}
+
+/// Recall that `range` excludes the `end` key.
+pub fn range_intersects_row_region(range: &TabletKeyRange, row_region: &Vec<KeyBound>) -> bool {
+  for key_bound in row_region {
+    if range_intersects_key_bound(range, key_bound) {
+      return true;
+    }
+  }
+  false
 }

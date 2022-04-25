@@ -29,8 +29,8 @@ impl RMPayloadTypes for ShardSplitTabletRMPayloadTypes {
   type TM = ShardSplitTMPayloadTypes;
   type RMContext = TabletContext;
 
-  // Actions
-  type RMCommitActionData = ();
+  // Actions. This contains the target Tablet to create.
+  type RMCommitActionData = STRange;
 
   // RM PLm
   type RMPreparedPLm = ShardSplitTabletRMPrepared;
@@ -114,10 +114,14 @@ impl STMPaxos2PCRMInner<ShardSplitTabletRMPayloadTypes> for ShardSplitTabletRMIn
 
   fn mk_prepared_plm<IO: BasicIOCtx>(
     &mut self,
-    _: &mut TabletContext,
+    ctx: &mut TabletContext,
     _: &mut IO,
   ) -> Option<ShardSplitTabletRMPrepared> {
-    Some(ShardSplitTabletRMPrepared {})
+    if ctx.pause_ddl() {
+      None
+    } else {
+      Some(ShardSplitTabletRMPrepared {})
+    }
   }
 
   fn prepared_plm_inserted<IO: BasicIOCtx>(
@@ -143,11 +147,14 @@ impl STMPaxos2PCRMInner<ShardSplitTabletRMPayloadTypes> for ShardSplitTabletRMIn
 
   fn committed_plm_inserted<IO: BasicIOCtx>(
     &mut self,
-    _: &mut TabletContext,
+    ctx: &mut TabletContext,
     _: &mut IO,
-    _: &RMCommittedPLm<ShardSplitTabletRMPayloadTypes>,
-  ) -> () {
-    ()
+    plm: &RMCommittedPLm<ShardSplitTabletRMPayloadTypes>,
+  ) -> STRange {
+    // Update Sharding data.
+    ctx.this_sharding_gen = plm.payload.sharding_gen.clone();
+    ctx.this_tablet_key_range = plm.payload.target_old.range.clone();
+    plm.payload.target_new.clone()
   }
 
   fn mk_aborted_plm<IO: BasicIOCtx>(

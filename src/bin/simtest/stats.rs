@@ -172,6 +172,7 @@ impl Stats {
               TabletMessage::AlterTable(_) => K_TABLET_DDL,
               TabletMessage::DropTable(_) => K_TABLET_DDL,
               TabletMessage::ShardSplit(_) => K_TABLET_SHARDING,
+              TabletMessage::ShardingConfirmed(_) => K_TABLET_SHARDING,
             },
             SlaveRemotePayload::CoordMessage(_, m) => match m {
               CoordMessage::MasterQueryPlanningSuccess(_) => K_UNNACCOUNTED,
@@ -184,6 +185,7 @@ impl Stats {
             },
             SlaveRemotePayload::ReconfigSlaveGroup(_) => K_UNNACCOUNTED,
             SlaveRemotePayload::ShardSplit(_) => K_SLAVE_SHARDING,
+            SlaveRemotePayload::ShardingMessage(_) => K_SLAVE_SHARDING,
           },
         },
         SlaveMessage::MasterGossip(_) => K_SLAVE_MASTER_GOSSIP,

@@ -1,8 +1,9 @@
-use crate::common::{cur_timestamp, Timestamp};
+use crate::common::{cur_timestamp, QueryId, Timestamp};
 use crate::common::{mk_t, BasicIOCtx};
 use crate::common::{TNodePath, TabletGroupId};
 use crate::message as msg;
 use crate::server::ServerContextBase;
+use crate::shard_pending_es::ShardingSplitPLm;
 use crate::shard_split_tm_es::{
   ShardNodePath, ShardSplitClosed, ShardSplitCommit, ShardSplitPrepare, ShardSplitPrepared,
   ShardSplitTMPayloadTypes,
@@ -13,6 +14,7 @@ use crate::stmpaxos2pc_rm::{
   STMPaxos2PCRMOuter,
 };
 use crate::stmpaxos2pc_tm::TMMessage;
+use crate::tablet::ShardingSnapshot;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 
@@ -28,7 +30,7 @@ impl RMPayloadTypes for ShardSplitSlaveRMPayloadTypes {
   type RMContext = SlaveContext;
 
   // Actions
-  type RMCommitActionData = ();
+  type RMCommitActionData = (TabletGroupId, QueryId);
 
   // RM PLm
   type RMPreparedPLm = ShardSplitSlaveRMPrepared;
@@ -56,7 +58,7 @@ pub struct ShardSplitSlaveRMAborted {}
 
 impl RMServerContext<ShardSplitSlaveRMPayloadTypes> for SlaveContext {
   fn push_plm(&mut self, plm: RMPLm<ShardSplitSlaveRMPayloadTypes>) {
-    self.slave_bundle.plms.push(SlavePLm::ShardSplit(plm));
+    self.slave_bundle.plms.push(SlavePLm::ShardingSplitPLm(ShardingSplitPLm::ShardSplit(plm)));
   }
 
   fn send_to_tm<IO: BasicIOCtx>(
@@ -138,9 +140,9 @@ impl STMPaxos2PCRMInner<ShardSplitSlaveRMPayloadTypes> for ShardSplitSlaveRMInne
     &mut self,
     _: &mut SlaveContext,
     _: &mut IO,
-    _: &RMCommittedPLm<ShardSplitSlaveRMPayloadTypes>,
-  ) -> () {
-    ()
+    commit: &RMCommittedPLm<ShardSplitSlaveRMPayloadTypes>,
+  ) -> (TabletGroupId, QueryId) {
+    (commit.payload.tid.clone(), commit.query_id.clone())
   }
 
   fn mk_aborted_plm<IO: BasicIOCtx>(
