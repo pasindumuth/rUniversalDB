@@ -1,5 +1,6 @@
 use crate::col_usage::ColUsageNode;
 use crate::coord::{CoordContext, CoordForwardMsg, CoordState};
+use crate::expression::does_types_match;
 use crate::master::MasterTimerInput;
 use crate::master_query_planning_es::ColPresenceReq;
 use crate::message as msg;
@@ -314,33 +315,42 @@ impl PrimaryKey {
   }
 }
 
-/// The key range that a tablet manages. The `start` and `end` are
-/// PrimaryKey types, which are convenient for splitting the key-space.
-/// If either `start` or `end` is `None`, that means there is no bound
-/// for that direction. This is a half-open interval, where `start`
-/// is inclusive and `end` is exclusive.
+/// Represents a contiguous subset of keys in a Table. Here, `start`
+/// and `end` partition the first KeyCol (if there even is a KeyCol).
+/// Here, `start` is inclusive and `end` is exlusive. If either are `None`,
+/// that side is unbounded.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TabletKeyRange {
-  pub start: Option<PrimaryKey>,
-  pub end: Option<PrimaryKey>,
+  pub start: Option<ColVal>,
+  pub end: Option<ColVal>,
 }
 
 impl TabletKeyRange {
-  /// Checks whether the given `key` is inside of `range`. Importantly, the schemas
-  /// of the keys in the `range` have to the same as that of `key`. Recall that the
-  /// `TabletKeyRange` are inclusive of beginning and exclusive of end.
-  pub fn contains(&self, key: &PrimaryKey) -> bool {
+  /// This function returns `false` when `range_key` false outside of `Self`.
+  /// Importantly, the `ColType` of the `range_key` provided must be the same as
+  /// `Self`. Recall that `Self` is inclusive of `start` and exclusive of `end`.
+  pub fn contains(&self, range_key: &ColVal) -> bool {
     if let Some(start_key) = &self.start {
-      if key < start_key {
+      if range_key < start_key {
         return false;
       }
     }
     if let Some(end_key) = &self.end {
-      if end_key <= key {
+      if end_key <= range_key {
         return false;
       }
     }
     true
+  }
+
+  /// This function returns `false` when `pkey` falls outside of `Self`. Importantly,
+  /// the `ColType` of the first key in `pkey` (if it exists) must match that of `Self`.
+  pub fn contains_pkey(&self, pkey: &PrimaryKey) -> bool {
+    if let Some(first_key) = pkey.cols.first() {
+      self.contains(first_key)
+    } else {
+      true
+    }
   }
 }
 
@@ -679,6 +689,21 @@ impl TableSchema {
   /// (for every `Timestamp`).
   pub fn get_schema_val_cols_static(&self, timestamp: &Timestamp) -> Vec<ColName> {
     self.val_cols.static_snapshot_read(timestamp).into_keys().collect()
+  }
+
+  /// Checks whether this `range_key` can appear in a `TabletKeyRange` that is used
+  /// to shard this `TableSchema`. Since this logic only depends on the `key_cols`, that
+  /// means the results of this function does not change over time.
+  pub fn is_valid_range_key(&self, range_key: &Option<ColVal>) -> bool {
+    if let Some(range_key) = range_key {
+      if let Some((_, first_key_type)) = &self.key_cols.first() {
+        does_types_match(first_key_type, Some(range_key))
+      } else {
+        false
+      }
+    } else {
+      true
+    }
   }
 }
 

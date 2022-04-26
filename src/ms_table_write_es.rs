@@ -3,7 +3,7 @@ use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
 use crate::common::{
   ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView, TransTableName,
 };
-use crate::expression::{is_true, EvalError};
+use crate::expression::{does_types_match, is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::message as msg;
 use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
@@ -209,13 +209,7 @@ impl SqlQueryInner for UpdateInner {
             if let Some(val) = &col_val {
               let col_type =
                 ctx.table_schema.val_cols.static_read(&col_name, &es.timestamp).unwrap();
-              let does_match = match (val, col_type) {
-                (ColVal::Bool(_), ColType::Bool) => true,
-                (ColVal::Int(_), ColType::Int) => true,
-                (ColVal::String(_), ColType::String) => true,
-                _ => false,
-              };
-              if !does_match {
+              if !does_types_match(col_type, Some(val)) {
                 return Err(EvalError::TypeError);
               }
             }

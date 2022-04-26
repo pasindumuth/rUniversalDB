@@ -13,6 +13,7 @@ use crate::common::{
 };
 use crate::create_table_tm_es::{CreateTableTMES, CreateTableTMInner, CreateTableTMPayloadTypes};
 use crate::drop_table_tm_es::{DropTableTMES, DropTableTMInner, DropTableTMPayloadTypes};
+use crate::expression::does_types_match;
 use crate::free_node_manager::{FreeNodeManager, FreeNodeManagerPLm, FreeNodeType};
 use crate::master_query_planning_es::{MasterQueryPlanning, MasterQueryPlanningESS};
 use crate::message as msg;
@@ -1163,30 +1164,13 @@ impl MasterContext {
     debug_assert!(!sids.is_empty());
     let mut shards = Vec::<(TabletKeyRange, TabletGroupId, SlaveGroupId)>::new();
 
-    // For all remaining KeyCols, amend `pkey` with the minimum value of the corresponding type.
-    fn mk_key(
-      first_val: ColVal,
-      mut rem_cols: core::slice::Iter<(ColName, ColType)>,
-    ) -> PrimaryKey {
-      let mut split_key = PrimaryKey { cols: vec![] };
-      split_key.cols.push(first_val);
-      while let Some((_, col_type)) = rem_cols.next() {
-        match col_type {
-          ColType::Int => split_key.cols.push(ColVal::Int(i32::MIN)),
-          ColType::Bool => split_key.cols.push(ColVal::Bool(false)),
-          ColType::String => split_key.cols.push(ColVal::String("".to_string())),
-        }
-      }
-      split_key
-    }
-
     // Removes one random element from `sids` (which the caller must ensure exists) and
     // constructs the output.
     fn mk_shard<IO: MasterIOCtx>(
       io_ctx: &mut IO,
       sids: &mut Vec<&SlaveGroupId>,
-      start: Option<PrimaryKey>,
-      end: Option<PrimaryKey>,
+      start: Option<ColVal>,
+      end: Option<ColVal>,
     ) -> (TabletKeyRange, TabletGroupId, SlaveGroupId) {
       let idx = io_ctx.rand().next_u32() as usize % sids.len();
       let sid = sids.remove(idx);
@@ -1200,8 +1184,7 @@ impl MasterContext {
       shards.push(mk_shard(io_ctx, &mut sids, None, None));
     } else {
       // Get the first KeyCol
-      let mut it = create_table.key_cols.iter();
-      let (_, col_type) = it.next().unwrap();
+      let (_, col_type) = create_table.key_cols.iter().next().unwrap();
       match col_type {
         ColType::Int => {
           // Decide if we want 1 shard or 2 shards. Make sure we do not choose more shards
@@ -1212,7 +1195,7 @@ impl MasterContext {
             shards.push(mk_shard(io_ctx, &mut sids, None, None));
           } else {
             // 2 shards
-            let split_key = mk_key(ColVal::Int(0), it);
+            let split_key = ColVal::Int(0);
             shards.push(mk_shard(io_ctx, &mut sids, None, Some(split_key.clone())));
             shards.push(mk_shard(io_ctx, &mut sids, Some(split_key.clone()), None));
           }
@@ -1226,7 +1209,7 @@ impl MasterContext {
             shards.push(mk_shard(io_ctx, &mut sids, None, None));
           } else {
             // 2 shards
-            let split_key = mk_key(ColVal::Bool(true), it);
+            let split_key = ColVal::Bool(true);
             shards.push(mk_shard(io_ctx, &mut sids, None, Some(split_key.clone())));
             shards.push(mk_shard(io_ctx, &mut sids, Some(split_key.clone()), None));
           }
@@ -1249,12 +1232,12 @@ impl MasterContext {
           let mut char_it = split_chars.into_iter();
           if let Some(first_char) = char_it.next() {
             // Create the first partition
-            let mut prev_split_key = mk_key(ColVal::String(first_char.to_string()), it.clone());
+            let mut prev_split_key = ColVal::String(first_char.to_string());
             shards.push(mk_shard(io_ctx, &mut sids, None, Some(prev_split_key.clone())));
 
             // Create middle partitions
             while let Some(next_char) = char_it.next() {
-              let split_key = mk_key(ColVal::String(next_char.to_string()), it.clone());
+              let split_key = ColVal::String(next_char.to_string());
               shards.push(mk_shard(
                 io_ctx,
                 &mut sids,
@@ -1480,7 +1463,13 @@ impl MasterContext {
                     // Check that the split point is not `None` and that it is contained
                     // within the original range.
                     let split_key = &es.inner.target_old.range.end;
-                    if split_key.is_some() && orig_range.contains(split_key.as_ref().unwrap()) {
+                    let (gen, _) = full_gen;
+                    let db_schema =
+                      gossip.db_schema.get(&(es.inner.table_path.clone(), gen.clone())).unwrap();
+                    if db_schema.is_valid_range_key(split_key)
+                      && split_key.is_some()
+                      && orig_range.contains(split_key.as_ref().unwrap())
+                    {
                       // Start the ES.
                       es.state = paxos2pc::State::WaitingInsertTMPrepared;
                       tables_being_modified.insert(es.inner.table_path.clone());

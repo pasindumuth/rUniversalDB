@@ -1,5 +1,6 @@
 use crate::common::{
-  lookup, lookup_pos, ColBound, KeyBound, PolyColBound, SingleBound, TableSchema, Timestamp,
+  lookup, lookup_pos, ColBound, KeyBound, PolyColBound, SingleBound, TableSchema, TabletKeyRange,
+  Timestamp,
 };
 use crate::common::{ColName, ColType, ColVal, ColValN, PrimaryKey, TableView};
 use std::cmp::max;
@@ -535,4 +536,56 @@ fn presence_snapshot_to_table_view(
     table_view.add_row(row);
   }
   table_view
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Sharding Utils
+// -----------------------------------------------------------------------------------------------
+
+/// Converts the `range_key` to a Storage Key that can be used as a lower bound when
+/// querying the `GenericMVTable`.
+fn range_to_storage_key(range_key: &ColVal) -> (PrimaryKey, Option<ColName>) {
+  (PrimaryKey { cols: vec![range_key.clone()] }, None)
+}
+
+/// Computes the subset of `storage` that lies within `range`.
+pub fn compute_range_storage(storage: &GenericMVTable, range: &TabletKeyRange) -> GenericMVTable {
+  let start_bound = if let Some(start) = &range.start {
+    Bound::Included(range_to_storage_key(start))
+  } else {
+    Bound::Unbounded
+  };
+
+  let end_bound = if let Some(end) = &range.end {
+    Bound::Excluded(range_to_storage_key(end))
+  } else {
+    Bound::Unbounded
+  };
+
+  let mut target_storage = GenericMVTable::new();
+  for (key, value) in storage.range((start_bound, end_bound)) {
+    target_storage.insert(key.clone(), value.clone());
+  }
+
+  target_storage
+}
+
+/// This function modified `storage` by removing all keys being `range.start`, but
+/// returns a `GenericMVTable` consisting of the keys on and after `range.end`. (Thus
+/// all keys within `range` are deleted forever.)
+pub fn remove_range(storage: &mut GenericMVTable, range: &TabletKeyRange) -> GenericMVTable {
+  if let Some(start) = &range.start {
+    let mut remaining = storage.split_off(&range_to_storage_key(start));
+    if let Some(end) = &range.end {
+      remaining.split_off(&range_to_storage_key(end))
+    } else {
+      GenericMVTable::new()
+    }
+  } else {
+    if let Some(end) = &range.end {
+      storage.split_off(&range_to_storage_key(end))
+    } else {
+      GenericMVTable::new()
+    }
+  }
 }

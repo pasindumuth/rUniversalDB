@@ -457,6 +457,18 @@ pub struct PerformQuery {
   pub query: GeneralQuery,
 }
 
+impl PerformQuery {
+  pub fn get_query_plan(&self) -> &QueryPlan {
+    match &self.query {
+      GeneralQuery::SuperSimpleTransTableSelectQuery(query) => &query.query_plan,
+      GeneralQuery::SuperSimpleTableSelectQuery(query) => &query.query_plan,
+      GeneralQuery::UpdateQuery(query) => &query.query_plan,
+      GeneralQuery::InsertQuery(query) => &query.query_plan,
+      GeneralQuery::DeleteQuery(query) => &query.query_plan,
+    }
+  }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct CancelQuery {
   pub query_id: QueryId,

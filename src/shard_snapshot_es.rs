@@ -8,7 +8,7 @@ use crate::message as msg;
 use crate::server::ServerContextBase;
 use crate::shard_split_tm_es::STRange;
 use crate::slave::{SlaveContext, SlavePLm};
-use crate::storage::GenericMVTable;
+use crate::storage::{compute_range_storage, remove_range, GenericMVTable};
 use crate::tablet::{ShardingSnapshot, TabletConfig, TabletContext, TabletForwardMsg, TabletPLm};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, Bound};
@@ -79,23 +79,13 @@ impl ShardingSnapshotES {
   }
 
   fn send_sharding_snapshot<IO: CoreIOCtx>(&mut self, ctx: &mut TabletContext, io_ctx: &mut IO) {
-    // Read in the part of the `storage` we need to send. Recall that in a
-    // `TabletKeyRange`, the end key is exclusive. Recall that `target.range.start` is
-    // not None (see the docs in `ShardSplitTMInner`).
-    let split_storage_key = (self.target.range.start.clone().unwrap(), None);
-    let range = (Bound::Included(split_storage_key), Bound::Unbounded);
-    let mut target_storage = GenericMVTable::new();
-    for (key, value) in ctx.storage.range(range) {
-      target_storage.insert(key.clone(), value.clone());
-    }
-
     // Construct the ShardingSnapshot
     let snapshot = ShardingSnapshot {
       this_tid: self.target.tid.clone(),
       this_table_path: ctx.this_table_path.clone(),
       this_sharding_gen: ctx.this_sharding_gen.clone(),
       this_table_key_range: ctx.this_tablet_key_range.clone(),
-      storage: target_storage,
+      storage: compute_range_storage(&ctx.storage, &self.target.range),
       table_schema: ctx.table_schema.clone(),
       presence_timestamp: ctx.presence_timestamp.clone(),
       committed_writes: ctx.committed_writes.clone(),
@@ -207,8 +197,8 @@ impl ShardingSnapshotES {
     match &self.state {
       State::ShardingSnapshotSent | State::Follower => {
         // Remove all the storage data that this Tablet no longer manages.
-        let split_storage_key = (self.target.range.start.clone().unwrap(), None);
-        ctx.storage.split_off(&split_storage_key);
+        let remaining = remove_range(&mut ctx.storage, &self.target.range);
+        debug_assert!(remaining.is_empty());
         ShardingSnapshotAction::Exit
       }
       _ => {

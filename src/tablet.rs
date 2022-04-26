@@ -1859,6 +1859,19 @@ impl TabletContext {
     statuses: &mut Statuses,
     perform_query: msg::PerformQuery,
   ) {
+    // If the `ShardingGen` is behind, then we abort.
+    let query_plan = perform_query.get_query_plan();
+    let (_, sharding_gen) = query_plan.table_location_map.get(&self.this_table_path).unwrap();
+    if sharding_gen < &self.this_sharding_gen {
+      self.send_query_error(
+        io_ctx,
+        perform_query.sender_path,
+        perform_query.query_id,
+        msg::QueryError::InvalidQueryPlan,
+      );
+      return;
+    }
+
     // Otherwise, we may process the PerformQuery
     match perform_query.query {
       msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
@@ -3206,7 +3219,7 @@ impl TabletContext {
   /// Check whether the `pkey` falls in the range of this Tablet's `TabletKeyRange`. The `pkey`
   /// must conform the tablets KeyCol schema (which the `TabletKeyRange` also does).
   pub fn check_range_inclusion(&self, pkey: &PrimaryKey) -> bool {
-    check_range_inclusion(&self.this_tablet_key_range, pkey)
+    self.this_tablet_key_range.contains_pkey(pkey)
   }
 
   /// If any Sharding operations are still in the process of finishing, we avoid
@@ -3219,23 +3232,6 @@ impl TabletContext {
 // -----------------------------------------------------------------------------------------------
 //  New Table Subquery Construction
 // -----------------------------------------------------------------------------------------------
-
-/// Use the ordering relation on `PrimaryKey` to check that `pkey` is within `tablet_key_range`.
-fn check_range_inclusion(tablet_key_range: &TabletKeyRange, pkey: &PrimaryKey) -> bool {
-  if let Some(start_key) = &tablet_key_range.start {
-    if pkey < start_key {
-      return false;
-    }
-  }
-
-  if let Some(end_key) = &tablet_key_range.end {
-    if pkey >= end_key {
-      return false;
-    }
-  }
-
-  true
-}
 
 /// This runs the `ContextConstructor` with the given inputs and simply accumulates the
 /// `ContextRow` to produce a `Context` for each element in `children`.

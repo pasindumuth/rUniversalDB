@@ -5,7 +5,7 @@ use crate::common::{
 use crate::common::{
   ColName, ColType, ColVal, ColValN, PrimaryKey, QueryId, TablePath, TableView, TransTableName,
 };
-use crate::expression::{construct_simple_cexpr, evaluate_c_expr, EvalError};
+use crate::expression::{construct_simple_cexpr, does_types_match, evaluate_c_expr, EvalError};
 use crate::gr_query_es::GRQueryES;
 use crate::message as msg;
 use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
@@ -88,16 +88,7 @@ impl SqlQueryInner for InsertInner {
 
       for row in &eval_values {
         let col_valn = row.get(i).unwrap();
-        let type_matches = match (col_type, col_valn) {
-          (ColType::Int, Some(ColVal::Int(_))) => true,
-          (ColType::Int, None) => true,
-          (ColType::Bool, Some(ColVal::Bool(_))) => true,
-          (ColType::Bool, None) => true,
-          (ColType::String, Some(ColVal::String(_))) => true,
-          (ColType::String, None) => true,
-          _ => false,
-        };
-        if !type_matches {
+        if !does_types_match(col_type, col_valn.as_ref()) {
           // If types do not match for some row, we propagate up a TypeError.
           return Err(mk_eval_error(EvalError::TypeError));
         }

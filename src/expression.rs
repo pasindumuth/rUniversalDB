@@ -881,6 +881,23 @@ fn full_bound<T>() -> ColBound<T> {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  Type Checking
+// -----------------------------------------------------------------------------------------------
+
+/// Returns `true` if the types match, `false` otherwise.
+pub fn does_types_match(col_type: &ColType, col_valn: Option<&ColVal>) -> bool {
+  match (col_type, col_valn) {
+    (ColType::Int, Some(ColVal::Int(_))) => true,
+    (ColType::Int, None) => true,
+    (ColType::Bool, Some(ColVal::Bool(_))) => true,
+    (ColType::Bool, None) => true,
+    (ColType::String, Some(ColVal::String(_))) => true,
+    (ColType::String, None) => true,
+    _ => false,
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Region Isolation Property Utilities
 // -----------------------------------------------------------------------------------------------
 

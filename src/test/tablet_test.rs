@@ -1,6 +1,6 @@
 use crate::common::{PrimaryKey, QueryId, TabletKeyRange};
 use crate::finish_query_rm_es::FinishQueryRMES;
-use crate::tablet::{check_range_inclusion, TabletState, DDLES};
+use crate::tablet::{TabletState, DDLES};
 use crate::test_utils::{cvb, cvi, cvs, CheckCtx};
 use std::collections::BTreeMap;
 
