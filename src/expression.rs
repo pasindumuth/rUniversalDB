@@ -994,17 +994,90 @@ pub fn is_surely_isolated_multiwrite(
 //  Sharding Keybound Utils
 // -----------------------------------------------------------------------------------------------
 
-fn range_intersects_key_bound(range: &TabletKeyRange, key_bound: &KeyBound) -> bool {
-  // TODO:
-  true
+/// This function safetly casts the `range` and `first_poly_col_bound` to the type `T`
+/// (returning `None` if this cannot be done), and then computes whether these
+/// two ranges might intersect. (That is, if `false` is returned, the two ranges
+/// certainly will not intersect.)
+fn range_might_intersects_key_bound<T: BoundType + Clone + Ord>(
+  range: &TabletKeyRange,
+  first_poly_col_bound: &PolyColBound,
+) -> Option<bool> {
+  let range_col_bound = range.clone().into_col_bound::<T>()?;
+  let first_col_bound = T::from_poly(first_poly_col_bound)?;
+  Some(might_col_intersect(&range_col_bound, &first_col_bound))
 }
 
-/// Recall that `range` excludes the `end` key.
-pub fn range_intersects_row_region(range: &TabletKeyRange, row_region: &Vec<KeyBound>) -> bool {
-  for key_bound in row_region {
-    if range_intersects_key_bound(range, key_bound) {
-      return true;
+/// This function checks whether any `KeyBound` in `row_region` might intersect with the
+/// `range`. (That is, if `false` is returned, then every `KeyBound` definitely does not
+/// intersect with `range`. )
+///
+/// Preconditions: If the `start` or `end` of `range` exists, then the `key_cols` is
+/// non-empty and the first `ColType` agrees. As usual, the schema of `KeyBound`s
+/// conforms to that of `key_cols`.
+pub fn range_might_intersect_row_region(
+  key_cols: &Vec<(ColName, ColType)>,
+  range: &TabletKeyRange,
+  row_region: &Vec<KeyBound>,
+) -> bool {
+  if let Some((_, col_type)) = key_cols.first() {
+    for mut key_bound in row_region {
+      let col_bound = key_bound.col_bounds.first().unwrap();
+      let might_intersect = match col_type {
+        ColType::Int => range_might_intersects_key_bound::<i32>(range, &col_bound),
+        ColType::Bool => range_might_intersects_key_bound::<bool>(range, &col_bound),
+        ColType::String => range_might_intersects_key_bound::<String>(range, &col_bound),
+      }
+      .unwrap();
+      if might_intersect {
+        return true;
+      }
     }
+    false
+  } else {
+    // In this case, if there is any `row_region` at all, it will include the one
+    // and only PrimaryKey in the key space. Since `range` contains the set of all Keys,
+    // we have the below code.
+    debug_assert!(range.start.is_none() && range.end.is_none());
+    !row_region.is_empty()
   }
-  false
+}
+
+/// This function safetly casts the `range` and `first_poly_col_bound` to the type `T`
+/// (returning `None` if this cannot be done), and then computes the intersect between
+/// the two and returns it.
+fn range_col_bound_intersection<T: BoundType + Clone + Ord>(
+  range: &TabletKeyRange,
+  first_poly_col_bound: &PolyColBound,
+) -> Option<PolyColBound> {
+  let range_col_bound = range.clone().into_col_bound::<T>()?;
+  let first_col_bound = T::from_poly(first_poly_col_bound)?;
+  let (start, end) = col_bound_intersect_interval(&range_col_bound, first_col_bound);
+  Some(T::to_poly(ColBound { start: start.clone(), end: end.clone() }))
+}
+
+/// This function takes the intersect of every `KeyBound` in `row_region` and then returns it.
+///
+/// Preconditions: See `range_might_intersect_row_region`.
+pub fn range_row_region_intersection(
+  key_cols: &Vec<(ColName, ColType)>,
+  range: &TabletKeyRange,
+  row_region: Vec<KeyBound>,
+) -> Vec<KeyBound> {
+  if let Some((_, col_type)) = key_cols.first() {
+    let mut new_row_region = Vec::<KeyBound>::new();
+    for mut key_bound in row_region {
+      let col_bound = key_bound.col_bounds.first().unwrap();
+      let new_col_bound = match col_type {
+        ColType::Int => range_col_bound_intersection::<i32>(range, &col_bound),
+        ColType::Bool => range_col_bound_intersection::<bool>(range, &col_bound),
+        ColType::String => range_col_bound_intersection::<String>(range, &col_bound),
+      }
+      .unwrap();
+      *key_bound.col_bounds.first_mut().unwrap() = new_col_bound;
+      new_row_region.push(key_bound);
+    }
+    new_row_region
+  } else {
+    row_region
+  }
 }

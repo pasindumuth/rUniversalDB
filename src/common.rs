@@ -352,6 +352,25 @@ impl TabletKeyRange {
       true
     }
   }
+
+  /// This function returns `None` if this conversion fails (due to a type incompatibility).
+  pub fn into_col_bound<T: BoundType>(self) -> Option<ColBound<T>> {
+    match (self.start, self.end) {
+      (None, None) => Some(ColBound { start: SingleBound::Unbounded, end: SingleBound::Unbounded }),
+      (Some(start), None) => Some(ColBound {
+        start: SingleBound::Included(T::col_val_cast(start)?),
+        end: SingleBound::Unbounded,
+      }),
+      (None, Some(end)) => Some(ColBound {
+        start: SingleBound::Unbounded,
+        end: SingleBound::Excluded(T::col_val_cast(end)?),
+      }),
+      (Some(start), Some(end)) => Some(ColBound {
+        start: SingleBound::Included(T::col_val_cast(start)?),
+        end: SingleBound::Excluded(T::col_val_cast(end)?),
+      }),
+    }
+  }
 }
 
 /// A Type used to represent a generation.
@@ -1177,6 +1196,9 @@ pub trait BoundType: Sized {
   fn col_valn_cast_ref(col_val: &ColValN) -> Option<&Self> {
     Self::col_val_cast_ref(col_val.as_ref()?)
   }
+
+  fn from_poly(poly_col_bound: &PolyColBound) -> Option<&ColBound<Self>>;
+  fn to_poly(col_bound: ColBound<Self>) -> PolyColBound;
 }
 
 /// `BoundType` for `i32`
@@ -1195,6 +1217,18 @@ impl BoundType for i32 {
     } else {
       None
     }
+  }
+
+  fn from_poly(poly_col_bound: &PolyColBound) -> Option<&ColBound<Self>> {
+    if let PolyColBound::Int(col_bound) = poly_col_bound {
+      Some(col_bound)
+    } else {
+      None
+    }
+  }
+
+  fn to_poly(col_bound: ColBound<Self>) -> PolyColBound {
+    PolyColBound::Int(col_bound)
   }
 }
 
@@ -1215,6 +1249,18 @@ impl BoundType for bool {
       None
     }
   }
+
+  fn from_poly(poly_col_bound: &PolyColBound) -> Option<&ColBound<Self>> {
+    if let PolyColBound::Bool(col_bound) = poly_col_bound {
+      Some(col_bound)
+    } else {
+      None
+    }
+  }
+
+  fn to_poly(col_bound: ColBound<Self>) -> PolyColBound {
+    PolyColBound::Bool(col_bound)
+  }
 }
 
 /// `BoundType` for `String`
@@ -1233,5 +1279,17 @@ impl BoundType for String {
     } else {
       None
     }
+  }
+
+  fn from_poly(poly_col_bound: &PolyColBound) -> Option<&ColBound<Self>> {
+    if let PolyColBound::String(col_bound) = poly_col_bound {
+      Some(col_bound)
+    } else {
+      None
+    }
+  }
+
+  fn to_poly(col_bound: ColBound<Self>) -> PolyColBound {
+    PolyColBound::String(col_bound)
   }
 }

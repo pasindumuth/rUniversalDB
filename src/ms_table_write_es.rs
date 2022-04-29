@@ -49,6 +49,7 @@ impl SqlQueryInner for UpdateInner {
     // Compute the ReadRegion
     let read_region = compute_read_region(
       &ctx.table_schema.key_cols,
+      &ctx.this_tablet_key_range,
       &es.query_plan,
       &es.context,
       &self.sql_query.selection,

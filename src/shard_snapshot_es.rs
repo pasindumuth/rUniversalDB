@@ -2,7 +2,7 @@ use crate::common::{
   CTSubNodePath, CoreIOCtx, PaxosGroupId, PaxosGroupIdTrait, QueryId, RemoteLeaderChangedPLm,
   SlaveIOCtx, TNodePath,
 };
-use crate::expression::range_intersects_row_region;
+use crate::expression::range_might_intersect_row_region;
 use crate::finish_query_rm_es::FinishQueryRMES;
 use crate::message as msg;
 use crate::server::ServerContextBase;
@@ -133,7 +133,11 @@ impl ShardingSnapshotES {
         ctx.waiting_read_protected.iter().chain(ctx.inserting_read_protected.iter());
       for (_, reqs) in unpersisted_read_protected {
         for req in reqs {
-          if range_intersects_row_region(&self.target.range, &req.read_region.row_region) {
+          if range_might_intersect_row_region(
+            &ctx.table_schema.key_cols,
+            &self.target.range,
+            &req.read_region.row_region,
+          ) {
             return false;
           }
         }

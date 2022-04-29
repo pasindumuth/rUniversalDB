@@ -1,14 +1,15 @@
 use crate::col_usage::{collect_top_level_cols, free_external_cols};
 use crate::common::{
   btree_multimap_insert, lookup, mk_qid, to_table_path, CoreIOCtx, GossipData, GossipDataView,
-  KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, Timestamp,
+  KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
 };
 use crate::common::{
   CQueryPath, CTQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow, PaxosGroupId,
   PaxosGroupIdTrait, QueryId, SlaveGroupId, TQueryPath, TablePath, TableView, TransTableName,
 };
 use crate::expression::{
-  compress_row_region, compute_key_region, evaluate_c_expr, is_true, CExpr, EvalError,
+  compress_row_region, compute_key_region, evaluate_c_expr, is_true, range_row_region_intersection,
+  CExpr, EvalError,
 };
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::master_query_planning_es::ColPresenceReq;
@@ -128,6 +129,7 @@ pub fn check_gossip<'a>(gossip: &GossipDataView<'a>, query_plan: &QueryPlan) -> 
 /// specific to the query.
 pub fn compute_read_region(
   key_cols: &Vec<(ColName, ColType)>,
+  range: &TabletKeyRange,
   query_plan: &QueryPlan,
   context: &Context,
   selection: &proc::ValExpr,
@@ -158,6 +160,7 @@ pub fn compute_read_region(
   let val_col_region = Vec::from_iter(val_col_region.into_iter());
 
   // Compute the ReadRegion
+  row_region = range_row_region_intersection(key_cols, range, row_region);
   ReadRegion { val_col_region, row_region }
 }
 
@@ -277,6 +280,7 @@ impl TableReadES {
     // Compute the ReadRegion
     let read_region = compute_read_region(
       &ctx.table_schema.key_cols,
+      &ctx.this_tablet_key_range,
       &self.query_plan,
       &self.context,
       &self.sql_query.selection,
