@@ -305,7 +305,7 @@ impl STMPaxos2PCTMInner<ShardSplitTMPayloadTypes> for ShardSplitTMInner {
     let full_gen = ctx.gossip.get().table_generation.get_last_version(&self.table_path).unwrap();
     let (_, sharding_gen) = full_gen;
     let commit = ShardSplitCommit {
-      sharding_gen: sharding_gen.clone(),
+      sharding_gen: sharding_gen.next(),
       target_old: self.target_old.clone(),
       target_new: self.target_new.clone(),
     };

@@ -536,7 +536,7 @@ impl<'a> QueryGenCtx<'a> {
               return None;
             } else {
               assert!(start < end);
-              start + end / 2
+              (start + end) / 2
             }
           }
           (Some(ColVal::Int(start)), None) => *start + 10, // We simply add 10 in this case.
