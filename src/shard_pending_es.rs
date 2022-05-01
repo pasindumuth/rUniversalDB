@@ -8,7 +8,9 @@ use crate::shard_split_slave_rm_es::{
 };
 use crate::shard_split_tm_es::ShardSplitTMPayloadTypes;
 use crate::slave::{SlaveContext, SlavePLm};
-use crate::tablet::{ShardingSnapshot, TabletConfig, TabletContext, TabletForwardMsg};
+use crate::tablet::{
+  ShardingSnapshot, TabletBundle, TabletConfig, TabletContext, TabletForwardMsg,
+};
 use crate::{message as msg, stmpaxos2pc_rm, stmpaxos2pc_tm};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -298,12 +300,15 @@ impl ShardSplitESS {
         self.handle_shard_split_es_action(io_ctx, ctx, query_id, action);
       }
       ShardingSplitPLm::ShardingSnapshotPLm(plm) => {
+        let this_tid = plm.snapshot.this_tid.clone();
         // Here, the `PendingShardingES` should be done, so we also remove it.
         if let Some(mut es) = self.shard_pending_ess.remove(&plm.query_id) {
           // Update `pending_shards`
-          self.pending_shards.remove(&plm.snapshot.this_tid);
+          self.pending_shards.remove(&this_tid);
           // Forward to the ES.
           es.handle_sharding_plm(ctx, io_ctx, plm);
+          // Amend `tablet_bundles` so that SharedPaxosInserter can work properly
+          ctx.tablet_bundles.insert(this_tid, TabletBundle::default());
         }
       }
     }

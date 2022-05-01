@@ -154,6 +154,8 @@ pub trait NodeIOCtx: BasicIOCtx + FreeNodeIOCtx + SlaveIOCtx + MasterIOCtx {}
 // -----------------------------------------------------------------------------------------------
 /// These are very low-level utilities whose absence I consider a shortcoming of Rust.
 
+pub const ALPHABET: &'static str = "abcdefghijklmnopqrstuvwxyz";
+
 pub trait RangeEnds: Sized {
   /// Constructs a Vec out of the given endpoints.
   fn rvec(i: Self, j: Self) -> Vec<Self>;
@@ -315,10 +317,19 @@ impl PrimaryKey {
   }
 }
 
-/// Represents a contiguous subset of keys in a Table. Here, `start`
-/// and `end` partition the first KeyCol (if there even is a KeyCol).
+/// Represents a contiguous subset of keys in a Table. Here, if `start` or `end`
+/// is present, then the `ColType` agrees with the first KeyCol, and they will
+/// be used to partition the KeySpace by partitioning the first KeyCol.
 /// Here, `start` is inclusive and `end` is exlusive. If either are `None`,
 /// that side is unbounded.
+///
+/// NOTE: The reason we ceased to use `PrimaryKey` here was that when building
+/// `(Read/Write)Region`s, slicing the `row_region` would be quite a bit more
+/// inefficient. The only shortcoming with the below is that `PrimaryKey` that
+/// start with a `bool` cannot be sharded well. One solution is to use `PrimaryKey`
+/// prefixes (instead of the whole `PrimaryKey`). (Notice that this would not make
+/// `row_region` slicing any more expensive if we continue to use the first KeyCol
+/// most of the time).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TabletKeyRange {
   pub start: Option<ColVal>,

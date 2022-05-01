@@ -1,5 +1,5 @@
 use crate::col_usage::collect_top_level_cols;
-use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
+use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, Timestamp, WriteRegion};
 use crate::common::{
   ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView, TransTableName,
 };
@@ -106,6 +106,7 @@ impl SqlQueryInner for UpdateInner {
         &ctx.table_schema,
         &es.timestamp,
         &es.query_plan.col_usage_node.source,
+        &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         MSStorageView::new(
           &ctx.storage,
@@ -135,6 +136,7 @@ impl SqlQueryInner for UpdateInner {
         &ctx.table_schema,
         &es.timestamp,
         &es.query_plan.col_usage_node.source,
+        &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         MSStorageView::new(
           &ctx.storage,

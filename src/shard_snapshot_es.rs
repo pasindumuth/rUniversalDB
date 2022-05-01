@@ -1,6 +1,6 @@
 use crate::common::{
   CTSubNodePath, CoreIOCtx, PaxosGroupId, PaxosGroupIdTrait, QueryId, RemoteLeaderChangedPLm,
-  SlaveIOCtx, TNodePath,
+  SlaveIOCtx, TNodePath, TabletGroupId,
 };
 use crate::expression::range_might_intersect_row_region;
 use crate::finish_query_rm_es::FinishQueryRMES;
@@ -84,7 +84,7 @@ impl ShardingSnapshotES {
       this_tid: self.target.tid.clone(),
       this_table_path: ctx.this_table_path.clone(),
       this_sharding_gen: ctx.this_sharding_gen.clone(),
-      this_table_key_range: ctx.this_tablet_key_range.clone(),
+      this_table_key_range: self.target.range.clone(),
       storage: compute_range_storage(&ctx.storage, &self.target.range),
       table_schema: ctx.table_schema.clone(),
       presence_timestamp: ctx.presence_timestamp.clone(),
@@ -199,7 +199,7 @@ impl ShardingSnapshotES {
     _: ShardingConfirmedPLm,
   ) -> ShardingSnapshotAction {
     match &self.state {
-      State::ShardingSnapshotSent | State::Follower => {
+      State::InsertingShardingConfirmed | State::Follower => {
         // Remove all the storage data that this Tablet no longer manages.
         let remaining = remove_range(&mut ctx.storage, &self.target.range);
         debug_assert!(remaining.is_empty());

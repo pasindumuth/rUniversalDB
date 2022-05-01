@@ -144,7 +144,11 @@ impl TestContext {
     match response {
       msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
         assert_eq!(payload.request_id, request_id);
-        assert_eq!(payload.result, exp_result);
+        if payload.result != exp_result {
+          println!("{:#?}", query);
+          println!("{:#?}", request_id);
+          assert_eq!(payload.result, exp_result);
+        }
       }
       _ => panic!("Incorrect Response: {:#?}", response),
     }

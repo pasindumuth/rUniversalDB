@@ -1,6 +1,6 @@
 use crate::common::{PrimaryKey, QueryId, TabletKeyRange};
 use crate::finish_query_rm_es::FinishQueryRMES;
-use crate::tablet::{TabletState, DDLES};
+use crate::tablet::{ShardingState, TabletState, DDLES};
 use crate::test_utils::{cvb, cvi, cvs, CheckCtx};
 use std::collections::BTreeMap;
 
@@ -126,5 +126,10 @@ pub fn check_tablet_clean(tablet: &TabletState, check_ctx: &mut CheckCtx) {
     DDLES::Drop(_) => false,
     DDLES::Dropped(_) => true,
     DDLES::ShardSplit(_) => false,
+  });
+
+  check_ctx.check(match &statuses.sharding_state {
+    ShardingState::None => true,
+    ShardingState::ShardingSnapshotES(_) => false,
   });
 }

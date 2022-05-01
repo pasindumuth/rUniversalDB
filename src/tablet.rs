@@ -22,7 +22,8 @@ use crate::drop_table_rm_es::{
 };
 use crate::drop_table_tm_es::DropTableTMPayloadTypes;
 use crate::expression::{
-  compute_key_region, is_surely_isolated_multiread, is_surely_isolated_multiwrite, EvalError,
+  compute_key_region, is_surely_isolated_multiread, is_surely_isolated_multiwrite,
+  range_row_region_intersection, EvalError,
 };
 use crate::finish_query_rm_es::{FinishQueryRMES, FinishQueryRMInner};
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
@@ -1023,6 +1024,9 @@ pub struct StorageLocalTable<'a, StorageViewT: StorageView> {
   timestamp: &'a Timestamp,
   /// The `GeneralSource` in the Data Source of the Query.
   source: &'a proc::GeneralSource,
+  /// The `TabletKeyRange` of the Tablet. Recall that the underlying storage might temporarily
+  /// have keys outside of this range during the Sharding process.
+  tablet_key_range: &'a TabletKeyRange,
   /// The row-filtering expression (i.e. WHERE clause) to compute subtables with.
   selection: &'a proc::ValExpr,
   /// This is used to compute the KeyBound
@@ -1036,11 +1040,20 @@ impl<'a, StorageViewT: StorageView> StorageLocalTable<'a, StorageViewT> {
     table_schema: &'a TableSchema,
     timestamp: &'a Timestamp,
     source: &'a proc::GeneralSource,
+    tablet_key_range: &'a TabletKeyRange,
     selection: &'a proc::ValExpr,
     storage: StorageViewT,
   ) -> StorageLocalTable<'a, StorageViewT> {
     let schema = table_schema.get_schema_static(timestamp).into_iter().map(|c| Some(c)).collect();
-    StorageLocalTable { table_schema, source, timestamp, selection, storage, schema }
+    StorageLocalTable {
+      table_schema,
+      source,
+      timestamp,
+      selection,
+      tablet_key_range,
+      storage,
+      schema,
+    }
   }
 }
 
@@ -1078,8 +1091,11 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
     // Recall that since `contains_col_ref` is false for the `parent_context_schema`, this
     // `col_map` passes the precondition of `compute_key_region`.
     let col_map = compute_col_map(parent_context_schema, parent_context_row);
-    let key_bounds =
-      compute_key_region(&self.selection, col_map, &self.source, &self.table_schema.key_cols);
+    let key_bounds = range_row_region_intersection(
+      &self.table_schema.key_cols,
+      &self.tablet_key_range,
+      compute_key_region(&self.selection, col_map, &self.source, &self.table_schema.key_cols),
+    );
     self.storage.compute_subtable(&key_bounds, &col_names, self.timestamp)
   }
 }
@@ -2898,13 +2914,30 @@ impl TabletContext {
           // anyways. (In constract, we will let the Prepared ESs finish, since it's too
           // late to abort them.)
           if self.is_leader() {
-            let mut qids = Vec::<QueryId>::new();
-            qids.extend(statuses.perform_query_buffer.keys().cloned());
-            qids.extend(statuses.ms_query_ess.keys().cloned());
-            qids.extend(statuses.top.table_read_ess.keys().cloned());
+            // For PerformQuery, we simply remove them and respond; there are no child queries.
+            for (_, perform_query) in std::mem::take(&mut statuses.perform_query_buffer) {
+              self.send_query_error(
+                io_ctx,
+                perform_query.sender_path,
+                perform_query.query_id,
+                msg::QueryError::InvalidQueryPlan,
+              );
+            }
+
+            // Otherwise, we use the standard exiting functions.
+            let qids: Vec<_> = statuses.ms_query_ess.keys().cloned().collect();
+            for qid in qids {
+              self.exit_ms_query_es(io_ctx, statuses, qid, msg::QueryError::InvalidQueryPlan);
+            }
+            let mut qids: Vec<_> = statuses.top.table_read_ess.keys().cloned().collect();
             qids.extend(statuses.top.trans_table_read_ess.keys().cloned());
             for qid in qids {
-              self.exit_and_clean_up(io_ctx, statuses, qid);
+              self.handle_tp_es_action(
+                io_ctx,
+                statuses,
+                qid,
+                TPESAction::QueryError(msg::QueryError::InvalidQueryPlan),
+              );
             }
           }
 

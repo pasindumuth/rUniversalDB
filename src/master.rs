@@ -4,6 +4,7 @@ use crate::alter_table_tm_es::{
 use crate::common::{
   lookup_pos, map_insert, mk_qid, mk_t, mk_tid, remove_item, update_all_eids, GeneralTraceMessage,
   GossipData, LeaderMap, MasterIOCtx, MasterTraceMessage, TableSchema, Timestamp, VersionedValue,
+  ALPHABET,
 };
 use crate::common::{BasicIOCtx, RemoteLeaderChangedPLm};
 use crate::common::{
@@ -1220,7 +1221,7 @@ impl MasterContext {
           let num_shards = min(io_ctx.rand().next_u32() % 4 + 1, sids.len() as u32);
 
           // Create the splitting characters. These must be unique and sorted in ascending order.
-          let mut all_shards = Vec::from_iter("abcdefghijklmnopqrstuvwxyz".to_string().chars());
+          let mut all_shards = Vec::from_iter(ALPHABET.to_string().chars());
           let mut split_chars = Vec::<char>::new();
           for _ in 0..(num_shards - 1) {
             split_chars

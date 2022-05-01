@@ -378,8 +378,8 @@ impl STMPaxos2PCTMInner<ShardSplitTMPayloadTypes> for ShardSplitTMInner {
           ctx.external_request_id_map.remove(&response_data.request_id);
           io_ctx.send(
             &response_data.sender_eid,
-            msg::NetworkMessage::External(msg::ExternalMessage::ExternalDDLQuerySuccess(
-              msg::ExternalDDLQuerySuccess {
+            msg::NetworkMessage::External(msg::ExternalMessage::ExternalShardingSuccess(
+              msg::ExternalShardingSuccess {
                 request_id: response_data.request_id.clone(),
                 timestamp: commit_timestamp.clone(),
               },

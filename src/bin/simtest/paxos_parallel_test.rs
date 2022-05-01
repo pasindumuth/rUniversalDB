@@ -4,13 +4,17 @@ use crate::stats::Stats;
 use rand::seq::SliceRandom;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_rid, mk_t, read_index, TableSchema, Timestamp};
+use runiversal::common::{
+  mk_rid, mk_t, mk_tid, read_index, ColType, ColVal, TableSchema, TabletGroupId, TabletKeyRange,
+  Timestamp, ALPHABET,
+};
 use runiversal::common::{ColName, TablePath};
 use runiversal::common::{
   EndpointId, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, RequestId, SlaveGroupId,
 };
 use runiversal::message as msg;
 use runiversal::paxos::PaxosConfig;
+use runiversal::shard_split_tm_es::STRange;
 use runiversal::simulation_utils::mk_slave_eid;
 use runiversal::sql_ast::iast;
 use runiversal::sql_parser::convert_ast;
@@ -53,6 +57,8 @@ struct QueryGenCtx<'a> {
   rand: &'a mut XorShiftRng,
   timestamp: Timestamp,
   table_schemas: &'a BTreeMap<TablePath, &'a TableSchema>,
+  sharding_config: &'a BTreeMap<TablePath, &'a Vec<(TabletKeyRange, TabletGroupId)>>,
+  tablet_address_config: &'a BTreeMap<TabletGroupId, SlaveGroupId>,
 }
 
 /// Add Tables will have one Primary Key column of `Int` type. All ValCol types will
@@ -505,18 +511,118 @@ impl<'a> QueryGenCtx<'a> {
     Some(stages.join("\n"))
   }
 
+  /// Picks an existing Tablets and creates a `ShardingOp` to split it.
+  fn mk_sharding_query(&mut self) -> Option<msg::ShardingOp> {
+    // Pick an existing Tablet randomly.
+    let (table_path, schema) = Self::pick_random_table_path(&mut self.rand, &self.table_schemas)?;
+    let sharding = self.sharding_config.get(table_path).unwrap();
+    let shard_idx = self.rand.next_u32() as usize % sharding.len();
+    let (range, old_tid) = sharding.get(shard_idx).unwrap();
+    let old_sid = self.tablet_address_config.get(old_tid).unwrap();
+
+    // Split the range and define the location of a new Tablet.
+    let num_tablets = self.tablet_address_config.len(); // `num_tablets` is certain non-zero.
+    let mut tablet_idx = self.rand.next_u32() as usize % num_tablets;
+    let (_, new_sid) = read_index(self.tablet_address_config, tablet_idx)?;
+    let new_tid = mk_tid(&mut self.rand);
+
+    // Split the range
+    let (_, first_key_col) = schema.key_cols.first()?;
+    let (old_range, new_range) = match first_key_col {
+      ColType::Int => {
+        let mid: i32 = match (&range.start, &range.end) {
+          (Some(ColVal::Int(start)), Some(ColVal::Int(end))) => {
+            if start == end {
+              return None;
+            } else {
+              assert!(start < end);
+              start + end / 2
+            }
+          }
+          (Some(ColVal::Int(start)), None) => *start + 10, // We simply add 10 in this case.
+          (None, Some(ColVal::Int(end))) => *end - 10,     // We simply subtract 10 in this case.
+          (None, None) => 0,
+          _ => panic!(),
+        };
+        (
+          TabletKeyRange { start: range.start.clone(), end: Some(ColVal::Int(mid.clone())) },
+          TabletKeyRange { start: Some(ColVal::Int(mid)), end: range.end.clone() },
+        )
+      }
+      // We do not attempt to shard a Tablet that start with a boolean key.
+      ColType::Bool => return None,
+      ColType::String => {
+        let (start_idx, end_idx) = match (&range.start, &range.end) {
+          (Some(ColVal::String(start)), Some(ColVal::String(end))) => {
+            if start.is_empty() || end.is_empty() {
+              return None;
+            } else {
+              (
+                ALPHABET.find(start.chars().next().unwrap()).unwrap(),
+                ALPHABET.find(end.chars().next().unwrap()).unwrap(),
+              )
+            }
+          }
+          (Some(ColVal::String(start)), None) => {
+            if start.is_empty() {
+              return None;
+            } else {
+              (ALPHABET.find(start.chars().next().unwrap()).unwrap(), ALPHABET.len() - 1)
+            }
+          }
+          (None, Some(ColVal::String(end))) => {
+            if end.is_empty() {
+              return None;
+            } else {
+              (0, ALPHABET.find(end.chars().next().unwrap()).unwrap())
+            }
+          }
+          (None, None) => (0, ALPHABET.len() - 1),
+          _ => panic!(),
+        };
+
+        // Take the character in the middle.
+        let mid = if start_idx == end_idx {
+          return None;
+        } else {
+          assert!(start_idx < end_idx);
+          ALPHABET.chars().nth((start_idx + end_idx) / 2).unwrap().to_string()
+        };
+
+        (
+          TabletKeyRange { start: range.start.clone(), end: Some(ColVal::String(mid.clone())) },
+          TabletKeyRange { start: Some(ColVal::String(mid)), end: range.end.clone() },
+        )
+      }
+    };
+
+    Some(msg::ShardingOp::Split(msg::SplitShardingOp {
+      table_path: table_path.clone(),
+      target_old: STRange { sid: old_sid.clone(), tid: old_tid.clone(), range: old_range.clone() },
+      target_new: STRange { sid: new_sid.clone(), tid: new_tid.clone(), range: new_range.clone() },
+    }))
+  }
+
   /// Choose a random table and return its name, KeyCols, and ValCols
   fn pick_random_table(&mut self) -> Option<(String, Vec<ColName>, Vec<ColName>)> {
-    let num_sources = self.table_schemas.len();
+    let (source, schema) = Self::pick_random_table_path(&mut self.rand, &self.table_schemas)?;
+    let key_cols: Vec<ColName> = schema.key_cols.iter().map(|(c, _)| c).cloned().collect();
+    let val_col_map = schema.val_cols.static_snapshot_read(&self.timestamp);
+    let val_cols: Vec<ColName> = val_col_map.into_keys().collect();
+    Some((source.0.clone(), key_cols, val_cols))
+  }
+
+  /// Choose a random table and return its `TabletPath` and `TableSchema`.
+  fn pick_random_table_path<'b, 'c>(
+    rand: &'c mut XorShiftRng,
+    table_schemas: &'b BTreeMap<TablePath, &'b TableSchema>,
+  ) -> Option<(&'b TablePath, &'b &'b TableSchema)> {
+    let num_sources = table_schemas.len();
     if num_sources == 0 {
       None
     } else {
-      let mut source_idx = self.rand.next_u32() as usize % num_sources;
-      let (source, schema) = read_index(self.table_schemas, source_idx).unwrap();
-      let key_cols: Vec<ColName> = schema.key_cols.iter().map(|(c, _)| c).cloned().collect();
-      let val_col_map = schema.val_cols.static_snapshot_read(&self.timestamp);
-      let val_cols: Vec<ColName> = val_col_map.into_keys().collect();
-      Some((source.0.clone(), key_cols, val_cols))
+      let mut source_idx = rand.next_u32() as usize % num_sources;
+      read_index(table_schemas, source_idx)
     }
   }
 }
@@ -527,8 +633,9 @@ impl<'a> QueryGenCtx<'a> {
 
 #[derive(Debug)]
 enum Request {
-  Query(msg::PerformExternalQuery),
   DDLQuery(msg::PerformExternalDDLQuery),
+  Sharding(msg::PerformExternalSharding),
+  Query(msg::PerformExternalQuery),
 }
 
 /// Results of `verify_req_res`, which contains extra statistics useful for checking
@@ -541,6 +648,8 @@ struct VerifyResult {
   stats_ncte_1stage: Vec<AvgCounter>,
   queries_cancelled: u32,
   ddl_queries_cancelled: u32,
+  sharding_success: u32,
+  sharding_aborted: u32,
 }
 
 struct AvgCounter {
@@ -569,6 +678,8 @@ impl AvgCounter {
 /// a response due to nodes dying. We also have `success_write_reqs`, which contains exactly
 /// queries that succeeded which might do some kind of write (i.e. DDL Queries and Multi-Stage
 /// Queries). Any query excluded from `success_write_reqs` cannot do any sort of write.
+///
+/// Note: We do not replay Sharding queries.
 fn verify_req_res(
   rand: &mut XorShiftRng,
   full_req_res_map: BTreeMap<RequestId, (Request, Option<msg::ExternalMessage>)>,
@@ -583,6 +694,8 @@ fn verify_req_res(
   // Setup some stats
   let mut queries_cancelled = 0;
   let mut ddl_queries_cancelled = 0;
+  let mut sharding_success = 0;
+  let mut sharding_aborted = 0;
   let total_queries = full_req_res_map.len() as u32;
 
   // This map contains the set of queries we need to execute in the replay. Whether we check
@@ -634,6 +747,12 @@ fn verify_req_res(
             return None;
           }
         }
+        (Request::Sharding(_), msg::ExternalMessage::ExternalShardingSuccess(_)) => {
+          sharding_success += 1;
+        }
+        (Request::Sharding(_), msg::ExternalMessage::ExternalShardingAborted(_)) => {
+          sharding_aborted += 1;
+        }
         _ => panic!(),
       }
     } else {
@@ -660,6 +779,9 @@ fn verify_req_res(
             {
               return None;
             }
+          }
+          Request::Sharding(_) => {
+            // We do not replay Sharding queries during Replay.
           }
         }
       }
@@ -721,6 +843,8 @@ fn verify_req_res(
     stats_ncte_1stage,
     queries_cancelled,
     ddl_queries_cancelled,
+    sharding_success,
+    sharding_aborted,
   })
 }
 
@@ -847,28 +971,45 @@ pub fn parallel_test<WriterT: Writer>(
       let full_db_schema = sim.full_db_schema();
       let cur_tables = full_db_schema.table_generation.static_snapshot_read(&timestamp);
       let mut table_schemas = BTreeMap::<TablePath, &TableSchema>::new();
-      for (table_path, (gen, _)) in cur_tables {
+      let mut sharding_config = BTreeMap::<TablePath, &Vec<(TabletKeyRange, TabletGroupId)>>::new();
+      for (table_path, full_gen) in cur_tables {
+        let gen = full_gen.0.clone();
         let table_schema = full_db_schema.db_schema.get(&(table_path.clone(), gen)).unwrap();
-        table_schemas.insert(table_path, table_schema);
+        table_schemas.insert(table_path.clone(), table_schema);
+        let sharding = full_db_schema.sharding_config.get(&(table_path.clone(), full_gen)).unwrap();
+        sharding_config.insert(table_path, sharding);
       }
 
       // Construct a Query generation ctx
-      let mut gen_ctx = QueryGenCtx { rand: &mut rand, timestamp, table_schemas: &table_schemas };
+      let mut gen_ctx = QueryGenCtx {
+        rand: &mut rand,
+        timestamp,
+        table_schemas: &table_schemas,
+        sharding_config: &sharding_config,
+        tablet_address_config: &full_db_schema.tablet_address_config,
+      };
+
+      // Used to wrap the Queries that `QueryGenCtx` generates.
+      enum GenQuery {
+        DDLQuery(String),
+        Sharding(msg::ShardingOp),
+        Query(String),
+      }
 
       // Generate a Query. Try 5 times to generate it
-      let mut maybe_query_data: Option<(bool, String)> = None;
+      let mut maybe_query_data: Option<GenQuery> = None;
       for _ in 0..5 {
-        let (is_ddl, maybe_query) = if iteration < NUM_WARMUP_ITERATIONS / 2 {
+        maybe_query_data = if iteration < NUM_WARMUP_ITERATIONS / 2 {
           // For the first few iterations, we create some tables.
-          (true, gen_ctx.mk_create_table())
+          gen_ctx.mk_create_table().map(|x| GenQuery::DDLQuery(x))
         } else if iteration < NUM_WARMUP_ITERATIONS {
           // For the next few iterations, we populate that ables.
-          (false, gen_ctx.mk_insert())
+          gen_ctx.mk_insert().map(|x| GenQuery::Query(x))
         } else {
           // Otherwise, we randomly generate any type of query chosen using a hard-coded
           // distribution. We define the distribution as a constant vector that specifies
           // the relative probabilities.
-          const DIST: [u32; 10] = [5, 4, 5, 5, 30, 20, 5, 40, 15, 10];
+          const DIST: [u32; 11] = [5, 4, 5, 5, 30, 20, 5, 40, 15, 10, 0];
 
           // Select an `idx` into DIST based on its probability distribution.
           let mut i: u32 = gen_ctx.rand.next_u32() % DIST.iter().sum::<u32>();
@@ -880,33 +1021,34 @@ pub fn parallel_test<WriterT: Writer>(
 
           // Map the selected `idx` to the corresponding query.
           match idx {
-            0 => (true, gen_ctx.mk_create_table()),
-            1 => (true, gen_ctx.mk_drop_table()),
-            2 => (true, gen_ctx.mk_add_col()),
-            3 => (true, gen_ctx.mk_drop_col()),
-            4 => (false, gen_ctx.mk_insert()),
-            5 => (false, gen_ctx.mk_update()),
-            6 => (false, gen_ctx.mk_delete()),
-            7 => (false, gen_ctx.mk_select()),
-            8 => (false, gen_ctx.mk_multi_stage()),
-            9 => (false, gen_ctx.mk_advanced_query()),
+            0 => gen_ctx.mk_create_table().map(|x| GenQuery::DDLQuery(x)),
+            1 => gen_ctx.mk_drop_table().map(|x| GenQuery::DDLQuery(x)),
+            2 => gen_ctx.mk_add_col().map(|x| GenQuery::DDLQuery(x)),
+            3 => gen_ctx.mk_drop_col().map(|x| GenQuery::DDLQuery(x)),
+            4 => gen_ctx.mk_insert().map(|x| GenQuery::Query(x)),
+            5 => gen_ctx.mk_update().map(|x| GenQuery::Query(x)),
+            6 => gen_ctx.mk_delete().map(|x| GenQuery::Query(x)),
+            7 => gen_ctx.mk_select().map(|x| GenQuery::Query(x)),
+            8 => gen_ctx.mk_multi_stage().map(|x| GenQuery::Query(x)),
+            9 => gen_ctx.mk_advanced_query().map(|x| GenQuery::Query(x)),
+            10 => gen_ctx.mk_sharding_query().map(|x| GenQuery::Sharding(x)),
             _ => panic!(),
           }
         };
 
-        if let Some(query) = maybe_query {
-          maybe_query_data = Some((is_ddl, query));
+        if maybe_query_data.is_some() {
           break;
         }
       }
 
-      if let Some((is_ddl, query)) = maybe_query_data {
-        // Construct a request and populate `req_map`
-        let request_id = mk_rid(&mut sim.rand);
-        let client_idx = sim.rand.next_u32() as usize % client_eids.len();
-        let client_eid = client_eids.get(client_idx).unwrap();
+      // Construct a request and populate `req_map`
+      let request_id = mk_rid(&mut sim.rand);
+      let client_idx = sim.rand.next_u32() as usize % client_eids.len();
+      let client_eid = client_eids.get(client_idx).unwrap();
 
-        if is_ddl {
+      match maybe_query_data {
+        None => {}
+        Some(GenQuery::DDLQuery(query)) => {
           let perform = msg::PerformExternalDDLQuery {
             sender_eid: client_eid.clone(),
             request_id: request_id.clone(),
@@ -917,7 +1059,7 @@ pub fn parallel_test<WriterT: Writer>(
             .unwrap()
             .insert(request_id.clone(), Request::DDLQuery(perform.clone()));
 
-          // Record the leadership of the Master PaxosGroup and then send the `query` to it.
+          // Record the leadership of the Master PaxosGroup and then send the `perform` to it.
           let gid = PaxosGroupId::Master;
           let cur_lid = sim.leader_map.get(&gid).unwrap().clone();
           req_lid_map.insert(request_id, (client_eid.clone(), gid, cur_lid.clone()));
@@ -928,7 +1070,31 @@ pub fn parallel_test<WriterT: Writer>(
             client_eid,
             &cur_lid.eid,
           );
-        } else {
+        }
+        Some(GenQuery::Sharding(sharding_op)) => {
+          let perform = msg::PerformExternalSharding {
+            sender_eid: client_eid.clone(),
+            request_id: request_id.clone(),
+            op: sharding_op,
+          };
+          req_map
+            .get_mut(client_eid)
+            .unwrap()
+            .insert(request_id.clone(), Request::Sharding(perform.clone()));
+
+          // Record the leadership of the Master PaxosGroup and then send the `perform` to it.
+          let gid = PaxosGroupId::Master;
+          let cur_lid = sim.leader_map.get(&gid).unwrap().clone();
+          req_lid_map.insert(request_id, (client_eid.clone(), gid, cur_lid.clone()));
+          sim.add_msg(
+            msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+              msg::MasterExternalReq::PerformExternalSharding(perform),
+            )),
+            client_eid,
+            &cur_lid.eid,
+          );
+        }
+        Some(GenQuery::Query(query)) => {
           let perform = msg::PerformExternalQuery {
             sender_eid: client_eid.clone(),
             request_id: request_id.clone(),
@@ -939,7 +1105,7 @@ pub fn parallel_test<WriterT: Writer>(
             .unwrap()
             .insert(request_id.clone(), Request::Query(perform.clone()));
 
-          // Choose a SlaveGroupId, record its leadership, and then send the `query` to it.
+          // Choose a SlaveGroupId, record its leadership, and then send the `perform` to it.
           let slave_idx = sim.rand.next_u32() as usize % sids.len();
           let sid = sids.get(slave_idx).unwrap();
           let gid = sid.to_gid();
@@ -1120,7 +1286,8 @@ pub fn parallel_test<WriterT: Writer>(
        # Master Reconfigs: {master_reconfig_count}, # Slave Reconfigs: {slave_reconfig_count},
        {select_stats_str}
        # Multi-Stage: {num_multi_stage},
-       # Query Cancels: {queries_cancelled}, # DDL Query Cancels: {ddl_queries_cancelled}",
+       # Query Cancels: {queries_cancelled}, # DDL Query Cancels: {ddl_queries_cancelled},
+       # Sharding Success: {sharding_success}, # Sharding Aborted: {sharding_aborted}",
       duration = res.replay_duration.time_ms,
       total = res.total_queries,
       succeeded = res.successful_queries,
@@ -1130,7 +1297,9 @@ pub fn parallel_test<WriterT: Writer>(
       select_stats_str = select_stats_str,
       num_multi_stage = res.num_multi_stage,
       queries_cancelled = res.queries_cancelled,
-      ddl_queries_cancelled = res.ddl_queries_cancelled
+      ddl_queries_cancelled = res.ddl_queries_cancelled,
+      sharding_success = res.sharding_success,
+      sharding_aborted = res.sharding_aborted,
     ));
     Some(sim.get_stats().clone())
   } else {

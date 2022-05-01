@@ -570,22 +570,19 @@ pub fn compute_range_storage(storage: &GenericMVTable, range: &TabletKeyRange) -
   target_storage
 }
 
-/// This function modified `storage` by removing all keys being `range.start`, but
-/// returns a `GenericMVTable` consisting of the keys on and after `range.end`. (Thus
-/// all keys within `range` are deleted forever.)
+/// This function modified `storage` leaving only the keys strictly before `range.start`.
+/// In addition, this returns all keys on or after `range.end`. (Thus all keys within `range`
+/// are deleted forever.)
 pub fn remove_range(storage: &mut GenericMVTable, range: &TabletKeyRange) -> GenericMVTable {
-  if let Some(start) = &range.start {
-    let mut remaining = storage.split_off(&range_to_storage_key(start));
-    if let Some(end) = &range.end {
-      remaining.split_off(&range_to_storage_key(end))
-    } else {
-      GenericMVTable::new()
-    }
+  let mut remaining = if let Some(start) = &range.start {
+    storage.split_off(&range_to_storage_key(start))
   } else {
-    if let Some(end) = &range.end {
-      storage.split_off(&range_to_storage_key(end))
-    } else {
-      GenericMVTable::new()
-    }
+    std::mem::take(storage)
+  };
+
+  if let Some(end) = &range.end {
+    remaining.split_off(&range_to_storage_key(end))
+  } else {
+    GenericMVTable::new()
   }
 }

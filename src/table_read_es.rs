@@ -148,7 +148,7 @@ pub fn compute_read_region(
       row_region.push(key_bound);
     }
   }
-  row_region = compress_row_region(row_region);
+  row_region = range_row_region_intersection(key_cols, range, compress_row_region(row_region));
 
   // Compute the Column Region.
   let mut val_col_region = BTreeSet::<ColName>::new();
@@ -160,7 +160,6 @@ pub fn compute_read_region(
   let val_col_region = Vec::from_iter(val_col_region.into_iter());
 
   // Compute the ReadRegion
-  row_region = range_row_region_intersection(key_cols, range, row_region);
   ReadRegion { val_col_region, row_region }
 }
 
@@ -323,6 +322,7 @@ impl TableReadES {
         &ctx.table_schema,
         &self.timestamp,
         &self.query_plan.col_usage_node.source,
+        &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
       ),
@@ -470,6 +470,7 @@ impl TPESBase for TableReadES {
             &ctx.table_schema,
             &self.timestamp,
             &self.query_plan.col_usage_node.source,
+            &ctx.this_tablet_key_range,
             &self.sql_query.selection,
             SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
           ),

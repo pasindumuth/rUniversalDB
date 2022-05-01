@@ -62,13 +62,13 @@ pub fn check_coord_clean(coord: &CoordState, check_ctx: &mut CheckCtx) {
   let statuses = &coord.statuses;
   let ctx = &coord.ctx;
 
-  // Check `Coord` clean
-  check_ctx.check(ctx.external_request_id_map.is_empty());
-
   // Check `Status` clean
   check_ctx.check(statuses.finish_query_tm_ess.is_empty());
   check_ctx.check(statuses.ms_coord_ess.is_empty());
   check_ctx.check(statuses.gr_query_ess.is_empty());
   check_ctx.check(statuses.trans_table_read_ess.is_empty());
   check_ctx.check(statuses.tm_statuss.is_empty());
+
+  // Check `Coord` clean
+  check_ctx.check(ctx.external_request_id_map.is_empty());
 }

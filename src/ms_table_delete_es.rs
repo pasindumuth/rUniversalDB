@@ -106,6 +106,7 @@ impl SqlQueryInner for DeleteInner {
         &ctx.table_schema,
         &es.timestamp,
         &es.query_plan.col_usage_node.source,
+        &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         MSStorageView::new(
           &ctx.storage,
@@ -135,6 +136,7 @@ impl SqlQueryInner for DeleteInner {
         &ctx.table_schema,
         &es.timestamp,
         &es.query_plan.col_usage_node.source,
+        &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         MSStorageView::new(
           &ctx.storage,
