@@ -858,6 +858,7 @@ pub trait Writer {
 pub struct ParallelTestStats {
   pub all_stats: Vec<Stats>,
   pub all_reconfig_stats: Vec<Stats>,
+  pub all_sharding_stats: Vec<Stats>,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -876,7 +877,7 @@ pub fn test_all_basic_parallel<WriterT: Writer>(
   for i in 0..rounds {
     let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     w.println(format!("Running round {:?}", i));
-    let mut maybe_stats = parallel_test(mk_seed(rand), 1, 0, w);
+    let mut maybe_stats = parallel_test(mk_seed(rand), 1, 0, false, w);
     w.flush();
     let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     if let Some(mut stats) = maybe_stats {
@@ -896,12 +897,13 @@ pub fn test_all_paxos_parallel<WriterT: Writer>(
   // Accumulats message statistics for every round.
   let mut all_stats = Vec::<Stats>::new();
   let mut all_reconfig_stats = Vec::<Stats>::new();
+  let mut all_sharding_stats = Vec::<Stats>::new();
 
   // Execute the rounds.
   for i in 0..rounds {
     let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-    w.println(format!("Running round {:?}", 2 * i));
-    let mut maybe_stats = parallel_test(mk_seed(rand), 5, 0, w);
+    w.println(format!("Running round {:?}", 3 * i));
+    let mut maybe_stats = parallel_test(mk_seed(rand), 5, 0, false, w);
     w.flush();
     let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     if let Some(mut stats) = maybe_stats {
@@ -910,24 +912,35 @@ pub fn test_all_paxos_parallel<WriterT: Writer>(
     }
 
     let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-    w.println(format!("Running reconfig round {:?}", 2 * i + 1));
-    let maybe_stats = parallel_test(mk_seed(rand), 5, 10, w);
+    w.println(format!("Running reconfig round {:?}", 3 * i + 1));
+    let maybe_stats = parallel_test(mk_seed(rand), 5, 10, false, w);
     w.flush();
     let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     if let Some(mut stats) = maybe_stats {
       stats.duration = (end_t - start_t) as u32;
       all_reconfig_stats.push(stats);
     }
+
+    let start_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    w.println(format!("Running sharding round {:?}", 3 * i + 2));
+    let maybe_stats = parallel_test(mk_seed(rand), 5, 10, true, w);
+    w.flush();
+    let end_t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    if let Some(mut stats) = maybe_stats {
+      stats.duration = (end_t - start_t) as u32;
+      all_sharding_stats.push(stats);
+    }
   }
 
   // Return various statistics
-  ParallelTestStats { all_stats, all_reconfig_stats }
+  ParallelTestStats { all_stats, all_reconfig_stats, all_sharding_stats }
 }
 
 pub fn parallel_test<WriterT: Writer>(
   seed: [u8; 16],
   num_paxos_nodes: u32,
   num_reconfig_free_nodes: u32,
+  do_sharding: bool,
   w: &mut WriterT,
 ) -> Option<Stats> {
   w.println(format!("seed: {:?}", seed));
@@ -1009,13 +1022,14 @@ pub fn parallel_test<WriterT: Writer>(
           // Otherwise, we randomly generate any type of query chosen using a hard-coded
           // distribution. We define the distribution as a constant vector that specifies
           // the relative probabilities.
-          const DIST: [u32; 11] = [5, 4, 5, 5, 30, 20, 5, 40, 15, 10, 10];
+          let dist: [u32; 11] =
+            [5, 4, 5, 5, 30, 20, 5, 40, 15, 10, if do_sharding { 10 } else { 0 }];
 
-          // Select an `idx` into DIST based on its probability distribution.
-          let mut i: u32 = gen_ctx.rand.next_u32() % DIST.iter().sum::<u32>();
+          // Select an `idx` into dist based on its probability distribution.
+          let mut i: u32 = gen_ctx.rand.next_u32() % dist.iter().sum::<u32>();
           let mut idx: usize = 0;
-          while idx < DIST.len() && i >= DIST[idx] {
-            i -= DIST[idx];
+          while idx < dist.len() && i >= dist[idx] {
+            i -= dist[idx];
             idx += 1;
           }
 

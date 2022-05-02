@@ -71,7 +71,7 @@ fn main() {
   println!("\n");
 
   // Run parallel tests, potentially in multiple threads if requested.
-  const DEFAULT_NUM_ROUNDS: u32 = 50;
+  const DEFAULT_NUM_ROUNDS: u32 = 33;
   let rounds: u32 = if let Some(rounds) = matches.value_of("rounds") {
     rounds.parse().unwrap()
   } else {
@@ -247,19 +247,24 @@ fn execute_multi(rand: &mut XorShiftRng, instances: u32, rounds: u32) {
   {
     let mut all_stats = Vec::<Stats>::new();
     let mut all_reconfig_stats = Vec::<Stats>::new();
+    let mut all_sharding_stats = Vec::<Stats>::new();
 
     for parallel_stats in parallel_stats_acc {
       all_stats.extend(parallel_stats.all_stats);
       all_reconfig_stats.extend(parallel_stats.all_reconfig_stats);
+      all_sharding_stats.extend(parallel_stats.all_sharding_stats);
     }
 
     let (avg_duration, avg_message_stats) = process_stats(all_stats);
     let (avg_reconfig_duration, avg_reconfig_message_stats) = process_stats(all_reconfig_stats);
+    let (avg_sharding_duration, avg_sharding_message_stats) = process_stats(all_sharding_stats);
 
     // Print the stats.
     println!("Avg Duration: {}", avg_duration);
     println!("Avg Statistics: {}", format_message_stats(&avg_message_stats));
     println!("Avg Reconfig Duration: {}", avg_reconfig_duration);
     println!("Avg Reconfig Statistics: {}", format_message_stats(&avg_reconfig_message_stats));
+    println!("Avg Sharding Duration: {}", avg_sharding_duration);
+    println!("Avg Sharding Statistics: {}", format_message_stats(&avg_sharding_message_stats));
   }
 }
