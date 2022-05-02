@@ -3,7 +3,8 @@ use crate::common::{CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, P
 use crate::coord::{CoordConfig, CoordContext};
 use crate::master::{FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput};
 use crate::message as msg;
-use crate::message::FreeNodeMessage;
+use crate::message::{FreeNodeMessage, NetworkMessage};
+use crate::net::GenericInputTrait;
 use crate::paxos::PaxosConfig;
 use crate::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
@@ -33,6 +34,12 @@ pub enum GenericInput {
   Message(EndpointId, msg::NetworkMessage),
   SlaveBackMessage(SlaveBackMessage),
   TimerInput(GenericTimerInput),
+}
+
+impl GenericInputTrait for GenericInput {
+  fn from_network(eid: EndpointId, message: NetworkMessage) -> GenericInput {
+    GenericInput::Message(eid, message)
+  }
 }
 
 // -----------------------------------------------------------------------------------------------

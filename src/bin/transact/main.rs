@@ -5,7 +5,7 @@ mod server;
 #[macro_use]
 extern crate runiversal;
 
-use crate::server::{handle_conn, handle_self_conn, ProdCoreIOCtx, ProdIOCtx, TIMER_INCREMENT};
+use crate::server::{handle_self_conn, ProdCoreIOCtx, ProdIOCtx, TIMER_INCREMENT};
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -20,7 +20,7 @@ use runiversal::master::{
 };
 use runiversal::message as msg;
 use runiversal::message::FreeNodeMessage;
-use runiversal::net::{recv, send_bytes, send_msg, SERVER_PORT};
+use runiversal::net::{handle_conn, send_msg, start_acceptor_thread, SERVER_PORT};
 use runiversal::node::{get_prod_configs, GenericInput, NodeConfig, NodeState};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
@@ -106,18 +106,7 @@ fn main() {
   let out_conn_map = Arc::new(Mutex::new(BTreeMap::<EndpointId, Sender<Vec<u8>>>::new()));
 
   // Start the Accepting Thread
-  {
-    let to_server_sender = to_server_sender.clone();
-    let this_ip = this_ip.clone();
-    thread::spawn(move || {
-      let listener = TcpListener::bind(format!("{}:{}", &this_ip, SERVER_PORT)).unwrap();
-      for stream in listener.incoming() {
-        let stream = stream.unwrap();
-        let endpoint_id = handle_conn(&to_server_sender, stream);
-        println!("Connected from: {:?}", endpoint_id);
-      }
-    });
-  }
+  start_acceptor_thread(&to_server_sender, this_ip.clone());
 
   // Create the self-connection
   let this_eid = EndpointId(this_ip);

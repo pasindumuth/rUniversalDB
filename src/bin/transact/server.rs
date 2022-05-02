@@ -13,7 +13,7 @@ use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::{FullMasterInput, MasterTimerInput};
 use runiversal::message as msg;
 use runiversal::multiversion_map::MVM;
-use runiversal::net::{recv, send_bytes, send_msg};
+use runiversal::net::send_msg;
 use runiversal::node::{GenericInput, GenericTimerInput};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
@@ -36,25 +36,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 //  Network Helpers
 // -----------------------------------------------------------------------------------------------
 
-/// Creates the FromNetwork threads for this new Incoming Connection, `stream`.
-pub fn handle_conn(to_server_sender: &Sender<GenericInput>, stream: TcpStream) -> EndpointId {
-  let other_ip = EndpointId(stream.peer_addr().unwrap().ip().to_string());
-
-  // Setup FromNetwork Thread
-  {
-    let to_server_sender = to_server_sender.clone();
-    let stream = stream.try_clone().unwrap();
-    let other_ip = other_ip.clone();
-    thread::spawn(move || loop {
-      let data = recv(&stream);
-      let network_msg: msg::NetworkMessage = rmp_serde::from_read_ref(&data).unwrap();
-      to_server_sender.send(GenericInput::Message(other_ip.clone(), network_msg)).unwrap();
-    });
-  }
-
-  other_ip
-}
-
 /// Creates a thread that acts as both the FromNetwork and ToNetwork Threads,
 /// setting up both the Incoming Connection as well as Outgoing Connection at once.
 pub fn handle_self_conn(
@@ -69,7 +50,7 @@ pub fn handle_self_conn(
   // Setup Self Connection Thread
   let to_server_sender = to_server_sender.clone();
   let this_ip = this_ip.clone();
-  thread::spawn(move || loop {
+  thread::Builder::new().name(format!("Self Connection")).spawn(move || loop {
     let data = receiver.recv().unwrap();
     let network_msg: msg::NetworkMessage = rmp_serde::from_read_ref(&data).unwrap();
     to_server_sender.send(GenericInput::Message(this_ip.clone(), network_msg)).unwrap();
@@ -106,7 +87,7 @@ impl ProdIOCtx {
   pub fn start(&mut self) {
     let to_top = self.to_top.clone();
     let tasks = self.tasks.clone();
-    thread::spawn(move || loop {
+    thread::Builder::new().name(format!("Timer")).spawn(move || loop {
       // Sleep
       let increment = std::time::Duration::from_micros(TIMER_INCREMENT);
       thread::sleep(increment);
@@ -167,7 +148,7 @@ impl FreeNodeIOCtx for ProdIOCtx {
       rand: XorShiftRng::from_entropy(),
       to_top: self.to_top.clone(),
     };
-    thread::spawn(move || {
+    thread::Builder::new().name(format!("TabletGroup {}", snapshot.this_tid.0)).spawn(move || {
       let mut tablet = TabletState::create_reconfig(gossip, snapshot, this_eid, tablet_config);
       loop {
         let tablet_msg = to_tablet_receiver.recv().unwrap();
@@ -187,7 +168,7 @@ impl FreeNodeIOCtx for ProdIOCtx {
       rand: XorShiftRng::from_entropy(),
       to_top: self.to_top.clone(),
     };
-    thread::spawn(move || {
+    thread::Builder::new().name(format!("CoordGroup {}", ctx.this_cid.0)).spawn(move || {
       let mut coord = CoordState::new(ctx);
       loop {
         let coord_msg = to_coord_receiver.recv().unwrap();
@@ -216,10 +197,10 @@ impl SlaveIOCtx for ProdIOCtx {
     self.exited
   }
 
-  fn create_tablet(&mut self, tablet_ctx: TabletContext) {
+  fn create_tablet(&mut self, ctx: TabletContext) {
     // Create mpsc queue for Slave-Tablet communication.
     let (to_tablet_sender, to_tablet_receiver) = mpsc::channel::<TabletForwardMsg>();
-    self.tablet_map.insert(tablet_ctx.this_tid.clone(), to_tablet_sender);
+    self.tablet_map.insert(ctx.this_tid.clone(), to_tablet_sender);
 
     // Spawn a new thread and create the Tablet.
     let mut io_ctx = ProdCoreIOCtx {
@@ -227,8 +208,8 @@ impl SlaveIOCtx for ProdIOCtx {
       rand: XorShiftRng::from_entropy(),
       to_top: self.to_top.clone(),
     };
-    thread::spawn(move || {
-      let mut tablet = TabletState::new(tablet_ctx);
+    thread::Builder::new().name(format!("TabletGroup {}", ctx.this_tid.0)).spawn(move || {
+      let mut tablet = TabletState::new(ctx);
       loop {
         let tablet_msg = to_tablet_receiver.recv().unwrap();
         tablet.handle_input(&mut io_ctx, tablet_msg);

@@ -3,7 +3,13 @@
 readonly NUM_SLAVES_GROUPS=2 # Tune this
 readonly NUM_SLAVES=$((5 * $NUM_SLAVES_GROUPS))
 
-if [ "$1" = "build" ]; then
+if [ "$1" = "setup" ]; then
+  # This should be run once after installing docker to create the docker
+  # network, the base image, etc.
+  docker network create --subnet=172.19.0.0/16 runiversal-net
+  docker build -t runiversal -f Dockerfile.init .
+  docker build -t runiversal .
+elif [ "$1" = "build" ]; then
   docker build -t runiversal .
 elif [ "$1" = "client" ]; then
   # Start the image by running the client, and start an interactive terminal.

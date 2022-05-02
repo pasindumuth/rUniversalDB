@@ -5,7 +5,10 @@ use runiversal::cast;
 use runiversal::common::mk_rid;
 use runiversal::common::{EndpointId, RequestId};
 use runiversal::message as msg;
-use runiversal::net::{recv, send_msg, SERVER_PORT};
+use runiversal::message::NetworkMessage;
+use runiversal::net::{
+  handle_conn, send_msg, start_acceptor_thread, GenericInputTrait, SERVER_PORT,
+};
 use std::collections::BTreeMap;
 use std::io::SeekFrom::End;
 use std::io::Write;
@@ -25,6 +28,18 @@ fn prompt(name: &str) -> String {
   return line.trim().to_string();
 }
 
+/// `GenericInput` for the client CLI.
+struct GenericInput {
+  eid: EndpointId,
+  message: NetworkMessage,
+}
+
+impl GenericInputTrait for GenericInput {
+  fn from_network(eid: EndpointId, message: NetworkMessage) -> GenericInput {
+    GenericInput { eid, message }
+  }
+}
+
 fn main() {
   // Setup CLI parsing
   let matches = App::new("rUniversalDB")
@@ -37,38 +52,14 @@ fn main() {
   let this_ip = matches.value_of("ip").unwrap().to_string();
 
   // The mpsc channel for passing data to the Server Thread from all FromNetwork Threads.
-  let (to_server_sender, to_server_receiver) = mpsc::channel::<(EndpointId, msg::NetworkMessage)>();
+  let (to_server_sender, to_server_receiver) = mpsc::channel::<GenericInput>();
   // Maps the IP addresses to a FromServer Queue, used to send data to Outgoing Connections.
   let out_conn_map = Arc::new(Mutex::new(BTreeMap::<EndpointId, Sender<Vec<u8>>>::new()));
   // Create an RNG for ID generation
   let mut rand = XorShiftRng::from_entropy();
 
   // Start the Accepting Thread
-  {
-    let to_server_sender = to_server_sender.clone();
-    let this_ip = this_ip.clone();
-    thread::spawn(move || {
-      let listener = TcpListener::bind(format!("{}:{}", &this_ip, SERVER_PORT)).unwrap();
-      for stream in listener.incoming() {
-        let stream = stream.unwrap();
-        let other_ip = EndpointId(stream.peer_addr().unwrap().ip().to_string());
-
-        // Setup FromNetwork Thread
-        {
-          let to_server_sender = to_server_sender.clone();
-          let stream = stream.try_clone().unwrap();
-          let other_ip = other_ip.clone();
-          thread::spawn(move || loop {
-            let data = recv(&stream);
-            let network_msg: msg::NetworkMessage = rmp_serde::from_read_ref(&data).unwrap();
-            to_server_sender.send((other_ip.clone(), network_msg)).unwrap();
-          });
-        }
-
-        println!("Connected from: {:?}", other_ip);
-      }
-    });
-  }
+  start_acceptor_thread(&to_server_sender, this_ip.clone());
 
   // The EndpointId of this node
   let this_eid = EndpointId(this_ip);
@@ -114,7 +105,7 @@ fn main() {
 
               // Send and wait for a response
               send_msg(&out_conn_map, &target_eid, network_msg);
-              let (_, message) = to_server_receiver.recv().unwrap();
+              let message = to_server_receiver.recv().unwrap().message;
 
               // Print the response
               let external_msg = cast!(msg::NetworkMessage::External, message).unwrap();
@@ -144,7 +135,7 @@ fn main() {
 
               // Send and wait for a response
               send_msg(&out_conn_map, &target_eid, network_msg);
-              let (_, message) = to_server_receiver.recv().unwrap();
+              let message = to_server_receiver.recv().unwrap().message;
 
               // Print the respnse
               println!("{:#?}", message);
