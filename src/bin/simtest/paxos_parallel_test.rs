@@ -1009,7 +1009,7 @@ pub fn parallel_test<WriterT: Writer>(
           // Otherwise, we randomly generate any type of query chosen using a hard-coded
           // distribution. We define the distribution as a constant vector that specifies
           // the relative probabilities.
-          const DIST: [u32; 11] = [5, 4, 5, 5, 30, 20, 5, 40, 15, 10, 0];
+          const DIST: [u32; 11] = [5, 4, 5, 5, 30, 20, 5, 40, 15, 10, 10];
 
           // Select an `idx` into DIST based on its probability distribution.
           let mut i: u32 = gen_ctx.rand.next_u32() % DIST.iter().sum::<u32>();

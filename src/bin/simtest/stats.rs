@@ -5,6 +5,7 @@ use runiversal::message::{
   SlaveMessage, SlaveReconfig, SlaveRemotePayload, TabletMessage,
 };
 use runiversal::slave::SharedPaxosBundle;
+use std::cmp::max;
 use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------
@@ -71,7 +72,10 @@ const K_SLAVE_NEW_NODE_STARTED: &str = "slave_new_node_started";
 const K_SLAVE_START_NEW_NODE: &str = "slave_start_new_node";
 
 // Tablet
-const K_TABLET_PCSA: &str = "tablet_pcsa";
+const K_TABLET_PERFORM: &str = "tablet_perform";
+const K_TABLET_CANCEL: &str = "tablet_cancel";
+const K_TABLET_SUCCESS: &str = "tablet_success";
+const K_TABLET_ABORT: &str = "tablet_abort";
 const K_TABLET_FINISH_QUERY: &str = "tablet_finish_query";
 const K_TABLET_DDL: &str = "tablet_ddl";
 const K_TABLET_SHARDING: &str = "tablet_sharding";
@@ -86,20 +90,90 @@ const K_FREE_NODE_MASTER_LEADERSHIP: &str = "free_node_master_leadership";
 // Unnaccounted
 const K_UNNACCOUNTED: &str = "unnaccounted";
 
+/// This defines the order that the messages should be displayed.
+const NUM_MESSAGES: usize = 54;
+const DISPLAY_ORDER: [&str; NUM_MESSAGES] = [
+  K_EXTERNAL_QUERY_SUCCESS,
+  K_EXTERNAL_QUERY_ABORTED,
+  K_EXTERNAL_DDL_QUERY_SUCCESS,
+  K_EXTERNAL_DDL_QUERY_ABORTED,
+  K_EXTERNAL_SHARDING_SUCCESS,
+  K_EXTERNAL_SHARDING_ABORTED,
+  K_PERFORM_EXTERNAL_DDL_QUERY,
+  K_CANCEL_EXTERNAL_DDL_QUERY,
+  K_PERFORM_EXTERNAL_SHARDING,
+  K_CANCEL_EXTERNAL_SHARDING,
+  K_MASTER_REMOTE_LEADER_CHANGED,
+  K_MASTER_DDL,
+  K_MASTER_SHARDING,
+  K_MASTER_MASTER_GOSSIP,
+  K_MASTER_MULTI_PAXOS_MESSAGE,
+  K_MASTER_IS_LEADER,
+  K_MASTER_LOG_SYNC_REQUEST,
+  K_MASTER_LOG_SYNC_RESPONSE,
+  K_MASTER_NEXT_INDEX_REQUEST,
+  K_MASTER_NEXT_INDEX_RESPONSE,
+  K_MASTER_INFORM_LEARNED,
+  K_MASTER_NEW_NODE_STARTED,
+  K_MASTER_START_NEW_NODE,
+  K_MASTER_NODES_DEAD,
+  K_MASTER_SLAVE_GROUP_RECONFIGURED,
+  K_MASTER_REGISTER_FREE_NODE,
+  K_MASTER_FREE_NODE_HEARTBEAT,
+  K_MASTER_CONFIRM_SLAVE_CREATION,
+  K_PERFORM_EXTERNAL_QUERY,
+  K_CANCEL_EXTERNAL_QUERY,
+  K_SLAVE_REMOTE_LEADER_CHANGED,
+  K_SLAVE_CREATE_TABLE,
+  K_SLAVE_SHARDING,
+  K_SLAVE_MASTER_GOSSIP,
+  K_SLAVE_MULTI_PAXOS_MESSAGE,
+  K_SLAVE_IS_LEADER,
+  K_SLAVE_LOG_SYNC_REQUEST,
+  K_SLAVE_LOG_SYNC_RESPONSE,
+  K_SLAVE_NEXT_INDEX_REQUEST,
+  K_SLAVE_NEXT_INDEX_RESPONSE,
+  K_SLAVE_INFORM_LEARNED,
+  K_SLAVE_NEW_NODE_STARTED,
+  K_SLAVE_START_NEW_NODE,
+  K_TABLET_PERFORM,
+  K_TABLET_CANCEL,
+  K_TABLET_SUCCESS,
+  K_TABLET_ABORT,
+  K_TABLET_FINISH_QUERY,
+  K_TABLET_DDL,
+  K_TABLET_SHARDING,
+  K_COORD_PCSA,
+  K_COORD_FINISH_QUERY,
+  K_FREE_NODE_MASTER_LEADERSHIP,
+  K_UNNACCOUNTED,
+];
+
 // -----------------------------------------------------------------------------------------------
 //  Stats
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Stats {
   /// Records the (system time) duration of the simulation.
   pub duration: u32,
   /// Records message frequency.
-  message_stats: BTreeMap<&'static str, u32>,
+  reverse_map: BTreeMap<&'static str, usize>,
+  message_stats: Vec<(&'static str, u32)>,
 }
 
 impl Stats {
-  pub fn get_message_stats(&self) -> &BTreeMap<&'static str, u32> {
+  pub fn new() -> Stats {
+    let mut reverse_map = BTreeMap::<&'static str, usize>::new();
+    let mut message_stats = Vec::<(&'static str, u32)>::new();
+    for (i, message_name) in DISPLAY_ORDER.iter().enumerate() {
+      reverse_map.insert(message_name, i);
+      message_stats.push((message_name, 0));
+    }
+    Stats { duration: 0, reverse_map, message_stats }
+  }
+
+  pub fn get_message_stats(&self) -> &Vec<(&'static str, u32)> {
     &self.message_stats
   }
 
@@ -164,10 +238,10 @@ impl Stats {
             SlaveRemotePayload::CreateTable(_) => K_SLAVE_CREATE_TABLE,
             SlaveRemotePayload::MasterGossip(_) => K_SLAVE_MASTER_GOSSIP,
             SlaveRemotePayload::TabletMessage(_, m) => match m {
-              TabletMessage::PerformQuery(_) => K_TABLET_PCSA,
-              TabletMessage::CancelQuery(_) => K_TABLET_PCSA,
-              TabletMessage::QueryAborted(_) => K_TABLET_PCSA,
-              TabletMessage::QuerySuccess(_) => K_TABLET_PCSA,
+              TabletMessage::PerformQuery(_) => K_TABLET_PERFORM,
+              TabletMessage::CancelQuery(_) => K_TABLET_CANCEL,
+              TabletMessage::QueryAborted(_) => K_TABLET_SUCCESS,
+              TabletMessage::QuerySuccess(_) => K_TABLET_ABORT,
               TabletMessage::FinishQuery(_) => K_TABLET_FINISH_QUERY,
               TabletMessage::AlterTable(_) => K_TABLET_DDL,
               TabletMessage::DropTable(_) => K_TABLET_DDL,
@@ -213,10 +287,66 @@ impl Stats {
       },
     };
 
-    if let Some(count) = self.message_stats.get_mut(message_key) {
-      *count += 1;
-    } else {
-      self.message_stats.insert(message_key, 1);
+    let index = self.reverse_map.get_mut(&message_key).unwrap();
+    let (_, count) = self.message_stats.get_mut(*index).unwrap();
+    *count += 1;
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Stat Utils
+// -----------------------------------------------------------------------------------------------
+
+/// Takes the average of all numbers in `Stats` across the whole vector `all_stats`. There
+/// must be at least one `all_stats`.
+pub fn process_stats(all_stats: Vec<Stats>) -> (f64, Vec<(&'static str, f64)>) {
+  let num_stats = all_stats.len();
+
+  let mut avg_duration: f64 = 0.0;
+  let mut avg_message_stats = Vec::<(&'static str, f64)>::new();
+
+  // Initialize using the first `Stats`.
+  let mut it = all_stats.into_iter();
+  for (message, count) in it.next().unwrap().get_message_stats() {
+    avg_message_stats.push((message, *count as f64));
+  }
+
+  // First, take the sum of the desired stats.
+  while let Some(stats) = it.next() {
+    avg_duration += stats.duration as f64;
+    for (i, (_, count)) in stats.get_message_stats().iter().enumerate() {
+      let (_, accum) = avg_message_stats.get_mut(i).unwrap();
+      *accum += *count as f64
     }
   }
+
+  // Next, compute the average.
+  avg_duration /= num_stats as f64;
+  for (_, count) in &mut avg_message_stats {
+    *count /= num_stats as f64;
+  }
+
+  (avg_duration, avg_message_stats)
+}
+
+/// Formats the `message_stats` into a string such that the colons in the map are aligned.
+pub fn format_message_stats(message_stats: &Vec<(&'static str, f64)>) -> String {
+  let mut max_key_len = 0;
+  for (key, _) in message_stats {
+    max_key_len = max(max_key_len, key.len());
+  }
+
+  let mut lines = Vec::<String>::new();
+  lines.push("{".to_string());
+  for (key, count) in message_stats {
+    lines.push(format!(
+      "{spaces}{key}: {count},",
+      spaces = " ".repeat(max_key_len - key.len() + 4), // We use an indent of 4
+      key = key,
+      count = count.floor()
+    ));
+  }
+  lines.push("}".to_string());
+
+  lines.join("\n")
 }

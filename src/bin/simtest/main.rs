@@ -6,7 +6,7 @@ use crate::basic_serial_test::test_all_basic_serial;
 use crate::paxos_parallel_test::{
   test_all_basic_parallel, test_all_paxos_parallel, ParallelTestStats, Writer,
 };
-use crate::stats::Stats;
+use crate::stats::{format_message_stats, process_stats, Stats};
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -71,11 +71,11 @@ fn main() {
   println!("\n");
 
   // Run parallel tests, potentially in multiple threads if requested.
-  const DEFAUL_NUM_ROUNDS: u32 = 50;
+  const DEFAULT_NUM_ROUNDS: u32 = 50;
   let rounds: u32 = if let Some(rounds) = matches.value_of("rounds") {
     rounds.parse().unwrap()
   } else {
-    DEFAUL_NUM_ROUNDS
+    DEFAULT_NUM_ROUNDS
   };
 
   if let Some(instances) = matches.value_of("instances") {
@@ -143,60 +143,6 @@ impl<'a> Writer for ConcurrentWriter<'a> {
     let text = self.mk_text();
     self.sender.send(ParallelTestMessage::PrintMessage(text));
   }
-}
-
-// -----------------------------------------------------------------------------------------------
-//  Stat Utils
-// -----------------------------------------------------------------------------------------------
-
-/// Takes the average of all numbers in `Stats` across the whole vector `all_stats`.
-fn process_stats(all_stats: Vec<Stats>) -> (f64, BTreeMap<&'static str, f64>) {
-  let num_stats = all_stats.len();
-
-  let mut avg_duration: f64 = 0.0;
-  let mut avg_message_stats = BTreeMap::<&'static str, f64>::new();
-
-  // First, take the sum of the desired stats.
-  for stats in all_stats {
-    avg_duration += stats.duration as f64;
-    for (key, count) in stats.get_message_stats() {
-      if let Some(cur_count) = avg_message_stats.get_mut(*key) {
-        *cur_count += *count as f64;
-      } else {
-        avg_message_stats.insert(*key, *count as f64);
-      }
-    }
-  }
-
-  // Next, compute the average.
-  avg_duration /= num_stats as f64;
-  for (_, count) in &mut avg_message_stats {
-    *count /= num_stats as f64;
-  }
-
-  (avg_duration, avg_message_stats)
-}
-
-/// Formats the `message_stats` into a string such that the colons in the map are aligned.
-fn format_message_stats(message_stats: BTreeMap<&'static str, f64>) -> String {
-  let mut max_key_len = 0;
-  for (key, _) in &message_stats {
-    max_key_len = max(max_key_len, key.len());
-  }
-
-  let mut lines = Vec::<String>::new();
-  lines.push("{".to_string());
-  for (key, count) in message_stats {
-    lines.push(format!(
-      "{spaces}{key}: {count},",
-      spaces = " ".repeat(max_key_len - key.len() + 4), // We use an indent of 4
-      key = key,
-      count = count.floor()
-    ));
-  }
-  lines.push("}".to_string());
-
-  lines.join("\n")
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -294,7 +240,7 @@ fn execute_multi(rand: &mut XorShiftRng, instances: u32, rounds: u32) {
 
     // Print the stats.
     println!("Avg Basic Duration: {}", avg_duration);
-    println!("Avg Basic Statistics: {}", format_message_stats(avg_message_stats));
+    println!("Avg Basic Statistics: {}", format_message_stats(&avg_message_stats));
   }
 
   // Process the parallel stats
@@ -312,8 +258,8 @@ fn execute_multi(rand: &mut XorShiftRng, instances: u32, rounds: u32) {
 
     // Print the stats.
     println!("Avg Duration: {}", avg_duration);
-    println!("Avg Statistics: {}", format_message_stats(avg_message_stats));
+    println!("Avg Statistics: {}", format_message_stats(&avg_message_stats));
     println!("Avg Reconfig Duration: {}", avg_reconfig_duration);
-    println!("Avg Reconfig Statistics: {}", format_message_stats(avg_reconfig_message_stats));
+    println!("Avg Reconfig Statistics: {}", format_message_stats(&avg_reconfig_message_stats));
   }
 }

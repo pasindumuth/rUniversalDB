@@ -104,8 +104,10 @@ pub enum MSQueryCoordAction {
   /// chance of success, and was ECU.
   FatalFailure(msg::ExternalAbortedData),
   /// Indicates that a valid MSCoordES was unsuccessful, but that there is a chance
-  /// of success if it were repeated at a higher timestamp.
-  NonFatalFailure,
+  /// of success if it were repeated at a higher timestamp. If the `bool` is `true`,
+  /// then on the next try, we should forcefully do a `MasterQueryPlanning` (even
+  /// if the local `GossipData` appears to be sufficient).
+  NonFatalFailure(bool),
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -118,9 +120,14 @@ impl FullMSCoordES {
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
+    start_with_master_query_planning: bool,
   ) -> MSQueryCoordAction {
     if let FullMSCoordES::QueryPlanning(plan_es) = self {
-      let action = plan_es.start(ctx, io_ctx);
+      let action = if start_with_master_query_planning {
+        plan_es.perform_master_query_planning(ctx, io_ctx)
+      } else {
+        plan_es.start(ctx, io_ctx)
+      };
       self.handle_planning_action(ctx, io_ctx, action)
     } else {
       Self::unexpected_branch()
@@ -269,11 +276,15 @@ impl FullMSCoordES {
       | msg::AbortedData::QueryError(msg::QueryError::DeadlockSafetyAbortion)
       | msg::AbortedData::QueryError(msg::QueryError::TimestampConflict)
       // TODO: Verify this code in the below case.
-      | msg::AbortedData::QueryError(msg::QueryError::InvalidQueryPlan)
       | msg::AbortedData::QueryError(msg::QueryError::InvalidLeadershipId)=> {
         // This implies a recoverable failure, so we ECU and return accordingly.
         self.exit_and_clean_up(ctx, io_ctx);
-        MSQueryCoordAction::NonFatalFailure
+        MSQueryCoordAction::NonFatalFailure(false)
+      }
+      | msg::AbortedData::QueryError(msg::QueryError::InvalidQueryPlan) => {
+        // Unlike the above, we want to forcefully do a MasterQueryPlanning
+        self.exit_and_clean_up(ctx, io_ctx);
+        MSQueryCoordAction::NonFatalFailure(true)
       }
       // Recall that LateralErrors should never make it back to the MSCoordES.
       msg::AbortedData::QueryError(msg::QueryError::LateralError) => panic!(),
@@ -382,7 +393,7 @@ impl FullMSCoordES {
         if orig_lid != cur_lid {
           // If a Leadership has changed, we abort and retry this MSCoordES.
           self.exit_and_clean_up(ctx, io_ctx);
-          return MSQueryCoordAction::NonFatalFailure;
+          return MSQueryCoordAction::NonFatalFailure(false);
         }
       }
 
@@ -555,7 +566,7 @@ impl FullMSCoordES {
 
     if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
       self.exit_and_clean_up(ctx, io_ctx);
-      return MSQueryCoordAction::NonFatalFailure;
+      return MSQueryCoordAction::NonFatalFailure(false);
     }
 
     // Populate the TMStatus accordingly.

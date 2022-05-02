@@ -418,7 +418,7 @@ impl Simulation {
       node_datas: Default::default(),
       true_timestamp: mk_t(0),
       client_msgs_received: Default::default(),
-      stats: Stats::default(),
+      stats: Stats::new(),
       tracer: Tracer::new(),
       leader_map: Default::default(),
       blocked_leadership: None,

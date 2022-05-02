@@ -266,7 +266,7 @@ impl CoordContext {
                     }),
                   },
                 );
-                let action = ms_coord.es.start(self, io_ctx);
+                let action = ms_coord.es.start(self, io_ctx, false);
                 self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
               }
               Err(payload) => io_ctx.send(
@@ -816,7 +816,7 @@ impl CoordContext {
         );
         self.exit_and_clean_up(io_ctx, statuses, query_id);
       }
-      MSQueryCoordAction::NonFatalFailure => {
+      MSQueryCoordAction::NonFatalFailure(start_with_master_query_planning) => {
         // First ECU the MSCoordES without removing it from `statuses`.
         let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
         let child_queries = ms_coord.child_queries.clone();
@@ -845,7 +845,7 @@ impl CoordContext {
         ));
 
         // Start executing the new MSCoordES.
-        let action = ms_coord.es.start(self, io_ctx);
+        let action = ms_coord.es.start(self, io_ctx, start_with_master_query_planning);
         self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
       }
     }
@@ -909,7 +909,7 @@ impl CoordContext {
             ));
 
             // Start executing the new MSCoordES.
-            let action = ms_coord.es.start(self, io_ctx);
+            let action = ms_coord.es.start(self, io_ctx, false);
             self.handle_ms_coord_es_action(io_ctx, statuses, query_id, action);
           }
         }
