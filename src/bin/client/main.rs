@@ -2,10 +2,9 @@ use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::cast;
-use runiversal::common::mk_rid;
+use runiversal::common::{mk_rid, ColName, ColVal, TableView};
 use runiversal::common::{EndpointId, RequestId};
 use runiversal::message as msg;
-use runiversal::message::NetworkMessage;
 use runiversal::net::{
   handle_conn, send_msg, start_acceptor_thread, GenericInputTrait, SERVER_PORT,
 };
@@ -31,16 +30,27 @@ fn prompt(name: &str) -> String {
 /// `GenericInput` for the client CLI.
 struct GenericInput {
   eid: EndpointId,
-  message: NetworkMessage,
+  message: msg::NetworkMessage,
 }
 
 impl GenericInputTrait for GenericInput {
-  fn from_network(eid: EndpointId, message: NetworkMessage) -> GenericInput {
+  fn from_network(eid: EndpointId, message: msg::NetworkMessage) -> GenericInput {
     GenericInput { eid, message }
   }
 }
 
 fn main() {
+  let mut table_view = TableView {
+    col_names: vec![Some(ColName("c1".to_string())), Some(ColName("c2".to_string()))],
+    rows: Default::default(),
+  };
+
+  table_view.rows.insert(vec![Some(ColVal::Int(10)), None], 3);
+  table_view.rows.insert(vec![Some(ColVal::Bool(true)), Some(ColVal::Bool(false))], 1);
+  table_view.rows.insert(vec![None, Some(ColVal::String("Hello".to_string()))], 2);
+
+  println!("{}", format_table(table_view));
+
   // Setup CLI parsing
   let matches = App::new("rUniversalDB")
     .version("1.0")
@@ -137,6 +147,18 @@ fn main() {
               send_msg(&out_conn_map, &target_eid, network_msg);
               let message = to_server_receiver.recv().unwrap().message;
 
+              match message.clone() {
+                msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
+                  success,
+                )) => {
+                  let table_view = success.result;
+                }
+                msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(
+                  aborted,
+                )) => {}
+                _ => panic!(),
+              }
+
               // Print the respnse
               println!("{:#?}", message);
             }
@@ -147,4 +169,108 @@ fn main() {
       }
     }
   }
+}
+
+fn format_table(table_view: TableView) -> String {
+  let mut lines = Vec::<String>::new();
+  let mut schema_row_elems = Vec::<String>::new();
+
+  schema_row_elems.push("index".to_string());
+  for maybe_col_name in table_view.col_names {
+    if let Some(ColName(col_name)) = maybe_col_name {
+      schema_row_elems.push(col_name);
+    }
+  }
+  schema_row_elems.push("count".to_string());
+
+  const CELL_WIDTH: usize = 16;
+  const MAX_CELL_CONTENT_LEN: usize = 10;
+
+  let mut formatted_schema_row_elems = Vec::<String>::new();
+  formatted_schema_row_elems.push("|".to_string());
+  for str in schema_row_elems {
+    let resolved_str = if str.len() > MAX_CELL_CONTENT_LEN {
+      format!("{}...", &str[..(MAX_CELL_CONTENT_LEN - 3)])
+    } else {
+      str
+    };
+
+    let white_space = CELL_WIDTH - resolved_str.len();
+    let l_padding = white_space / 2 + white_space % 2;
+    let r_padding = white_space / 2;
+
+    formatted_schema_row_elems.push(format!(
+      "{}{}{}",
+      " ".repeat(l_padding),
+      resolved_str,
+      " ".repeat(r_padding)
+    ));
+    formatted_schema_row_elems.push("|".to_string());
+  }
+
+  let schema_row = formatted_schema_row_elems.join("");
+  let length = schema_row.len();
+
+  lines.push("-".repeat(length));
+  lines.push(schema_row);
+  lines.push("-".repeat(length));
+
+  for (index, (cols, count)) in table_view.rows.into_iter().enumerate() {
+    let mut row_elems = Vec::<String>::new();
+    row_elems.push(index.to_string());
+    for col in cols {
+      let col_val_str = match col {
+        Some(ColVal::Int(val)) => val.to_string(),
+        Some(ColVal::Bool(val)) => val.to_string(),
+        Some(ColVal::String(val)) => format!("\"{}\"", val),
+        None => "NULL".to_string(),
+      };
+      row_elems.push(col_val_str);
+    }
+    row_elems.push(count.to_string());
+
+    let mut formatted_row_elems = Vec::<String>::new();
+    formatted_row_elems.push("|".to_string());
+    for str in row_elems {
+      let resolved_str = if str.len() > MAX_CELL_CONTENT_LEN {
+        format!("{}...", &str[..(MAX_CELL_CONTENT_LEN - 3)])
+      } else {
+        str
+      };
+
+      let white_space = CELL_WIDTH - resolved_str.len();
+      let l_padding = white_space - 1;
+      let r_padding = 1;
+
+      formatted_row_elems.push(format!(
+        "{}{}{}",
+        " ".repeat(l_padding),
+        resolved_str,
+        " ".repeat(r_padding)
+      ));
+      formatted_row_elems.push("|".to_string());
+    }
+
+    lines.push(formatted_row_elems.join(""));
+    lines.push("-".repeat(length));
+  }
+
+  lines.join("\n")
+
+  // // Format into row function. where we give a list of strings and it centers it and creates
+  // // bars between.
+  //
+  // fn format_into_row(elems: Vec<String>) -> String {
+  //   "".to_string()
+  // }
+  //
+  // /**
+  // hello  |    hi   |   bye
+  // -------------------------
+  //    1   |      2  |     3
+  // -------------------------
+  //
+  // We want to right justify.
+  // */
+  // schema
 }
