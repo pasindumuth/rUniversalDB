@@ -6,22 +6,22 @@ use std::collections::{BTreeMap, VecDeque};
 // -----------------------------------------------------------------------------------------------
 // Construct the PaxosNode EndpointIds of the paxos at the given index.
 pub fn mk_paxos_eid(i: u32) -> EndpointId {
-  EndpointId(format!("pe{}", i))
+  EndpointId::new(format!("pe{}", i), true)
 }
 
 // Construct the Slave EndpointId of the Slave at the given index.
 pub fn mk_slave_eid(i: u32) -> EndpointId {
-  EndpointId(format!("se{}", i))
+  EndpointId::new(format!("se{}", i), true)
 }
 
 // Construct the EndpointId of a Node.
 pub fn mk_node_eid(i: u32) -> EndpointId {
-  EndpointId(format!("ne{}", i))
+  EndpointId::new(format!("ne{}", i), true)
 }
 
 // Construct the Client id of the slave at the given index.
 pub fn mk_client_eid(i: u32) -> EndpointId {
-  EndpointId(format!("ce{}", i))
+  EndpointId::new(format!("ce{}", i), false)
 }
 
 /// Add a message between two nodes in the network.

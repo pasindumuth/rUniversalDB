@@ -10,7 +10,7 @@ use runiversal::common::{
   TabletGroupId, TabletKeyRange,
 };
 use runiversal::message as msg;
-use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_seed, mk_sid, mk_tab, mk_tid};
+use runiversal::test_utils::{cno, cvi, cvs, mk_seed, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
 
 /**

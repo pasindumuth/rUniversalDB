@@ -5,9 +5,7 @@ use runiversal::cast;
 use runiversal::common::{mk_rid, ColName, ColVal, TableView};
 use runiversal::common::{EndpointId, RequestId};
 use runiversal::message as msg;
-use runiversal::net::{
-  handle_conn, send_msg, start_acceptor_thread, GenericInputTrait, SERVER_PORT,
-};
+use runiversal::net::{send_msg, start_acceptor_thread, GenericInputTrait};
 use std::collections::BTreeMap;
 use std::io::SeekFrom::End;
 use std::io::Write;
@@ -61,7 +59,7 @@ fn main() {
   start_acceptor_thread(&to_server_sender, this_ip.clone());
 
   // The EndpointId of this node
-  let this_eid = EndpointId(this_ip);
+  let this_eid = EndpointId::new(this_ip, false);
   // The Master EndpointIds we tried starting the Master with
   let mut master_eids = Vec::<EndpointId>::new();
   // The EndpointId that most communication should use.
@@ -73,7 +71,8 @@ fn main() {
     match input.split_once(" ") {
       Some(("startmaster", rest)) => {
         // Start the masters
-        master_eids = rest.split(" ").into_iter().map(|ip| EndpointId(ip.to_string())).collect();
+        master_eids =
+          rest.split(" ").into_iter().map(|ip| EndpointId::new(ip.to_string(), true)).collect();
         for eid in &master_eids {
           send_msg(
             &out_conn_map,
@@ -81,11 +80,12 @@ fn main() {
             msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::StartMaster(msg::StartMaster {
               master_eids: master_eids.clone(),
             })),
+            false,
           );
         }
       }
       Some(("target", rest)) => {
-        opt_target_eid = Some(EndpointId(rest.to_string()));
+        opt_target_eid = Some(EndpointId::new(rest.to_string(), true));
       }
       _ => {
         if input == "exit" {
@@ -103,7 +103,7 @@ fn main() {
               ));
 
               // Send and wait for a response
-              send_msg(&out_conn_map, &target_eid, network_msg);
+              send_msg(&out_conn_map, &target_eid, network_msg, false);
               let message = to_server_receiver.recv().unwrap().message;
 
               // Print the response
@@ -133,7 +133,7 @@ fn main() {
               };
 
               // Send and wait for a response
-              send_msg(&out_conn_map, &target_eid, network_msg);
+              send_msg(&out_conn_map, &target_eid, network_msg, false);
               let message = to_server_receiver.recv().unwrap().message;
               match message {
                 msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(

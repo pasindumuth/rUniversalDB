@@ -18,7 +18,7 @@ use runiversal::shard_split_tm_es::STRange;
 use runiversal::simulation_utils::mk_slave_eid;
 use runiversal::sql_ast::iast;
 use runiversal::sql_parser::convert_ast;
-use runiversal::test_utils::{mk_eid, mk_seed, mk_sid};
+use runiversal::test_utils::{mk_seed, mk_sid};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::test_utils::table;

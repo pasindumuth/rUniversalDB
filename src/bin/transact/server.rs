@@ -124,7 +124,7 @@ impl BasicIOCtx for ProdIOCtx {
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    send_msg(&self.out_conn_map, eid, msg);
+    send_msg(&self.out_conn_map, eid, msg, true);
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}
@@ -303,7 +303,7 @@ impl BasicIOCtx for ProdCoreIOCtx {
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    send_msg(&self.out_conn_map, eid, msg);
+    send_msg(&self.out_conn_map, eid, msg, true);
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}

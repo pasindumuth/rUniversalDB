@@ -13,7 +13,7 @@ use runiversal::common::{
 use runiversal::message as msg;
 use runiversal::message::{ExternalAbortedData, NetworkMessage};
 use runiversal::paxos::PaxosConfig;
-use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_seed, mk_sid, mk_tab, mk_tid};
+use runiversal::test_utils::{cno, cvi, cvs, mk_seed, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
 
 /**

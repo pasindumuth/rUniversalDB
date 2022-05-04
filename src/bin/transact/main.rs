@@ -20,7 +20,7 @@ use runiversal::master::{
 };
 use runiversal::message as msg;
 use runiversal::message::FreeNodeMessage;
-use runiversal::net::{handle_conn, send_msg, start_acceptor_thread, SERVER_PORT};
+use runiversal::net::{send_msg, start_acceptor_thread};
 use runiversal::node::{get_prod_configs, GenericInput, NodeConfig, NodeState};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
@@ -109,7 +109,7 @@ fn main() {
   start_acceptor_thread(&to_server_sender, this_ip.clone());
 
   // Create the self-connection
-  let this_eid = EndpointId(this_ip);
+  let this_eid = EndpointId::new(this_ip, true);
   handle_self_conn(&this_eid, &out_conn_map, &to_server_sender);
 
   // Run startup_type specific code.
@@ -121,7 +121,7 @@ fn main() {
         .value_of("entry_ip")
         .expect("entry_ip is requred if startup_type is 'freenode'")
         .to_string();
-      let master_eid = EndpointId(master_ip);
+      let master_eid = EndpointId::new(master_ip, true);
 
       // Parse freenode_type
       let freenode_type = matches
@@ -144,6 +144,7 @@ fn main() {
             node_type,
           }),
         )),
+        true,
       );
     }
     _ => unreachable!(),

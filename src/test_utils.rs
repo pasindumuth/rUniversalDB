@@ -28,10 +28,6 @@ pub fn mk_sid(id: &str) -> SlaveGroupId {
   SlaveGroupId(id.to_string())
 }
 
-pub fn mk_eid(id: &str) -> EndpointId {
-  EndpointId(id.to_string())
-}
-
 pub fn mk_tid(id: &str) -> TabletGroupId {
   TabletGroupId(id.to_string())
 }

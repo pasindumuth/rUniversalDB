@@ -23,6 +23,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 // -------------------------------------------------------------------------------------------------
+//  Connection Messages
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InitMessage {
+  /// See `EndpointId::is_internal`.
+  pub is_internal: bool,
+}
+
+// -------------------------------------------------------------------------------------------------
 //  NetworkMessage
 // -------------------------------------------------------------------------------------------------
 

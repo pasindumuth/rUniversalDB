@@ -10,7 +10,7 @@ use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::{mk_client_eid, mk_node_eid};
 use runiversal::slave::SlaveConfig;
 use runiversal::tablet::TabletConfig;
-use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_sid};
+use runiversal::test_utils::{cno, cvi, cvs, mk_sid};
 use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------------------------

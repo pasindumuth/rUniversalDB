@@ -12,7 +12,7 @@ use runiversal::message::ExternalAbortedData;
 use runiversal::paxos::PaxosConfig;
 use runiversal::simulation_utils::mk_slave_eid;
 use runiversal::slave::SlaveConfig;
-use runiversal::test_utils::{cno, cvi, cvs, mk_eid, mk_seed, mk_sid};
+use runiversal::test_utils::{cno, cvi, cvs, mk_seed, mk_sid};
 use sqlformat;
 use std::collections::BTreeMap;
 
