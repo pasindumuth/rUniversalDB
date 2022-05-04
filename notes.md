@@ -32,13 +32,13 @@ docker kill runiversal15; docker container rm runiversal15;
 
 1. start masters and client, run the following:
 startmaster 172.19.0.10 172.19.0.11 172.19.0.12 172.19.0.13 172.19.0.14
-3. start the slaves, run the following:
+2. start the slaves, run the following:
 target 172.19.0.10
 CREATE TABLE users(id INT PRIMARY KEY);
 target 172.19.0.15
 INSERT INTO users(id) VALUES (1), (2), (3);
 SELECT id FROM users;
-4. run the following
+3. run the following
 target 172.19.0.10
 CREATE TABLE inventory(id INT PRIMARY KEY, name VARCHAR);
 target 172.19.0.15
