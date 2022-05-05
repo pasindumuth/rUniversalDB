@@ -1,4 +1,4 @@
-use crate::common::EndpointId;
+use crate::common::{EndpointId, InternalMode};
 use std::collections::{BTreeMap, VecDeque};
 
 // -----------------------------------------------------------------------------------------------
@@ -6,22 +6,22 @@ use std::collections::{BTreeMap, VecDeque};
 // -----------------------------------------------------------------------------------------------
 // Construct the PaxosNode EndpointIds of the paxos at the given index.
 pub fn mk_paxos_eid(i: u32) -> EndpointId {
-  EndpointId::new(format!("pe{}", i), true)
+  EndpointId::new(format!("pe{}", i), InternalMode::Internal)
 }
 
 // Construct the Slave EndpointId of the Slave at the given index.
 pub fn mk_slave_eid(i: u32) -> EndpointId {
-  EndpointId::new(format!("se{}", i), true)
+  EndpointId::new(format!("se{}", i), InternalMode::Internal)
 }
 
 // Construct the EndpointId of a Node.
 pub fn mk_node_eid(i: u32) -> EndpointId {
-  EndpointId::new(format!("ne{}", i), true)
+  EndpointId::new(format!("ne{}", i), InternalMode::Internal)
 }
 
 // Construct the Client id of the slave at the given index.
 pub fn mk_client_eid(i: u32) -> EndpointId {
-  EndpointId::new(format!("ce{}", i), false)
+  EndpointId::new(format!("ce{}", i), InternalMode::External { salt: "".to_string() })
 }
 
 /// Add a message between two nodes in the network.

@@ -1,9 +1,9 @@
 use crate::alter_table_tm_es::AlterTableTMPayloadTypes;
 use crate::col_usage::ColUsageNode;
 use crate::common::{
-  CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, LeadershipId,
-  PaxosGroupId, QueryId, RequestId, SlaveGroupId, TNodePath, TQueryPath, TablePath, TableView,
-  TabletGroupId, TabletKeyRange, TierMap, TransTableLocationPrefix, TransTableName,
+  CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, InternalMode,
+  LeadershipId, PaxosGroupId, QueryId, RequestId, SlaveGroupId, TNodePath, TQueryPath, TablePath,
+  TableView, TabletGroupId, TabletKeyRange, TierMap, TransTableLocationPrefix, TransTableName,
 };
 use crate::common::{FullGen, GossipData, LeaderMap, QueryPlan, RemoteLeaderChangedPLm, Timestamp};
 use crate::create_table_tm_es::CreateTableTMPayloadTypes;
@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct InitMessage {
   /// See `EndpointId::is_internal`.
-  pub is_internal: bool,
+  pub is_internal: InternalMode,
 }
 
 // -------------------------------------------------------------------------------------------------

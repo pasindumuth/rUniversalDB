@@ -1,4 +1,4 @@
-use crate::common::EndpointId;
+use crate::common::{EndpointId, InternalMode};
 use crate::message as msg;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::BTreeMap;
@@ -136,7 +136,7 @@ pub fn send_msg(
   locked_out_conn_map: &Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
   eid: &EndpointId,
   msg: msg::NetworkMessage,
-  this_eid_internal: bool,
+  this_eid_internal: &InternalMode,
 ) {
   let mut out_conn_map = locked_out_conn_map.lock().unwrap();
 
@@ -147,6 +147,7 @@ pub fn send_msg(
     out_conn_map.insert(eid.clone(), sender);
     let locked_out_conn_map = locked_out_conn_map.clone();
     let eid = eid.clone();
+    let this_eid_internal = this_eid_internal.clone();
     thread::Builder::new().name(format!("ToNetwork {}", eid.ip)).spawn(move || {
       let stream = TcpStream::connect(format!("{}:{}", eid.ip, SERVER_PORT)).unwrap();
       // Configure the stream to block indefinitely for reads and writes.
@@ -154,7 +155,7 @@ pub fn send_msg(
       stream.set_write_timeout(None).unwrap();
 
       // Send Initialization message
-      let init_msg = msg::InitMessage { is_internal: this_eid_internal };
+      let init_msg = msg::InitMessage { is_internal: this_eid_internal.clone() };
       let data_out = rmp_serde::to_vec(&init_msg).unwrap();
       send_bytes(&data_out, &stream);
 
@@ -171,7 +172,7 @@ pub fn send_msg(
       // so that next time we try sending a message to that `EndpointId`, we will establish
       // a new connection. Importantly, observe that this is the only code that will ever
       // remove an element from `out_conn_map`.
-      if !eid.is_internal {
+      if let InternalMode::External { .. } = &eid.mode {
         let mut out_conn_map = locked_out_conn_map.lock().unwrap();
         out_conn_map.remove(&eid).unwrap();
       }

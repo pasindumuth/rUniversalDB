@@ -10,7 +10,7 @@ use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  mk_t, BasicIOCtx, FreeNodeIOCtx, GossipData, MasterIOCtx, NodeIOCtx, SlaveIOCtx,
+  mk_t, BasicIOCtx, FreeNodeIOCtx, GossipData, InternalMode, MasterIOCtx, NodeIOCtx, SlaveIOCtx,
 };
 use runiversal::common::{CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, SlaveGroupId};
 use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
@@ -109,7 +109,8 @@ fn main() {
   start_acceptor_thread(&to_server_sender, this_ip.clone());
 
   // Create the self-connection
-  let this_eid = EndpointId::new(this_ip, true);
+  let this_internal_mode = InternalMode::Internal;
+  let this_eid = EndpointId::new(this_ip, this_internal_mode.clone());
   handle_self_conn(&this_eid, &out_conn_map, &to_server_sender);
 
   // Run startup_type specific code.
@@ -121,7 +122,7 @@ fn main() {
         .value_of("entry_ip")
         .expect("entry_ip is requred if startup_type is 'freenode'")
         .to_string();
-      let master_eid = EndpointId::new(master_ip, true);
+      let master_eid = EndpointId::new(master_ip, InternalMode::Internal);
 
       // Parse freenode_type
       let freenode_type = matches
@@ -144,7 +145,7 @@ fn main() {
             node_type,
           }),
         )),
-        true,
+        &this_internal_mode,
       );
     }
     _ => unreachable!(),

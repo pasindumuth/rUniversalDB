@@ -405,6 +405,14 @@ pub struct TierMap {
 //  ID Types
 // -------------------------------------------------------------------------------------------------
 
+/// This is used to indicate if an `EndpointId` is Internal or External. To facilitate
+/// reconnection, we have a randomly generated `salt` as a part of `External`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum InternalMode {
+  Internal,
+  External { salt: String },
+}
+
 /// A global identifer of a network node. This includes Slaves, Clients, Admin
 /// clients, and other nodes in the network.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -412,15 +420,15 @@ pub struct EndpointId {
   pub ip: String,
   /// Internal `EndpointId` are network endpoints that belong to processes within the
   /// system. In particular, these are the Slave Nodes, Master Nodes, Free Nodes, etc.
-  /// Processes outside of the system includes the user. In practice, `is_internal` is
+  /// Processes outside of the system includes the user. In practice, `mode` is
   /// used to decide whether to reconnect to an `EndpointId` once its connection goes down.
   /// We do not do this for Internal `EndpointId`s to preserve FIFO behavior.
-  pub is_internal: bool,
+  pub mode: InternalMode,
 }
 
 impl EndpointId {
-  pub fn new(ip: String, is_internal: bool) -> EndpointId {
-    EndpointId { ip, is_internal }
+  pub fn new(ip: String, is_internal: InternalMode) -> EndpointId {
+    EndpointId { ip, mode: is_internal }
   }
 }
 
@@ -965,7 +973,7 @@ pub struct RemoteLeaderChangedPLm {
 //  Basic Utils
 // -----------------------------------------------------------------------------------------------
 
-fn rand_string<R: Rng>(rng: &mut R) -> String {
+pub fn rand_string<R: Rng>(rng: &mut R) -> String {
   rng.sample_iter(&Alphanumeric).take(12).map(char::from).collect()
 }
 

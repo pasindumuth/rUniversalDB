@@ -2,8 +2,8 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
   btree_multimap_insert, mk_cid, mk_sid, mk_t, BasicIOCtx, CoreIOCtx, FreeNodeIOCtx,
-  GeneralTraceMessage, GossipData, MasterIOCtx, MasterTraceMessage, NodeIOCtx, SlaveIOCtx,
-  SlaveTraceMessage, Timestamp,
+  GeneralTraceMessage, GossipData, InternalMode, MasterIOCtx, MasterTraceMessage, NodeIOCtx,
+  SlaveIOCtx, SlaveTraceMessage, Timestamp,
 };
 use runiversal::common::{
   CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, SlaveGroupId,
@@ -124,7 +124,7 @@ impl BasicIOCtx for ProdIOCtx {
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    send_msg(&self.out_conn_map, eid, msg, true);
+    send_msg(&self.out_conn_map, eid, msg, &InternalMode::Internal);
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}
@@ -303,7 +303,7 @@ impl BasicIOCtx for ProdCoreIOCtx {
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    send_msg(&self.out_conn_map, eid, msg, true);
+    send_msg(&self.out_conn_map, eid, msg, &InternalMode::Internal);
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}
