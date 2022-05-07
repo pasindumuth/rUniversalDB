@@ -1,6 +1,3 @@
-mod prompt;
-
-use crate::prompt::CommandPrompt;
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -9,6 +6,8 @@ use runiversal::common::{mk_rid, rand_string, ColName, ColVal, InternalMode, Tab
 use runiversal::common::{EndpointId, RequestId};
 use runiversal::message as msg;
 use runiversal::net::{send_msg, start_acceptor_thread, GenericInputTrait};
+use rustyline::error::ReadlineError;
+use rustyline::Editor;
 use std::collections::BTreeMap;
 use std::io::SeekFrom::End;
 use std::io::{Read, Write};
@@ -32,7 +31,7 @@ impl GenericInputTrait for GenericInput {
   }
 }
 
-fn main() -> crossterm::Result<()> {
+fn main() {
   // Setup CLI parsing
   let matches = App::new("rUniversalDB")
     .version("1.0")
@@ -62,11 +61,31 @@ fn main() -> crossterm::Result<()> {
   let mut opt_target_eid = Option::<EndpointId>::None;
 
   // Create command prompt
-  let mut prompt = CommandPrompt::new();
+  let mut rl = Editor::<()>::new();
 
   // Setup the CLI read loop.
   loop {
-    let input = prompt.prompt_wrapper()?;
+    // Read the next line from the command prompt.
+    let readline = rl.readline(">> ");
+    let input = match readline {
+      Ok(line) => {
+        rl.add_history_entry(line.as_str());
+        line
+      }
+      Err(ReadlineError::Interrupted) => {
+        println!("CTRL-C");
+        break;
+      }
+      Err(ReadlineError::Eof) => {
+        println!("CTRL-D");
+        break;
+      }
+      Err(err) => {
+        println!("Error: {:?}", err);
+        break;
+      }
+    };
+
     match input.split_once(" ") {
       Some(("startmaster", rest)) => {
         // Start the masters
@@ -156,8 +175,6 @@ fn main() -> crossterm::Result<()> {
       }
     }
   }
-
-  Ok(())
 }
 
 /// Format `table_view` into a printable string.
