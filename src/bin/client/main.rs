@@ -1,3 +1,6 @@
+mod prompt;
+
+use crate::prompt::prompt_wrapper;
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -8,7 +11,7 @@ use runiversal::message as msg;
 use runiversal::net::{send_msg, start_acceptor_thread, GenericInputTrait};
 use std::collections::BTreeMap;
 use std::io::SeekFrom::End;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Mutex};
@@ -16,14 +19,6 @@ use std::thread;
 use std::time::SystemTime;
 
 // The Threading Model is the same as the Transact Server.
-
-fn prompt(name: &str) -> String {
-  let mut line = String::new();
-  print!("{}", name);
-  std::io::stdout().flush().unwrap();
-  std::io::stdin().read_line(&mut line).expect("Error: Could not read a line");
-  return line.trim().to_string();
-}
 
 /// `GenericInput` for the client CLI.
 struct GenericInput {
@@ -37,7 +32,7 @@ impl GenericInputTrait for GenericInput {
   }
 }
 
-fn main() {
+fn main() -> crossterm::Result<()> {
   // Setup CLI parsing
   let matches = App::new("rUniversalDB")
     .version("1.0")
@@ -68,7 +63,7 @@ fn main() {
 
   // Setup the CLI read loop.
   loop {
-    let input = prompt("> ");
+    let input = if let Some(input) = prompt_wrapper()? { input } else { "exit".to_string() };
     match input.split_once(" ") {
       Some(("startmaster", rest)) => {
         // Start the masters
@@ -158,6 +153,8 @@ fn main() {
       }
     }
   }
+
+  Ok(())
 }
 
 /// Format `table_view` into a printable string.

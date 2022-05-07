@@ -38,68 +38,17 @@ CREATE TABLE users(id INT PRIMARY KEY);
 target 172.19.0.15
 INSERT INTO users(id) VALUES (1), (2), (3);
 SELECT id FROM users;
-3. run the following
+
+target 172.19.0.10
+ALTER TABLE users ADD name STRING;
+target 172.19.0.15
+UPDATE users SET name = 'henry' WHERE id = 2;
+SELECT * FROM users;
+
+4. run the following
 target 172.19.0.10
 CREATE TABLE inventory(id INT PRIMARY KEY, name VARCHAR);
 target 172.19.0.15
 INSERT INTO inventory(id, name) VALUES (1, 'pasindu'), (2, 'hello');
 SELECT id, name FROM inventory;
 
-## Code
-Example of implementing Debug for a struct:
-
-```rust
-
-impl Debug for SlaveContext {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-    let mut debug_trait_builder = f.debug_struct("SlaveContext");
-    let _ = debug_trait_builder.field("coord_positions", &self.coord_positions);
-    let _ = debug_trait_builder.field("this_sid", &self.this_sid);
-    let _ = debug_trait_builder.field("this_gid", &self.this_gid);
-    let _ = debug_trait_builder.field("this_eid", &self.this_eid);
-    let _ = debug_trait_builder.field("gossip", &self.gossip);
-    let _ = debug_trait_builder.field("leader_map", &self.leader_map);
-    let _ = debug_trait_builder.field("network_driver", &self.network_driver);
-    let _ = debug_trait_builder.field("slave_bundle", &self.slave_bundle);
-    let _ = debug_trait_builder.field("tablet_bundles", &self.tablet_bundles);
-    debug_trait_builder.finish()
-  }
-}
-
-```
-
-Example (unrefined) of impelmenting Debug for an enum:
-
-```rust
-  impl ::core::fmt::Debug for SlaveTimerInput {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-      match (&*self,) {
-        (&SlaveTimerInput::PaxosTimerEvent(ref __self_0),) => {
-          let mut debug_trait_builder = f.debug_tuple("PaxosTimerEvent");
-          let _ = debug_trait_builder.field(&&(*__self_0));
-          debug_trait_builder.finish()
-        }
-        (&SlaveTimerInput::RemoteLeaderChanged,) => {
-          let mut debug_trait_builder = f.debug_tuple("RemoteLeaderChanged");
-          debug_trait_builder.finish()
-        }
-      }
-    }
-  }
-```
-
-
-```
-  let successful_queries = sorted_success_res.len() as u32;
-  let mut count = 0;
-  for (_, (req, res)) in sorted_success_res {
-    println!(
-      "         QUERY {:?}:
-                Req: {:?}
-                Res: {:?}",
-      count, req, res
-    );
-    count += 1;
-    context.send_query(&mut sim, req.query.as_str(), 10000, res.result);
-  }
-```

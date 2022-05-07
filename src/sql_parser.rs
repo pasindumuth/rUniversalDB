@@ -365,12 +365,7 @@ pub fn convert_ddl_ast(raw_query: Vec<ast::Statement>) -> Result<DDLQuery, Strin
       for col in columns {
         // Read the name and type
         let col_name = ColName(col.name.value.clone());
-        let col_type = match &col.data_type {
-          ast::DataType::Varchar(_) => ColType::String,
-          ast::DataType::Int => ColType::Int,
-          ast::DataType::Boolean => ColType::Bool,
-          _ => return Err(format!("Unsupported data type in CREATE TABLE: {:?}.", col.data_type)),
-        };
+        let col_type = convert_data_type(&col.data_type)?;
         // Read whether this is declared as a PRIMARY KEY or not
         let mut is_key_col = false;
         for option_def in &col.options {
@@ -478,6 +473,7 @@ pub fn convert_data_type(raw_data_type: &ast::DataType) -> Result<ColType, Strin
     ast::DataType::Int => Ok(ColType::Int),
     ast::DataType::Boolean => Ok(ColType::Bool),
     ast::DataType::String => Ok(ColType::String),
+    ast::DataType::Varchar(_) => Ok(ColType::String),
     _ => Err(format!("Unsupported ast::DataType {:?}", raw_data_type)),
   }
 }
