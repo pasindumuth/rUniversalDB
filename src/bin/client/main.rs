@@ -157,15 +157,20 @@ fn main() {
               send_msg(&out_conn_map, &target_eid, network_msg, &this_internal_mode);
               let message = to_server_receiver.recv().unwrap().message;
               match message {
-                msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
-                  success,
-                )) => {
-                  println!("{}", format_table(success.result));
-                }
-                message => {
-                  // Print the respnse
-                  println!("{:#?}", message);
-                }
+                msg::NetworkMessage::External(external) => match external {
+                  msg::ExternalMessage::ExternalQuerySuccess(success) => {
+                    println!("{}", format_table(success.result));
+                  }
+                  msg::ExternalMessage::ExternalQueryAborted(aborted) => {
+                    println!("Failed with error: {:#?}", aborted.payload);
+                  }
+                  msg::ExternalMessage::ExternalDDLQuerySuccess(_) => {}
+                  msg::ExternalMessage::ExternalDDLQueryAborted(aborted) => {
+                    println!("Failed with error: {:#?}", aborted.payload);
+                  }
+                  _ => println!("{:#?}", external),
+                },
+                message => println!("{:#?}", message),
               }
             }
           } else {
