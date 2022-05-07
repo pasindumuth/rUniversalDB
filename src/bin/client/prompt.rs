@@ -1,85 +1,158 @@
-use crossterm::cursor::{MoveLeft, MoveRight};
+use crossterm::cursor::{MoveLeft, MoveRight, MoveToColumn};
 use crossterm::event::{read, Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::io::{stdout, Write};
 
-fn prompt(prompt_str: &str) -> crossterm::Result<Option<String>> {
-  // Print prompt
-  print!("{}", prompt_str);
-  stdout().flush().unwrap();
+/// The caret to print at the front.
+const PROMPT_STR: &str = "> ";
 
-  // The left-most character in the rest of the line is the latest element here.
-  let mut prev = Vec::<char>::new();
-  let mut rest = Vec::<char>::new();
-  loop {
-    // It's guaranteed that read() wont block if `poll` returns `Ok(true)`
-    let event = read()?;
-    if let Event::Key(key_event) = event {
-      match key_event.code {
-        KeyCode::Backspace => {
-          if let Some(_) = prev.pop() {
-            if !rest.is_empty() {
-              execute!(stdout(), MoveRight(rest.len() as u16))?;
-              execute!(stdout(), MoveLeft(1))?;
-              print!(" ");
-              execute!(stdout(), MoveLeft(rest.len() as u16))?;
-            }
-            execute!(stdout(), MoveLeft(1))?;
-            print!(" ");
-            execute!(stdout(), MoveLeft(1))?;
-          }
-        }
-        KeyCode::Enter => {
-          prev.extend(rest.into_iter().rev());
-          execute!(stdout(), MoveLeft((prev.len() + prompt_str.len()) as u16))?;
-          print!("\n");
-          stdout().flush().unwrap();
-          break Ok(Some(prev.into_iter().collect()));
-        }
-        KeyCode::Left => {
-          if let Some(c) = prev.pop() {
-            rest.push(c);
-            execute!(stdout(), MoveLeft(1))?;
-          }
-        }
-        KeyCode::Right => {
-          if let Some(c) = rest.pop() {
-            prev.push(c);
-            execute!(stdout(), MoveRight(1))?;
-          }
-        }
-        KeyCode::Tab => {
-          prev.push('\t');
-          print!("{}", '\t');
-        }
-        KeyCode::Char(c) => {
-          prev.push(c);
-          print!("{}", c);
-        }
-        KeyCode::Esc => {
-          break Ok(None);
-        }
-        _ => {}
-      }
+pub struct CommandPrompt {
+  history: Vec<Vec<char>>,
+  /// This points to the current element in the history that the user is pointing
+  /// to (as a consequence of pressing the `up` and `down` arrow keys). This is
+  /// reset after a command is submitted.
+  index: usize,
 
-      // Print `rest`, which would be non-empty if the cursor is in the middle
-      // of some text.
-      for c in rest.iter().rev() {
-        print!("{}", c);
-      }
-      execute!(stdout(), MoveLeft(rest.len() as u16))?;
-      stdout().flush().unwrap();
-    }
-  }
+  /// Data indicating the current line.
+  line: Vec<char>,
+  /// This points to an element in `line` (or one element after).
+  pos: usize,
+
+  /// The numbers of characters (excluding the caret) that were last rendered.
+  last_render_length: usize,
 }
 
-pub fn prompt_wrapper() -> crossterm::Result<Option<String>> {
-  // By default, the terminal does some nice stuff. In order to get raw input
-  // and have the terminal do nothing more than the commands we give it with stdout,
-  // we switch to raw mode. This way, `read()?` above is immediate.
-  enable_raw_mode()?;
-  let ret = prompt("> ");
-  disable_raw_mode()?;
-  ret
+impl CommandPrompt {
+  pub fn new() -> CommandPrompt {
+    CommandPrompt { history: Vec::new(), index: 0, line: vec![], pos: 0, last_render_length: 0 }
+  }
+
+  fn render_line(&mut self) -> crossterm::Result<()> {
+    // Clear the current line.
+    execute!(stdout(), MoveToColumn((1 + PROMPT_STR.len()) as u16))?;
+    for _ in 0..self.last_render_length {
+      print!(" ");
+    }
+
+    // Print the line.
+    execute!(stdout(), MoveToColumn((1 + PROMPT_STR.len()) as u16))?;
+    for c in &self.line {
+      print!("{}", c);
+    }
+
+    // Set the cursor position.
+    execute!(stdout(), MoveToColumn((1 + PROMPT_STR.len()) as u16))?;
+    execute!(stdout(), MoveRight(self.pos as u16))?;
+
+    // Set the rendering length.
+    self.last_render_length = self.line.len();
+
+    stdout().flush()
+  }
+
+  fn submit(&mut self) -> crossterm::Result<Vec<char>> {
+    // Create a new line, empty line and move the cursor to the start (no caret).
+    self.pos = 0;
+    let line = std::mem::take(&mut self.line);
+    execute!(stdout(), MoveToColumn(1))?;
+    print!("\n");
+    stdout().flush()?;
+
+    // Return the line that just finished.
+    Ok(line)
+  }
+
+  fn prompt(&mut self) -> crossterm::Result<Vec<char>> {
+    // Print prompt
+    print!("{}", PROMPT_STR);
+    stdout().flush().unwrap();
+
+    loop {
+      // Listen for a key event.
+      let event = read()?;
+      if let Event::Key(key_event) = event {
+        match key_event.code {
+          KeyCode::Backspace => {
+            if self.pos > 0 {
+              self.pos -= 1;
+              self.line.remove(self.pos);
+              self.render_line();
+            }
+          }
+          KeyCode::Enter => {
+            break self.submit();
+          }
+          KeyCode::Left => {
+            if self.pos > 0 {
+              self.pos -= 1;
+              self.render_line();
+            }
+          }
+          KeyCode::Right => {
+            if self.pos < self.line.len() {
+              self.pos += 1;
+              self.render_line();
+            }
+          }
+          KeyCode::Up => {
+            if self.index > 0 {
+              self.index -= 1;
+
+              // Update the current line with the historical line.
+              self.line = self.history.get(self.index).unwrap().clone();
+              self.pos = self.line.len();
+
+              self.render_line();
+            }
+          }
+          KeyCode::Down => {
+            if self.index < self.history.len() {
+              self.index += 1;
+
+              // Update the current line with the historical line.
+              if self.index < self.history.len() {
+                self.line = self.history.get(self.index).unwrap().clone();
+                self.pos = self.line.len();
+              } else {
+                // If we are pointing past the history, simply start a new, empty line.
+                self.line = "".chars().collect();
+                self.pos = 0;
+              }
+
+              self.render_line();
+            }
+          }
+          KeyCode::Char(c) => {
+            self.line.insert(self.pos, c);
+            self.pos += 1;
+            self.render_line();
+          }
+          KeyCode::Esc => {
+            self.line = "exit".chars().collect();
+            self.pos = self.line.len();
+            break self.submit();
+          }
+          _ => {}
+        }
+      }
+    }
+  }
+
+  pub fn prompt_wrapper(&mut self) -> crossterm::Result<String> {
+    // By default, the terminal does some nice stuff. In order to get raw input
+    // and have the terminal do nothing more than the commands we give it with stdout,
+    // we switch to raw mode. This way, `read()?` above is immediate.
+    enable_raw_mode()?;
+    let ret = self.prompt();
+    disable_raw_mode()?;
+
+    // Update the history and reset the index.
+    let command = ret?;
+    self.history.push(command.clone());
+    self.index = self.history.len();
+
+    // Return the command
+    Ok(command.into_iter().collect())
+  }
 }

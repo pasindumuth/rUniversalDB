@@ -1,6 +1,6 @@
 mod prompt;
 
-use crate::prompt::prompt_wrapper;
+use crate::prompt::CommandPrompt;
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -61,9 +61,12 @@ fn main() -> crossterm::Result<()> {
   // The EndpointId that most communication should use.
   let mut opt_target_eid = Option::<EndpointId>::None;
 
+  // Create command prompt
+  let mut prompt = CommandPrompt::new();
+
   // Setup the CLI read loop.
   loop {
-    let input = if let Some(input) = prompt_wrapper()? { input } else { "exit".to_string() };
+    let input = prompt.prompt_wrapper()?;
     match input.split_once(" ") {
       Some(("startmaster", rest)) => {
         // Start the masters
