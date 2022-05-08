@@ -56,8 +56,8 @@ pub enum MasterExternalReq {
   /// Sharding
   PerformExternalSharding(PerformExternalSharding),
   CancelExternalSharding(CancelExternalSharding),
-  /// This is used for debugging purposes during development.
-  ExternalDebugRequest(ExternalDebugRequest),
+  /// This is used to query Metadata about the database.
+  ExternalMetadataRequest(ExternalMetadataRequest),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -209,7 +209,7 @@ pub enum ExternalMessage {
   ExternalShardingSuccess(ExternalShardingSuccess),
   ExternalShardingAborted(ExternalShardingAborted),
   /// Debug. This is used for debugging purposes during development.
-  ExternalDebugResponse(ExternalDebugResponse),
+  ExternalMetadataResponse(ExternalMetadataResponse),
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -861,19 +861,19 @@ pub struct ExternalShardingSuccess {
 }
 
 // -------------------------------------------------------------------------------------------------
-//  External Debug
+//  External Metadata
 // -------------------------------------------------------------------------------------------------
-/// This is used for debugging purposes during development.
+/// This is used for soliciting metadata.
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ExternalDebugRequest {
+pub struct ExternalMetadataRequest {
   pub sender_eid: EndpointId,
   pub request_id: RequestId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ExternalDebugResponse {
+pub struct ExternalMetadataResponse {
   pub sender_eid: EndpointId,
   pub request_id: RequestId,
-  pub debug_str: String,
+  pub gossip_data: GossipData,
 }

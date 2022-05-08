@@ -186,13 +186,13 @@ impl Stats {
         ExternalMessage::ExternalDDLQueryAborted(_) => K_EXTERNAL_DDL_QUERY_ABORTED,
         ExternalMessage::ExternalShardingSuccess(_) => K_EXTERNAL_SHARDING_SUCCESS,
         ExternalMessage::ExternalShardingAborted(_) => K_EXTERNAL_SHARDING_ABORTED,
-        ExternalMessage::ExternalDebugResponse(_) => K_UNNACCOUNTED,
+        ExternalMessage::ExternalMetadataResponse(_) => K_UNNACCOUNTED,
       },
       NetworkMessage::Master(m) => match m {
         MasterMessage::MasterExternalReq(m) => match m {
           MasterExternalReq::PerformExternalDDLQuery(_) => K_PERFORM_EXTERNAL_DDL_QUERY,
           MasterExternalReq::CancelExternalDDLQuery(_) => K_CANCEL_EXTERNAL_DDL_QUERY,
-          MasterExternalReq::ExternalDebugRequest(_) => K_UNNACCOUNTED,
+          MasterExternalReq::ExternalMetadataRequest(_) => K_UNNACCOUNTED,
           MasterExternalReq::PerformExternalSharding(_) => K_PERFORM_EXTERNAL_SHARDING,
           MasterExternalReq::CancelExternalSharding(_) => K_CANCEL_EXTERNAL_SHARDING,
         },

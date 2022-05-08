@@ -1200,7 +1200,7 @@ pub fn parallel_test<WriterT: Writer>(
           msg::ExternalMessage::ExternalDDLQueryAborted(aborted) => &aborted.request_id,
           msg::ExternalMessage::ExternalShardingSuccess(success) => &success.request_id,
           msg::ExternalMessage::ExternalShardingAborted(aborted) => &aborted.request_id,
-          msg::ExternalMessage::ExternalDebugResponse(_) => panic!(),
+          msg::ExternalMessage::ExternalMetadataResponse(_) => panic!(),
         };
 
         let req = req_map.get_mut(&eid).unwrap().remove(request_id).unwrap();
@@ -1242,7 +1242,7 @@ pub fn parallel_test<WriterT: Writer>(
             msg::ExternalMessage::ExternalDDLQueryAborted(aborted) => &aborted.request_id,
             msg::ExternalMessage::ExternalShardingSuccess(success) => &success.request_id,
             msg::ExternalMessage::ExternalShardingAborted(aborted) => &aborted.request_id,
-            msg::ExternalMessage::ExternalDebugResponse(_) => panic!(),
+            msg::ExternalMessage::ExternalMetadataResponse(_) => panic!(),
           };
 
           let req = req_map.get_mut(&eid).unwrap().remove(request_id).unwrap();

@@ -982,16 +982,15 @@ impl MasterContext {
               }
             }
           }
-          msg::MasterExternalReq::ExternalDebugRequest(request) => {
-            // Send back debug data.
-            let debug_str = format!("{:#?}", self);
+          msg::MasterExternalReq::ExternalMetadataRequest(request) => {
+            // Send back metadata.
             io_ctx.send(
               &request.sender_eid.clone(),
-              msg::NetworkMessage::External(msg::ExternalMessage::ExternalDebugResponse(
-                msg::ExternalDebugResponse {
+              msg::NetworkMessage::External(msg::ExternalMessage::ExternalMetadataResponse(
+                msg::ExternalMetadataResponse {
                   sender_eid: request.sender_eid,
                   request_id: request.request_id,
-                  debug_str,
+                  gossip_data: self.gossip.clone(),
                 },
               )),
             );
