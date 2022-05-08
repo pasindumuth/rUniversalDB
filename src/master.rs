@@ -989,6 +989,7 @@ impl MasterContext {
                   sender_eid: request.sender_eid,
                   request_id: request.request_id,
                   gossip_data: self.gossip.clone(),
+                  leader_map: self.leader_map.value().clone(),
                 },
               )),
             );

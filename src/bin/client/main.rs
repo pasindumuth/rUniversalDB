@@ -3,12 +3,13 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::cast;
 use runiversal::common::{
-  mk_rid, rand_string, ColName, ColType, ColVal, GossipData, InternalMode, TablePath, TableView,
-  Timestamp,
+  mk_rid, rand_string, ColName, ColType, ColVal, GossipData, InternalMode, PaxosGroupId, TablePath,
+  TableView, Timestamp,
 };
 use runiversal::common::{EndpointId, RequestId};
 use runiversal::message as msg;
 use runiversal::net::{send_msg, start_acceptor_thread, GenericInputTrait, SendAction};
+use runiversal::sql_parser::is_ddl;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 use std::collections::BTreeMap;
@@ -33,6 +34,10 @@ fn main() {
         .required(false)
         .help("A space separate list (in quotes) of Master IPs."),
     )
+    .arg(arg!(-e --entry_mip <VALUE>).required(false).help(
+      "If '-m' is not specified, this Master IP address is used to connect to \
+       the system for communication by the command prompt.",
+    ))
     .get_matches();
 
   // Get required arguments
@@ -65,9 +70,12 @@ fn main() {
     for _ in 0..master_eids.len() {
       to_server_receiver.recv();
     }
-  } else {
-    // Otherwise, we enter the read loop.
+  } else if let Some(master_ip) = matches.value_of("entry_mip") {
+    // Otherwise, enter the read loop.
+    state.initialize_connection(master_ip.to_string());
     state.start_loop();
+  } else {
+    println!("Please specify either '-m' or '-e'.");
   }
 }
 
@@ -105,7 +113,8 @@ struct ClientState {
   /// The Master EndpointIds we tried starting the Master with
   master_eids: Vec<EndpointId>,
   /// The EndpointId that most communication should use.
-  opt_target_eid: Option<EndpointId>,
+  opt_target_master_eid: Option<EndpointId>,
+  opt_target_slave_eid: Option<EndpointId>,
   /// The CLI command prompt (which maintaining command history, cursor state, etc).
   read_loop: Editor<()>,
 }
@@ -132,7 +141,8 @@ impl ClientState {
       rand,
       this_eid,
       master_eids: vec![],
-      opt_target_eid: None,
+      opt_target_master_eid: None,
+      opt_target_slave_eid: None,
       read_loop: Editor::new(),
     }
   }
@@ -172,49 +182,61 @@ impl ClientState {
     }
   }
 
+  /// Contacts `master_ip` to solicit the `self.master_eids`,
+  /// `self.opt_target_master_eid`, and `self.opt_traget_slave_eid`.
+  fn initialize_connection(&mut self, master_ip: String) {
+    let request_id = mk_rid(&mut self.rand);
+    let master_eid = EndpointId::new(master_ip.to_string(), InternalMode::Internal);
+    self.send(
+      &master_eid,
+      SendAction::new(
+        msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+          msg::MasterExternalReq::ExternalMetadataRequest(msg::ExternalMetadataRequest {
+            sender_eid: self.this_eid.clone(),
+            request_id,
+          }),
+        )),
+        None,
+      ),
+    );
+
+    // Send and wait for a response
+    let message = self.to_server_receiver.recv().unwrap().message;
+    let external_msg = cast!(msg::NetworkMessage::External, message).unwrap();
+    let resp = cast!(msg::ExternalMessage::ExternalMetadataResponse, external_msg).unwrap();
+
+    // Populate ClientState
+    self.master_eids = resp.gossip_data.get().master_address_config.clone();
+    for (gid, lid) in resp.leader_map {
+      if let PaxosGroupId::Slave(_) = gid {
+        // For simplicity, choose some random Slave Leadership.
+        self.opt_target_slave_eid = Some(lid.eid);
+      } else {
+        // And choose the only Master Leadership.
+        self.opt_target_master_eid = Some(lid.eid);
+      }
+    }
+  }
+
   /// Processes a line submitted by the user.
   fn handle_input(&mut self, input: String) -> Result<LoopAction, String> {
     // Quit
     if input == "\\q" {
       Ok(LoopAction::Exit)
     }
-    // Start the Master Group
-    else if input.starts_with("setmaster ") {
-      // Parse the `master_eids`
+    // Set the remote MasterNode to communicate with.
+    else if input.starts_with("master_target ") {
       let mut it = input.split(" ");
       it.next();
-      self.master_eids =
-        it.map(|ip| EndpointId::new(ip.to_string(), InternalMode::Internal)).collect();
-
+      self.opt_target_master_eid =
+        Some(EndpointId::new(it.next().unwrap().to_string(), InternalMode::Internal));
       Ok(LoopAction::DoNothing)
     }
-    // Start the Master Group
-    else if input.starts_with("startmaster ") {
-      // Parse the `master_eids`
+    // Set the remote Slave Node to communicate with.
+    else if input.starts_with("slave_target ") {
       let mut it = input.split(" ");
       it.next();
-      self.master_eids =
-        it.map(|ip| EndpointId::new(ip.to_string(), InternalMode::Internal)).collect();
-
-      // Instruct the nodes to become part of the Master Group.
-      for eid in &self.master_eids {
-        self.send(
-          eid,
-          SendAction::new(
-            msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::StartMaster(msg::StartMaster {
-              master_eids: self.master_eids.clone(),
-            })),
-            None,
-          ),
-        );
-      }
-      Ok(LoopAction::DoNothing)
-    }
-    // Set the remote Node to communicate with.
-    else if input.starts_with("target ") {
-      let mut it = input.split(" ");
-      it.next();
-      self.opt_target_eid =
+      self.opt_target_slave_eid =
         Some(EndpointId::new(it.next().unwrap().to_string(), InternalMode::Internal));
       Ok(LoopAction::DoNothing)
     }
@@ -229,9 +251,8 @@ impl ClientState {
       ));
 
       // Send and wait for a response
-      self.send(self.get_target()?, SendAction::new(network_msg, None));
+      self.send(self.get_master()?, SendAction::new(network_msg, None));
       let message = self.to_server_receiver.recv().unwrap().message;
-
       let external_msg = cast!(msg::NetworkMessage::External, message).unwrap();
       let resp = cast!(msg::ExternalMessage::ExternalMetadataResponse, external_msg).unwrap();
       let gossip_data = resp.gossip_data;
@@ -259,28 +280,29 @@ impl ClientState {
     // Send a normal DQL or DQL Query (based on what the `opt_target_eid` is).
     else {
       let request_id = mk_rid(&mut self.rand);
-      let network_msg = if self.master_eids.contains(self.get_target()?) {
-        // Send this message as a  DDL Query, since the target is set for the Master.
-        msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+      if is_ddl(&input) {
+        // Send this message as a DDL Query to the Master.
+        let network_msg = msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
           msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
             sender_eid: self.this_eid.clone(),
             request_id,
             query: input,
           }),
-        ))
+        ));
+        self.send(self.get_master()?, SendAction::new(network_msg, None));
       } else {
-        // Otherwise, send this message as a DQL Query, since the Target is a Slave.
-        msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+        // Otherwise, send this message as a DQL Query to the Slave.
+        let network_msg = msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
           msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
             sender_eid: self.this_eid.clone(),
             request_id,
             query: input,
           }),
-        ))
+        ));
+        self.send(self.get_slave()?, SendAction::new(network_msg, None));
       };
 
       // Send and wait for a response
-      self.send(self.get_target()?, SendAction::new(network_msg, None));
       let message = self.to_server_receiver.recv().unwrap().message;
 
       // Display the output
@@ -307,17 +329,26 @@ impl ClientState {
     }
   }
 
-  fn get_target(&self) -> Result<&EndpointId, String> {
-    if let Some(target) = &self.opt_target_eid {
-      Ok(target)
-    } else {
-      Err("A target address is not set. Do that by typing 'target <hostname>'.".to_string())
-    }
+  fn get_master(&self) -> Result<&EndpointId, String> {
+    get_eid(&self.opt_target_master_eid)
+  }
+
+  fn get_slave(&self) -> Result<&EndpointId, String> {
+    get_eid(&self.opt_target_slave_eid)
   }
 
   /// A convenience function for sending data to `eid`.
   fn send(&self, eid: &EndpointId, action: SendAction) {
     send_msg(&self.out_conn_map, eid, action, &self.this_eid.mode);
+  }
+}
+
+/// Unwraps `opt_target`, returning an error if not present.
+fn get_eid(opt_target: &Option<EndpointId>) -> Result<&EndpointId, String> {
+  if let Some(target) = opt_target {
+    Ok(target)
+  } else {
+    Err("A target address is not set. Do that by typing 'target <hostname>'.".to_string())
   }
 }
 

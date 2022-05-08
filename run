@@ -11,28 +11,30 @@ if [ "$1" = "setup" ]; then
   docker build -t runiversal .
 elif [ "$1" = "build" ]; then
   docker build -t runiversal .
-elif [ "$1" = "client" ]; then
-  # Start the image by running the client, and start an interactive terminal.
-  docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal scripts/client -i 172.19.0.2;
-  # After we exit the terminal, clean up the container.
-  docker container rm rclient;
-elif [ "$1" = "client_fast" ]; then
+elif [ "$1" = "client_init" ]; then
   # Start the image by running the client, but only to initialize the Master Group.
   docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal scripts/client -i 172.19.0.2 -m '172.19.0.10 172.19.0.11 172.19.0.12 172.19.0.13 172.19.0.14';
+  # After we exit the terminal, clean up the container.
+  docker container rm rclient;
+elif [ "$1" = "client" ]; then
+  # Start the image by running the client, and start an interactive terminal.
+  docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal scripts/client -i 172.19.0.2 -e 172.19.0.10;
   # After we exit the terminal, clean up the container.
   docker container rm rclient;
 elif [ "$1" = "masters" ]; then
   # Start the image by running transact, and have it be in the background.
   for ((i = 10; i < 15; i++)); do
     CONTAINER_NAME="runiversal${i}";
-    docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.19.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.19.0."${i}" -t masterbootup;
+    docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.19.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.19.0."${i}" -t masterbootup &
   done
+  wait
 elif [ "$1" = "slaves" ]; then
   # Start the image by running transact, and have it be in the background.
   for ((i = 15; i < $((15 + $NUM_SLAVES)); i++)); do
     CONTAINER_NAME="runiversal${i}";
-    docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.19.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.19.0."${i}" -t freenode -f newslave -e 172.19.0.10;
+    docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.19.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.19.0."${i}" -t freenode -f newslave -e 172.19.0.10 &
   done
+  wait
 elif [ "$1" = "clean" ]; then
   CONTAINERS="rclient";
   for ((i = 10; i < $((15 + $NUM_SLAVES)); i++)); do

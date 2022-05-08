@@ -2,6 +2,8 @@ use crate::common::TablePath;
 use crate::common::{ColName, ColType};
 use crate::sql_ast::{iast, proc};
 use sqlparser::ast;
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::test_utils::table;
 use std::collections::BTreeMap;
 
@@ -475,5 +477,13 @@ pub fn convert_data_type(raw_data_type: &ast::DataType) -> Result<ColType, Strin
     ast::DataType::String => Ok(ColType::String),
     ast::DataType::Varchar(_) => Ok(ColType::String),
     _ => Err(format!("Unsupported ast::DataType {:?}", raw_data_type)),
+  }
+}
+
+/// Computes whether this SQL Query is a DDL query by attempting to parse it as such.
+pub fn is_ddl(query: &str) -> bool {
+  match Parser::parse_sql(&GenericDialect {}, &query) {
+    Ok(parsed_ast) => convert_ddl_ast(parsed_ast).is_ok(),
+    Err(_) => false,
   }
 }
