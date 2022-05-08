@@ -34,10 +34,7 @@ docker kill runiversal15; docker container rm runiversal15;
 ## Setup
 Run the following:
 
-./run masters &&
-./run client_init &&
-./run slaves &&
-./run client
+./run start
 
 ## Query Examples
 
