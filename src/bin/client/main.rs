@@ -52,15 +52,18 @@ impl GenericInputTrait for GenericInput {
   }
 }
 
+/// Actions returned by `handle_input` to be performed by `start_loop`.
 enum LoopAction {
   Print(String),
   DoNothing,
   Exit,
 }
 
+/// Contains the client state (e.g. connection state).
 struct ClientState {
   to_server_receiver: Receiver<GenericInput>,
   out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  /// Rng
   rand: XorShiftRng,
   /// The EndpointId of this node
   this_eid: EndpointId,
@@ -69,7 +72,7 @@ struct ClientState {
   /// The EndpointId that most communication should use.
   opt_target_eid: Option<EndpointId>,
   /// The CLI command prompt (which maintaining command history, cursor state, etc).
-  rl: Editor<()>,
+  read_loop: Editor<()>,
 }
 
 impl ClientState {
@@ -95,17 +98,18 @@ impl ClientState {
       this_eid,
       master_eids: vec![],
       opt_target_eid: None,
-      rl: Editor::new(),
+      read_loop: Editor::new(),
     }
   }
+
   fn start_loop(&mut self) {
     // Setup the CLI read loop.
     loop {
       // Read the next line from the command prompt.
-      let readline = self.rl.readline(">> ");
+      let readline = self.read_loop.readline(">> ");
       let input = match readline {
         Ok(line) => {
-          self.rl.add_history_entry(line.as_str());
+          self.read_loop.add_history_entry(line.as_str());
           line
         }
         Err(ReadlineError::Interrupted) => {
@@ -133,15 +137,21 @@ impl ClientState {
     }
   }
 
+  /// Processes a line submitted by the user.
   fn handle_input(&mut self, input: String) -> Result<LoopAction, String> {
-    if input == "exit" {
+    // Quit
+    if input == "\\q" {
       Ok(LoopAction::Exit)
-    } else if input.starts_with("startmaster ") {
-      // Start the masters
+    }
+    // Start the Master Group
+    else if input.starts_with("startmaster ") {
+      // Parse the `master_eids`
       let mut it = input.split(" ");
       it.next();
       self.master_eids =
         it.map(|ip| EndpointId::new(ip.to_string(), InternalMode::Internal)).collect();
+
+      // Instruct the nodes to become part of the Master Group.
       for eid in &self.master_eids {
         send_msg(
           &self.out_conn_map,
@@ -153,14 +163,17 @@ impl ClientState {
         );
       }
       Ok(LoopAction::DoNothing)
-    } else if input.starts_with("target ") {
+    }
+    // Set the remote Node to communicate with.
+    else if input.starts_with("target ") {
       let mut it = input.split(" ");
       it.next();
       self.opt_target_eid =
         Some(EndpointId::new(it.next().unwrap().to_string(), InternalMode::Internal));
       Ok(LoopAction::DoNothing)
-    } else if input.starts_with("\\dt") {
-      // We display schema data. Here, we query
+    }
+    // Query and display metadata from the system
+    else if input.starts_with("\\dt") {
       let request_id = mk_rid(&mut self.rand);
       let network_msg = msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
         msg::MasterExternalReq::ExternalMetadataRequest(msg::ExternalMetadataRequest {
@@ -178,6 +191,7 @@ impl ClientState {
       let gossip_data = resp.gossip_data;
       let timestamp = gossip_data.get().table_generation.get_latest_lat();
 
+      // Display the output
       let display = if input.starts_with("\\dt ") {
         // Here, a table name should also be specified, which we display in detail.
         let mut it = input.split(" ");
@@ -195,8 +209,9 @@ impl ClientState {
         format_dt_overview(gossip_data, timestamp)
       };
       Ok(LoopAction::Print(display))
-    } else {
-      // Here, we handle this as a normal SQL query.
+    }
+    // Send a normal DQL or DQL Query (based on what the `opt_target_eid` is).
+    else {
       let request_id = mk_rid(&mut self.rand);
       let network_msg = if self.master_eids.contains(self.get_target()?) {
         // Send this message as a  DDL Query, since the target is set for the Master.
@@ -221,6 +236,8 @@ impl ClientState {
       // Send and wait for a response
       send_msg(&self.out_conn_map, self.get_target()?, network_msg, &self.this_eid.mode);
       let message = self.to_server_receiver.recv().unwrap().message;
+
+      // Display the output
       if let Some(display) = match message {
         msg::NetworkMessage::External(external) => match external {
           msg::ExternalMessage::ExternalQuerySuccess(success) => {
@@ -257,11 +274,15 @@ impl ClientState {
 //  Print Utils
 // -----------------------------------------------------------------------------------------------
 
+/// How to justify content within a cell.
 enum Justification {
-  Right,
+  Left,
   Center,
+  Right,
 }
 
+/// Takes every element in `elems` and places it within a cell, using the given
+/// `justification`, and returns the line.
 fn format_even_spaces(elems: Vec<String>, justification: Justification) -> String {
   const CELL_WIDTH: usize = 16;
   const MAX_CELL_CONTENT_LEN: usize = 14;
@@ -278,8 +299,9 @@ fn format_even_spaces(elems: Vec<String>, justification: Justification) -> Strin
 
     let white_space = CELL_WIDTH - resolved_elem.len();
     let (l_padding, r_padding) = match justification {
-      Justification::Right => (white_space - 1, 1),
+      Justification::Left => (1, white_space - 1),
       Justification::Center => (white_space / 2 + white_space % 2, white_space / 2),
+      Justification::Right => (white_space - 1, 1),
     };
 
     formatted_elems.push(format!(
@@ -298,28 +320,27 @@ fn format_even_spaces(elems: Vec<String>, justification: Justification) -> Strin
 fn format_table(table_view: TableView) -> String {
   let mut lines = Vec::<String>::new();
 
-  // Construct the elements in the schema string
-  let mut schema_row_elems = Vec::<String>::new();
-  schema_row_elems.push("index".to_string());
+  // Construct Display Columns for the Display Table
+  let mut display_cols = Vec::<String>::new();
+  display_cols.push("index".to_string());
   for maybe_col_name in table_view.col_names {
     if let Some(ColName(col_name)) = maybe_col_name {
-      schema_row_elems.push(col_name);
+      display_cols.push(col_name);
     }
   }
-  schema_row_elems.push("count".to_string());
+  display_cols.push("count".to_string());
+  let display_cols_line = format_even_spaces(display_cols, Justification::Center);
+  let display_width = display_cols_line.len();
 
-  // Format the schema string
-  let schema_row = format_even_spaces(schema_row_elems, Justification::Center);
-  let length = schema_row.len();
+  // Populate the first few lines
+  lines.push("-".repeat(display_width));
+  lines.push(display_cols_line);
+  lines.push("-".repeat(display_width));
 
-  lines.push("-".repeat(length));
-  lines.push(schema_row);
-  lines.push("-".repeat(length));
-
-  // Construct the row strings
+  // Construct Display Rows
   for (index, (cols, count)) in table_view.rows.into_iter().enumerate() {
-    let mut row_elems = Vec::<String>::new();
-    row_elems.push(index.to_string());
+    let mut display_row = Vec::<String>::new();
+    display_row.push(index.to_string());
     for col in cols {
       let col_val_str = match col {
         Some(ColVal::Int(val)) => val.to_string(),
@@ -327,17 +348,18 @@ fn format_table(table_view: TableView) -> String {
         Some(ColVal::String(val)) => format!("\"{}\"", val),
         None => "NULL".to_string(),
       };
-      row_elems.push(col_val_str);
+      display_row.push(col_val_str);
     }
-    row_elems.push(count.to_string());
+    display_row.push(count.to_string());
 
-    lines.push(format_even_spaces(row_elems, Justification::Right));
-    lines.push("-".repeat(length));
+    lines.push(format_even_spaces(display_row, Justification::Right));
+    lines.push("-".repeat(display_width));
   }
 
   lines.join("\n")
 }
 
+/// Format database schema into a printable string.
 fn format_dt_overview(gossip: GossipData, timestamp: Timestamp) -> String {
   let mut lines = Vec::<String>::new();
 
@@ -351,6 +373,7 @@ fn format_dt_overview(gossip: GossipData, timestamp: Timestamp) -> String {
   lines.push(display_cols_line);
   lines.push("-".repeat(display_width));
 
+  // Construct Display Rows
   for (table_path, _) in gossip.get().table_generation.static_snapshot_read(&timestamp) {
     let display_row = vec!["public".to_string(), table_path.0, "table".to_string()];
     lines.push(format_even_spaces(display_row, Justification::Right));
@@ -360,10 +383,11 @@ fn format_dt_overview(gossip: GossipData, timestamp: Timestamp) -> String {
   lines.join("\n")
 }
 
+/// Format table schema into a printable string.
 fn format_dt_table(gossip: GossipData, path: String, timestamp: Timestamp) -> Option<String> {
   let mut lines = Vec::<String>::new();
 
-  // Construct Display Table
+  // Construct Display Columns for the Display Table
   let mut display_cols = vec!["Column".to_string(), "Type".to_string()];
   let display_cols_line = format_even_spaces(display_cols, Justification::Center);
   let display_width = display_cols_line.len();
@@ -373,6 +397,7 @@ fn format_dt_table(gossip: GossipData, path: String, timestamp: Timestamp) -> Op
   lines.push(display_cols_line);
   lines.push("-".repeat(display_width));
 
+  // Construct Display Rows
   let table_path = TablePath(path);
   let (gen, _) = gossip.get().table_generation.static_read(&table_path, &timestamp)?;
   let table_path_gen = (table_path.clone(), gen.clone());
