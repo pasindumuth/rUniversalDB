@@ -1,7 +1,7 @@
 use crate::common::{mk_t, mk_uuid, remove_item, Timestamp, UUID};
 use crate::common::{EndpointId, Gen, LeadershipId};
 use crate::message as msg;
-use crate::message::{LeaderChanged, PLEntry, PLIndex, PaxosDriverMessage, PaxosMessage, Rnd};
+use crate::message::{LeaderChanged, PLEntry, PLIndex, Rnd};
 use rand::RngCore;
 use sqlparser::dialect::keywords::Keyword::NEXT;
 use std::cmp::{max, min};
@@ -122,10 +122,10 @@ pub enum UserPLEntry<BundleT> {
 }
 
 impl<BundleT> UserPLEntry<BundleT> {
-  fn convert(self) -> msg::PLEntry<BundleT> {
+  fn convert(self) -> PLEntry<BundleT> {
     match self {
-      UserPLEntry::Bundle(bundle) => msg::PLEntry::Bundle(bundle),
-      UserPLEntry::ReconfigBundle(reconfig) => msg::PLEntry::ReconfigBundle(reconfig),
+      UserPLEntry::Bundle(bundle) => PLEntry::Bundle(bundle),
+      UserPLEntry::ReconfigBundle(reconfig) => PLEntry::ReconfigBundle(reconfig),
     }
   }
 }
@@ -388,7 +388,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
     &mut self,
     ctx: &mut PaxosContextBaseT,
     message: msg::PaxosDriverMessage<BundleT>,
-  ) -> Vec<msg::PLEntry<BundleT>> {
+  ) -> Vec<PLEntry<BundleT>> {
     let mut learned_entries = self.handle_paxos_message_internal(ctx, message);
     // Poll and process all `buffered_messages` which an index that is low enough.
     self.handle_buffered_messages(ctx, &mut learned_entries);
@@ -402,9 +402,9 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
     &mut self,
     ctx: &mut PaxosContextBaseT,
     message: msg::PaxosDriverMessage<BundleT>,
-  ) -> Vec<msg::PLEntry<BundleT>> {
+  ) -> Vec<PLEntry<BundleT>> {
     match message {
-      PaxosDriverMessage::MultiPaxosMessage(multi) => {
+      msg::PaxosDriverMessage::MultiPaxosMessage(multi) => {
         if let msg::PaxosMessage::Prepare(_) = &multi.paxos_message {
           if multi.sender_eid != self.leader.eid
             && self.leader_heartbeat <= self.paxos_config.heartbeat_threshold
@@ -447,7 +447,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
         let instance_entry = self.paxos_instances.get_mut(&multi.index).unwrap();
         let paxos_instance = instance_entry.instance.as_mut().unwrap();
         match multi.paxos_message {
-          PaxosMessage::Prepare(prepare) => {
+          msg::PaxosMessage::Prepare(prepare) => {
             let state = &mut paxos_instance.acceptor_state;
             if prepare.crnd > state.rnd {
               state.rnd = prepare.crnd;
@@ -467,7 +467,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
               );
             }
           }
-          PaxosMessage::Promise(promise) => {
+          msg::PaxosMessage::Promise(promise) => {
             let state = paxos_instance.proposer_state.proposals.get_mut(&promise.rnd).unwrap();
             state.promises.push(promise.vrnd_vval);
             if state.promises.len() == majority(&self.paxos_nodes) {
@@ -510,7 +510,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
               }
             }
           }
-          PaxosMessage::Accept(accept) => {
+          msg::PaxosMessage::Accept(accept) => {
             let state = &mut paxos_instance.acceptor_state;
             if accept.crnd >= state.rnd {
               state.rnd = accept.crnd.clone();
@@ -543,7 +543,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
               }
             }
           }
-          PaxosMessage::Learn(learn) => {
+          msg::PaxosMessage::Learn(learn) => {
             let state = &mut paxos_instance.learner_state;
             if !state.learned.contains_key(&learn.vrnd) {
               state.learned.insert(learn.vrnd.clone(), 0);
@@ -577,13 +577,13 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
           }
         }
       }
-      PaxosDriverMessage::IsLeader(is_leader) => {
+      msg::PaxosDriverMessage::IsLeader(is_leader) => {
         if is_leader.lid == self.leader {
           // Reset heartbeat
           self.leader_heartbeat = 0;
         }
       }
-      PaxosDriverMessage::InformLearned(inform_learned) => {
+      msg::PaxosDriverMessage::InformLearned(inform_learned) => {
         let mut learned_entries = Vec::<PLEntry<BundleT>>::new();
         loop {
           // Poll and process a `buffered_messages` if there is one with low enough index.
@@ -621,7 +621,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
           return learned_entries;
         }
       }
-      PaxosDriverMessage::LogSyncRequest(request) => {
+      msg::PaxosDriverMessage::LogSyncRequest(request) => {
         let mut learned = Vec::<(PLIndex, Rnd, PLEntry<BundleT>)>::new();
         for index in request.next_index..self.next_index {
           // Note that `index` will exist in `paxos_instances` because the only way it would not
@@ -638,7 +638,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
           msg::PaxosDriverMessage::LogSyncResponse(msg::LogSyncResponse { learned }),
         );
       }
-      PaxosDriverMessage::LogSyncResponse(response) => {
+      msg::PaxosDriverMessage::LogSyncResponse(response) => {
         // Learn all values sent here
         for (index, vrnd, vval) in response.learned {
           // We guard with `self.index`, since all indices prior are already learned.
@@ -666,7 +666,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
         // Here, we have processed all the `should_learned`s we could, so we finish.
         return learned_entries;
       }
-      PaxosDriverMessage::NextIndexRequest(request) => {
+      msg::PaxosDriverMessage::NextIndexRequest(request) => {
         let this_eid = ctx.this_eid();
         ctx.send(
           &request.sender_eid,
@@ -676,7 +676,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
           }),
         );
       }
-      PaxosDriverMessage::NextIndexResponse(response) => {
+      msg::PaxosDriverMessage::NextIndexResponse(response) => {
         let orig_min_index = self.min_complete_index();
 
         // Update remote index
@@ -688,7 +688,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
           self.paxos_instances.remove(&index);
         }
       }
-      PaxosDriverMessage::StartNewNode(start) => {
+      msg::PaxosDriverMessage::StartNewNode(start) => {
         // Here, we simply respond with a `NewNodeStarted`. Recall that redundant
         // `StartNewNode` messages like this are possible.
         let this_eid = ctx.this_eid().clone();
@@ -697,7 +697,7 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
           msg::PaxosDriverMessage::NewNodeStarted(msg::NewNodeStarted { paxos_node: this_eid }),
         );
       }
-      PaxosDriverMessage::NewNodeStarted(started) => {
+      msg::PaxosDriverMessage::NewNodeStarted(started) => {
         self.unconfirmed_eids.remove(&started.paxos_node);
       }
     }

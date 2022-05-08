@@ -1,13 +1,12 @@
 use crate::col_usage::{iterate_stage_ms_query, GeneralStage};
-use crate::common::TablePath;
-use crate::common::{lookup, FullGen, TableSchema, Timestamp};
-use crate::common::{ColName, Gen, TierMap, TransTableName};
+use crate::common::{
+  lookup, ColName, FullGen, Gen, TablePath, TableSchema, TierMap, Timestamp, TransTableName,
+};
 use crate::master_query_planning_es::{
   DBSchemaView, ReqColPresenceError, ReqTablePresenceError, StaticValidationErrorTrait,
 };
 use crate::multiversion_map::MVM;
 use crate::sql_ast::proc;
-use crate::sql_ast::proc::MSQueryStage;
 use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
 

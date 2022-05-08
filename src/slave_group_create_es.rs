@@ -1,5 +1,7 @@
-use crate::common::{mk_cid, mk_sid, update_all_eids, MasterIOCtx};
-use crate::common::{CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupIdTrait, SlaveGroupId};
+use crate::common::{
+  mk_cid, mk_sid, update_all_eids, CoordGroupId, EndpointId, Gen, LeadershipId, MasterIOCtx,
+  PaxosGroupIdTrait, SlaveGroupId,
+};
 use crate::master::{MasterContext, MasterPLm};
 use crate::message as msg;
 use serde::{Deserialize, Serialize};

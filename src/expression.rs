@@ -3,7 +3,6 @@ use crate::common::{
   TabletKeyRange, WriteRegion, WriteRegionType,
 };
 use crate::common::{ColName, ColType, ColVal, ColValN};
-use crate::sql_ast::proc::ValExpr;
 use crate::sql_ast::{iast, proc};
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
@@ -98,18 +97,18 @@ pub fn construct_cexpr(
   next_subquery_idx: &mut usize,
 ) -> Result<CExpr, EvalError> {
   let c_expr = match sql_expr {
-    ValExpr::ColumnRef(col) => CExpr::Value { val: col_map.get(col).unwrap().clone() },
-    ValExpr::UnaryExpr { op, expr } => CExpr::UnaryExpr {
+    proc::ValExpr::ColumnRef(col) => CExpr::Value { val: col_map.get(col).unwrap().clone() },
+    proc::ValExpr::UnaryExpr { op, expr } => CExpr::UnaryExpr {
       op: op.clone(),
       expr: Box::new(construct_cexpr(expr.deref(), col_map, subquery_vals, next_subquery_idx)?),
     },
-    ValExpr::BinaryExpr { op, left, right } => CExpr::BinaryExpr {
+    proc::ValExpr::BinaryExpr { op, left, right } => CExpr::BinaryExpr {
       op: op.clone(),
       left: Box::new(construct_cexpr(left.deref(), col_map, subquery_vals, next_subquery_idx)?),
       right: Box::new(construct_cexpr(right.deref(), col_map, subquery_vals, next_subquery_idx)?),
     },
-    ValExpr::Value { val } => CExpr::Value { val: construct_colvaln(val.clone())? },
-    ValExpr::Subquery { .. } => {
+    proc::ValExpr::Value { val } => CExpr::Value { val: construct_colvaln(val.clone())? },
+    proc::ValExpr::Subquery { .. } => {
       // Here, we simply take the next subquery and increment `next_subquery_idx`.
       let subquery_val = subquery_vals.get(*next_subquery_idx).unwrap().clone();
       *next_subquery_idx += 1;
@@ -123,17 +122,17 @@ pub fn construct_cexpr(
 /// are no `ColumnRef`s or `Subquery`s.
 pub fn construct_simple_cexpr(sql_expr: &proc::ValExpr) -> Result<CExpr, EvalError> {
   match sql_expr {
-    ValExpr::ColumnRef(_) => Err(EvalError::InvalidSimpleExpr),
-    ValExpr::UnaryExpr { op, expr } => {
+    proc::ValExpr::ColumnRef(_) => Err(EvalError::InvalidSimpleExpr),
+    proc::ValExpr::UnaryExpr { op, expr } => {
       Ok(CExpr::UnaryExpr { op: op.clone(), expr: Box::new(construct_simple_cexpr(expr.deref())?) })
     }
-    ValExpr::BinaryExpr { op, left, right } => Ok(CExpr::BinaryExpr {
+    proc::ValExpr::BinaryExpr { op, left, right } => Ok(CExpr::BinaryExpr {
       op: op.clone(),
       left: Box::new(construct_simple_cexpr(left.deref())?),
       right: Box::new(construct_simple_cexpr(right.deref())?),
     }),
-    ValExpr::Value { val } => Ok(CExpr::Value { val: construct_colvaln(val.clone())? }),
-    ValExpr::Subquery { .. } => Err(EvalError::InvalidSimpleExpr),
+    proc::ValExpr::Value { val } => Ok(CExpr::Value { val: construct_colvaln(val.clone())? }),
+    proc::ValExpr::Subquery { .. } => Err(EvalError::InvalidSimpleExpr),
   }
 }
 
@@ -362,7 +361,7 @@ fn construct_kb_expr(
   key_cols: &Vec<(ColName, ColType)>,
 ) -> Result<KBExpr, EvalError> {
   let kb_expr = match expr {
-    ValExpr::ColumnRef(col) => {
+    proc::ValExpr::ColumnRef(col) => {
       if let Some(val) = col_map.get(&col) {
         KBExpr::Value { val: val.clone() }
       } else {
@@ -373,16 +372,16 @@ fn construct_kb_expr(
         }
       }
     }
-    ValExpr::UnaryExpr { op, expr } => {
+    proc::ValExpr::UnaryExpr { op, expr } => {
       KBExpr::UnaryExpr { op, expr: Box::new(construct_kb_expr(*expr, col_map, source, key_cols)?) }
     }
-    ValExpr::BinaryExpr { op, left, right } => KBExpr::BinaryExpr {
+    proc::ValExpr::BinaryExpr { op, left, right } => KBExpr::BinaryExpr {
       op,
       left: Box::new(construct_kb_expr(*left, col_map, source, key_cols)?),
       right: Box::new(construct_kb_expr(*right, col_map, source, key_cols)?),
     },
-    ValExpr::Value { val } => KBExpr::Value { val: construct_colvaln(val.clone())? },
-    ValExpr::Subquery { .. } => KBExpr::UnknownValue,
+    proc::ValExpr::Value { val } => KBExpr::Value { val: construct_colvaln(val.clone())? },
+    proc::ValExpr::Subquery { .. } => KBExpr::UnknownValue,
   };
   Ok(kb_expr)
 }

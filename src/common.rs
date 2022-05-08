@@ -4,7 +4,6 @@ use crate::expression::does_types_match;
 use crate::master::MasterTimerInput;
 use crate::master_query_planning_es::ColPresenceReq;
 use crate::message as msg;
-use crate::message::NetworkMessage;
 use crate::multiversion_map::MVM;
 use crate::node::{GenericInput, GenericTimerInput};
 use crate::server::{CTServerContext, CommonQuery};

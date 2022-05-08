@@ -1,6 +1,4 @@
 use crate::message as msg;
-use crate::message::NetworkMessage::Slave;
-use crate::message::{ExternalMessage, SlaveMessage, SlaveRemotePayload};
 use crate::simple_rm_es::SimpleRMES;
 use crate::simple_tm_es::{SimplePayloadTypes, SimplePrepare, SimpleTMES, SimpleTMInner};
 use crate::simulation::ISlaveIOCtx;
@@ -219,12 +217,12 @@ impl SlaveContext {
   ) {
     match input {
       FullSlaveInput::SlaveMessage(message) => match message {
-        SlaveMessage::ExternalMessage(request) => {
+        msg::SlaveMessage::ExternalMessage(request) => {
           if self.is_leader() {
             self.handle_input(io_ctx, statuses, SlaveForwardMsg::SlaveExternalReq(request))
           }
         }
-        SlaveMessage::RemoteMessage(remote_message) => {
+        msg::SlaveMessage::RemoteMessage(remote_message) => {
           if self.is_leader() {
             // Pass the message through the NetworkDriver
             let maybe_delivered = self.network_driver.receive(
@@ -242,7 +240,10 @@ impl SlaveContext {
             }
           }
         }
-        SlaveMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip { gid, lid }) => {
+        msg::SlaveMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip {
+          gid,
+          lid,
+        }) => {
           if self.is_leader() {
             if &lid.gen > &self.leader_map.value().get(&gid).unwrap().gen {
               // If the incoming RemoteLeaderChanged would increase the generation
@@ -342,14 +343,14 @@ impl SlaveContext {
         }
       }
       SlaveForwardMsg::SlaveExternalReq(request) => match request {
-        ExternalMessage::STMSimpleRequest(simple_req) => {
+        msg::ExternalMessage::STMSimpleRequest(simple_req) => {
           let query_id = simple_req.query_id;
           let mut es =
             STMSimpleTMES::new(query_id.clone(), STMSimpleTMInner { rms: simple_req.rms });
           es.state = stmpaxos2pc_tm::State::WaitingInsertTMPrepared;
           statuses.stm_simple_tm_ess.insert(query_id, es);
         }
-        ExternalMessage::SimpleRequest(simple_req) => {
+        msg::ExternalMessage::SimpleRequest(simple_req) => {
           let query_id = simple_req.query_id;
 
           // Construct SimplePrepares
@@ -371,7 +372,7 @@ impl SlaveContext {
         }
       },
       SlaveForwardMsg::SlaveRemotePayload(payload) => match payload {
-        SlaveRemotePayload::STMRMMessage(message) => {
+        msg::SlaveRemotePayload::STMRMMessage(message) => {
           if let stmpaxos2pc_tm::RMMessage::Prepare(prepare) = message.clone() {
             // Here, we randomly decide whether to accept the `Prepare` and proceed to
             // insert `Prepared`, or whether to respond immediately with an `Aborted`.
@@ -396,15 +397,15 @@ impl SlaveContext {
             stmpaxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.stm_simple_rm_ess, message);
           self.handle_stm_simple_rm_es_action(statuses, query_id, action);
         }
-        SlaveRemotePayload::STMTMMessage(message) => {
+        msg::SlaveRemotePayload::STMTMMessage(message) => {
           stmpaxos2pc_tm::handle_msg(self, io_ctx, &mut statuses.stm_simple_tm_ess, message);
         }
-        SlaveRemotePayload::RMMessage(message) => {
+        msg::SlaveRemotePayload::RMMessage(message) => {
           let (query_id, action) =
             paxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.simple_rm_ess, &mut (), message);
           self.handle_simple_rm_es_action(statuses, query_id, action);
         }
-        SlaveRemotePayload::TMMessage(message) => {
+        msg::SlaveRemotePayload::TMMessage(message) => {
           let (query_id, action) =
             paxos2pc_tm::handle_tm_msg(self, io_ctx, &mut statuses.simple_tm_ess, message);
           self.handle_simple_tm_es_action(statuses, query_id, action);

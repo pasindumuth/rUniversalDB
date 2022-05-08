@@ -205,7 +205,7 @@ fn execute_multi(rand: &mut XorShiftRng, instances: u32, rounds: u32) {
   }
 
   // Drop the original sender to avoid blocking the following `recv` call forever.
-  std::mem::drop(sender);
+  drop(sender);
 
   let mut parallel_stats_acc = Vec::<ParallelTestStats>::new();
   let mut basic_stats_acc = Vec::<Vec<Stats>>::new();

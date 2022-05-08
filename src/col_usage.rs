@@ -3,7 +3,6 @@ use crate::common::{ColName, ColType, Gen, TablePath, TierMap, TransTableName};
 use crate::master_query_planning_es::{ColPresenceReq, ColUsageErrorTrait, DBSchemaView};
 use crate::multiversion_map::MVM;
 use crate::server::contains_col;
-use crate::sql_ast::proc::{GeneralSourceRef, MSQueryStage, SelectClause};
 use crate::sql_ast::{iast, proc};
 use serde::{Deserialize, Serialize};
 use sqlparser::test_utils::table;
@@ -124,12 +123,12 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
     // the (Trans)Table in question.
     let mut contains_col = |col_name: &ColName| -> Result<bool, ErrorT> {
       match &source.source_ref {
-        GeneralSourceRef::TransTableName(trans_table_name) => {
+        proc::GeneralSourceRef::TransTableName(trans_table_name) => {
           // The Query converter will have made sure that all TransTableNames actually exist.
           let table_schema = trans_table_ctx.get(trans_table_name).unwrap();
           Ok(table_schema.contains(&Some(col_name.clone())))
         }
-        GeneralSourceRef::TablePath(table_path) => {
+        proc::GeneralSourceRef::TablePath(table_path) => {
           // The Query converter will have made sure that all TablePaths actually exist.
           self.view.contains_col(table_path, col_name)
         }
@@ -167,7 +166,7 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
   ) -> Result<ColUsageNode, ErrorT> {
     let mut projection = Vec::<Option<ColName>>::new();
     match &select.projection {
-      SelectClause::SelectList(select_list) => {
+      proc::SelectClause::SelectList(select_list) => {
         for (select_item, alias) in select_list {
           if let Some(col) = alias {
             projection.push(Some(col.clone()));
@@ -178,13 +177,13 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
           }
         }
       }
-      SelectClause::Wildcard => match &select.from.source_ref {
-        GeneralSourceRef::TablePath(table_path) => {
+      proc::SelectClause::Wildcard => match &select.from.source_ref {
+        proc::GeneralSourceRef::TablePath(table_path) => {
           for col in self.view.get_all_cols(table_path)? {
             projection.push(Some(col));
           }
         }
-        GeneralSourceRef::TransTableName(trans_table_name) => {
+        proc::GeneralSourceRef::TransTableName(trans_table_name) => {
           projection = trans_table_ctx.get(trans_table_name).unwrap().clone();
         }
       },
@@ -192,7 +191,7 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
 
     let mut exprs = Vec::new();
     match &select.projection {
-      SelectClause::SelectList(select_list) => {
+      proc::SelectClause::SelectList(select_list) => {
         let mut val_expr_count = 0;
         let mut unary_agg_count = 0;
         for (select_item, _) in select_list {
@@ -211,7 +210,7 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
           return Err(ErrorT::mk_error(ColUsageError::InvalidSelectClause));
         }
       }
-      SelectClause::Wildcard => {}
+      proc::SelectClause::Wildcard => {}
     }
 
     exprs.push(select.selection.clone());

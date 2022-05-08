@@ -8,7 +8,6 @@ use crate::common::{CTQueryPath, Context, QueryId, TransTableLocationPrefix};
 use crate::expression::{is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::message as msg;
-use crate::message::QueryError;
 use crate::server::{
   mk_eval_error, CTServerContext, ContextConstructor, LocalColumnRef, LocalTable, ServerContextBase,
 };
@@ -421,7 +420,7 @@ impl TPESBase for TransTableReadES {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-    query_error: QueryError,
+    query_error: msg::QueryError,
   ) -> TPESAction {
     TransTableReadES::handle_internal_query_error(self, ctx, io_ctx, query_error)
   }

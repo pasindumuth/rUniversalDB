@@ -1,7 +1,5 @@
 use crate::common::{ColName, TablePath, TransTableName};
 use crate::message as msg;
-use crate::sql_ast::iast::SelectClause;
-use crate::sql_ast::proc::SimpleSource;
 use crate::sql_ast::{iast, proc};
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
@@ -96,7 +94,7 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
 
       // Rename the Projection Clause
       match &mut select.projection {
-        SelectClause::SelectList(select_list) => {
+        iast::SelectClause::SelectList(select_list) => {
           for (select_item, _) in select_list {
             match select_item {
               iast::SelectItem::ValExpr(val_expr) => {
@@ -108,7 +106,7 @@ fn rename_trans_tables_query_r(ctx: &mut RenameContext, query: &mut iast::Query)
             }
           }
         }
-        SelectClause::Wildcard => {}
+        iast::SelectClause::Wildcard => {}
       }
 
       // Rename the Where Clause
@@ -206,7 +204,7 @@ fn flatten_top_level_query_r(
     }
     iast::QueryBody::Update(update) => {
       let mut ms_update = proc::Update {
-        table: SimpleSource {
+        table: proc::SimpleSource {
           source_ref: TablePath(update.table.source_ref.clone()),
           alias: update.table.alias.clone(),
         },
@@ -224,7 +222,7 @@ fn flatten_top_level_query_r(
     }
     iast::QueryBody::Insert(insert) => {
       let mut ms_insert = proc::Insert {
-        table: SimpleSource {
+        table: proc::SimpleSource {
           source_ref: TablePath(insert.table.source_ref.clone()),
           alias: insert.table.alias.clone(),
         },
@@ -245,7 +243,7 @@ fn flatten_top_level_query_r(
     }
     iast::QueryBody::Delete(delete) => {
       let ms_delete = proc::Delete {
-        table: SimpleSource {
+        table: proc::SimpleSource {
           source_ref: TablePath(delete.table.source_ref.clone()),
           alias: delete.table.alias.clone(),
         },

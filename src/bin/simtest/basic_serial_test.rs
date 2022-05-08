@@ -11,7 +11,6 @@ use runiversal::common::{
   SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
 };
 use runiversal::message as msg;
-use runiversal::message::{ExternalAbortedData, NetworkMessage};
 use runiversal::paxos::PaxosConfig;
 use runiversal::test_utils::{cno, cvi, cvs, mk_seed, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
@@ -476,7 +475,9 @@ fn insert_test(seed: [u8; 16]) {
       ",
       10000,
       |abort_data| match abort_data {
-        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidInsert) => true,
+        msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidInsert) => {
+          true
+        }
         _ => false,
       },
     );
@@ -491,7 +492,9 @@ fn insert_test(seed: [u8; 16]) {
       ",
       10000,
       |abort_data| match abort_data {
-        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidInsert) => true,
+        msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidInsert) => {
+          true
+        }
         _ => false,
       },
     );
@@ -521,7 +524,9 @@ fn update_test(seed: [u8; 16]) {
       ",
       10000,
       |abort_data| match abort_data {
-        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidUpdate) => true,
+        msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidUpdate) => {
+          true
+        }
         _ => false,
       },
     );
@@ -536,7 +541,9 @@ fn update_test(seed: [u8; 16]) {
       ",
       10000,
       |abort_data| match abort_data {
-        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidUpdate) => true,
+        msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidUpdate) => {
+          true
+        }
         _ => false,
       },
     );
@@ -1158,7 +1165,9 @@ fn drop_column(seed: [u8; 16]) {
       ",
       10000,
       |abort_data| match abort_data {
-        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidColUsage) => true,
+        msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidColUsage) => {
+          true
+        }
         _ => false,
       },
     );
@@ -1480,7 +1489,7 @@ fn drop_table_test(seed: [u8; 16]) {
       ",
       10000,
       |abort_data| match abort_data {
-        ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::TablesDNE(_)) => true,
+        msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::TablesDNE(_)) => true,
         _ => false,
       },
     );

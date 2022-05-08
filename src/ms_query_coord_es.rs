@@ -15,10 +15,8 @@ use crate::master_query_planning_es::{
   master_query_planning, ColPresenceReq, StaticDBSchemaView, StaticDBSchemaViewError,
 };
 use crate::message as msg;
-use crate::message::{ExternalAbortedData, MasteryQueryPlanningResult};
 use crate::server::{contains_col, CTServerContext, CommonQuery, ServerContextBase};
 use crate::sql_ast::proc;
-use crate::sql_ast::proc::MSQueryStage;
 use crate::table_read_es::perform_aggregation;
 use crate::tm_status::{SendHelper, TMStatus};
 use crate::trans_table_read_es::TransTableSource;
@@ -259,7 +257,7 @@ impl FullMSCoordES {
       // a higher timestamp will not generally fix the issue. Thus we ECU and return accordingly.
       msg::AbortedData::QueryError(msg::QueryError::TypeError { msg: err_msg }) => {
         self.exit_and_clean_up(ctx, io_ctx);
-        MSQueryCoordAction::FatalFailure(ExternalAbortedData::QueryExecutionError(
+        MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError(
           msg::ExternalQueryError::TypeError { msg: err_msg },
         ))
       }
@@ -268,7 +266,7 @@ impl FullMSCoordES {
       //  metadata matches.
       msg::AbortedData::QueryError(msg::QueryError::RuntimeError { msg: err_msg }) => {
         self.exit_and_clean_up(ctx, io_ctx);
-        MSQueryCoordAction::FatalFailure(ExternalAbortedData::QueryExecutionError(
+        MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError(
           msg::ExternalQueryError::RuntimeError { msg: err_msg },
         ))
       }
@@ -781,7 +779,7 @@ impl QueryPlanningES {
     match &self.state {
       QueryPlanningS::MasterQueryPlanning(state) if state.master_query_id == master_qid => {
         match result {
-          MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
+          msg::MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
             // By now, we know the QueryPlanning can succeed. However, we need to make sure
             // the local GossipData is recent enough so we can communicate with the shards.
             if self.check_local_gossip(ctx, &master_query_plan) {
@@ -802,7 +800,7 @@ impl QueryPlanningES {
               QueryPlanningAction::Wait
             }
           }
-          MasteryQueryPlanningResult::QueryPlanningError(error) => {
+          msg::MasteryQueryPlanningResult::QueryPlanningError(error) => {
             self.state = QueryPlanningS::Done;
             QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryPlanningError(error))
           }

@@ -3,7 +3,6 @@ use crate::common::{CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, P
 use crate::coord::{CoordConfig, CoordContext};
 use crate::master::{FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput};
 use crate::message as msg;
-use crate::message::{FreeNodeMessage, NetworkMessage};
 use crate::net::GenericInputTrait;
 use crate::paxos::PaxosConfig;
 use crate::slave::{
@@ -37,7 +36,7 @@ pub enum GenericInput {
 }
 
 impl GenericInputTrait for GenericInput {
-  fn from_network(eid: EndpointId, message: NetworkMessage) -> GenericInput {
+  fn from_network(eid: EndpointId, message: msg::NetworkMessage) -> GenericInput {
     GenericInput::Message(eid, message)
   }
 }
@@ -437,13 +436,13 @@ impl NodeState {
           // Handle FreeNode messages
           if let msg::NetworkMessage::FreeNode(free_node_msg) = message {
             match free_node_msg {
-              FreeNodeMessage::MasterLeadershipId(new_lid) => {
+              msg::FreeNodeMessage::MasterLeadershipId(new_lid) => {
                 // Update the Leadership Id if it is more recent.
                 if new_lid.gen > lid.gen {
                   *lid = new_lid;
                 }
               }
-              FreeNodeMessage::CreateSlaveGroup(create) => {
+              msg::FreeNodeMessage::CreateSlaveGroup(create) => {
                 // Create GossipData
                 let gossip = Arc::new(create.gossip);
 
@@ -507,7 +506,7 @@ impl NodeState {
                   )),
                 );
               }
-              FreeNodeMessage::SlaveSnapshot(snapshot) => {
+              msg::FreeNodeMessage::SlaveSnapshot(snapshot) => {
                 let gossip = Arc::new(snapshot.gossip);
 
                 // Create the Coords
@@ -570,7 +569,7 @@ impl NodeState {
                   slave_buffered_msgs,
                 ));
               }
-              FreeNodeMessage::MasterSnapshot(snapshot) => {
+              msg::FreeNodeMessage::MasterSnapshot(snapshot) => {
                 // Create the MasterState
                 let mut master_state = MasterState::create_reconfig(
                   io_ctx,
@@ -601,7 +600,7 @@ impl NodeState {
                   master_buffered_msgs,
                 ));
               }
-              FreeNodeMessage::ShutdownNode => {
+              msg::FreeNodeMessage::ShutdownNode => {
                 self.state = State::PostExistence;
               }
               _ => {}
@@ -635,7 +634,7 @@ impl NodeState {
             // Handle FreeNode messages
             if let msg::NetworkMessage::FreeNode(free_node_msg) = message {
               match free_node_msg {
-                FreeNodeMessage::CreateSlaveGroup(_) => {
+                msg::FreeNodeMessage::CreateSlaveGroup(_) => {
                   // Respond with a `ConfirmSlaveCreation`.
                   io_ctx.send(
                     &eid,
@@ -647,7 +646,7 @@ impl NodeState {
                     )),
                   );
                 }
-                FreeNodeMessage::SlaveSnapshot(_) => {
+                msg::FreeNodeMessage::SlaveSnapshot(_) => {
                   // Respond with a `NewNodeStarted`.
                   io_ctx.send(
                     &eid,
@@ -658,7 +657,7 @@ impl NodeState {
                     )),
                   );
                 }
-                FreeNodeMessage::ShutdownNode => {
+                msg::FreeNodeMessage::ShutdownNode => {
                   SlaveIOCtx::mark_exit(io_ctx);
                 }
                 _ => {}
@@ -690,7 +689,7 @@ impl NodeState {
             // Handle FreeNode messages
             if let msg::NetworkMessage::FreeNode(free_node_msg) = message {
               match free_node_msg {
-                FreeNodeMessage::MasterSnapshot(_) => {
+                msg::FreeNodeMessage::MasterSnapshot(_) => {
                   // Respond with a `NewNodeStarted`.
                   io_ctx.send(
                     &eid,
@@ -701,7 +700,7 @@ impl NodeState {
                     )),
                   );
                 }
-                FreeNodeMessage::ShutdownNode => {
+                msg::FreeNodeMessage::ShutdownNode => {
                   MasterIOCtx::mark_exit(io_ctx);
                 }
                 _ => {}

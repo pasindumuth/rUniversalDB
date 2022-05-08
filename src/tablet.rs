@@ -29,16 +29,13 @@ use crate::finish_query_rm_es::{FinishQueryRMES, FinishQueryRMInner};
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
 use crate::message as msg;
-use crate::message::TabletMessage;
 use crate::ms_table_delete_es::{DeleteInner, MSTableDeleteES};
 use crate::ms_table_es::{GeneralQueryES, MSTableES, MSTableExecutionS, SqlQueryInner};
 use crate::ms_table_insert_es::{InsertInner, MSTableInsertES};
 use crate::ms_table_read_es::{MSTableReadES, SelectInner};
 use crate::ms_table_write_es::{MSTableWriteES, UpdateInner};
 use crate::paxos2pc_rm;
-use crate::paxos2pc_rm::Paxos2PCRMAction;
 use crate::paxos2pc_tm;
-use crate::paxos2pc_tm::{Paxos2PCContainer, RMMessage, RMPLm};
 use crate::server::{
   contains_col, CTServerContext, CommonQuery, ContextConstructor, LocalColumnRef, LocalTable,
   ServerContextBase,
@@ -890,7 +887,7 @@ impl Statuses {
 // -----------------------------------------------------------------------------------------------
 /// Implementation for DDLES
 
-impl Paxos2PCContainer<AlterTableRMES> for DDLES {
+impl paxos2pc_rm::Paxos2PCContainer<AlterTableRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut AlterTableRMES> {
     if let DDLES::Alter(es) = self {
       // Recall that our DDL and Sharding Coordination scheme requires the previous
@@ -913,7 +910,7 @@ impl Paxos2PCContainer<AlterTableRMES> for DDLES {
   }
 }
 
-impl Paxos2PCContainer<DropTableRMES> for DDLES {
+impl paxos2pc_rm::Paxos2PCContainer<DropTableRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut DropTableRMES> {
     if let DDLES::Drop(es) = self {
       // Recall that our DDL and Sharding Coordination scheme requires the previous
@@ -938,7 +935,7 @@ impl Paxos2PCContainer<DropTableRMES> for DDLES {
   }
 }
 
-impl Paxos2PCContainer<ShardSplitTabletRMES> for DDLES {
+impl paxos2pc_rm::Paxos2PCContainer<ShardSplitTabletRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut ShardSplitTabletRMES> {
     if let DDLES::ShardSplit(es) = self {
       // Recall that our DDL and Sharding Coordination scheme requires the previous
@@ -1556,7 +1553,7 @@ impl TabletContext {
               stmpaxos2pc_rm::handle_rm_msg(self, io_ctx, &mut statuses.ddl_es, message);
             self.handle_shard_split_es_action(io_ctx, statuses, query_id, action);
           }
-          TabletMessage::ShardingConfirmed(message) => match &mut statuses.sharding_state {
+          msg::TabletMessage::ShardingConfirmed(message) => match &mut statuses.sharding_state {
             ShardingState::None => {}
             ShardingState::ShardingSnapshotES(es) => {
               let action = es.handle_msg(self, message);
@@ -2978,11 +2975,11 @@ impl TabletContext {
     &mut self,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: Paxos2PCRMAction,
+    action: paxos2pc_rm::Paxos2PCRMAction,
   ) {
     match action {
-      Paxos2PCRMAction::Wait => {}
-      Paxos2PCRMAction::Exit => {
+      paxos2pc_rm::Paxos2PCRMAction::Wait => {}
+      paxos2pc_rm::Paxos2PCRMAction::Exit => {
         statuses.finish_query_ess.remove(&query_id);
       }
     }

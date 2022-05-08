@@ -18,10 +18,6 @@ use crate::expression::does_types_match;
 use crate::free_node_manager::{FreeNodeManager, FreeNodeManagerPLm, FreeNodeType};
 use crate::master_query_planning_es::{MasterQueryPlanning, MasterQueryPlanningESS};
 use crate::message as msg;
-use crate::message::{
-  ExternalDDLQueryAbortData, FreeNodeAssoc, MasterExternalReq, MasterMessage, MasterRemotePayload,
-  PLEntry, ShardingOp,
-};
 use crate::multiversion_map::MVM;
 use crate::network_driver::{NetworkDriver, NetworkDriverContext};
 use crate::paxos::{PaxosConfig, PaxosContextBase, PaxosDriver, PaxosTimerEvent, UserPLEntry};
@@ -32,7 +28,6 @@ use crate::slave_reconfig_es::{SlaveReconfigESS, SlaveReconfigPLm};
 use crate::sql_ast::proc;
 use crate::sql_parser::{convert_ddl_ast, DDLQuery};
 use crate::stmpaxos2pc_tm as paxos2pc;
-use crate::stmpaxos2pc_tm::{STMPaxos2PCTMAction, State, TMServerContext};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlparser::dialect::GenericDialect;
@@ -452,12 +447,12 @@ impl MasterContext {
     message: msg::MasterMessage,
   ) {
     match message {
-      MasterMessage::MasterExternalReq(request) => {
+      msg::MasterMessage::MasterExternalReq(request) => {
         if self.is_leader() {
           self.handle_input(io_ctx, statuses, MasterForwardMsg::MasterExternalReq(request))
         }
       }
-      MasterMessage::RemoteMessage(remote_message) => {
+      msg::MasterMessage::RemoteMessage(remote_message) => {
         if self.is_leader() {
           // Pass the message through the NetworkDriver
           let maybe_delivered = self.network_driver.receive(
@@ -475,7 +470,10 @@ impl MasterContext {
           }
         }
       }
-      MasterMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip { gid, lid }) => {
+      msg::MasterMessage::RemoteLeaderChangedGossip(msg::RemoteLeaderChangedGossip {
+        gid,
+        lid,
+      }) => {
         if self.is_leader() {
           // We filter out messages for PaxosGroupIds urecongnized by this node.
           if let Some(cur_lid) = self.leader_map.value().get(&gid) {
@@ -487,22 +485,22 @@ impl MasterContext {
           }
         }
       }
-      MasterMessage::FreeNodeAssoc(free_node_msg) => {
+      msg::MasterMessage::FreeNodeAssoc(free_node_msg) => {
         if self.is_leader() {
           match free_node_msg {
-            FreeNodeAssoc::RegisterFreeNode(register) => {
+            msg::FreeNodeAssoc::RegisterFreeNode(register) => {
               statuses.free_node_manager.handle_register(register);
             }
-            FreeNodeAssoc::FreeNodeHeartbeat(heartbeat) => {
+            msg::FreeNodeAssoc::FreeNodeHeartbeat(heartbeat) => {
               statuses.free_node_manager.handle_heartbeat(self, heartbeat);
             }
-            FreeNodeAssoc::ConfirmSlaveCreation(confirm_msg) => {
+            msg::FreeNodeAssoc::ConfirmSlaveCreation(confirm_msg) => {
               statuses.slave_group_create_ess.handle_msg(self, io_ctx, confirm_msg);
             }
           }
         }
       }
-      MasterMessage::PaxosDriverMessage(paxos_message) => {
+      msg::MasterMessage::PaxosDriverMessage(paxos_message) => {
         let pl_entries = self.paxos_driver.handle_paxos_message(
           &mut MasterPaxosContext { io_ctx, this_eid: &self.this_eid },
           paxos_message,
@@ -791,7 +789,7 @@ impl MasterContext {
       }
       MasterForwardMsg::MasterExternalReq(message) => {
         match message {
-          MasterExternalReq::PerformExternalDDLQuery(external_query) => {
+          msg::MasterExternalReq::PerformExternalDDLQuery(external_query) => {
             match self.validate_ddl_query(&external_query) {
               Ok(ddl_query) => {
                 let query_id = mk_qid(io_ctx.rand());
@@ -869,7 +867,7 @@ impl MasterContext {
               }
             }
           }
-          MasterExternalReq::CancelExternalDDLQuery(cancel) => {
+          msg::MasterExternalReq::CancelExternalDDLQuery(cancel) => {
             if let Some(query_id) = self.external_request_id_map.remove(&cancel.request_id) {
               // Utility to send a `ConfirmCancelled` back to the External referred to by `cancel`.
               fn respond_cancelled<IO: MasterIOCtx>(
@@ -890,7 +888,7 @@ impl MasterContext {
               // If the query_id corresponds to an early CreateTable, then abort it.
               if let Some(es) = statuses.create_table_tm_ess.get(&query_id) {
                 match &es.state {
-                  State::Start | State::WaitingInsertTMPrepared => {
+                  paxos2pc::State::Start | paxos2pc::State::WaitingInsertTMPrepared => {
                     statuses.create_table_tm_ess.remove(&query_id);
                     respond_cancelled(io_ctx, cancel);
                   }
@@ -900,7 +898,7 @@ impl MasterContext {
               // Otherwise, if the query_id corresponds to an early AlterTable, then abort it.
               else if let Some(es) = statuses.alter_table_tm_ess.get(&query_id) {
                 match &es.state {
-                  State::Start | State::WaitingInsertTMPrepared => {
+                  paxos2pc::State::Start | paxos2pc::State::WaitingInsertTMPrepared => {
                     statuses.alter_table_tm_ess.remove(&query_id);
                     respond_cancelled(io_ctx, cancel);
                   }
@@ -910,7 +908,7 @@ impl MasterContext {
               // Otherwise, if the query_id corresponds to an early DropTable, then abort it.
               else if let Some(es) = statuses.drop_table_tm_ess.get(&query_id) {
                 match &es.state {
-                  State::Start | State::WaitingInsertTMPrepared => {
+                  paxos2pc::State::Start | paxos2pc::State::WaitingInsertTMPrepared => {
                     statuses.drop_table_tm_ess.remove(&query_id);
                     respond_cancelled(io_ctx, cancel);
                   }
@@ -934,7 +932,7 @@ impl MasterContext {
             // For each type of `ShardingOp`, simply construct the corresponding
             // ES. The Main Loop will validate them, abort them, and start them.
             match external_query.op {
-              ShardingOp::Split(split) => {
+              msg::ShardingOp::Split(split) => {
                 map_insert(
                   &mut statuses.shard_split_tm_ess,
                   &query_id,
@@ -973,7 +971,7 @@ impl MasterContext {
               // If the query_id corresponds to an early ShardSplit, then abort it.
               if let Some(es) = statuses.shard_split_tm_ess.get(&query_id) {
                 match &es.state {
-                  State::Start | State::WaitingInsertTMPrepared => {
+                  paxos2pc::State::Start | paxos2pc::State::WaitingInsertTMPrepared => {
                     statuses.shard_split_tm_ess.remove(&query_id);
                     respond_cancelled(io_ctx, cancel);
                   }
@@ -1003,31 +1001,31 @@ impl MasterContext {
       MasterForwardMsg::MasterRemotePayload(payload) => {
         match payload {
           // MasterQueryPlanning
-          MasterRemotePayload::MasterQueryPlanning(request) => {
+          msg::MasterRemotePayload::MasterQueryPlanning(request) => {
             statuses.planning_ess.handle_msg(self, io_ctx, request);
           }
           // CreateTable
-          MasterRemotePayload::CreateTable(message) => {
+          msg::MasterRemotePayload::CreateTable(message) => {
             paxos2pc::handle_msg(self, io_ctx, &mut statuses.create_table_tm_ess, message);
           }
           // AlterTable
-          MasterRemotePayload::AlterTable(message) => {
+          msg::MasterRemotePayload::AlterTable(message) => {
             paxos2pc::handle_msg(self, io_ctx, &mut statuses.alter_table_tm_ess, message);
           }
           // DropTable
-          MasterRemotePayload::DropTable(message) => {
+          msg::MasterRemotePayload::DropTable(message) => {
             paxos2pc::handle_msg(self, io_ctx, &mut statuses.drop_table_tm_ess, message);
           }
           // ShardSplit
-          MasterRemotePayload::ShardSplit(message) => {
+          msg::MasterRemotePayload::ShardSplit(message) => {
             paxos2pc::handle_msg(self, io_ctx, &mut statuses.shard_split_tm_ess, message);
           }
           // MasterGossipRequest
-          MasterRemotePayload::MasterGossipRequest(gossip_req) => {
+          msg::MasterRemotePayload::MasterGossipRequest(gossip_req) => {
             self.send_gossip(io_ctx, gossip_req.sender_path);
           }
           // SlaveReconfig
-          MasterRemotePayload::SlaveReconfig(reconfig) => {
+          msg::MasterRemotePayload::SlaveReconfig(reconfig) => {
             statuses.slave_reconfig_ess.handle_msg(
               self,
               io_ctx,

@@ -18,7 +18,6 @@ use runiversal::master::{
   FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput,
 };
 use runiversal::message as msg;
-use runiversal::message::NetworkMessage;
 use runiversal::multiversion_map::MVM;
 use runiversal::node::node_test::check_node_clean;
 use runiversal::node::{GenericInput, GenericTimerInput, NodeConfig, NodeState};
