@@ -13,7 +13,7 @@ use runiversal::coord::{CoordConfig, CoordContext, CoordForwardMsg, CoordState};
 use runiversal::master::{FullMasterInput, MasterTimerInput};
 use runiversal::message as msg;
 use runiversal::multiversion_map::MVM;
-use runiversal::net::send_msg;
+use runiversal::net::{send_msg, SendAction};
 use runiversal::node::{GenericInput, GenericTimerInput};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
@@ -33,31 +33,6 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // -----------------------------------------------------------------------------------------------
-//  Network Helpers
-// -----------------------------------------------------------------------------------------------
-
-/// Creates a thread that acts as both the FromNetwork and ToNetwork Threads,
-/// setting up both the Incoming Connection as well as Outgoing Connection at once.
-pub fn handle_self_conn(
-  this_ip: &EndpointId,
-  out_conn_map: &Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
-  to_server_sender: &Sender<GenericInput>,
-) {
-  let mut out_conn_map = out_conn_map.lock().unwrap();
-  let (sender, receiver) = mpsc::channel();
-  out_conn_map.insert(this_ip.clone(), sender);
-
-  // Setup Self Connection Thread
-  let to_server_sender = to_server_sender.clone();
-  let this_ip = this_ip.clone();
-  thread::Builder::new().name(format!("Self Connection")).spawn(move || loop {
-    let data = receiver.recv().unwrap();
-    let network_msg: msg::NetworkMessage = rmp_serde::from_read_ref(&data).unwrap();
-    to_server_sender.send(GenericInput::Message(this_ip.clone(), network_msg)).unwrap();
-  });
-}
-
-// -----------------------------------------------------------------------------------------------
 //  IOCtx
 // -----------------------------------------------------------------------------------------------
 
@@ -67,7 +42,7 @@ pub const TIMER_INCREMENT: u64 = 250;
 pub struct ProdIOCtx {
   // Basic
   pub rand: XorShiftRng,
-  pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<SendAction>>>>,
   pub exited: bool,
 
   // Constructing and communicating with Tablets
@@ -124,7 +99,7 @@ impl BasicIOCtx for ProdIOCtx {
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    send_msg(&self.out_conn_map, eid, msg, &InternalMode::Internal);
+    send_msg(&self.out_conn_map, eid, SendAction::new(msg, None), &InternalMode::Internal);
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}
@@ -285,7 +260,7 @@ impl Debug for ProdIOCtx {
 pub struct ProdCoreIOCtx {
   // Basic
   pub rand: XorShiftRng,
-  pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  pub out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<SendAction>>>>,
 
   // Slave
   pub to_top: Sender<GenericInput>,
@@ -303,7 +278,7 @@ impl BasicIOCtx for ProdCoreIOCtx {
   }
 
   fn send(&mut self, eid: &EndpointId, msg: msg::NetworkMessage) {
-    send_msg(&self.out_conn_map, eid, msg, &InternalMode::Internal);
+    send_msg(&self.out_conn_map, eid, SendAction::new(msg, None), &InternalMode::Internal);
   }
 
   fn general_trace(&mut self, _: GeneralTraceMessage) {}

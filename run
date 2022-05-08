@@ -16,6 +16,11 @@ elif [ "$1" = "client" ]; then
   docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal scripts/client -i 172.19.0.2;
   # After we exit the terminal, clean up the container.
   docker container rm rclient;
+elif [ "$1" = "client_fast" ]; then
+  # Start the image by running the client, but only to initialize the Master Group.
+  docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal scripts/client -i 172.19.0.2 -m '172.19.0.10 172.19.0.11 172.19.0.12 172.19.0.13 172.19.0.14';
+  # After we exit the terminal, clean up the container.
+  docker container rm rclient;
 elif [ "$1" = "masters" ]; then
   # Start the image by running transact, and have it be in the background.
   for ((i = 10; i < 15; i++)); do

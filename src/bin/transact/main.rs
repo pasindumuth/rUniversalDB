@@ -5,7 +5,7 @@ mod server;
 #[macro_use]
 extern crate runiversal;
 
-use crate::server::{handle_self_conn, ProdCoreIOCtx, ProdIOCtx, TIMER_INCREMENT};
+use crate::server::{ProdCoreIOCtx, ProdIOCtx, TIMER_INCREMENT};
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -20,7 +20,7 @@ use runiversal::master::{
 };
 use runiversal::message as msg;
 use runiversal::message::FreeNodeMessage;
-use runiversal::net::{send_msg, start_acceptor_thread};
+use runiversal::net::{handle_self_conn, send_msg, start_acceptor_thread, SendAction};
 use runiversal::node::{get_prod_configs, GenericInput, NodeConfig, NodeState};
 use runiversal::paxos::PaxosConfig;
 use runiversal::slave::{
@@ -36,37 +36,6 @@ use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-/// The threading architecture we use is as follows. Every network
-/// connection has 2 threads, one for receiving data, called the
-/// FromNetwork Thread (which spends most of its time blocking on reading
-/// the socket), and one thread for sending data, called the ToNetwork
-/// Thread (which spends most of its time blocking on a FromServer Queue,
-/// which we create every time a new socket is created). Once a FromNetwork
-/// Thread receives a packet, it puts it into a Multi-Producer-Single-Consumer
-/// Queue, called the ToServer MPSC. Here, each FromNetwork Thread is a Producer,
-/// and the only Consumer is the Server Thread. Once the Server Thread wants
-/// to send a packet out of a socket, it places it in the socket's FromServer
-/// Queue. The ToNetwork Thread picks this up and sends it out of the socket.
-/// The FromServer Queue is a Single-Producer-Single-Consumer queue.
-///
-/// The Server Thread also needs to connect to itself. We don't use
-/// a network socket for this, and we don't have two auxiliary threads.
-/// Instead, we have one auxiliary thread, called the Self Connection
-/// Thread, which takes packets that are sent out of Server Thread and
-/// immediately feeds it back in.
-///
-/// We also have an Accepting Thread that listens for new connections
-/// and constructs the FromNetwork Thread, ToNetwork Thread, and connects
-/// them up.
-
-// TODO:
-//  1. document above the now only use uni-direction queues.
-//  2. Figure out what happens if the other side disconnects. The `stream.read_u32`
-//    function probably returns an error, and we can remove the EndpointId from
-//    `out_conn_map`. However, we need to figure out if this TCP API is a long-term,
-//    persisted connection (or if it will randomly disconnect with the other side, e.g.
-//    due to inactivity or temporary network partitions).
 
 // -----------------------------------------------------------------------------------------------
 //  Main
@@ -103,7 +72,7 @@ fn main() {
   // The mpsc channel for passing data to the Server Thread from all FromNetwork Threads.
   let (to_server_sender, to_server_receiver) = mpsc::channel::<GenericInput>();
   // Maps the IP addresses to a FromServer Queue, used to send data to Outgoing Connections.
-  let out_conn_map = Arc::new(Mutex::new(BTreeMap::<EndpointId, Sender<Vec<u8>>>::new()));
+  let out_conn_map = Arc::new(Mutex::new(BTreeMap::<EndpointId, Sender<SendAction>>::new()));
 
   // Start the Accepting Thread
   start_acceptor_thread(&to_server_sender, this_ip.clone());
@@ -139,12 +108,15 @@ fn main() {
       send_msg(
         &out_conn_map,
         &master_eid,
-        msg::NetworkMessage::Master(msg::MasterMessage::FreeNodeAssoc(
-          msg::FreeNodeAssoc::RegisterFreeNode(msg::RegisterFreeNode {
-            sender_eid: this_eid.clone(),
-            node_type,
-          }),
-        )),
+        SendAction::new(
+          msg::NetworkMessage::Master(msg::MasterMessage::FreeNodeAssoc(
+            msg::FreeNodeAssoc::RegisterFreeNode(msg::RegisterFreeNode {
+              sender_eid: this_eid.clone(),
+              node_type,
+            }),
+          )),
+          None,
+        ),
         &this_internal_mode,
       );
     }

@@ -887,7 +887,7 @@ impl Statuses {
 // -----------------------------------------------------------------------------------------------
 /// Implementation for DDLES
 
-impl paxos2pc_rm::Paxos2PCContainer<AlterTableRMES> for DDLES {
+impl paxos2pc_tm::Paxos2PCContainer<AlterTableRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut AlterTableRMES> {
     if let DDLES::Alter(es) = self {
       // Recall that our DDL and Sharding Coordination scheme requires the previous
@@ -910,7 +910,7 @@ impl paxos2pc_rm::Paxos2PCContainer<AlterTableRMES> for DDLES {
   }
 }
 
-impl paxos2pc_rm::Paxos2PCContainer<DropTableRMES> for DDLES {
+impl paxos2pc_tm::Paxos2PCContainer<DropTableRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut DropTableRMES> {
     if let DDLES::Drop(es) = self {
       // Recall that our DDL and Sharding Coordination scheme requires the previous
@@ -935,7 +935,7 @@ impl paxos2pc_rm::Paxos2PCContainer<DropTableRMES> for DDLES {
   }
 }
 
-impl paxos2pc_rm::Paxos2PCContainer<ShardSplitTabletRMES> for DDLES {
+impl paxos2pc_tm::Paxos2PCContainer<ShardSplitTabletRMES> for DDLES {
   fn get_mut(&mut self, query_id: &QueryId) -> Option<&mut ShardSplitTabletRMES> {
     if let DDLES::ShardSplit(es) = self {
       // Recall that our DDL and Sharding Coordination scheme requires the previous

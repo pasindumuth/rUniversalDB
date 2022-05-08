@@ -8,7 +8,7 @@ use runiversal::common::{
 };
 use runiversal::common::{EndpointId, RequestId};
 use runiversal::message as msg;
-use runiversal::net::{send_msg, start_acceptor_thread, GenericInputTrait};
+use runiversal::net::{send_msg, start_acceptor_thread, GenericInputTrait, SendAction};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 use std::collections::BTreeMap;
@@ -28,12 +28,47 @@ fn main() {
     .version("1.0")
     .author("Pasindu M. <pasindumuth@gmail.com>")
     .arg(arg!(-i --ip <VALUE>).required(true).help("The IP address of the current host."))
+    .arg(
+      arg!(-m --mips <VALUE>)
+        .required(false)
+        .help("A space separate list (in quotes) of Master IPs."),
+    )
     .get_matches();
 
   // Get required arguments
   let this_ip = matches.value_of("ip").unwrap().to_string();
   let mut state = ClientState::new(this_ip);
-  state.start_loop();
+
+  // If `mips` is specified, we interpret this as a one-off execution of the program where
+  // we merely need to start the Masters.
+  if let Some(master_ips_str) = matches.value_of("mips") {
+    let master_eids: Vec<_> = master_ips_str
+      .split(" ")
+      .map(|ip| EndpointId::new(ip.to_string(), InternalMode::Internal))
+      .collect();
+
+    // Send out the `StartMaster` message
+    let (to_server_sender, to_server_receiver) = mpsc::channel::<()>();
+    for eid in &master_eids {
+      state.send(
+        eid,
+        SendAction::new(
+          msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::StartMaster(msg::StartMaster {
+            master_eids: master_eids.clone(),
+          })),
+          Some(to_server_sender.clone()),
+        ),
+      );
+    }
+
+    // Wait until all messages have been sent. After this, we exit.
+    for _ in 0..master_eids.len() {
+      to_server_receiver.recv();
+    }
+  } else {
+    // Otherwise, we enter the read loop.
+    state.start_loop();
+  }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -62,7 +97,7 @@ enum LoopAction {
 /// Contains the client state (e.g. connection state).
 struct ClientState {
   to_server_receiver: Receiver<GenericInput>,
-  out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<Vec<u8>>>>>,
+  out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<SendAction>>>>,
   /// Rng
   rand: XorShiftRng,
   /// The EndpointId of this node
@@ -80,7 +115,7 @@ impl ClientState {
     // The mpsc channel for passing data to the Server Thread from all FromNetwork Threads.
     let (to_server_sender, to_server_receiver) = mpsc::channel::<GenericInput>();
     // Maps the IP addresses to a FromServer Queue, used to send data to Outgoing Connections.
-    let out_conn_map = Arc::new(Mutex::new(BTreeMap::<EndpointId, Sender<Vec<u8>>>::new()));
+    let out_conn_map = Arc::new(Mutex::new(BTreeMap::<EndpointId, Sender<SendAction>>::new()));
     // Create an RNG for ID generation
     let mut rand = XorShiftRng::from_entropy();
 
@@ -144,6 +179,16 @@ impl ClientState {
       Ok(LoopAction::Exit)
     }
     // Start the Master Group
+    else if input.starts_with("setmaster ") {
+      // Parse the `master_eids`
+      let mut it = input.split(" ");
+      it.next();
+      self.master_eids =
+        it.map(|ip| EndpointId::new(ip.to_string(), InternalMode::Internal)).collect();
+
+      Ok(LoopAction::DoNothing)
+    }
+    // Start the Master Group
     else if input.starts_with("startmaster ") {
       // Parse the `master_eids`
       let mut it = input.split(" ");
@@ -153,13 +198,14 @@ impl ClientState {
 
       // Instruct the nodes to become part of the Master Group.
       for eid in &self.master_eids {
-        send_msg(
-          &self.out_conn_map,
+        self.send(
           eid,
-          msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::StartMaster(msg::StartMaster {
-            master_eids: self.master_eids.clone(),
-          })),
-          &self.this_eid.mode,
+          SendAction::new(
+            msg::NetworkMessage::FreeNode(msg::FreeNodeMessage::StartMaster(msg::StartMaster {
+              master_eids: self.master_eids.clone(),
+            })),
+            None,
+          ),
         );
       }
       Ok(LoopAction::DoNothing)
@@ -183,7 +229,7 @@ impl ClientState {
       ));
 
       // Send and wait for a response
-      send_msg(&self.out_conn_map, self.get_target()?, network_msg, &self.this_eid.mode);
+      self.send(self.get_target()?, SendAction::new(network_msg, None));
       let message = self.to_server_receiver.recv().unwrap().message;
 
       let external_msg = cast!(msg::NetworkMessage::External, message).unwrap();
@@ -234,7 +280,7 @@ impl ClientState {
       };
 
       // Send and wait for a response
-      send_msg(&self.out_conn_map, self.get_target()?, network_msg, &self.this_eid.mode);
+      self.send(self.get_target()?, SendAction::new(network_msg, None));
       let message = self.to_server_receiver.recv().unwrap().message;
 
       // Display the output
@@ -267,6 +313,11 @@ impl ClientState {
     } else {
       Err("A target address is not set. Do that by typing 'target <hostname>'.".to_string())
     }
+  }
+
+  /// A convenience function for sending data to `eid`.
+  fn send(&self, eid: &EndpointId, action: SendAction) {
+    send_msg(&self.out_conn_map, eid, action, &self.this_eid.mode);
   }
 }
 
