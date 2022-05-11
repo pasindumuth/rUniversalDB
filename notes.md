@@ -23,7 +23,7 @@ cargo run --bin client 2>/dev/null
 docker run -it runiversal
 
 ## Run & Stop
-docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal scripts/client -i 172.19.0.2
+docker run --cap-add=NET_ADMIN -it --name=rclient4 --ip 172.19.0.4 --network=runiversal-net runiversal scripts/client -i 172.19.0.4 -e 172.19.0.10
 docker run --cap-add=NET_ADMIN -it --name=runiversal10 --ip 172.19.0.10 --network=runiversal-net runiversal scripts/transact -i 172.19.0.10 -t masterbootup
 docker run --cap-add=NET_ADMIN -d --name=runiversal15 --ip 172.19.0.15 --network=runiversal-net runiversal scripts/transact -i 172.19.0.15 -t freenode -f newslave -e 172.19.0.10
 
@@ -32,9 +32,20 @@ docker kill runiversal10; docker container rm runiversal10;
 docker kill runiversal15; docker container rm runiversal15;
 
 ## Setup
-Run the following:
+To start up the system and create an initial client, do:
 
 ./run start
+
+To create extra clients, do:
+
+./run new_client 2
+./run new_client 3
+
+To clean up everything, do:
+
+./run clean
+./run cclean 2
+./run cclean 3
 
 ## Query Examples
 

@@ -1,3 +1,6 @@
+mod monitor;
+
+use crate::monitor::MetadataMonitor;
 use clap::{arg, App};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
@@ -10,6 +13,7 @@ use runiversal::common::{EndpointId, RequestId};
 use runiversal::message as msg;
 use runiversal::net::{send_msg, start_acceptor_thread, GenericInputTrait, SendAction};
 use runiversal::sql_parser::is_ddl;
+use runiversal::test_utils::mk_seed;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 use std::collections::BTreeMap;
@@ -83,15 +87,22 @@ fn main() {
 //  ClientState
 // -----------------------------------------------------------------------------------------------
 
-/// `GenericInput` for the client CLI.
-struct GenericInput {
+/// An input containing incoming network data.
+pub struct NetworkInput {
   eid: EndpointId,
   message: msg::NetworkMessage,
 }
 
+/// `GenericInput` for the client CLI.
+pub enum GenericInput {
+  NetworkInput(NetworkInput),
+  /// This signals for the thread currently listening to stop listening.
+  None,
+}
+
 impl GenericInputTrait for GenericInput {
   fn from_network(eid: EndpointId, message: msg::NetworkMessage) -> GenericInput {
-    GenericInput { eid, message }
+    GenericInput::NetworkInput(NetworkInput { eid, message })
   }
 }
 
@@ -104,7 +115,8 @@ enum LoopAction {
 
 /// Contains the client state (e.g. connection state).
 struct ClientState {
-  to_server_receiver: Receiver<GenericInput>,
+  to_server_sender: Sender<GenericInput>,
+  to_server_receiver: Option<Receiver<GenericInput>>,
   out_conn_map: Arc<Mutex<BTreeMap<EndpointId, Sender<SendAction>>>>,
   /// Rng
   rand: XorShiftRng,
@@ -136,7 +148,8 @@ impl ClientState {
     let this_eid = EndpointId::new(this_ip, this_internal_mode.clone());
 
     ClientState {
-      to_server_receiver,
+      to_server_sender,
+      to_server_receiver: Some(to_server_receiver),
       out_conn_map,
       rand,
       this_eid,
@@ -193,7 +206,7 @@ impl ClientState {
         msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
           msg::MasterExternalReq::ExternalMetadataRequest(msg::ExternalMetadataRequest {
             sender_eid: self.this_eid.clone(),
-            request_id,
+            request_id: request_id.clone(),
           }),
         )),
         None,
@@ -201,7 +214,8 @@ impl ClientState {
     );
 
     // Send and wait for a response
-    let message = self.to_server_receiver.recv().unwrap().message;
+    let message =
+      block_until_network_response(self.to_server_receiver.as_ref(), &request_id).message;
     let external_msg = cast!(msg::NetworkMessage::External, message).unwrap();
     let resp = cast!(msg::ExternalMessage::ExternalMetadataResponse, external_msg).unwrap();
 
@@ -240,19 +254,40 @@ impl ClientState {
         Some(EndpointId::new(it.next().unwrap().to_string(), InternalMode::Internal));
       Ok(LoopAction::DoNothing)
     }
+    // Display metadata that we pull continuous from the Master Group.
+    else if input.starts_with("live metadata") {
+      // Temporarily take the `to_server_receiver` and construct the MetadataMonitor
+      let to_server_receiver = std::mem::take(&mut self.to_server_receiver).unwrap();
+      let seed = mk_seed(&mut self.rand);
+      let monitor = MetadataMonitor::new(
+        self.to_server_sender.clone(),
+        to_server_receiver,
+        seed,
+        self.out_conn_map.clone(),
+        self.this_eid.clone(),
+        self.opt_target_master_eid.clone().unwrap(),
+      )
+      .unwrap();
+
+      // Display the metadata monitor. When it is done, it will return back
+      // the `to_server_receiver`.
+      self.to_server_receiver = Some(monitor.show_screen().unwrap());
+      Ok(LoopAction::DoNothing)
+    }
     // Query and display metadata from the system
     else if input.starts_with("\\dt") {
       let request_id = mk_rid(&mut self.rand);
       let network_msg = msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
         msg::MasterExternalReq::ExternalMetadataRequest(msg::ExternalMetadataRequest {
           sender_eid: self.this_eid.clone(),
-          request_id,
+          request_id: request_id.clone(),
         }),
       ));
 
       // Send and wait for a response
       self.send(self.get_master()?, SendAction::new(network_msg, None));
-      let message = self.to_server_receiver.recv().unwrap().message;
+      let message =
+        block_until_network_response(self.to_server_receiver.as_ref(), &request_id).message;
       let external_msg = cast!(msg::NetworkMessage::External, message).unwrap();
       let resp = cast!(msg::ExternalMessage::ExternalMetadataResponse, external_msg).unwrap();
       let gossip_data = resp.gossip_data;
@@ -285,7 +320,7 @@ impl ClientState {
         let network_msg = msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
           msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
             sender_eid: self.this_eid.clone(),
-            request_id,
+            request_id: request_id.clone(),
             query: input,
           }),
         ));
@@ -295,7 +330,7 @@ impl ClientState {
         let network_msg = msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
           msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
             sender_eid: self.this_eid.clone(),
-            request_id,
+            request_id: request_id.clone(),
             query: input,
           }),
         ));
@@ -303,7 +338,8 @@ impl ClientState {
       };
 
       // Send and wait for a response
-      let message = self.to_server_receiver.recv().unwrap().message;
+      let message =
+        block_until_network_response(self.to_server_receiver.as_ref(), &request_id).message;
 
       // Display the output
       if let Some(display) = match message {
@@ -349,6 +385,54 @@ fn get_eid(opt_target: &Option<EndpointId>) -> Result<&EndpointId, String> {
     Ok(target)
   } else {
     Err("A target address is not set. Do that by typing 'target <hostname>'.".to_string())
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Network Utils
+// -----------------------------------------------------------------------------------------------
+
+/// Read messages from `receiver` until one arrives with a matching `rid`, or `None` arrives.
+pub fn block_until_generic_response(
+  receiver: Option<&Receiver<GenericInput>>,
+  rid: &RequestId,
+) -> GenericInput {
+  loop {
+    let input = receiver.unwrap().recv().unwrap();
+    if let GenericInput::NetworkInput(network_input) = &input {
+      if match &network_input.message {
+        msg::NetworkMessage::External(message) => match message {
+          msg::ExternalMessage::ExternalQuerySuccess(res) => &res.request_id == rid,
+          msg::ExternalMessage::ExternalQueryAborted(res) => &res.request_id == rid,
+          msg::ExternalMessage::ExternalDDLQuerySuccess(res) => &res.request_id == rid,
+          msg::ExternalMessage::ExternalDDLQueryAborted(res) => &res.request_id == rid,
+          msg::ExternalMessage::ExternalShardingSuccess(res) => &res.request_id == rid,
+          msg::ExternalMessage::ExternalShardingAborted(res) => &res.request_id == rid,
+          msg::ExternalMessage::ExternalMetadataResponse(res) => &res.request_id == rid,
+        },
+        _ => {
+          debug_assert!(false);
+          false
+        }
+      } {
+        return input;
+      }
+    } else {
+      return input;
+    }
+  }
+}
+
+/// Read messages from `receiver` until one arrives with a matching `rid`.
+pub fn block_until_network_response(
+  receiver: Option<&Receiver<GenericInput>>,
+  rid: &RequestId,
+) -> NetworkInput {
+  loop {
+    let input = block_until_generic_response(receiver.clone(), rid);
+    if let GenericInput::NetworkInput(network_input) = input {
+      return network_input;
+    }
   }
 }
 
