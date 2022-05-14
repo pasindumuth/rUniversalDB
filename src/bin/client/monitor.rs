@@ -329,7 +329,7 @@ fn free_nodes(free_node_eids: Vec<EndpointId>) -> String {
 }
 
 /// Convert `col_type` to a `String`.
-fn col_type_str(col_type: &ColType) -> String {
+pub fn col_type_str(col_type: &ColType) -> String {
   match col_type {
     ColType::Int => "Int".to_string(),
     ColType::Bool => "Bool".to_string(),

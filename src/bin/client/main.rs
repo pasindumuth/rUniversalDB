@@ -1,6 +1,6 @@
 mod monitor;
 
-use crate::monitor::MetadataMonitor;
+use crate::monitor::{col_type_str, MetadataMonitor};
 use clap::{arg, App};
 use env_logger::Builder;
 use log::LevelFilter;
@@ -577,14 +577,7 @@ fn format_dt_table(gossip: GossipData, path: String, timestamp: Timestamp) -> Op
   let mut all_cols = schema.key_cols.clone();
   all_cols.extend(schema.val_cols.static_snapshot_read(&timestamp).into_iter());
   for (col_name, col_type) in all_cols {
-    let display_row = vec![
-      col_name.0,
-      match col_type {
-        ColType::Int => "integer".to_string(),
-        ColType::Bool => "bool".to_string(),
-        ColType::String => "string".to_string(),
-      },
-    ];
+    let display_row = vec![col_name.0, col_type_str(&col_type)];
     lines.push(format_even_spaces(display_row, Justification::Right));
     lines.push("-".repeat(display_width));
   }
