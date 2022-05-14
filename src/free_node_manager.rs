@@ -278,4 +278,8 @@ impl FreeNodeManager {
   pub fn free_nodes(&self) -> &BTreeMap<EndpointId, FreeNodeType> {
     &self.free_nodes
   }
+
+  pub fn free_node_eids(&self) -> Vec<EndpointId> {
+    self.free_nodes.keys().cloned().collect()
+  }
 }

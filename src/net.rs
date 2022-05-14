@@ -1,6 +1,7 @@
 use crate::common::{EndpointId, InternalMode};
 use crate::message as msg;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use log::info;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -132,7 +133,7 @@ fn handle_conn<GenericInputT: 'static + GenericInputTrait + Send>(
         }
       };
 
-      println!(
+      info!(
         "Thread 'FromNetwork {}' shutting down. \
          Connection closed with error: {}",
         ip, error
@@ -240,10 +241,7 @@ pub fn send_msg(
         out_conn_map.remove(&eid).unwrap();
       }
 
-      println!(
-        "Thread 'ToNetwork {:?}' shutting down. Connection closed with error: {}",
-        eid, error
-      );
+      info!("Thread 'ToNetwork {:?}' shutting down. Connection closed with error: {}", eid, error);
     });
   }
 

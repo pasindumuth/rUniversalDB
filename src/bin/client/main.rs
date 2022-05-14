@@ -2,6 +2,8 @@ mod monitor;
 
 use crate::monitor::MetadataMonitor;
 use clap::{arg, App};
+use env_logger::Builder;
+use log::LevelFilter;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::cast;
@@ -43,6 +45,9 @@ fn main() {
        the system for communication by the command prompt.",
     ))
     .get_matches();
+
+  // Setup logging
+  Builder::new().filter_level(LevelFilter::Off).init();
 
   // Get required arguments
   let this_ip = matches.value_of("ip").unwrap().to_string();
@@ -255,7 +260,7 @@ impl ClientState {
       Ok(LoopAction::DoNothing)
     }
     // Display metadata that we pull continuous from the Master Group.
-    else if input.starts_with("live metadata") {
+    else if input.starts_with("live") {
       // Temporarily take the `to_server_receiver` and construct the MetadataMonitor
       let to_server_receiver = std::mem::take(&mut self.to_server_receiver).unwrap();
       let seed = mk_seed(&mut self.rand);

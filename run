@@ -58,6 +58,8 @@ elif [ "$1" = "start" ]; then
   client
 elif [ "$1" = "new_client" ]; then
   docker run --cap-add=NET_ADMIN -it --name=rclient"$2" --ip 172.19.0."$2" --network=runiversal-net runiversal scripts/client -i 172.19.0."$2" -e 172.19.0.10
+elif [ "$1" = "new_slave" ]; then
+  docker run --cap-add=NET_ADMIN -d --name=runiversal"$2" --ip 172.19.0."$2" --network=runiversal-net runiversal scripts/transact -i 172.19.0."$2" -t freenode -f "$3" -e 172.19.0.10
 elif [ "$1" = "clean" ]; then
   CONTAINERS="rclient";
   for ((i = 10; i < $((15 + $NUM_SLAVES)); i++)); do

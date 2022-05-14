@@ -990,6 +990,7 @@ impl MasterContext {
                   request_id: request.request_id,
                   gossip_data: self.gossip.clone(),
                   leader_map: self.leader_map.value().clone(),
+                  free_node_eids: statuses.free_node_manager.free_node_eids(),
                 },
               )),
             );

@@ -10,7 +10,9 @@ use crossterm::terminal::{
 use crossterm::{event, execute};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_rid, EndpointId, PaxosGroupId, PaxosGroupIdTrait};
+use runiversal::common::{
+  mk_rid, ColType, ColVal, EndpointId, GossipData, LeaderMap, PaxosGroupId, PaxosGroupIdTrait,
+};
 use runiversal::message as msg;
 use runiversal::net::{send_msg, SendAction};
 use std::collections::BTreeMap;
@@ -145,30 +147,15 @@ impl MetadataMonitor {
           {
             let gossip_data = resp.gossip_data;
             let leader_map = resp.leader_map;
-            // let timestamp = gossip_data.get().table_generation.get_latest_lat();
 
-            let mut paxos_group_rows = Vec::<PaxosGroupRow>::new();
-
-            // Add in Master data.
-            let eids = gossip_data.get().master_address_config;
-            let ips: Vec<_> = eids.iter().map(|eid| eid.ip.clone()).collect();
-            paxos_group_rows.push(PaxosGroupRow {
-              replicated_group: "Master".to_string(),
-              leader: leader_map.get(&PaxosGroupId::Master).unwrap().eid.ip.clone(),
-              members: ips.join(", "),
-            });
-
-            // Add in Slaves data.
-            for (sid, eids) in gossip_data.get().slave_address_config {
-              let ips: Vec<_> = eids.iter().map(|eid| eid.ip.clone()).collect();
-              paxos_group_rows.push(PaxosGroupRow {
-                replicated_group: format!("Slave {}", sid.0),
-                leader: leader_map.get(&sid.to_gid()).unwrap().eid.ip.clone(),
-                members: ips.join(", "),
-              });
-            }
-
-            self.content = Table::new(paxos_group_rows).to_string();
+            // Construct the Display tables and assign the tables to be rendered on the screen.
+            self.content = vec![
+              paxos_group_table(&gossip_data, &leader_map),
+              free_nodes(resp.free_node_eids),
+              sharding_table(&gossip_data),
+              table_schemas_table(&gossip_data),
+            ]
+            .join("\n");
           }
         }
         Signal::Event(event) => match event {
@@ -256,4 +243,127 @@ struct PaxosGroupRow {
   replicated_group: String,
   leader: String,
   members: String,
+}
+
+#[derive(Tabled)]
+struct ShardingRow {
+  table_name: String,
+  tablet_group_id: String,
+  slave_group_id: String,
+  range_start: String,
+  range_end: String,
+}
+
+#[derive(Tabled)]
+struct TableSchemaRow {
+  table_name: String,
+  key: String,
+  columns: String,
+}
+
+/// Create a Table containing the
+fn paxos_group_table(gossip_data: &GossipData, leader_map: &LeaderMap) -> String {
+  let mut paxos_group_rows = Vec::<PaxosGroupRow>::new();
+
+  // Add in Master data.
+  let eids = gossip_data.get().master_address_config;
+  let ips: Vec<_> = eids.iter().map(|eid| eid.ip.clone()).collect();
+  paxos_group_rows.push(PaxosGroupRow {
+    replicated_group: "Master".to_string(),
+    leader: leader_map.get(&PaxosGroupId::Master).unwrap().eid.ip.clone(),
+    members: ips.join(", "),
+  });
+
+  // Add in Slaves data.
+  for (sid, eids) in gossip_data.get().slave_address_config {
+    let ips: Vec<_> = eids.iter().map(|eid| eid.ip.clone()).collect();
+    paxos_group_rows.push(PaxosGroupRow {
+      replicated_group: format!("Slave {}", sid.0),
+      leader: leader_map.get(&sid.to_gid()).unwrap().eid.ip.clone(),
+      members: ips.join(", "),
+    });
+  }
+
+  format!("Table 1: Paxos Configurations\n{}", Table::new(paxos_group_rows).to_string())
+}
+
+/// Convert the `start` or `end` of `TabletKeyRange` into a string.
+fn range_bound_str(range_bound: &Option<ColVal>) -> String {
+  match range_bound {
+    None => "Unbounded".to_string(),
+    Some(ColVal::Int(val)) => val.to_string(),
+    Some(ColVal::Bool(val)) => val.to_string(),
+    Some(ColVal::String(val)) => val.to_string(),
+  }
+}
+
+/// Create a Display Table containing the sharding data.
+fn sharding_table(gossip_data: &GossipData) -> String {
+  let timestamp = gossip_data.get().table_generation.get_latest_lat();
+
+  // Construct the sharding rows to display. There is a row for each Tablet.
+  let mut sharding_rows = Vec::<ShardingRow>::new();
+  let table_path_gens = gossip_data.get().table_generation.static_snapshot_read(&timestamp);
+  for table_path_gen in table_path_gens {
+    let shards = gossip_data.get().sharding_config.get(&table_path_gen).unwrap();
+    let (table_path, _) = table_path_gen;
+    for (range, tid) in shards {
+      let sid = gossip_data.get().tablet_address_config.get(tid).unwrap();
+      sharding_rows.push(ShardingRow {
+        table_name: table_path.0.clone(),
+        tablet_group_id: tid.0.clone(),
+        slave_group_id: sid.0.clone(),
+        range_start: range_bound_str(&range.start),
+        range_end: range_bound_str(&range.end),
+      });
+    }
+  }
+
+  format!("Table 2: Sharding\n{}", Table::new(sharding_rows).to_string())
+}
+
+/// Create a display string for the set of FreeNodes in the system.
+fn free_nodes(free_node_eids: Vec<EndpointId>) -> String {
+  let ips: Vec<_> = free_node_eids.into_iter().map(|eid| eid.ip).collect();
+  format!("FreeNodes: {}\n", ips.join(", "))
+}
+
+/// Convert `col_type` to a `String`.
+fn col_type_str(col_type: &ColType) -> String {
+  match col_type {
+    ColType::Int => "Int".to_string(),
+    ColType::Bool => "Bool".to_string(),
+    ColType::String => "String".to_string(),
+  }
+}
+
+/// Create a Table containing the
+fn table_schemas_table(gossip_data: &GossipData) -> String {
+  let timestamp = gossip_data.get().table_generation.get_latest_lat();
+
+  // Construct the sharding rows to display. There is a row for each Tablet.
+  let mut schema_rows = Vec::<TableSchemaRow>::new();
+  let table_path_gens = gossip_data.get().table_generation.static_snapshot_read(&timestamp);
+  for (table_path, (gen, _)) in table_path_gens {
+    let table_path_gen = (table_path.clone(), gen);
+    let schema = gossip_data.get().db_schema.get(&table_path_gen).unwrap();
+
+    // Stringify the key columns.
+    let mut key_elems = Vec::<String>::new();
+    for (col_name, col_type) in &schema.key_cols {
+      key_elems.push(format!("({}: {})", col_name.0, col_type_str(col_type)));
+    }
+    let key = key_elems.join(", ");
+
+    // Stringify the value columns.
+    let mut val_elems = Vec::<String>::new();
+    for (col_name, col_type) in &schema.val_cols.static_snapshot_read(&timestamp) {
+      val_elems.push(format!("({}: {})", col_name.0, col_type_str(col_type)));
+    }
+    let columns = val_elems.join(", ");
+
+    schema_rows.push(TableSchemaRow { table_name: table_path.0.clone(), key, columns });
+  }
+
+  format!("Table 3: Schemas\n{}", Table::new(schema_rows).to_string())
 }

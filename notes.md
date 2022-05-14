@@ -40,6 +40,8 @@ To create extra clients, do:
 
 ./run new_client 2
 ./run new_client 3
+./run new_slave 25 newslave
+./run new_slave 26 reconfig
 
 To clean up everything, do:
 

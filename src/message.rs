@@ -877,4 +877,5 @@ pub struct ExternalMetadataResponse {
   pub request_id: RequestId,
   pub gossip_data: GossipData,
   pub leader_map: LeaderMap,
+  pub free_node_eids: Vec<EndpointId>,
 }

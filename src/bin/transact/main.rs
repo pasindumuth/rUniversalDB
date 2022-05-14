@@ -7,6 +7,8 @@ extern crate runiversal;
 
 use crate::server::{ProdCoreIOCtx, ProdIOCtx, TIMER_INCREMENT};
 use clap::{arg, App};
+use env_logger::Builder;
+use log::LevelFilter;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
@@ -64,6 +66,9 @@ fn main() {
        Leader. (This is unused if the startup_type is 'masterbootup').",
     ))
     .get_matches();
+
+  // Setup logging
+  Builder::new().filter_level(LevelFilter::max()).init();
 
   // Get required arguments
   let startup_type = matches.value_of("startup_type").unwrap().to_string();
