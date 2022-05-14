@@ -10,7 +10,7 @@ use crossterm::terminal::{
 use crossterm::{event, execute};
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use runiversal::common::{mk_rid, EndpointId};
+use runiversal::common::{mk_rid, EndpointId, PaxosGroupId, PaxosGroupIdTrait};
 use runiversal::message as msg;
 use runiversal::net::{send_msg, SendAction};
 use std::collections::BTreeMap;
@@ -20,6 +20,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{sleep, JoinHandle};
 use std::time::Duration;
+use tabled::{Table, Tabled};
 use tui::backend::CrosstermBackend;
 use tui::layout::{Constraint, Direction, Layout};
 use tui::widgets::Paragraph;
@@ -142,7 +143,32 @@ impl MetadataMonitor {
             resp,
           )) = generic_input.message
           {
-            self.content = format!("{:#?}", resp.gossip_data);
+            let gossip_data = resp.gossip_data;
+            let leader_map = resp.leader_map;
+            // let timestamp = gossip_data.get().table_generation.get_latest_lat();
+
+            let mut paxos_group_rows = Vec::<PaxosGroupRow>::new();
+
+            // Add in Master data.
+            let eids = gossip_data.get().master_address_config;
+            let ips: Vec<_> = eids.iter().map(|eid| eid.ip.clone()).collect();
+            paxos_group_rows.push(PaxosGroupRow {
+              replicated_group: "Master".to_string(),
+              leader: leader_map.get(&PaxosGroupId::Master).unwrap().eid.ip.clone(),
+              members: ips.join(", "),
+            });
+
+            // Add in Slaves data.
+            for (sid, eids) in gossip_data.get().slave_address_config {
+              let ips: Vec<_> = eids.iter().map(|eid| eid.ip.clone()).collect();
+              paxos_group_rows.push(PaxosGroupRow {
+                replicated_group: format!("Slave {}", sid.0),
+                leader: leader_map.get(&sid.to_gid()).unwrap().eid.ip.clone(),
+                members: ips.join(", "),
+              });
+            }
+
+            self.content = Table::new(paxos_group_rows).to_string();
           }
         }
         Signal::Event(event) => match event {
@@ -219,4 +245,15 @@ fn should_quit(key: &KeyEvent) -> bool {
     KeyCode::Esc | KeyCode::Char('q') => true,
     _ => false,
   }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Print Utils
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Tabled)]
+struct PaxosGroupRow {
+  replicated_group: String,
+  leader: String,
+  members: String,
 }
