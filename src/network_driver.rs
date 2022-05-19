@@ -18,8 +18,8 @@ pub struct NetworkDriverContext<'a> {
 
 #[derive(Debug)]
 pub struct NetworkDriver<PayloadT> {
-  /// This buffers the NetworkMessages until the LeaderMap is sufficiently high enough.
-  /// Some properties:
+  /// This buffers the NetworkMessages until the corresponding `LeadershipId` in the
+  /// `LeaderMap` is sufficiently high enough. Some properties:
   ///   1. All `RemoteMessage`s for a given `PaxosGroupId` have the same `from_lid`.
   network_buffer: BTreeMap<PaxosGroupId, Vec<msg::RemoteMessage<PayloadT>>>,
   /// The `Gen` of the `ctx.leader_map` that `network_buffer` corresponds to.
@@ -36,6 +36,8 @@ impl<PayloadT: Clone> NetworkDriver<PayloadT> {
     NetworkDriver { network_buffer, gen: leader_map.gen().clone() }
   }
 
+  /// The precondition is that the `remote_message` is always from a `PaxosGroupId` that
+  /// is in the `leader_map` in `ctx`.
   pub fn receive(
     &mut self,
     ctx: NetworkDriverContext,

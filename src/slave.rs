@@ -462,7 +462,13 @@ impl SlaveContext {
       }
       msg::SlaveMessage::RemoteMessage(remote_message) => {
         if self.is_leader() {
-          // Pass the message through the NetworkDriver
+          // Pass the message through the NetworkDriver.
+
+          // To prove the precondition of `receive`, recall that either a `NetworkMessage` is
+          // an `SlaveMessage::is_tier_1` message or not. If it is, notice that only the messages
+          // from the Master Group will hit this branch, thus sustaining the property. Otherwise,
+          // recall that the `NodeState` only passes through a message from the Current Paxos
+          // View, thus sustaining the property.
           let maybe_delivered = self.network_driver.receive(
             NetworkDriverContext {
               this_gid: &self.this_gid,
@@ -844,7 +850,7 @@ impl SlaveContext {
       SlaveForwardMsg::GossipData(gossip, some_leader_map) => {
         // We only accept new Gossips where the generation increases.
         if self.gossip.get_gen() < gossip.get_gen() {
-          // Amend the local LeaderMap to refect the new GossipData.
+          // Amend the local LeaderMap to reflect the new GossipData.
           update_leader_map(
             &mut self.leader_map,
             self.gossip.as_ref(),

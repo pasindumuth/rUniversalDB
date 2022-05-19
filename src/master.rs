@@ -455,6 +455,12 @@ impl MasterContext {
       msg::MasterMessage::RemoteMessage(remote_message) => {
         if self.is_leader() {
           // Pass the message through the NetworkDriver
+
+          // To prove the precondition of `receive`, recall that either a `NetworkMessage` is
+          // a `MasterMessage::is_tier_1` message or not. If it is, notice that none of those
+          // messages will hit this branch, thus sustaining the property. Otherwise,
+          // recall that the `NodeState` only passes through a message from the Current Paxos
+          // View, thus sustaining the property.
           let maybe_delivered = self.network_driver.receive(
             NetworkDriverContext {
               this_gid: &PaxosGroupId::Master,

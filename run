@@ -87,6 +87,10 @@ elif [ "$1" = "cclean" ]; then
   docker container rm ${CONTAINER} &> /dev/null;
 elif [ "$1" = "test" ]; then
   cargo run --release --bin simtest -- -i 8 -r 80
+elif [ "$1" = "test_all" ]; then
+  cargo run --release --bin simtest -- -i 8 -r 80;
+  cargo run --release --bin paxos;
+  cargo run --release --bin paxos2pc_sim;
 elif [ "$1" = "bench" ]; then
   cargo run --release --bin simtest -- -i 4 -r 8
 else

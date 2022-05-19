@@ -11,11 +11,11 @@ pub fn check_node_clean(node: &NodeState, check_ctx: &mut CheckCtx) {
   match &node.state {
     State::DNEState(_) => {}
     State::FreeNodeState(_, _) => {}
-    State::NominalSlaveState(slave_state) => {
-      check_slave_clean(&slave_state.state, check_ctx);
+    State::NominalSlaveState(slave_state, _) => {
+      check_slave_clean(&slave_state, check_ctx);
     }
-    State::NominalMasterState(master_state) => {
-      check_master_clean(&master_state.state, check_ctx);
+    State::NominalMasterState(master_state, _) => {
+      check_master_clean(&master_state, check_ctx);
     }
     State::PostExistence => {}
   }

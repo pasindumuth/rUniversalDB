@@ -1,4 +1,6 @@
-use crate::common::{mk_t, FreeNodeIOCtx, GossipDataView, MasterIOCtx, NodeIOCtx, SlaveIOCtx};
+use crate::common::{
+  mk_t, FreeNodeIOCtx, GossipDataView, MasterIOCtx, NodeIOCtx, SlaveIOCtx, VersionedValue,
+};
 use crate::common::{CoordGroupId, EndpointId, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait};
 use crate::coord::{CoordConfig, CoordContext};
 use crate::master::{FullMasterInput, MasterConfig, MasterContext, MasterState, MasterTimerInput};
@@ -9,7 +11,7 @@ use crate::slave::{
   FullSlaveInput, SlaveBackMessage, SlaveConfig, SlaveContext, SlaveState, SlaveTimerInput,
 };
 use crate::tablet::TabletConfig;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 #[path = "test/node_test.rs"]
@@ -59,200 +61,198 @@ pub fn amend_buffer<MessageT>(
 }
 
 // -----------------------------------------------------------------------------------------------
-//  NominalSlaveState
+//  MessageTrait
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Debug)]
-struct NominalSlaveState {
-  state: SlaveState,
-  /// Messages (which are not client messages) that came from `EndpointId`s that is not present
-  /// in `state.get_eids`.
-  buffered_messages: BTreeMap<EndpointId, Vec<msg::SlaveMessage>>,
-  /// The `Gen` of the set of `EndpointId`s that `state` currently allows
-  /// messages to pass through from.
-  cur_gen: Gen,
+trait MessageTrait {
+  fn is_tier_1(&self) -> bool;
+
+  fn is_external(&self) -> bool;
 }
 
-impl NominalSlaveState {
-  fn init<IO: SlaveIOCtx>(
-    io_ctx: &mut IO,
-    state: SlaveState,
-    buffered_messages: BTreeMap<EndpointId, Vec<msg::SlaveMessage>>,
-  ) -> NominalSlaveState {
-    // Record and maintain the current version of `get_eids`, which we use to
-    // detect if `get_eids` changes and ensure that all buffered messages that
-    // should be delivered actually are.
-    let mut cur_gen = state.get_eids().gen().clone();
-
-    // Construct NominalSlaveState
-    let mut nominal_state = NominalSlaveState { state, buffered_messages, cur_gen };
-
-    // Deliver all buffered messages, leaving buffered only what should be
-    // buffered. (Importantly, there might be Slave messages, like Paxos,
-    // already present from the other Slave nodes being bootstrapped).
-    nominal_state.deliver_all_once(io_ctx);
-
-    // Next, we see if `get_eids` have changed. If so, there might now be buffered
-    // messages that need to be delivered.
-    nominal_state.deliver_all(io_ctx);
-    nominal_state
+/// `Master` implementation.
+impl MessageTrait for msg::MasterMessage {
+  fn is_tier_1(&self) -> bool {
+    msg::MasterMessage::is_tier_1(self)
   }
 
-  fn handle_msg<IO: SlaveIOCtx>(
-    &mut self,
-    io_ctx: &mut IO,
-    eid: &EndpointId,
-    slave_msg: msg::SlaveMessage,
-  ) {
-    // Pass through normally or buffer.
-    self.deliver_single_once(io_ctx, eid, slave_msg);
-
-    // Next, we see if `get_eids` have changed. If so, there might now be buffered
-    // messages that need to be delivered.
-    self.deliver_all(io_ctx);
-  }
-
-  /// Deliver the `slave_message` to `slave_state`, or buffer it.
-  fn deliver_single_once<IO: SlaveIOCtx>(
-    &mut self,
-    io_ctx: &mut IO,
-    eid: &EndpointId,
-    slave_msg: msg::SlaveMessage,
-  ) {
-    // If the message is from the External, we deliver it.
-    if let msg::SlaveMessage::SlaveExternalReq(_) = &slave_msg {
-      self.state.handle_input(io_ctx, FullSlaveInput::SlaveMessage(slave_msg));
-    }
-    // Otherwise, if the message is a tier 1 message, we deliver it
-    else if slave_msg.is_tier_1() {
-      self.state.handle_input(io_ctx, FullSlaveInput::SlaveMessage(slave_msg));
-    }
-    // Otherwise, if it is from an EndpointId from `get_eids`, we deliver it.
-    else if self.state.get_eids().value().contains(eid) {
-      self.state.handle_input(io_ctx, FullSlaveInput::SlaveMessage(slave_msg));
+  fn is_external(&self) -> bool {
+    if let msg::MasterMessage::MasterExternalReq(_) = self {
+      true
     } else {
-      // Otherwise, we buffer the message.
-      amend_buffer(&mut self.buffered_messages, eid, slave_msg);
+      false
     }
   }
+}
 
-  fn deliver_all_once<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
-    // Deliver all messages that were buffered so far.
-    let mut old_buffered_messages = std::mem::take(&mut self.buffered_messages);
-    for (eid, buffer) in old_buffered_messages {
-      for slave_msg in buffer {
-        self.deliver_single_once(io_ctx, &eid, slave_msg);
-      }
-    }
+/// `Slave` implementation.
+impl MessageTrait for msg::SlaveMessage {
+  fn is_tier_1(&self) -> bool {
+    msg::SlaveMessage::is_tier_1(self)
   }
 
-  fn deliver_all<IO: SlaveIOCtx>(&mut self, io_ctx: &mut IO) {
-    // Next, we see if `get_eids` have changed. If so, there might now be buffered
-    // messages that need to be delivered.
-    while &self.cur_gen != self.state.get_eids().gen() {
-      self.cur_gen = *self.state.get_eids().gen();
-      self.deliver_all_once(io_ctx);
+  fn is_external(&self) -> bool {
+    if let msg::SlaveMessage::SlaveExternalReq(_) = self {
+      true
+    } else {
+      false
     }
   }
 }
 
 // -----------------------------------------------------------------------------------------------
-//  NominalMasterState
+//  InnerStateTrait
 // -----------------------------------------------------------------------------------------------
 
-// TODO: add a tier to the network message to help reasoning about the
-//  below easier.
+trait InnerStateTrait {
+  type MessageT: MessageTrait;
+
+  fn get_eids(&self) -> &VersionedValue<BTreeSet<EndpointId>>;
+
+  fn handle_input(&mut self, message: Self::MessageT);
+}
+
+/// `Master` implementation.
+struct MasterInnerState<'a, IO> {
+  io_ctx: &'a mut IO,
+  state: &'a mut MasterState,
+}
+
+impl<'a, IO: MasterIOCtx> InnerStateTrait for MasterInnerState<'a, IO> {
+  type MessageT = msg::MasterMessage;
+
+  fn get_eids(&self) -> &VersionedValue<BTreeSet<EndpointId>> {
+    self.state.get_eids()
+  }
+
+  fn handle_input(&mut self, message: Self::MessageT) {
+    self.state.handle_input(self.io_ctx, FullMasterInput::MasterMessage(message));
+  }
+}
+
+/// `Slave` implementation.
+struct SlaveInnerState<'a, IO> {
+  io_ctx: &'a mut IO,
+  state: &'a mut SlaveState,
+}
+
+impl<'a, IO: SlaveIOCtx> InnerStateTrait for SlaveInnerState<'a, IO> {
+  type MessageT = msg::SlaveMessage;
+
+  fn get_eids(&self) -> &VersionedValue<BTreeSet<EndpointId>> {
+    self.state.get_eids()
+  }
+
+  fn handle_input(&mut self, message: Self::MessageT) {
+    self.state.handle_input(self.io_ctx, FullSlaveInput::SlaveMessage(message));
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  NominalState Container
+// -----------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
-struct NominalMasterState {
-  state: MasterState,
-  /// Messages (which are not client messages) that came from `EndpointId`s that is not present
-  /// in `state.get_eids`.
-  buffered_messages: BTreeMap<EndpointId, Vec<msg::MasterMessage>>,
+struct NominalState<MessageT> {
+  /// Messages (which are not client messages) that came from `EndpointId`s that
+  /// is not present in `state.get_eids`.
+  buffered_messages: BTreeMap<EndpointId, Vec<MessageT>>,
   /// The `Gen` of the set of `EndpointId`s that `state` currently allows
   /// messages to pass through from.
   cur_gen: Gen,
 }
 
-impl NominalMasterState {
-  fn init<IO: MasterIOCtx>(
-    io_ctx: &mut IO,
-    state: MasterState,
-    buffered_messages: BTreeMap<EndpointId, Vec<msg::MasterMessage>>,
-  ) -> NominalMasterState {
+impl<MessageT: MessageTrait> NominalState<MessageT> {
+  fn init<InnerStateT>(
+    inner_state: &mut InnerStateT,
+    buffered_messages: BTreeMap<EndpointId, Vec<MessageT>>,
+  ) -> NominalState<MessageT>
+  where
+    InnerStateT: InnerStateTrait<MessageT = MessageT>,
+  {
     // Record and maintain the current version of `get_eids`, which we use to
     // detect if `get_eids` changes and ensure that all buffered messages that
     // should be delivered actually are.
-    let mut cur_gen = state.get_eids().gen().clone();
+    let mut cur_gen = inner_state.get_eids().gen().clone();
 
-    // Construct NominalMasterState
-    let mut nominal_state = NominalMasterState { state, buffered_messages, cur_gen };
+    // Construct NominalState
+    let mut nominal_state = NominalState { buffered_messages, cur_gen };
 
     // Deliver all buffered messages, leaving buffered only what should be
     // buffered. (Importantly, there might be Master messages, like Paxos,
     // already present from the other Master nodes being bootstrapped).
-    nominal_state.deliver_all_once(io_ctx);
+    nominal_state.deliver_all_once(inner_state);
 
     // Next, we see if `get_eids` have changed. If so, there might now be buffered
     // messages that need to be delivered.
-    nominal_state.deliver_all(io_ctx);
+    nominal_state.deliver_all(inner_state);
     nominal_state
   }
 
-  fn handle_msg<IO: MasterIOCtx>(
+  fn handle_msg<InnerStateT: InnerStateTrait>(
     &mut self,
-    io_ctx: &mut IO,
+    inner_state: &mut InnerStateT,
     eid: &EndpointId,
-    master_msg: msg::MasterMessage,
-  ) {
+    message: MessageT,
+  ) where
+    InnerStateT: InnerStateTrait<MessageT = MessageT>,
+  {
     // Pass through normally or buffer.
-    self.deliver_single_once(io_ctx, eid, master_msg);
+    self.deliver_single_once(inner_state, eid, message);
 
     // Next, we see if `get_eids` have changed. If so, there might now be buffered
     // messages that need to be delivered.
-    self.deliver_all(io_ctx);
+    self.deliver_all(inner_state);
   }
 
   /// Deliver the `master_message` to `master_state`, or buffer it.
-  fn deliver_single_once<IO: MasterIOCtx>(
+  fn deliver_single_once<InnerStateT: InnerStateTrait>(
     &mut self,
-    io_ctx: &mut IO,
+    inner_state: &mut InnerStateT,
     eid: &EndpointId,
-    master_msg: msg::MasterMessage,
-  ) {
+    message: MessageT,
+  ) where
+    InnerStateT: InnerStateTrait<MessageT = MessageT>,
+  {
     // If the message is from the External, we deliver it.
-    if let msg::MasterMessage::MasterExternalReq(_) = &master_msg {
-      self.state.handle_input(io_ctx, FullMasterInput::MasterMessage(master_msg));
+    if message.is_external() {
+      inner_state.handle_input(message);
     }
     // Otherwise, if the message is a tier 1 message, we deliver it
-    else if master_msg.is_tier_1() {
-      self.state.handle_input(io_ctx, FullMasterInput::MasterMessage(master_msg));
+    else if message.is_tier_1() {
+      inner_state.handle_input(message);
     }
     // Otherwise, if it is from an EndpointId from `get_eids`, we deliver it.
-    else if self.state.get_eids().value().contains(eid) {
-      self.state.handle_input(io_ctx, FullMasterInput::MasterMessage(master_msg));
+    else if inner_state.get_eids().value().contains(eid) {
+      inner_state.handle_input(message);
     } else {
       // Otherwise, we buffer the message.
-      amend_buffer(&mut self.buffered_messages, eid, master_msg);
+      amend_buffer(&mut self.buffered_messages, eid, message);
     }
   }
 
-  fn deliver_all_once<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
+  fn deliver_all_once<InnerStateT: InnerStateTrait>(&mut self, inner_state: &mut InnerStateT)
+  where
+    InnerStateT: InnerStateTrait<MessageT = MessageT>,
+  {
     // Deliver all messages that were buffered so far.
     let mut old_buffered_messages = std::mem::take(&mut self.buffered_messages);
     for (eid, buffer) in old_buffered_messages {
-      for master_msg in buffer {
-        self.deliver_single_once(io_ctx, &eid, master_msg);
+      for message in buffer {
+        self.deliver_single_once(inner_state, &eid, message);
       }
     }
   }
 
-  fn deliver_all<IO: MasterIOCtx>(&mut self, io_ctx: &mut IO) {
+  fn deliver_all<InnerStateT: InnerStateTrait>(&mut self, inner_state: &mut InnerStateT)
+  where
+    InnerStateT: InnerStateTrait<MessageT = MessageT>,
+  {
     // Next, we see if `get_eids` have changed. If so, there might now be buffered
     // messages that need to be delivered.
-    while &self.cur_gen != self.state.get_eids().gen() {
-      self.cur_gen = *self.state.get_eids().gen();
-      self.deliver_all_once(io_ctx);
+    while &self.cur_gen != inner_state.get_eids().gen() {
+      self.cur_gen = *inner_state.get_eids().gen();
+      self.deliver_all_once(inner_state);
     }
   }
 }
@@ -336,8 +336,8 @@ pub fn get_prod_configs() -> NodeConfig {
 enum State {
   DNEState(BTreeMap<EndpointId, Vec<msg::NetworkMessage>>),
   FreeNodeState(LeadershipId, BTreeMap<EndpointId, Vec<msg::NetworkMessage>>),
-  NominalSlaveState(NominalSlaveState),
-  NominalMasterState(NominalMasterState),
+  NominalSlaveState(SlaveState, NominalState<msg::SlaveMessage>),
+  NominalMasterState(MasterState, NominalState<msg::MasterMessage>),
   PostExistence,
 }
 
@@ -411,11 +411,9 @@ impl NodeState {
                 }
 
                 // Advance
-                self.state = State::NominalMasterState(NominalMasterState::init(
-                  io_ctx,
-                  master_state,
-                  master_buffered_msgs,
-                ));
+                let mut inner_state = MasterInnerState { io_ctx, state: &mut master_state };
+                let nominal_state = NominalState::init(&mut inner_state, master_buffered_msgs);
+                self.state = State::NominalMasterState(master_state, nominal_state);
               }
               _ => {}
             }
@@ -489,11 +487,9 @@ impl NodeState {
                 }
 
                 // Advance
-                self.state = State::NominalSlaveState(NominalSlaveState::init(
-                  io_ctx,
-                  slave_state,
-                  slave_buffered_msgs,
-                ));
+                let mut inner_state = SlaveInnerState { io_ctx, state: &mut slave_state };
+                let nominal_state = NominalState::init(&mut inner_state, slave_buffered_msgs);
+                self.state = State::NominalSlaveState(slave_state, nominal_state);
 
                 // Respond with a `ConfirmSlaveCreation`.
                 io_ctx.send(
@@ -563,11 +559,9 @@ impl NodeState {
                 }
 
                 // Advance
-                self.state = State::NominalSlaveState(NominalSlaveState::init(
-                  io_ctx,
-                  slave_state,
-                  slave_buffered_msgs,
-                ));
+                let mut inner_state = SlaveInnerState { io_ctx, state: &mut slave_state };
+                let nominal_state = NominalState::init(&mut inner_state, slave_buffered_msgs);
+                self.state = State::NominalSlaveState(slave_state, nominal_state);
               }
               msg::FreeNodeMessage::MasterSnapshot(snapshot) => {
                 // Create the MasterState
@@ -594,11 +588,9 @@ impl NodeState {
                 }
 
                 // Advance
-                self.state = State::NominalMasterState(NominalMasterState::init(
-                  io_ctx,
-                  master_state,
-                  master_buffered_msgs,
-                ));
+                let mut inner_state = MasterInnerState { io_ctx, state: &mut master_state };
+                let nominal_state = NominalState::init(&mut inner_state, master_buffered_msgs);
+                self.state = State::NominalMasterState(master_state, nominal_state);
               }
               msg::FreeNodeMessage::ShutdownNode => {
                 self.state = State::PostExistence;
@@ -628,7 +620,7 @@ impl NodeState {
         }
         _ => {}
       },
-      State::NominalSlaveState(nominal_state) => {
+      State::NominalSlaveState(slave_state, nominal_state) => {
         match generic_input {
           GenericInput::Message(eid, message) => {
             // Handle FreeNode messages
@@ -640,7 +632,7 @@ impl NodeState {
                     &eid,
                     msg::NetworkMessage::Master(msg::MasterMessage::FreeNodeAssoc(
                       msg::FreeNodeAssoc::ConfirmSlaveCreation(msg::ConfirmSlaveCreation {
-                        sid: nominal_state.state.ctx.this_sid.clone(),
+                        sid: slave_state.ctx.this_sid.clone(),
                         sender_eid: self.this_eid.clone(),
                       }),
                     )),
@@ -664,16 +656,17 @@ impl NodeState {
               }
             } else if let msg::NetworkMessage::Slave(slave_msg) = message {
               // Forward the message.
-              nominal_state.handle_msg(io_ctx, &eid, slave_msg);
+              let mut inner_state = SlaveInnerState { io_ctx, state: slave_state };
+              nominal_state.handle_msg(&mut inner_state, &eid, slave_msg);
             }
           }
           GenericInput::TimerInput(GenericTimerInput::SlaveTimerInput(timer_input)) => {
             // Forward the `SlaveTimerInput`
-            nominal_state.state.handle_input(io_ctx, FullSlaveInput::SlaveTimerInput(timer_input));
+            slave_state.handle_input(io_ctx, FullSlaveInput::SlaveTimerInput(timer_input));
           }
           GenericInput::SlaveBackMessage(back_msg) => {
             // Forward the `SlaveBackMessage`
-            nominal_state.state.handle_input(io_ctx, FullSlaveInput::SlaveBackMessage(back_msg));
+            slave_state.handle_input(io_ctx, FullSlaveInput::SlaveBackMessage(back_msg));
           }
           _ => {}
         }
@@ -683,7 +676,7 @@ impl NodeState {
           self.state = State::PostExistence;
         }
       }
-      State::NominalMasterState(nominal_state) => {
+      State::NominalMasterState(master_state, nominal_state) => {
         match generic_input {
           GenericInput::Message(eid, message) => {
             // Handle FreeNode messages
@@ -707,14 +700,13 @@ impl NodeState {
               }
             } else if let msg::NetworkMessage::Master(master_msg) = message {
               // Forward the message.
-              nominal_state.handle_msg(io_ctx, &eid, master_msg);
+              let mut inner_state = MasterInnerState { io_ctx, state: master_state };
+              nominal_state.handle_msg(&mut inner_state, &eid, master_msg);
             }
           }
           GenericInput::TimerInput(GenericTimerInput::MasterTimerInput(timer_input)) => {
             // Forward the `MasterTimerInput`
-            nominal_state
-              .state
-              .handle_input(io_ctx, FullMasterInput::MasterTimerInput(timer_input));
+            master_state.handle_input(io_ctx, FullMasterInput::MasterTimerInput(timer_input));
           }
           _ => {}
         }
@@ -732,8 +724,8 @@ impl NodeState {
   /// return the the GossipData underneath. If this node is not the Master (i.e. it
   /// is in `PostExistence`), then we return `None`.
   pub fn full_db_schema(&self) -> Option<GossipDataView> {
-    if let State::NominalMasterState(master) = &self.state {
-      Some(master.state.ctx.gossip.get())
+    if let State::NominalMasterState(master_state, _) = &self.state {
+      Some(master_state.ctx.gossip.get())
     } else {
       None
     }
