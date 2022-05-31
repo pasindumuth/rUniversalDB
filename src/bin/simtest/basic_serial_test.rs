@@ -7,8 +7,8 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_t, remove_item, TableSchema, Timestamp};
 use runiversal::common::{
-  ColName, ColType, EndpointId, Gen, LeadershipId, PaxosGroupIdTrait, PrimaryKey, RequestId,
-  SlaveGroupId, TablePath, TableView, TabletGroupId, TabletKeyRange,
+  ColName, ColType, EndpointId, Gen, LeadershipId, PaxosGroupIdTrait, PrimaryKey, QueryResult,
+  RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
 };
 use runiversal::message as msg;
 use runiversal::paxos::PaxosConfig;
@@ -63,7 +63,7 @@ fn simple_test(seed: [u8; 16]) {
   // Test Simple Update-Select
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1"))]);
     ctx.execute_query(
@@ -77,7 +77,7 @@ fn simple_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
     ctx.execute_query(
       &mut sim,
@@ -91,7 +91,7 @@ fn simple_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
     ctx.execute_query(
@@ -107,7 +107,7 @@ fn simple_test(seed: [u8; 16]) {
   // Test Simple Multi-Stage Transactions
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5"))]);
     ctx.execute_query(
       &mut sim,
@@ -125,7 +125,7 @@ fn simple_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_4"))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5"))]);
     ctx.execute_query(
@@ -141,7 +141,7 @@ fn simple_test(seed: [u8; 16]) {
   // Test NULL data
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(6)), Some(cvs("my_email_6"))]);
     ctx.execute_query(
       &mut sim,
@@ -154,7 +154,7 @@ fn simple_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(6)), Some(cvs("my_email_6")), None]);
     ctx.execute_query(
       &mut sim,
@@ -168,7 +168,7 @@ fn simple_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_4")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_5")), Some(cvi(25))]);
     ctx.execute_query(
@@ -196,7 +196,7 @@ fn subquery_test(seed: [u8; 16]) {
   setup_inventory_table(&mut sim, &mut ctx);
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(25))]);
     ctx.execute_query(
@@ -213,7 +213,7 @@ fn subquery_test(seed: [u8; 16]) {
   setup_user_table(&mut sim, &mut ctx);
 
   {
-    let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
+    let mut exp_result = QueryResult::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(30))]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(50))]);
     exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(30))]);
@@ -232,7 +232,7 @@ fn subquery_test(seed: [u8; 16]) {
   // Test Simple Subquery
 
   {
-    let mut exp_result = TableView::new(vec![cno("balance")]);
+    let mut exp_result = QueryResult::new(vec![cno("balance")]);
     exp_result.add_row(vec![Some(cvi(30))]);
     ctx.execute_query(
       &mut sim,
@@ -251,7 +251,7 @@ fn subquery_test(seed: [u8; 16]) {
   // Test Correlated Subquery
 
   {
-    let mut exp_result = TableView::new(vec![cno("balance")]);
+    let mut exp_result = QueryResult::new(vec![cno("balance")]);
     exp_result.add_row(vec![Some(cvi(30))]);
     ctx.execute_query(
       &mut sim,
@@ -270,7 +270,7 @@ fn subquery_test(seed: [u8; 16]) {
   // Test Subquery with TransTable
 
   {
-    let mut exp_result = TableView::new(vec![cno("balance")]);
+    let mut exp_result = QueryResult::new(vec![cno("balance")]);
     exp_result.add_row(vec![Some(cvi(30))]);
     ctx.execute_query(
       &mut sim,
@@ -308,7 +308,7 @@ fn trans_table_test(seed: [u8; 16]) {
   // Test TransTable Reads
 
   {
-    let mut exp_result = TableView::new(vec![cno("email")]);
+    let mut exp_result = QueryResult::new(vec![cno("email")]);
     exp_result.add_row(vec![Some(cvs("my_email_1"))]);
     exp_result.add_row(vec![Some(cvs("my_email_2"))]);
     ctx.execute_query(
@@ -344,7 +344,7 @@ fn select_projection_test(seed: [u8; 16]) {
   // Test advanced expression in the SELECT projection.
 
   {
-    let mut exp_result = TableView::new(vec![cno("e"), cno("balance")]);
+    let mut exp_result = QueryResult::new(vec![cno("e"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
     exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);
     ctx.execute_query(
@@ -357,7 +357,7 @@ fn select_projection_test(seed: [u8; 16]) {
       exp_result,
     );
 
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(120))]);
     exp_result.add_row(vec![Some(cvi(140))]);
     ctx.execute_query(
@@ -370,7 +370,7 @@ fn select_projection_test(seed: [u8; 16]) {
       exp_result,
     );
 
-    let mut exp_result = TableView::new(vec![cno("b")]);
+    let mut exp_result = QueryResult::new(vec![cno("b")]);
     exp_result.add_row(vec![Some(cvi(120))]);
     exp_result.add_row(vec![Some(cvi(140))]);
     ctx.execute_query(
@@ -388,7 +388,7 @@ fn select_projection_test(seed: [u8; 16]) {
 
     // SELECT * tests
 
-    let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
+    let mut exp_result = QueryResult::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
     ctx.execute_query(
       &mut sim,
@@ -401,7 +401,7 @@ fn select_projection_test(seed: [u8; 16]) {
     );
 
     // Tests that SELECT * will read anonymous columns from a CTE properly.
-    let mut exp_result = TableView::new(vec![cno("e"), None]);
+    let mut exp_result = QueryResult::new(vec![cno("e"), None]);
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(100))]);
     ctx.execute_query(
       &mut sim,
@@ -433,7 +433,7 @@ fn insert_test(seed: [u8; 16]) {
   // Fully Insert with NULL
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), None]);
     ctx.execute_query(
@@ -450,7 +450,7 @@ fn insert_test(seed: [u8; 16]) {
   // Partial Insert with NULL
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(-1)), Some(cvs("my_email_2"))]);
     exp_result.add_row(vec![Some(cvi(3)), None]);
     ctx.execute_query(
@@ -577,7 +577,7 @@ fn multi_key_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("k1"), cno("k2"), cno("v1"), cno("v2")]);
+    let mut exp_result = QueryResult::new(vec![cno("k1"), cno("k2"), cno("v1"), cno("v2")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(0)), Some(cvi(0)), Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(1)), Some(cvi(0)), Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(0)), Some(cvi(0))]);
@@ -608,7 +608,7 @@ fn multi_key_test(seed: [u8; 16]) {
   // Range queries for multiple Key Columns
 
   {
-    let mut exp_result = TableView::new(vec![cno("k1"), cno("k2"), cno("v1")]);
+    let mut exp_result = QueryResult::new(vec![cno("k1"), cno("k2"), cno("v1")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(1)), Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(0))]);
@@ -627,7 +627,7 @@ fn multi_key_test(seed: [u8; 16]) {
   // Update using a complex WHERE clause
 
   {
-    let mut exp_result = TableView::new(vec![cno("k1"), cno("k2"), cno("v1")]);
+    let mut exp_result = QueryResult::new(vec![cno("k1"), cno("k2"), cno("v1")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(1)), Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(2))]);
@@ -644,7 +644,7 @@ fn multi_key_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("k1"), cno("k2"), cno("v1")]);
+    let mut exp_result = QueryResult::new(vec![cno("k1"), cno("k2"), cno("v1")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(1)), Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(2)), Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1)), Some(cvi(2))]);
@@ -679,7 +679,7 @@ fn multi_stage_test(seed: [u8; 16]) {
   // Multi-Stage Transactions with TransTables
 
   {
-    let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
+    let mut exp_result = QueryResult::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(80))]);
     ctx.execute_query(
       &mut sim,
@@ -696,7 +696,7 @@ fn multi_stage_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(30))]);
     ctx.execute_query(
       &mut sim,
@@ -734,7 +734,7 @@ fn aggregation_test(seed: [u8; 16]) {
   populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(3)), Some(cvs("my_email_3")), None]);
     ctx.execute_query(
@@ -751,7 +751,7 @@ fn aggregation_test(seed: [u8; 16]) {
   // Test basic Aggregates
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(65))]);
     ctx.execute_query(
       &mut sim,
@@ -764,7 +764,7 @@ fn aggregation_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(3))]);
     ctx.execute_query(
       &mut sim,
@@ -779,7 +779,7 @@ fn aggregation_test(seed: [u8; 16]) {
   // Test inner DISTINCT
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(40))]);
     ctx.execute_query(
       &mut sim,
@@ -794,7 +794,7 @@ fn aggregation_test(seed: [u8; 16]) {
   // Test outer DISTINCT
 
   {
-    let mut exp_result = TableView::new(vec![cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("count")]);
     exp_result.add_row(vec![Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(25))]);
@@ -810,7 +810,7 @@ fn aggregation_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("count")]);
     exp_result.add_row(vec![Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(25))]);
     exp_result.add_row(vec![None]);
@@ -827,7 +827,7 @@ fn aggregation_test(seed: [u8; 16]) {
   // Test all NULL column SUM
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![None]);
     ctx.execute_query(
       &mut sim,
@@ -851,7 +851,7 @@ fn avg_aggregation_test(seed: [u8; 16]) {
 
   // Test empty table
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![None]);
     ctx.execute_query(
       &mut sim,
@@ -865,7 +865,7 @@ fn avg_aggregation_test(seed: [u8; 16]) {
 
   // Test all NULL column
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), None]);
     ctx.execute_query(
       &mut sim,
@@ -878,7 +878,7 @@ fn avg_aggregation_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![None]);
     ctx.execute_query(
       &mut sim,
@@ -892,7 +892,7 @@ fn avg_aggregation_test(seed: [u8; 16]) {
 
   // Test nominal column
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(3)), Some(cvs("my_email_3")), Some(cvi(6))]);
     ctx.execute_query(
@@ -907,7 +907,7 @@ fn avg_aggregation_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(3))]);
     ctx.execute_query(
       &mut sim,
@@ -933,7 +933,7 @@ fn aliased_column_resolution_test(seed: [u8; 16]) {
   setup_inventory_table(&mut sim, &mut ctx);
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(25))]);
@@ -954,7 +954,7 @@ fn aliased_column_resolution_test(seed: [u8; 16]) {
   // Basic column shadowing test
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id")]);
     exp_result.add_row(vec![Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(2))]);
@@ -973,7 +973,7 @@ fn aliased_column_resolution_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id")]);
     exp_result.add_row(vec![Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(2))]);
@@ -994,7 +994,7 @@ fn aliased_column_resolution_test(seed: [u8; 16]) {
 
   // Qualified column with unqualified table
   {
-    let mut exp_result = TableView::new(vec![cno("product_id")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id")]);
     exp_result.add_row(vec![Some(cvi(0))]);
     exp_result.add_row(vec![Some(cvi(1))]);
     exp_result.add_row(vec![Some(cvi(2))]);
@@ -1043,7 +1043,7 @@ fn basic_add_column(seed: [u8; 16]) {
 
   {
     let mut exp_result =
-      TableView::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
+      QueryResult::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15)), None]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25)), None]);
     ctx.execute_query(
@@ -1057,7 +1057,7 @@ fn basic_add_column(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("price")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("price")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(100))]);
     ctx.execute_query(
       &mut sim,
@@ -1072,7 +1072,7 @@ fn basic_add_column(seed: [u8; 16]) {
 
   {
     let mut exp_result =
-      TableView::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
+      QueryResult::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35)), Some(cvi(200))]);
     ctx.execute_query(
       &mut sim,
@@ -1086,7 +1086,7 @@ fn basic_add_column(seed: [u8; 16]) {
 
   {
     let mut exp_result =
-      TableView::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
+      QueryResult::new(vec![cno("product_id"), cno("email"), cno("count"), cno("price")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15)), Some(cvi(100))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25)), None]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35)), Some(cvi(200))]);
@@ -1118,7 +1118,7 @@ fn drop_column(seed: [u8; 16]) {
   // for that column (rather than a non-null value that was previously there).
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
     ctx.execute_query(
       &mut sim,
@@ -1131,7 +1131,7 @@ fn drop_column(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
@@ -1185,7 +1185,7 @@ fn drop_column(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), None]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), None]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), None]);
@@ -1201,7 +1201,7 @@ fn drop_column(seed: [u8; 16]) {
 
   // Re-populated "count"
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvi(16))]);
     ctx.execute_query(
       &mut sim,
@@ -1215,7 +1215,7 @@ fn drop_column(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(16))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), None]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), None]);
@@ -1245,7 +1245,7 @@ fn basic_delete_test(seed: [u8; 16]) {
   populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
     ctx.execute_query(
       &mut sim,
@@ -1258,7 +1258,7 @@ fn basic_delete_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
@@ -1275,7 +1275,7 @@ fn basic_delete_test(seed: [u8; 16]) {
   // Delete rows with a non-trivial expression and check that they all get deleted
 
   {
-    let mut exp_result = TableView::new(vec![]);
+    let mut exp_result = QueryResult::new(vec![]);
     ctx.execute_query(
       &mut sim,
       " DELETE
@@ -1288,7 +1288,7 @@ fn basic_delete_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     ctx.execute_query(
       &mut sim,
@@ -1319,7 +1319,7 @@ fn insert_delete_insert_test(seed: [u8; 16]) {
   populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
     ctx.execute_query(
       &mut sim,
@@ -1341,7 +1341,7 @@ fn insert_delete_insert_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     exp_result.add_row(vec![Some(cvi(2)), Some(cvs("my_email_2")), Some(cvi(35))]);
     exp_result.add_row(vec![Some(cvi(3)), Some(cvs("my_email_3")), Some(cvi(45))]);
@@ -1375,7 +1375,7 @@ fn ghost_deleted_row_test(seed: [u8; 16]) {
   populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     ctx.execute_query(
@@ -1389,7 +1389,7 @@ fn ghost_deleted_row_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![]);
+    let mut exp_result = QueryResult::new(vec![]);
     ctx.execute_query(
       &mut sim,
       " DELETE
@@ -1402,7 +1402,7 @@ fn ghost_deleted_row_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
     ctx.execute_query(
       &mut sim,
@@ -1415,7 +1415,7 @@ fn ghost_deleted_row_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), None]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     ctx.execute_query(
@@ -1445,7 +1445,7 @@ fn drop_table_test(seed: [u8; 16]) {
   populate_user_table_basic(&mut sim, &mut ctx);
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(2))]);
     ctx.execute_query(
       &mut sim,
@@ -1458,7 +1458,7 @@ fn drop_table_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(3))]);
     ctx.execute_query(
       &mut sim,
@@ -1499,7 +1499,7 @@ fn drop_table_test(seed: [u8; 16]) {
   setup_inventory_table(&mut sim, &mut ctx);
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(0))]);
     ctx.execute_query(
       &mut sim,
@@ -1512,7 +1512,7 @@ fn drop_table_test(seed: [u8; 16]) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(3))]);
     ctx.execute_query(
       &mut sim,
@@ -1529,7 +1529,7 @@ fn drop_table_test(seed: [u8; 16]) {
   populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
-    let mut exp_result = TableView::new(vec![None]);
+    let mut exp_result = QueryResult::new(vec![None]);
     exp_result.add_row(vec![Some(cvi(2))]);
     ctx.execute_query(
       &mut sim,
@@ -1590,13 +1590,13 @@ fn cancellation_test(seed: [u8; 16]) {
     ) {
       assert_eq!(payload.request_id, request_id);
 
-      // Check that the TableView in the response is what we expect.
-      let mut exp_result = TableView::new(vec![]);
+      // Check that the ResultView in the response is what we expect.
+      let mut exp_result = QueryResult::new(vec![]);
       assert_eq!(payload.result, exp_result);
 
       // Check that final data in the system is what we expect.
       {
-        let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+        let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
         exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
         exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
         ctx.execute_query(
@@ -1610,7 +1610,7 @@ fn cancellation_test(seed: [u8; 16]) {
       }
 
       {
-        let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
+        let mut exp_result = QueryResult::new(vec![cno("email"), cno("balance")]);
         exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
         exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(110))]);
         exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(140))]);
@@ -1664,7 +1664,7 @@ fn cancellation_test(seed: [u8; 16]) {
     // is what we exact. We do this after cooldown to know that this is the stead state.
     if cancel_succeeded {
       {
-        let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+        let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
         exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
         exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
         ctx.execute_query(
@@ -1678,7 +1678,7 @@ fn cancellation_test(seed: [u8; 16]) {
       }
 
       {
-        let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
+        let mut exp_result = QueryResult::new(vec![cno("email"), cno("balance")]);
         exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
         exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
         exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);
@@ -1827,12 +1827,12 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
           msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(payload)) => {
             assert_eq!(payload.request_id, request_id.clone());
             // Verify the result is what we expect
-            let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+            let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email")]);
             exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
             assert_eq!(payload.result, exp_result);
 
             // Do a Select query and verify it matches what we expect the final data to be.
-            let mut exp_result = TableView::new(vec![cno("product_id"), cno("email")]);
+            let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email")]);
             exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0"))]);
             exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_3"))]);
             ctx.execute_query(

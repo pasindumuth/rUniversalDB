@@ -520,7 +520,7 @@ fn presence_snapshot_to_table_view(
   table_schema: &TableSchema,
   selection: &Vec<ColName>,
 ) -> TableView {
-  let mut table_view = TableView::new(selection.iter().cloned().map(|c| Some(c)).collect());
+  let mut table_view = TableView::new();
   for (pkey, col_name_vals) in presence_snapshot {
     let mut row = Vec::<ColValN>::new();
     for col_name in selection {

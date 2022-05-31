@@ -15,7 +15,7 @@ use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::master_query_planning_es::ColPresenceReq;
 use crate::message as msg;
 use crate::server::{
-  contains_col, contains_val_col, evaluate_super_simple_select, mk_eval_error, ContextConstructor,
+  contains_val_col, evaluate_super_simple_select, mk_eval_error, ContextConstructor,
   ExtraColumnRef, LocalColumnRef,
 };
 use crate::server::{LocalTable, ServerContextBase};
@@ -598,7 +598,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
   // Finally, iterate over the Context Rows of the subqueries and compute the final values.
   let mut pre_agg_table_views = Vec::<TableView>::new();
   for _ in 0..context.context_rows.len() {
-    pre_agg_table_views.push(TableView::new(schema.clone()));
+    pre_agg_table_views.push(TableView::new());
   }
 
   context_constructor.run(
@@ -642,7 +642,7 @@ pub fn perform_aggregation(
   // Produce the result table, handling aggregates and DISTINCT accordingly.
   let mut res_table_views = Vec::<TableView>::new();
   for pre_agg_table_view in pre_agg_table_views {
-    let mut res_table_view = TableView::new(pre_agg_table_view.col_names);
+    let mut res_table_view = TableView::new();
 
     // Handle aggregation
     if is_agg(sql_query) {
@@ -654,7 +654,7 @@ pub fn perform_aggregation(
       let select_list = cast!(proc::SelectClause::SelectList, &sql_query.projection).unwrap();
       let mut columns = Vec::<TableView>::new();
       for _ in 0..select_list.len() {
-        columns.push(TableView::new(Vec::new()));
+        columns.push(TableView::new());
       }
       for (row, count) in pre_agg_table_view.rows {
         for (i, val) in row.into_iter().enumerate() {

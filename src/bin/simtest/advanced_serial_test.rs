@@ -6,7 +6,7 @@ use crate::simulation::Simulation;
 use rand_xorshift::XorShiftRng;
 use runiversal::common::TableSchema;
 use runiversal::common::{
-  ColName, ColType, EndpointId, Gen, PrimaryKey, RequestId, SlaveGroupId, TablePath, TableView,
+  ColName, ColType, EndpointId, Gen, PrimaryKey, QueryResult, RequestId, SlaveGroupId, TablePath,
   TabletGroupId, TabletKeyRange,
 };
 use runiversal::message as msg;
@@ -44,7 +44,7 @@ fn subquery_test(seed: [u8; 16]) {
   // Test Multiple Subqueries
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id")]);
     exp_result.add_row(vec![Some(cvi(0))]);
     ctx.execute_query(
       &mut sim,
@@ -82,7 +82,7 @@ fn trans_table_test(seed: [u8; 16]) {
   // Test TransTable Reads
 
   {
-    let mut exp_result = TableView::new(vec![cno("email")]);
+    let mut exp_result = QueryResult::new(vec![cno("email")]);
     exp_result.add_row(vec![Some(cvs("my_email_1"))]);
     ctx.execute_query(
       &mut sim,
@@ -107,7 +107,7 @@ fn trans_table_test(seed: [u8; 16]) {
   // Test TransTable Reads with a Write
 
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(30))]);
     ctx.execute_query(
       &mut sim,

@@ -93,10 +93,6 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
     &self.schema
   }
 
-  fn contains_col(&self, col: &ColName) -> bool {
-    self.schema.contains(&Some(col.clone()))
-  }
-
   fn get_rows(
     &self,
     parent_context_schema: &ContextSchema,
@@ -115,13 +111,13 @@ impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> 
       self.trans_table_source.get_instance(&self.trans_table_name, *trans_table_instance_pos);
 
     // Next, we select the desired columns and compress them before returning it.
-    let mut sub_view = TableView::new(vec![]); // TODO: stop needing to specify a bogus schema.
+    let mut sub_view = TableView::new();
     for (row, count) in &trans_table_instance.rows {
       let mut new_row = Vec::<ColValN>::new();
       for col_ref in local_col_refs {
         let pos = match col_ref {
-          LocalColumnRef::Named(col) => trans_table_instance
-            .col_names
+          LocalColumnRef::Named(col) => self
+            .schema
             .iter()
             .position(
               |maybe_cur_col| {

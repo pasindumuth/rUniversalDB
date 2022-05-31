@@ -2,8 +2,9 @@ use crate::alter_table_tm_es::AlterTableTMPayloadTypes;
 use crate::col_usage::ColUsageNode;
 use crate::common::{
   CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, InternalMode,
-  LeadershipId, PaxosGroupId, QueryId, RequestId, SlaveGroupId, TNodePath, TQueryPath, TablePath,
-  TableView, TabletGroupId, TabletKeyRange, TierMap, TransTableLocationPrefix, TransTableName,
+  LeadershipId, PaxosGroupId, QueryId, QueryResult, RequestId, SlaveGroupId, TNodePath, TQueryPath,
+  TablePath, TableView, TabletGroupId, TabletKeyRange, TierMap, TransTableLocationPrefix,
+  TransTableName,
 };
 use crate::common::{FullGen, GossipData, LeaderMap, QueryPlan, RemoteLeaderChangedPLm, Timestamp};
 use crate::create_table_tm_es::CreateTableTMPayloadTypes;
@@ -612,7 +613,7 @@ pub struct CancelExternalQuery {
 pub struct ExternalQuerySuccess {
   pub request_id: RequestId,
   pub timestamp: Timestamp,
-  pub result: TableView,
+  pub result: QueryResult,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

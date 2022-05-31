@@ -809,7 +809,7 @@ fn verify_req_res(
             for _ in stats_ncte_1stage.len()..(i + 1) {
               stats_ncte_1stage.push(AvgCounter { num_elems: 0, sum: 0 });
             }
-            stats_ncte_1stage.get_mut(i).unwrap().add_entry(res.result.rows.len() as i32);
+            stats_ncte_1stage.get_mut(i).unwrap().add_entry(res.result.data.rows.len() as i32);
           }
           _ => {}
         }

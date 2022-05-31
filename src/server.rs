@@ -591,9 +591,10 @@ struct ContextConverter {
 impl ContextConverter {
   /// Sets up and creates a `ContextConverter`. Here, `child_columns` and `child_trans_table_names`
   /// are the column and TransTable that are to be used in the `Context` that is constructed.
-  /// Importantly, `ContextSchema` of this new `Context` does not preserve the order of
-  /// `child_cols`. Here, `local_table` is only used to infer if a column in `child_columns`
-  /// needs to be read from the parent `Context` or not.
+  /// Here, `local_table` is only used to infer if a column in `child_columns` needs to be read
+  /// from the parent `Context`, or from the `local_table`. Importantly, `ContextSchema` of this
+  /// new `Context` does not preserve the order of `child_columns`; in particular, the columns
+  /// in `child_columns` that are a part of the `local_table` are pulled to the front.
   fn create<LocalTableT: LocalTable>(
     parent_context_schema: &ContextSchema,
     local_table: &LocalTableT,
@@ -652,21 +653,26 @@ impl ContextConverter {
     conv
   }
 
-  /// Computes a child ContextRow. Note that the schema of `row` should be
-  /// `self.safe_present_cols`. (Here, `parent_context_row` must have the schema
-  /// of the `parent_context_schema` that was passed into the constructors). The `ContextRow`
-  /// that is constructed has a Schema of `context_schema`.
+  /// This function computes a child `ContextRow` (with a schema of `context_schema`) by simply
+  /// extracting the relevant parts of `parent_context_row`.
+  ///
+  /// Here, `safe_present_col_vals` must have the schema of the `self.safe_present_cols`,
+  /// and `parent_context_row` must have the schema of the `parent_context_schema` that
+  /// was passed into the constructor.
   fn compute_child_context_row(
     &self,
     parent_context_row: &ContextRow,
-    mut row: Vec<ColValN>,
+    safe_present_col_vals: Vec<ColValN>,
   ) -> ContextRow {
+    let mut new_context_row = ContextRow::default();
+    new_context_row.column_context_row = safe_present_col_vals;
     for col in &self.external_split {
       let index = self.context_col_index.get(col).unwrap();
-      row.push(parent_context_row.column_context_row.get(*index).unwrap().clone());
+      new_context_row
+        .column_context_row
+        .push(parent_context_row.column_context_row.get(*index).unwrap().clone());
     }
-    let mut new_context_row = ContextRow::default();
-    new_context_row.column_context_row = row;
+
     // Compute the `TransTableContextRow`
     for trans_table_name in &self.trans_table_split {
       let index = self.context_trans_table_index.get(trans_table_name).unwrap();
@@ -677,8 +683,8 @@ impl ContextConverter {
   }
 
   /// Extracts the subset of `subtable_row` whose `ColName`s correspond to
-  /// `self.safe_present_cols` and returns it in the order of `self.safe_present_cols`.
-  fn extract_child_relevent_cols(
+  /// `self.safe_present_cols`, and returns it in the order of `self.safe_present_cols`.
+  fn extract_safe_present_col_vals(
     &self,
     subtable_schema: &Vec<LocalColumnRef>,
     subtable_row: &Vec<ColValN>,
@@ -737,7 +743,14 @@ pub trait LocalTable {
   fn schema(&self) -> &Vec<Option<ColName>>;
 
   /// Checks if the given `col` is in the schema of the LocalTable.
-  fn contains_col(&self, col: &ColName) -> bool;
+  fn contains_col(&self, col: &ColName) -> bool {
+    for schema_col in self.schema() {
+      if schema_col.as_ref() == Some(col) {
+        return true;
+      }
+    }
+    false
+  }
 
   /// Checks if the given `local_col_ref` is in the schema of the LocalTable.
   fn contains_local_col_ref(&self, local_col_ref: &LocalColumnRef) -> bool {
@@ -772,10 +785,9 @@ pub trait LocalTable {
 
   /// Here, every `local_col_refs` must be in `contains_local_col_ref`, and every `ColumnRef`
   /// in `parent_context_schema` must have `contains_col_ref` evaluate to false. This function
-  /// gets all rows in the local table that is associated with the given parent ContextRow.
-  /// Here, we return the value of every row (`Vec<ColValN>`), as well as the count of how
-  /// many times that row occurred (this is more performant than returning the same row over
-  /// and over again).
+  /// gets all rows in the `LocalTable` that is associated with the given parent ContextRow.
+  /// Here, the returned rows `Vec<ColValN>` have a schema of `local_col_refs`, and the `u64`
+  /// associated with it is the number of times that each row occurred.
   fn get_rows(
     &self,
     parent_context_schema: &ContextSchema,
@@ -820,7 +832,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
     self.converters.iter().map(|conv| conv.context_schema.clone()).collect()
   }
 
-  /// An initial pass that's used to construct the child `Context`s in a deterministic order.
+  /// An initial pass that is used to construct the child `Context`s in a deterministic order.
   /// Recall that when `run` executes similar code, the presence of `extra_cols` might change
   /// the order in which child `ContextRow`s are constructed. This is a problem if we want the
   /// child `ContextRow` index (`usize`) to be consisted before sending subqueries, and after
@@ -845,29 +857,24 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
       child_context_row_maps.push(BTreeMap::new());
     }
 
-    for parent_context_row_idx in 0..parent_context_rows.len() {
-      let parent_context_row = parent_context_rows.get(parent_context_row_idx).unwrap();
+    for parent_context_row in parent_context_rows {
       for (mut local_row, _) in
         self.local_table.get_rows(&self.parent_context_schema, parent_context_row, &local_schema)
       {
         // First, construct the child ContextRows.
-        let mut child_context_rows = Vec::<(ContextRow, usize)>::new();
-        for index in 0..self.converters.len() {
+        for (index, conv) in self.converters.iter().enumerate() {
           // Compute the child ContextRow for this subquery, and populate
           // `child_context_row_map` accordingly.
-          let conv = self.converters.get(index).unwrap();
+          let child_context_row = conv.compute_child_context_row(
+            parent_context_row,
+            conv.extract_safe_present_col_vals(&local_schema, &local_row),
+          );
+
           let child_context_row_map = child_context_row_maps.get_mut(index).unwrap();
-          let row = conv.extract_child_relevent_cols(&local_schema, &local_row);
-          let child_context_row = conv.compute_child_context_row(parent_context_row, row);
           if !child_context_row_map.contains_key(&child_context_row) {
             let idx = child_context_row_map.len();
             child_context_row_map.insert(child_context_row.clone(), idx);
           }
-
-          // Get the child_context_idx to get the relevent TableView from the subquery
-          // results, and populate `subquery_vals`.
-          let child_context_idx = child_context_row_map.get(&child_context_row).unwrap();
-          child_context_rows.push((child_context_row, *child_context_idx));
         }
       }
     }
@@ -903,25 +910,25 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
         .extend(conv.safe_present_split.iter().map(|c| LocalColumnRef::Named(c.clone())));
     }
     let local_schema = Vec::from_iter(local_schema_set.into_iter());
-    let child_context_row_maps = self.create_child_context_row_maps(parent_context_rows);
 
-    for parent_context_row_idx in 0..parent_context_rows.len() {
-      let parent_context_row = parent_context_rows.get(parent_context_row_idx).unwrap();
+    let child_context_row_maps = self.create_child_context_row_maps(parent_context_rows);
+    for (parent_context_row_idx, parent_context_row) in parent_context_rows.iter().enumerate() {
       for (mut local_row, count) in
         self.local_table.get_rows(&self.parent_context_schema, parent_context_row, &local_schema)
       {
         // First, construct the child ContextRows.
         let mut child_context_rows = Vec::<(ContextRow, usize)>::new();
-        for index in 0..self.converters.len() {
+        for (index, conv) in self.converters.iter().enumerate() {
           // Compute the child ContextRow for this subquery, and populate
-          // `child_context_row_map` accordingly.
-          let conv = self.converters.get(index).unwrap();
-          let child_context_row_map = child_context_row_maps.get(index).unwrap();
-          let row = conv.extract_child_relevent_cols(&local_schema, &local_row);
-          let child_context_row = conv.compute_child_context_row(parent_context_row, row);
+          // `child_context_rows` accordingly.
+          let child_context_row = conv.compute_child_context_row(
+            parent_context_row,
+            conv.extract_safe_present_col_vals(&local_schema, &local_row),
+          );
 
           // Get the child_context_idx to get the relevent TableView from the subquery
           // results, and populate `subquery_vals`.
+          let child_context_row_map = child_context_row_maps.get(index).unwrap();
           let child_context_idx = child_context_row_map.get(&child_context_row).unwrap();
           child_context_rows.push((child_context_row, *child_context_idx));
         }

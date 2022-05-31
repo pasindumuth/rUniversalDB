@@ -97,7 +97,7 @@ impl SqlQueryInner for InsertInner {
 
     // Compute the UpdateView where we insert all of these rows as new rows.
     let mut update_view = GenericTable::new();
-    let mut res_table_view = TableView::new(es.query_plan.col_usage_node.schema.clone());
+    let mut res_table_view = TableView::new();
     let mut pkeys = BTreeSet::<PrimaryKey>::new();
     for row in eval_values {
       // Construct PrimaryKey.

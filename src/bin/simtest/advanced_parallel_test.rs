@@ -4,7 +4,9 @@ use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{mk_rid, mk_t, read_index, TableSchema, Timestamp};
-use runiversal::common::{ColName, EndpointId, Gen, RequestId, SlaveGroupId, TablePath, TableView};
+use runiversal::common::{
+  ColName, EndpointId, Gen, QueryResult, RequestId, SlaveGroupId, TablePath,
+};
 use runiversal::coord::CoordConfig;
 use runiversal::master::MasterConfig;
 use runiversal::message as msg;
@@ -684,7 +686,7 @@ fn setup_tables(sim: &mut Simulation, ctx: &mut TestContext) {
 
   {
     let mut exp_result =
-      TableView::new(vec![cno("k11"), cno("k12"), cno("v11"), cno("v12"), cno("v13")]);
+      QueryResult::new(vec![cno("k11"), cno("k12"), cno("v11"), cno("v12"), cno("v13")]);
     exp_result.add_row(vec![mki(0), mki(1), mki(2), mki(3), mki(4)]);
     exp_result.add_row(vec![mki(1), mki(2), mki(3), mki(4), mki(5)]);
     exp_result.add_row(vec![mki(2), mki(3), mki(4), mki(5), mki(6)]);
@@ -705,7 +707,7 @@ fn setup_tables(sim: &mut Simulation, ctx: &mut TestContext) {
   }
 
   {
-    let mut exp_result = TableView::new(vec![cno("k21"), cno("v21"), cno("v22")]);
+    let mut exp_result = QueryResult::new(vec![cno("k21"), cno("v21"), cno("v22")]);
     exp_result.add_row(vec![mki(0), mki(2), mki(3)]);
     exp_result.add_row(vec![mki(1), mki(3), mki(4)]);
     exp_result.add_row(vec![mki(2), mki(4), mki(5)]);

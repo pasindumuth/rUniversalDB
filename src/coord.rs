@@ -763,7 +763,7 @@ impl CoordContext {
         ms_coord.child_queries.push(tm_status.query_id.clone());
         statuses.tm_statuss.insert(tm_status.query_id.clone(), tm_status);
       }
-      MSQueryCoordAction::Success(all_rms, sql_query, table_view, timestamp) => {
+      MSQueryCoordAction::Success(all_rms, sql_query, result, timestamp) => {
         let ms_coord = statuses.ms_coord_ess.remove(&query_id).unwrap();
 
         if all_rms.is_empty() {
@@ -772,11 +772,7 @@ impl CoordContext {
           io_ctx.send(
             &ms_coord.sender_eid,
             msg::NetworkMessage::External(msg::ExternalMessage::ExternalQuerySuccess(
-              msg::ExternalQuerySuccess {
-                request_id: ms_coord.request_id,
-                timestamp,
-                result: table_view,
-              },
+              msg::ExternalQuerySuccess { request_id: ms_coord.request_id, timestamp, result },
             )),
           );
         } else {
@@ -796,7 +792,7 @@ impl CoordContext {
                 request_id: ms_coord.request_id,
                 sender_eid: ms_coord.sender_eid,
                 sql_query,
-                table_view,
+                result,
                 timestamp,
               }),
               committed: false,
@@ -873,7 +869,7 @@ impl CoordContext {
                 msg::ExternalQuerySuccess {
                   request_id: response_data.request_id,
                   timestamp: response_data.timestamp,
-                  result: response_data.table_view,
+                  result: response_data.result,
                 },
               )),
             );

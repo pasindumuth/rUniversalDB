@@ -2,7 +2,9 @@ use crate::col_usage::{
   iterate_stage_ms_query, node_external_trans_tables, ColUsageError, ColUsageNode, ColUsagePlanner,
   GeneralStage,
 };
-use crate::common::{lookup, merge_table_views, mk_qid, FullGen, OrigP, QueryPlan, Timestamp};
+use crate::common::{
+  lookup, merge_table_views, mk_qid, FullGen, OrigP, QueryPlan, QueryResult, Timestamp,
+};
 use crate::common::{
   ColName, Context, ContextRow, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId,
   SlaveGroupId, TQueryPath, TablePath, TableView, TabletGroupId, TierMap, TransTableLocationPrefix,
@@ -15,7 +17,7 @@ use crate::master_query_planning_es::{
   master_query_planning, ColPresenceReq, StaticDBSchemaView, StaticDBSchemaViewError,
 };
 use crate::message as msg;
-use crate::server::{contains_col, CTServerContext, CommonQuery, ServerContextBase};
+use crate::server::{CTServerContext, CommonQuery, ServerContextBase};
 use crate::sql_ast::proc;
 use crate::table_read_es::perform_aggregation;
 use crate::tm_status::{SendHelper, TMStatus};
@@ -97,7 +99,7 @@ pub enum MSQueryCoordAction {
   /// This tells the parent Server to execute the given TMStatus.
   ExecuteTMStatus(TMStatus),
   /// Indicates that a valid MSCoordES was successful, and was ECU.
-  Success(Vec<TQueryPath>, proc::MSQuery, TableView, Timestamp),
+  Success(Vec<TQueryPath>, proc::MSQuery, QueryResult, Timestamp),
   /// Indicates that a valid MSCoordES was unsuccessful and there is no
   /// chance of success, and was ECU.
   FatalFailure(msg::ExternalAbortedData),
@@ -413,16 +415,17 @@ impl FullMSCoordES {
       }
 
       // Finally, we go to Done and return the appropriate TableView.
-      let (_, (_, table_view)) = es
+      let (_, (schema, data)) = es
         .trans_table_views
         .iter()
         .find(|(trans_table_name, _)| trans_table_name == &es.sql_query.returning)
-        .unwrap();
+        .unwrap()
+        .clone();
       es.state = CoordState::Done;
       MSQueryCoordAction::Success(
         es.all_rms.iter().cloned().collect(),
         es.sql_query.clone(),
-        table_view.clone(),
+        QueryResult { schema, data },
         es.timestamp.clone(),
       )
     }

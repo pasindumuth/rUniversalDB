@@ -37,8 +37,7 @@ use crate::ms_table_write_es::{MSTableWriteES, UpdateInner};
 use crate::paxos2pc_rm;
 use crate::paxos2pc_tm;
 use crate::server::{
-  contains_col, CTServerContext, CommonQuery, ContextConstructor, LocalColumnRef, LocalTable,
-  ServerContextBase,
+  CTServerContext, CommonQuery, ContextConstructor, LocalColumnRef, LocalTable, ServerContextBase,
 };
 use crate::shard_snapshot_es::{ShardingConfirmedPLm, ShardingSnapshotAction, ShardingSnapshotES};
 use crate::shard_split_tablet_rm_es::{
@@ -1061,10 +1060,6 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
 
   fn schema(&self) -> &Vec<Option<ColName>> {
     &self.schema
-  }
-
-  fn contains_col(&self, col: &ColName) -> bool {
-    contains_col(self.table_schema, col, self.timestamp)
   }
 
   fn get_rows(

@@ -8,8 +8,8 @@ use rand::{RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::cast;
 use runiversal::common::{
-  mk_rid, rand_string, ColName, ColType, ColVal, GossipData, InternalMode, PaxosGroupId, TablePath,
-  TableView, Timestamp,
+  mk_rid, rand_string, ColName, ColType, ColVal, GossipData, InternalMode, PaxosGroupId,
+  QueryResult, TablePath, TableView, Timestamp,
 };
 use runiversal::common::{EndpointId, RequestId};
 use runiversal::message as msg;
@@ -487,14 +487,14 @@ fn format_even_spaces(elems: Vec<String>, justification: Justification) -> Strin
   formatted_elems.join("")
 }
 
-/// Format `table_view` into a printable string.
-fn format_table(table_view: TableView) -> String {
+/// Format `result` into a printable string.
+fn format_table(result: QueryResult) -> String {
   let mut lines = Vec::<String>::new();
 
   // Construct Display Columns for the Display Table
   let mut display_cols = Vec::<String>::new();
   display_cols.push("index".to_string());
-  for maybe_col_name in table_view.col_names {
+  for maybe_col_name in result.schema {
     if let Some(ColName(col_name)) = maybe_col_name {
       display_cols.push(col_name);
     }
@@ -509,7 +509,7 @@ fn format_table(table_view: TableView) -> String {
   lines.push("-".repeat(display_width));
 
   // Construct Display Rows
-  for (index, (cols, count)) in table_view.rows.into_iter().enumerate() {
+  for (index, (cols, count)) in result.data.rows.into_iter().enumerate() {
     let mut display_row = Vec::<String>::new();
     display_row.push(index.to_string());
     for col in cols {

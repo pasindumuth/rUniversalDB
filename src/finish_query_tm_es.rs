@@ -1,4 +1,4 @@
-use crate::common::{BasicIOCtx, ShardingGen, Timestamp};
+use crate::common::{BasicIOCtx, ColName, QueryResult, ShardingGen, Timestamp};
 use crate::common::{CNodePath, EndpointId, QueryId, RequestId, TNodePath, TQueryPath, TableView};
 use crate::coord::CoordContext;
 use crate::message as msg;
@@ -89,7 +89,7 @@ pub struct ResponseData {
   pub sql_query: proc::MSQuery,
 
   // Result values (values computed by the MSCoordES)
-  pub table_view: TableView,
+  pub result: QueryResult,
   pub timestamp: Timestamp,
 }
 

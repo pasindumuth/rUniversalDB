@@ -1,6 +1,6 @@
 use crate::simulation::Simulation;
-use runiversal::common::{mk_t, RangeEnds};
-use runiversal::common::{EndpointId, PaxosGroupId, RequestId, SlaveGroupId, TableView};
+use runiversal::common::{mk_t, ColName, ColValN, QueryResult, RangeEnds};
+use runiversal::common::{EndpointId, PaxosGroupId, RequestId, SlaveGroupId};
 use runiversal::coord::CoordConfig;
 use runiversal::free_node_manager::FreeNodeType;
 use runiversal::master::MasterConfig;
@@ -129,14 +129,14 @@ impl TestContext {
   }
 
   /// Executes the `query` using `sim` with a time limit of `time_limit`. If the query
-  /// finishes, we check that it succeeded and that the resulting `TableView` is the same
+  /// finishes, we check that it succeeded and that the resulting `ResultView` is the same
   /// as `expr_result`.
   pub fn execute_query(
     &mut self,
     sim: &mut Simulation,
     query: &str,
     time_limit: u32,
-    exp_result: TableView,
+    exp_result: QueryResult,
   ) {
     let request_id = self.send_query(sim, query);
     assert!(self.simulate_until_response(sim, time_limit));
@@ -154,7 +154,7 @@ impl TestContext {
     }
   }
 
-  /// Same as above, except we do not check the returned resulting `TableView`.
+  /// Same as above, except we do not check the returned resulting `ResultView`.
   pub fn execute_query_simple(&mut self, sim: &mut Simulation, query: &str, time_limit: u32) {
     let request_id = self.send_query(sim, query);
     assert!(self.simulate_until_response(sim, time_limit));
@@ -265,7 +265,7 @@ pub fn setup_inventory_table(sim: &mut Simulation, context: &mut TestContext) {
 
 pub fn populate_inventory_table_basic(sim: &mut Simulation, context: &mut TestContext) {
   {
-    let mut exp_result = TableView::new(vec![cno("product_id"), cno("email"), cno("count")]);
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvs("my_email_1")), Some(cvi(25))]);
     context.execute_query(
@@ -296,7 +296,7 @@ pub fn setup_user_table(sim: &mut Simulation, context: &mut TestContext) {
 
 pub fn populate_user_table_basic(sim: &mut Simulation, context: &mut TestContext) {
   {
-    let mut exp_result = TableView::new(vec![cno("email"), cno("balance")]);
+    let mut exp_result = QueryResult::new(vec![cno("email"), cno("balance")]);
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50))]);
     exp_result.add_row(vec![Some(cvs("my_email_1")), Some(cvi(60))]);
     exp_result.add_row(vec![Some(cvs("my_email_2")), Some(cvi(70))]);

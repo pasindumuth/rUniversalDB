@@ -164,7 +164,7 @@ impl SqlQueryInner for UpdateInner {
     // Setup the TableView that we are going to return and the UpdateView that we're going
     // to hold in the MSQueryES.
     let res_col_names = es.query_plan.col_usage_node.schema.clone();
-    let mut res_table_view = TableView::new(res_col_names.clone());
+    let mut res_table_view = TableView::new();
     let mut update_view = GenericTable::new();
 
     // Finally, iterate over the Context Rows of the subqueries and compute the final values.

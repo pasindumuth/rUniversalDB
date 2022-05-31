@@ -661,14 +661,12 @@ pub struct TransTableLocationPrefix {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TableView {
   /// The keys are the rows, and the values are the number of repetitions.
-  pub col_names: Vec<Option<ColName>>,
-  /// The keys are the rows, and the values are the number of repetitions.
   pub rows: BTreeMap<Vec<ColValN>, u64>,
 }
 
 impl TableView {
-  pub fn new(col_names: Vec<Option<ColName>>) -> TableView {
-    TableView { col_names, rows: Default::default() }
+  pub fn new() -> TableView {
+    TableView { rows: Default::default() }
   }
 
   pub fn add_row(&mut self, row: Vec<ColValN>) {
@@ -681,6 +679,27 @@ impl TableView {
     } else if row_count > 0 {
       self.rows.insert(row, row_count);
     }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Query Result
+// -----------------------------------------------------------------------------------------------
+
+/// This is a wrapper for `TableView`, except where the schema is attached.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct QueryResult {
+  pub schema: Vec<Option<ColName>>,
+  pub data: TableView,
+}
+
+impl QueryResult {
+  pub fn new(result_schema: Vec<Option<ColName>>) -> QueryResult {
+    QueryResult { schema: result_schema, data: TableView::new() }
+  }
+
+  pub fn add_row(&mut self, row: Vec<ColValN>) {
+    self.data.add_row(row);
   }
 }
 
@@ -1023,7 +1042,6 @@ pub fn merge_table_views(
       assert_eq!(cur_views.len(), views.len());
       for (idx, cur_view) in cur_views.into_iter().enumerate() {
         let view = views.get_mut(idx).unwrap();
-        assert_eq!(view.col_names, cur_view.col_names);
         for (cur_row_val, cur_row_count) in cur_view.rows {
           if let Some(row_count) = view.rows.get_mut(&cur_row_val) {
             *row_count += cur_row_count;
