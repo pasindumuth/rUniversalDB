@@ -421,7 +421,10 @@ pub fn evaluate_super_simple_select(
       for (i, maybe_col_name) in schema.iter().enumerate() {
         let col_val = if let Some(col_name) = maybe_col_name {
           named_col_map
-            .get(&proc::ColumnRef { table_name: None, col_name: col_name.clone() })
+            .get(&proc::ColumnRef {
+              table_name: select.from.name().clone(),
+              col_name: col_name.clone(),
+            })
             .unwrap()
             .clone()
         } else {
@@ -763,15 +766,11 @@ pub trait LocalTable {
   /// Checks whether this `ColumnRef` refers to a column in this `LocalTable`, taking the alias
   /// in the `source` into account.
   fn contains_col_ref(&self, col: &proc::ColumnRef) -> bool {
-    if let Some(table_name) = &col.table_name {
-      if self.source().name() == table_name {
-        debug_assert!(self.contains_col(&col.col_name));
-        true
-      } else {
-        false
-      }
+    if self.source().name() == &col.table_name {
+      debug_assert!(self.contains_col(&col.col_name));
+      true
     } else {
-      self.contains_col(&col.col_name)
+      false
     }
   }
 

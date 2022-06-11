@@ -17,7 +17,7 @@ use crate::master_query_planning_es::ColPresenceReq;
 use crate::paxos2pc_tm;
 use crate::shard_split_tm_es::{STRange, ShardSplitTMPayloadTypes};
 use crate::slave::{SharedPaxosBundle, SlaveSnapshot};
-use crate::sql_ast::proc;
+use crate::sql_ast::{iast, proc};
 use crate::stmpaxos2pc_tm;
 use crate::tablet::ShardingSnapshot;
 use serde::{Deserialize, Serialize};
@@ -683,7 +683,7 @@ pub struct PerformMasterQueryPlanning {
   pub sender_path: CQueryPath,
   pub query_id: QueryId,
   pub timestamp: Timestamp,
-  pub ms_query: proc::MSQuery,
+  pub sql_query: iast::Query,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -694,6 +694,7 @@ pub struct CancelMasterQueryPlanning {
 /// See `QueryPlan`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MasterQueryPlan {
+  pub ms_query: proc::MSQuery,
   pub all_tier_maps: BTreeMap<TransTableName, TierMap>,
   pub table_location_map: BTreeMap<TablePath, FullGen>,
   pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,

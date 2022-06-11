@@ -13,15 +13,15 @@ use crate::finish_query_tm_es::{
   FinishQueryPayloadTypes, FinishQueryPrepare, FinishQueryTMES, FinishQueryTMInner, ResponseData,
 };
 use crate::gr_query_es::{GRQueryAction, GRQueryES};
+use crate::master_query_planning_es::StaticDBSchemaView;
 use crate::message as msg;
 use crate::ms_query_coord_es::{
   FullMSCoordES, MSQueryCoordAction, QueryPlanningES, QueryPlanningS,
 };
 use crate::paxos2pc_tm as paxos2pc;
 use crate::paxos2pc_tm::{Paxos2PCTMAction, TMMessage};
-use crate::query_converter::convert_to_msquery;
 use crate::server::{CTServerContext, CommonQuery, ServerContextBase};
-use crate::sql_ast::iast::Query;
+use crate::sql_ast::iast;
 use crate::sql_ast::proc;
 use crate::sql_parser::convert_ast;
 use crate::tablet::TPESAction;
@@ -240,7 +240,7 @@ impl CoordContext {
         match message {
           msg::SlaveExternalReq::PerformExternalQuery(external_query) => {
             match self.init_request(&external_query) {
-              Ok(ms_query) => {
+              Ok(query) => {
                 let query_id = mk_qid(io_ctx.rand());
                 let request_id = &external_query.request_id;
 
@@ -260,7 +260,7 @@ impl CoordContext {
                     child_queries: vec![],
                     es: FullMSCoordES::QueryPlanning(QueryPlanningES {
                       timestamp: cur_timestamp(io_ctx, self.coord_config.timestamp_suffix_divisor),
-                      sql_query: ms_query,
+                      sql_query: query,
                       query_id: query_id.clone(),
                       state: QueryPlanningS::Start,
                     }),
@@ -555,7 +555,7 @@ impl CoordContext {
   fn init_request(
     &self,
     external_query: &msg::PerformExternalQuery,
-  ) -> Result<proc::MSQuery, msg::ExternalAbortedData> {
+  ) -> Result<iast::Query, msg::ExternalAbortedData> {
     if self.external_request_id_map.contains_key(&external_query.request_id) {
       // Duplicate RequestId; respond with an abort.
       Err(msg::ExternalAbortedData::NonUniqueRequestId)
@@ -565,7 +565,7 @@ impl CoordContext {
         Ok(parsed_ast) => {
           // Convert to MSQuery
           match convert_ast(parsed_ast) {
-            Ok(internal_ast) => convert_to_msquery(internal_ast),
+            Ok(internal_ast) => Ok(internal_ast),
             Err(parse_error) => Err(msg::ExternalAbortedData::ParseError(parse_error)),
           }
         }
@@ -827,7 +827,7 @@ impl CoordContext {
             cur_timestamp(io_ctx, self.coord_config.timestamp_suffix_divisor),
             exec.timestamp.add(mk_t(1)),
           ),
-          sql_query: exec.sql_query.clone(),
+          sql_query: exec.orig_query.clone(),
           query_id: query_id.clone(),
           state: QueryPlanningS::Start,
         });

@@ -152,7 +152,8 @@ impl SqlQueryInner for UpdateInner {
     // This consists of all Top-Level Columns for every expression, as well as all Key
     // Columns (since they are included in the resulting table).
     let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
-    top_level_cols_set.extend(ctx.table_schema.get_key_col_refs());
+    let cur_alias = es.query_plan.col_usage_node.source.name();
+    top_level_cols_set.extend(ctx.table_schema.get_key_col_refs(cur_alias));
     top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
     for (_, expr) in &self.sql_query.assignment {
       top_level_cols_set.extend(collect_top_level_cols(expr));
@@ -198,7 +199,8 @@ impl SqlQueryInner for UpdateInner {
 
           // First, we add in the Key Columns
           let mut primary_key = PrimaryKey { cols: vec![] };
-          for key_col in &ctx.table_schema.get_key_col_refs() {
+          let cur_alias = &es.query_plan.col_usage_node.source.name();
+          for key_col in &ctx.table_schema.get_key_col_refs(cur_alias) {
             let idx = top_level_col_names.iter().position(|col| key_col == col).unwrap();
             let col_val = top_level_col_vals.get(idx).unwrap().clone();
             res_row.push(col_val.clone());

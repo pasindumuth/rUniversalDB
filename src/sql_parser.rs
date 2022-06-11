@@ -26,12 +26,8 @@ fn get_table_ref(
   idents: Vec<ast::Ident>,
   alias: Option<ast::TableAlias>,
 ) -> Result<iast::TableRef, String> {
-  if idents.len() != 1 {
-    return Err(format!("Table Reference {:?} not supported.", idents));
-  }
-
   Ok(iast::TableRef {
-    source_ref: idents.into_iter().next().unwrap().value,
+    source_ref: get_table_name(idents)?,
     alias: alias.map(|table_alias| table_alias.name.value),
   })
 }
@@ -110,30 +106,7 @@ fn convert_query(query: ast::Query) -> Result<iast::Query, String> {
     ast::SetExpr::Query(child_query) => {
       iast::QueryBody::Query(Box::new(convert_query(*child_query)?))
     }
-    ast::SetExpr::Select(select) => {
-      let from_clause = select.from;
-      if from_clause.len() != 1 {
-        return Err(format!("Joins with ',' not supported"));
-      }
-      if !from_clause[0].joins.is_empty() {
-        return Err(format!("Joins not supported"));
-      }
-      let relation = from_clause.into_iter().next().unwrap().relation;
-      if let ast::TableFactor::Table { name, alias, .. } = relation {
-        iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
-          distinct: select.distinct,
-          projection: convert_select_clause(select.projection)?,
-          from: get_table_ref(name.0, alias)?,
-          selection: if let Some(selection) = select.selection {
-            convert_expr(selection)?
-          } else {
-            iast::ValExpr::Value { val: iast::Value::Boolean(true) }
-          },
-        })
-      } else {
-        return Err(format!("TableFactor {:?} not supported", relation));
-      }
-    }
+    ast::SetExpr::Select(select) => convert_select(*select)?,
     ast::SetExpr::Insert(stmt) => match stmt {
       ast::Statement::Insert { table_name, columns, source, .. } => {
         convert_insert(table_name, columns, source)?
@@ -149,67 +122,16 @@ fn convert_query(query: ast::Query) -> Result<iast::Query, String> {
   Ok(iast::Query { ctes: ictes, body })
 }
 
-fn convert_insert(
-  table_name: ast::ObjectName,
-  columns: Vec<ast::Ident>,
-  source: Box<ast::Query>,
-) -> Result<iast::QueryBody, String> {
-  if let ast::SetExpr::Values(values) = source.body {
-    // Construct values
-    let mut i_values = Vec::<Vec<iast::ValExpr>>::new();
-    for row in values.0 {
-      let mut i_row = Vec::<iast::ValExpr>::new();
-      for elem in row {
-        i_row.push(convert_expr(elem)?);
-      }
-      i_values.push(i_row);
-    }
-    // Construct Table name
-    let i_table = get_table_ref(table_name.0, None)?;
-    // Construct Columns
-    let mut i_columns = Vec::<String>::new();
-    for col in columns {
-      i_columns.push(col.value)
-    }
-    Ok(iast::QueryBody::Insert(iast::Insert {
-      table: i_table,
-      columns: i_columns,
-      values: i_values,
-    }))
-  } else {
-    Err(format!("Non VALUEs clause in Insert is unsupported."))
-  }
-}
+// -----------------------------------------------------------------------------------------------
+//  Select
+// -----------------------------------------------------------------------------------------------
 
-fn convert_update(
-  table_name: ast::ObjectName,
-  assignments: Vec<ast::Assignment>,
-  selection: Option<ast::Expr>,
-) -> Result<iast::QueryBody, String> {
-  Ok(iast::QueryBody::Update(iast::Update {
-    table: get_table_ref(table_name.0, None)?,
-    assignments: {
-      let mut internal_assignments = Vec::<(String, iast::ValExpr)>::new();
-      for a in assignments {
-        internal_assignments.push((a.id.value, convert_expr(a.value)?))
-      }
-      internal_assignments
-    },
-    selection: if let Some(selection) = selection {
-      convert_expr(selection)?
-    } else {
-      iast::ValExpr::Value { val: iast::Value::Boolean(true) }
-    },
-  }))
-}
-
-fn convert_delete(
-  table_name: ast::ObjectName,
-  selection: Option<ast::Expr>,
-) -> Result<iast::QueryBody, String> {
-  Ok(iast::QueryBody::Delete(iast::Delete {
-    table: get_table_ref(table_name.0, None)?,
-    selection: if let Some(selection) = selection {
+fn convert_select(select: ast::Select) -> Result<iast::QueryBody, String> {
+  Ok(iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
+    distinct: select.distinct,
+    projection: convert_select_clause(select.projection)?,
+    from: convert_from(select.from)?,
+    selection: if let Some(selection) = select.selection {
       convert_expr(selection)?
     } else {
       iast::ValExpr::Value { val: iast::Value::Boolean(true) }
@@ -273,6 +195,186 @@ fn convert_select_clause(
 
   Ok(iast::SelectClause::SelectList(select_list))
 }
+
+// -----------------------------------------------------------------------------------------------
+//  Join
+// -----------------------------------------------------------------------------------------------
+
+fn convert_from(mut from: Vec<ast::TableWithJoins>) -> Result<iast::JoinNode, String> {
+  if from.is_empty() {
+    Err(format!("The 'from' clause {:?} must have at least one table.", from))
+  } else {
+    let mut from_iter = from.into_iter();
+    let mut join_node = Some(convert_joins(from_iter.next().unwrap())?);
+
+    // Recall that `join` is left-associative.
+    for table_with_join in from_iter {
+      let cur_join_node = join_node.take().unwrap();
+      join_node = Some(iast::JoinNode::JoinInnerNode(iast::JoinInnerNode {
+        left: Box::new(cur_join_node),
+        right: Box::new(convert_joins(table_with_join)?),
+        join_type: iast::JoinType::Inner,
+        on: iast::ValExpr::Value { val: iast::Value::Boolean(true) },
+      }));
+    }
+
+    Ok(join_node.unwrap())
+  }
+}
+
+fn convert_joins(table_with_join: ast::TableWithJoins) -> Result<iast::JoinNode, String> {
+  let mut join_node = Some(convert_table_factor(table_with_join.relation)?);
+
+  // Recall that `join` is left-associative.
+  for join in table_with_join.joins {
+    let cur_join_node = join_node.take().unwrap();
+    let (join_type, on) = convert_join_op(join.join_operator)?;
+    join_node = Some(iast::JoinNode::JoinInnerNode(iast::JoinInnerNode {
+      left: Box::new(cur_join_node),
+      right: Box::new(convert_table_factor(join.relation)?),
+      join_type,
+      on,
+    }));
+  }
+
+  Ok(join_node.unwrap())
+}
+
+fn convert_join_op(join_op: ast::JoinOperator) -> Result<(iast::JoinType, iast::ValExpr), String> {
+  match join_op {
+    ast::JoinOperator::Inner(join_constraint) => {
+      Ok((iast::JoinType::Inner, convert_join_constraint(join_constraint)?))
+    }
+    ast::JoinOperator::LeftOuter(join_constraint) => {
+      Ok((iast::JoinType::Left, convert_join_constraint(join_constraint)?))
+    }
+    ast::JoinOperator::RightOuter(join_constraint) => {
+      Ok((iast::JoinType::Right, convert_join_constraint(join_constraint)?))
+    }
+    ast::JoinOperator::FullOuter(join_constraint) => {
+      Ok((iast::JoinType::Outer, convert_join_constraint(join_constraint)?))
+    }
+    ast::JoinOperator::CrossJoin => {
+      Ok((iast::JoinType::Outer, iast::ValExpr::Value { val: iast::Value::Boolean(true) }))
+    }
+    join_op => Err(format!("Unsupported join type: {:?}", join_op)),
+  }
+}
+
+fn convert_join_constraint(join_constraint: ast::JoinConstraint) -> Result<iast::ValExpr, String> {
+  match join_constraint {
+    ast::JoinConstraint::On(on) => Ok(convert_expr(on)?),
+    ast::JoinConstraint::None => Ok(iast::ValExpr::Value { val: iast::Value::Boolean(true) }),
+    join_constraint => Err(format!("Unsupported join constraint: {:?}", join_constraint)),
+  }
+}
+
+fn convert_table_factor(factor: ast::TableFactor) -> Result<iast::JoinNode, String> {
+  match factor {
+    ast::TableFactor::Table { name, alias, .. } => {
+      let ast::ObjectName(idents) = name;
+      Ok(iast::JoinNode::JoinLeaf(iast::JoinLeaf {
+        alias: alias.map(|table_alias| table_alias.name.value),
+        source: iast::JoinNodeSource::Table(get_table_name(idents)?),
+      }))
+    }
+    ast::TableFactor::Derived { lateral, subquery, alias } => {
+      Ok(iast::JoinNode::JoinLeaf(iast::JoinLeaf {
+        alias: alias.map(|table_alias| table_alias.name.value),
+        source: iast::JoinNodeSource::DerivedTable {
+          query: Box::new(convert_query(*subquery)?),
+          lateral,
+        },
+      }))
+    }
+    ast::TableFactor::TableFunction { .. } => Err(format!("Table functions are not supported.")),
+    ast::TableFactor::NestedJoin(table_with_joins) => convert_joins(*table_with_joins),
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Insert
+// -----------------------------------------------------------------------------------------------
+
+fn convert_insert(
+  table_name: ast::ObjectName,
+  columns: Vec<ast::Ident>,
+  source: Box<ast::Query>,
+) -> Result<iast::QueryBody, String> {
+  if let ast::SetExpr::Values(values) = source.body {
+    // Construct values
+    let mut i_values = Vec::<Vec<iast::ValExpr>>::new();
+    for row in values.0 {
+      let mut i_row = Vec::<iast::ValExpr>::new();
+      for elem in row {
+        i_row.push(convert_expr(elem)?);
+      }
+      i_values.push(i_row);
+    }
+    // Construct Table name
+    let i_table = get_table_ref(table_name.0, None)?;
+    // Construct Columns
+    let mut i_columns = Vec::<String>::new();
+    for col in columns {
+      i_columns.push(col.value)
+    }
+    Ok(iast::QueryBody::Insert(iast::Insert {
+      table: i_table,
+      columns: i_columns,
+      values: i_values,
+    }))
+  } else {
+    Err(format!("Non VALUEs clause in Insert is unsupported."))
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Update
+// -----------------------------------------------------------------------------------------------
+
+fn convert_update(
+  table_name: ast::ObjectName,
+  assignments: Vec<ast::Assignment>,
+  selection: Option<ast::Expr>,
+) -> Result<iast::QueryBody, String> {
+  Ok(iast::QueryBody::Update(iast::Update {
+    table: get_table_ref(table_name.0, None)?,
+    assignments: {
+      let mut internal_assignments = Vec::<(String, iast::ValExpr)>::new();
+      for a in assignments {
+        internal_assignments.push((a.id.value, convert_expr(a.value)?))
+      }
+      internal_assignments
+    },
+    selection: if let Some(selection) = selection {
+      convert_expr(selection)?
+    } else {
+      iast::ValExpr::Value { val: iast::Value::Boolean(true) }
+    },
+  }))
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Delete
+// -----------------------------------------------------------------------------------------------
+
+fn convert_delete(
+  table_name: ast::ObjectName,
+  selection: Option<ast::Expr>,
+) -> Result<iast::QueryBody, String> {
+  Ok(iast::QueryBody::Delete(iast::Delete {
+    table: get_table_ref(table_name.0, None)?,
+    selection: if let Some(selection) = selection {
+      convert_expr(selection)?
+    } else {
+      iast::ValExpr::Value { val: iast::Value::Boolean(true) }
+    },
+  }))
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Expression
+// -----------------------------------------------------------------------------------------------
 
 fn convert_value(value: ast::Value) -> Result<iast::Value, String> {
   match value {

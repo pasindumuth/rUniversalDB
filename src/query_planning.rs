@@ -16,7 +16,8 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
   iterate_stage_ms_query(
     &mut |stage: GeneralStage| match stage {
       GeneralStage::SuperSimpleSelect(query) => {
-        if let proc::GeneralSourceRef::TablePath(table_path) = &query.from.source_ref {
+        // TODO: do properly.
+        if let proc::GeneralSource::TablePath { table_path, .. } = &query.from {
           table_paths.insert(table_path.clone());
         }
       }

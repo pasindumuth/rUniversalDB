@@ -729,12 +729,12 @@ impl TableSchema {
     TableSchema { key_cols, val_cols: mvm }
   }
 
-  pub fn get_key_col_refs(&self) -> Vec<proc::ColumnRef> {
+  pub fn get_key_col_refs(&self, table_name: &String) -> Vec<proc::ColumnRef> {
     self
       .key_cols
       .iter()
       .cloned()
-      .map(|(col_name, _)| proc::ColumnRef { table_name: None, col_name })
+      .map(|(col_name, _)| proc::ColumnRef { table_name: table_name.clone(), col_name })
       .collect()
   }
 
@@ -1055,10 +1055,6 @@ pub fn merge_table_views(
   } else {
     vec![]
   }
-}
-
-pub fn to_table_path(source: &proc::GeneralSource) -> &TablePath {
-  cast!(proc::GeneralSourceRef::TablePath, &source.source_ref).unwrap()
 }
 
 /// An immutable value of type `T` with an associated version to easily tell

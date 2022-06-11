@@ -1,6 +1,5 @@
 use crate::col_usage::{
-  free_external_cols, iterate_stage_ms_query, ColUsageError, ColUsageNode, ColUsagePlanner,
-  GeneralStage,
+  iterate_stage_ms_query, ColUsageError, ColUsageNode, ColUsagePlanner, GeneralStage,
 };
 use crate::common::{
   add_item, default_get_mut, lookup, map_insert, FullGen, MasterIOCtx, RemoteLeaderChangedPLm,
@@ -12,14 +11,16 @@ use crate::common::{
 };
 use crate::master::{MasterContext, MasterPLm};
 use crate::message as msg;
+use crate::message::ExternalAbortedData;
 use crate::multiversion_map::MVM;
+use crate::query_converter::convert_to_msquery;
 use crate::query_planning::{
   collect_table_paths, compute_all_tier_maps, compute_table_location_map, perform_validations,
   StaticValidationError,
 };
 use crate::server::ServerContextBase;
+use crate::sql_ast::iast;
 use crate::sql_ast::proc;
-use crate::sql_ast::proc::MSQueryStage;
 use serde::{Deserialize, Serialize};
 use sqlparser::test_utils::table;
 use std::collections::BTreeMap;
@@ -556,22 +557,26 @@ pub fn master_query_planning<
   ViewT: DBSchemaView<ErrorT = ErrorT>,
 >(
   mut view: ViewT,
-  ms_query: &proc::MSQuery,
+  query: &iast::Query,
 ) -> Result<msg::MasterQueryPlan, ErrorT> {
+  // Convert to MSQuery
+  let ms_query = convert_to_msquery(&mut view, query.clone())?;
+
   // First, check that all TablePaths are present
-  let table_paths = collect_table_paths(ms_query);
+  let table_paths = collect_table_paths(&ms_query);
   let table_location_map = compute_table_location_map(&mut view, &table_paths)?;
 
   // Next, we do various validations on the MSQuery.
-  perform_validations(&mut view, ms_query)?;
+  perform_validations(&mut view, &ms_query)?;
 
   // Next, we run the FrozenColUsageAlgorithm
   let mut planner = ColUsagePlanner { view };
-  let col_usage_nodes = planner.plan_ms_query(ms_query)?;
+  let col_usage_nodes = planner.plan_ms_query(&ms_query)?;
 
   // Finally we construct a MasterQueryPlan and respond to the sender.
-  let all_tier_maps = compute_all_tier_maps(ms_query);
+  let all_tier_maps = compute_all_tier_maps(&ms_query);
   Ok(msg::MasterQueryPlan {
+    ms_query,
     all_tier_maps,
     table_location_map,
     col_presence_req: planner.finish(),
@@ -587,7 +592,7 @@ pub fn master_query_planning<
 pub struct MasterQueryPlanning {
   query_id: QueryId,
   timestamp: Timestamp,
-  ms_query: proc::MSQuery,
+  sql_query: iast::Query,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -599,7 +604,7 @@ struct MasterQueryPlanningES {
   sender_path: CQueryPath,
   query_id: QueryId,
   timestamp: Timestamp,
-  ms_query: proc::MSQuery,
+  sql_query: iast::Query,
 }
 
 /// Handle an incoming `PerformMasterQueryPlanning` message.
@@ -619,7 +624,7 @@ fn master_query_planning_pre(
     MasterQueryPlanningAction::Respond(msg::MasteryQueryPlanningResult::QueryPlanningError(error))
   }
 
-  match master_query_planning(view, &planning_msg.ms_query) {
+  match master_query_planning(view, &planning_msg.sql_query) {
     Ok(master_query_plan) => MasterQueryPlanningAction::Respond(
       msg::MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan),
     ),
@@ -656,7 +661,7 @@ fn master_query_planning_post(
       col_presence_req: Default::default(),
     };
 
-    match master_query_planning(view, &planning_plm.ms_query) {
+    match master_query_planning(view, &planning_plm.sql_query) {
       Ok(master_query_plan) => msg::MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan),
       Err(error) => msg::MasteryQueryPlanningResult::QueryPlanningError(match error {
         LockingDBSchemaViewError::TableDNE(table_path) => {
@@ -711,7 +716,7 @@ impl MasterQueryPlanningESS {
                 sender_path: perform.sender_path,
                 query_id: perform.query_id,
                 timestamp: perform.timestamp,
-                ms_query: perform.ms_query,
+                sql_query: perform.sql_query,
               },
             );
           }
@@ -740,7 +745,7 @@ impl MasterQueryPlanningESS {
       ctx.master_bundle.plms.push(MasterPLm::MasterQueryPlanning(MasterQueryPlanning {
         query_id: es.query_id.clone(),
         timestamp: es.timestamp.clone(),
-        ms_query: es.ms_query.clone(),
+        sql_query: es.sql_query.clone(),
       }));
     }
   }

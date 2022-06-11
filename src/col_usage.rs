@@ -25,6 +25,7 @@ use std::ops::Deref;
 pub struct ColUsageNode {
   /// The (Trans)Table used in the `proc::GeneralQuery` corresponding to this node.
   pub source: proc::GeneralSource,
+  pub safe_present_cols: Vec<ColName>,
 
   /// The schema of the TransTable produced by this `ColUsageNode`.
   pub schema: Vec<Option<ColName>>,
@@ -39,7 +40,7 @@ pub struct ColUsageNode {
   /// Below, `safe_present_cols` is the subset of all_cols that are present in the (Trans)Table
   /// (according to the gossiped_db_schema). `external_cols` is the complement of that.
   pub children: Vec<Vec<(TransTableName, ColUsageNode)>>,
-  pub safe_present_cols: Vec<ColName>,
+
   /// The External Cols Property is where if a `table_name` is present in a `ColumnRef`, this
   /// will be different from `source.name()`. This can be seen since such a `ColumnRef` must
   /// either be placed into `safe_present_cols`, or the QueryPlanning should fail.
@@ -121,36 +122,29 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
     // Split `all_cols` into `safe_present_cols` and `external_cols` based on the schema of
     // the (Trans)Table in question.
     let mut contains_col = |col_name: &ColName| -> Result<bool, ErrorT> {
-      match &source.source_ref {
-        proc::GeneralSourceRef::TransTableName(trans_table_name) => {
+      match source {
+        proc::GeneralSource::TransTableName { trans_table_name, .. } => {
           // The Query converter will have made sure that all TransTableNames actually exist.
           let table_schema = trans_table_ctx.get(trans_table_name).unwrap();
           Ok(table_schema.contains(&Some(col_name.clone())))
         }
-        proc::GeneralSourceRef::TablePath(table_path) => {
+        proc::GeneralSource::TablePath { table_path, .. } => {
           // The Query converter will have made sure that all TablePaths actually exist.
           self.view.contains_col(table_path, col_name)
         }
+        _ => panic!(),
       }
     };
 
     for col in all_cols {
-      if let Some(table_name) = &col.table_name {
-        if source.name() == table_name {
-          if contains_col(&col.col_name)? {
-            node.safe_present_cols.push(col.col_name);
-          } else {
-            return Err(ErrorT::mk_error(ColUsageError::InvalidColumnRef));
-          }
-        } else {
-          node.external_cols.push(col);
-        }
-      } else {
+      if source.name() == &col.table_name {
         if contains_col(&col.col_name)? {
           node.safe_present_cols.push(col.col_name);
         } else {
-          node.external_cols.push(col);
+          return Err(ErrorT::mk_error(ColUsageError::InvalidColumnRef));
         }
+      } else {
+        node.external_cols.push(col);
       }
     }
 
@@ -176,15 +170,16 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
           }
         }
       }
-      proc::SelectClause::Wildcard => match &select.from.source_ref {
-        proc::GeneralSourceRef::TablePath(table_path) => {
+      proc::SelectClause::Wildcard => match &select.from {
+        proc::GeneralSource::TablePath { table_path, .. } => {
           for col in self.view.get_all_cols(table_path)? {
             projection.push(Some(col));
           }
         }
-        proc::GeneralSourceRef::TransTableName(trans_table_name) => {
+        proc::GeneralSource::TransTableName { trans_table_name, .. } => {
           projection = trans_table_ctx.get(trans_table_name).unwrap().clone();
         }
+        _ => panic!(),
       },
     }
 
@@ -234,8 +229,8 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
 
     Ok(self.compute_frozen_col_usage_node(
       trans_table_ctx,
-      &proc::GeneralSource {
-        source_ref: proc::GeneralSourceRef::TablePath(update.table.source_ref.clone()),
+      &proc::GeneralSource::TablePath {
+        table_path: update.table.source_ref.clone(),
         alias: update.table.alias.clone(),
       },
       &exprs,
@@ -260,8 +255,8 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
 
     Ok(self.compute_frozen_col_usage_node(
       trans_table_ctx,
-      &proc::GeneralSource {
-        source_ref: proc::GeneralSourceRef::TablePath(insert.table.source_ref.clone()),
+      &proc::GeneralSource::TablePath {
+        table_path: insert.table.source_ref.clone(),
         alias: insert.table.alias.clone(),
       },
       &exprs,
@@ -279,8 +274,8 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
     let mut exprs = vec![delete.selection.clone()];
     Ok(self.compute_frozen_col_usage_node(
       trans_table_ctx,
-      &proc::GeneralSource {
-        source_ref: proc::GeneralSourceRef::TablePath(delete.table.source_ref.clone()),
+      &proc::GeneralSource::TablePath {
+        table_path: delete.table.source_ref.clone(),
         alias: delete.table.alias.clone(),
       },
       &exprs,
@@ -472,7 +467,7 @@ fn node_external_trans_tables_r(
   defined_trans_tables: &mut BTreeSet<TransTableName>,
   accum: &mut Vec<TransTableName>,
 ) {
-  if let proc::GeneralSourceRef::TransTableName(trans_table_name) = &node.source.source_ref {
+  if let proc::GeneralSource::TransTableName { trans_table_name, .. } = &node.source {
     if !defined_trans_tables.contains(trans_table_name) {
       accum.push(trans_table_name.clone())
     }
@@ -504,19 +499,6 @@ pub fn nodes_external_cols(nodes: &Vec<(TransTableName, ColUsageNode)>) -> Vec<p
     col_name_set.extend(node.external_cols.clone())
   }
   col_name_set.into_iter().collect()
-}
-
-/// Filters for only the `ColumnRef`s without an alias. These are the `ColName`s that must not
-/// exist in the Data Source of the `ColUsageNode` that this `external_col` is present in.
-/// This is because of the External Cols Property in `ColUsageNode`.
-pub fn free_external_cols(external_cols: &Vec<proc::ColumnRef>) -> Vec<ColName> {
-  let mut free_external_cols = Vec::<ColName>::new();
-  for col in external_cols {
-    if col.table_name.is_none() {
-      free_external_cols.push(col.col_name.clone())
-    }
-  }
-  free_external_cols
 }
 
 // -----------------------------------------------------------------------------------------------

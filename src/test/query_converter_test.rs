@@ -1,17 +1,21 @@
 use crate::common::{TablePath, TransTableName};
 use crate::message as msg;
-use crate::query_converter::{flatten_top_level_query, rename_trans_tables_query_r, RenameContext};
+use crate::query_converter::{rename_under_query, ConversionContext, RenameContext};
 use crate::sql_ast::{iast, proc};
 
 // -----------------------------------------------------------------------------------------------
 //  Common
 // -----------------------------------------------------------------------------------------------
 
+fn basic_join_node(name: String, alias: Option<String>) -> iast::JoinNode {
+  iast::JoinNode::JoinLeaf(iast::JoinLeaf { alias, source: iast::JoinNodeSource::Table(name) })
+}
+
 fn basic_select(table_ref: &str) -> iast::SuperSimpleSelect {
   iast::SuperSimpleSelect {
     distinct: false,
     projection: iast::SelectClause::SelectList(vec![]),
-    from: iast::TableRef { source_ref: table_ref.to_string(), alias: None },
+    from: basic_join_node(table_ref.to_string(), None),
     selection: iast::ValExpr::Value { val: iast::Value::Boolean(true) },
   }
 }
@@ -41,12 +45,8 @@ fn test_basic_rename() {
   );
 
   // Rename TransTables
-  let mut ctx = RenameContext {
-    trans_table_map: Default::default(),
-    counter: 0,
-    table_names: Default::default(),
-  };
-  rename_trans_tables_query_r(&mut ctx, &mut in_query);
+  let mut ctx = RenameContext { trans_table_map: Default::default(), counter: 0 };
+  rename_under_query(&mut ctx, &mut in_query);
 
   let expected = iast::Query {
     ctes: vec![
@@ -57,7 +57,7 @@ fn test_basic_rename() {
           body: iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
             distinct: false,
             projection: iast::SelectClause::SelectList(vec![]),
-            from: iast::TableRef { source_ref: "t2".to_string(), alias: None },
+            from: basic_join_node("t2".to_string(), None),
             selection: iast::ValExpr::Value { val: iast::Value::Boolean(true) },
           }),
         },
@@ -72,10 +72,7 @@ fn test_basic_rename() {
               body: iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
                 distinct: false,
                 projection: iast::SelectClause::SelectList(vec![]),
-                from: iast::TableRef {
-                  source_ref: "tt\\0\\tt1".to_string(),
-                  alias: Some("tt1".to_string()),
-                },
+                from: basic_join_node("tt\\0\\tt1".to_string(), Some("tt1".to_string())),
                 selection: iast::ValExpr::Value { val: iast::Value::Boolean(true) },
               }),
             },
@@ -83,10 +80,7 @@ fn test_basic_rename() {
           body: iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
             distinct: false,
             projection: iast::SelectClause::SelectList(vec![]),
-            from: iast::TableRef {
-              source_ref: "tt\\1\\tt1".to_string(),
-              alias: Some("tt1".to_string()),
-            },
+            from: basic_join_node("tt\\1\\tt1".to_string(), Some("tt1".to_string())),
             selection: iast::ValExpr::Value { val: iast::Value::Boolean(true) },
           }),
         },
@@ -95,7 +89,7 @@ fn test_basic_rename() {
     body: iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
       distinct: false,
       projection: iast::SelectClause::SelectList(vec![]),
-      from: iast::TableRef { source_ref: "tt\\2\\tt2".to_string(), alias: Some("tt2".to_string()) },
+      from: basic_join_node("tt\\2\\tt2".to_string(), Some("tt2".to_string())),
       selection: iast::ValExpr::Value { val: iast::Value::Boolean(true) },
     }),
   };
@@ -186,5 +180,7 @@ fn test_basic_flatten() {
     .collect(),
     returning: TransTableName("tt\\3\\".to_string()),
   });
-  assert_eq!(flatten_top_level_query(&query, &mut 3), expected);
+
+  let mut ctx = ConversionContext { col_usage_map: Default::default(), counter: 3 };
+  assert_eq!(ctx.flatten_top_level_query(&query).unwrap(), expected);
 }

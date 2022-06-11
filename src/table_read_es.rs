@@ -1,7 +1,7 @@
-use crate::col_usage::{collect_top_level_cols, free_external_cols};
+use crate::col_usage::collect_top_level_cols;
 use crate::common::{
-  btree_multimap_insert, lookup, mk_qid, to_table_path, CoreIOCtx, GossipData, GossipDataView,
-  KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
+  btree_multimap_insert, lookup, mk_qid, CoreIOCtx, GossipData, GossipDataView, KeyBound, OrigP,
+  QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
 };
 use crate::common::{
   CQueryPath, CTQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow, PaxosGroupId,
@@ -584,7 +584,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
       for (index, maybe_col_name) in schema.iter().enumerate() {
         if let Some(col_name) = maybe_col_name {
           top_level_extra_cols_set.insert(ExtraColumnRef::Named(proc::ColumnRef {
-            table_name: None,
+            table_name: sql_query.from.name().clone(),
             col_name: col_name.clone(),
           }));
         } else {

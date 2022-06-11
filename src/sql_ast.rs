@@ -4,32 +4,27 @@
 
 pub mod proc {
   use crate::common::{ColName, ColType, TablePath, TransTableName};
-  use crate::sql_ast::iast::{BinaryOp, UnaryAggregateOp, UnaryOp, Value};
+  use crate::sql_ast::iast::{BinaryOp, JoinType, UnaryAggregateOp, UnaryOp, Value};
   use serde::{Deserialize, Serialize};
 
   // Basic types
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub enum GeneralSourceRef {
-    TablePath(TablePath),
-    TransTableName(TransTableName),
-  }
-
-  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SimpleSource {
     pub source_ref: TablePath,
-    pub alias: Option<String>,
+    pub alias: String,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct GeneralSource {
-    pub source_ref: GeneralSourceRef,
-    pub alias: Option<String>,
+  pub enum GeneralSource {
+    TablePath { table_path: TablePath, alias: String },
+    TransTableName { trans_table_name: TransTableName, alias: String },
+    JoinNode(JoinNode),
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub struct ColumnRef {
-    pub table_name: Option<String>,
+    pub table_name: String,
     pub col_name: ColName,
   }
 
@@ -91,6 +86,29 @@ pub mod proc {
   pub struct Delete {
     pub table: SimpleSource,
     pub selection: ValExpr,
+  }
+
+  // Join
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum JoinNode {
+    JoinInnerNode(JoinInnerNode),
+    JoinLeaf(JoinLeaf),
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct JoinInnerNode {
+    pub left: Box<JoinNode>,
+    pub right: Box<JoinNode>,
+    pub join_type: JoinType,
+    pub on: ValExpr,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct JoinLeaf {
+    pub alias: String,
+    pub lateral: bool,
+    pub query: GRQuery,
   }
 
   // GR
@@ -155,25 +173,27 @@ pub mod proc {
 
   // Implementations
 
+  // TODO: remove this
   impl GeneralSource {
     pub fn name(&self) -> &String {
-      if let Some(alias) = &self.alias {
-        alias
-      } else {
-        match &self.source_ref {
-          GeneralSourceRef::TablePath(TablePath(name)) => name,
-          GeneralSourceRef::TransTableName(TransTableName(name)) => name,
-        }
+      match self {
+        GeneralSource::TablePath { alias, .. } => alias,
+        GeneralSource::TransTableName { alias, .. } => alias,
+        GeneralSource::JoinNode(_) => panic!(),
+      }
+    }
+
+    pub fn to_table_path(&self) -> &TablePath {
+      match &self {
+        GeneralSource::TablePath { table_path, .. } => table_path,
+        _ => panic!(),
       }
     }
   }
 
   impl SimpleSource {
     pub fn to_read_source(&self) -> GeneralSource {
-      GeneralSource {
-        source_ref: GeneralSourceRef::TablePath(self.source_ref.clone()),
-        alias: self.alias.clone(),
-      }
+      GeneralSource::TablePath { table_path: self.source_ref.clone(), alias: self.alias.clone() }
     }
   }
 }
@@ -183,7 +203,10 @@ pub mod proc {
 // -------------------------------------------------------------------------------------------------
 
 pub mod iast {
+  use crate::common::TablePath;
   use serde::{Deserialize, Serialize};
+
+  // Expression
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum ValExpr {
@@ -229,6 +252,44 @@ pub mod iast {
     Boolean(bool),
     Null,
   }
+
+  // Join
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum JoinType {
+    Inner,
+    Outer,
+    Left,
+    Right,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum JoinNode {
+    JoinInnerNode(JoinInnerNode),
+    JoinLeaf(JoinLeaf),
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct JoinInnerNode {
+    pub left: Box<JoinNode>,
+    pub right: Box<JoinNode>,
+    pub join_type: JoinType,
+    pub on: ValExpr,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct JoinLeaf {
+    pub alias: Option<String>,
+    pub source: JoinNodeSource,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub enum JoinNodeSource {
+    Table(String),
+    DerivedTable { query: Box<Query>, lateral: bool },
+  }
+
+  // Query
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Query {
@@ -281,7 +342,7 @@ pub mod iast {
   pub struct SuperSimpleSelect {
     pub distinct: bool,
     pub projection: SelectClause,
-    pub from: TableRef,
+    pub from: JoinNode,
     pub selection: ValExpr, // The where clause
   }
 
@@ -305,5 +366,20 @@ pub mod iast {
   pub struct Delete {
     pub table: TableRef,
     pub selection: ValExpr,
+  }
+
+  // Implmentations
+
+  impl JoinLeaf {
+    pub fn join_leaf_name(&self) -> Option<&String> {
+      if let Some(jln) = &self.alias {
+        Some(jln)
+      } else {
+        match &self.source {
+          JoinNodeSource::Table(table_name) => Some(table_name),
+          JoinNodeSource::DerivedTable { .. } => None,
+        }
+      }
+    }
   }
 }

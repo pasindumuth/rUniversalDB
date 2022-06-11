@@ -1921,8 +1921,7 @@ impl TabletContext {
       }
       msg::GeneralQuery::SuperSimpleTableSelectQuery(query) => {
         // We inspect the TierMap to see what kind of ES to create
-        let table_path =
-          cast!(proc::GeneralSourceRef::TablePath, &query.sql_query.from.source_ref).unwrap();
+        let table_path = query.sql_query.from.to_table_path();
         if query.query_plan.tier_map.map.contains_key(table_path) {
           self.start_ms_table_es(
             io_ctx,

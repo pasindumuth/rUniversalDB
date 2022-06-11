@@ -5,7 +5,7 @@ use crate::message as msg;
 use crate::paxos2pc_tm::{
   Paxos2PCTMInner, Paxos2PCTMOuter, PayloadTypes, RMMessage, RMPLm, TMMessage,
 };
-use crate::sql_ast::proc;
+use crate::sql_ast::{iast, proc};
 use crate::storage::GenericTable;
 use crate::tablet::{MSQueryES, ReadWriteRegion, TabletContext, TabletPLm};
 use serde::{Deserialize, Serialize};
@@ -85,8 +85,8 @@ pub struct ResponseData {
   // Request values (values send in the original request)
   pub request_id: RequestId,
   pub sender_eid: EndpointId,
-  /// We hold onto the original `MSQuery` in case of an Abort so that we can restart.
-  pub sql_query: proc::MSQuery,
+  /// We hold onto the original `Query` in case of an Abort so that we can restart.
+  pub sql_query: iast::Query,
 
   // Result values (values computed by the MSCoordES)
   pub result: QueryResult,

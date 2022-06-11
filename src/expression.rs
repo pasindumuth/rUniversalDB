@@ -335,18 +335,7 @@ fn contains_key_col_ref(
   key_cols: &Vec<(ColName, ColType)>,
   col: &proc::ColumnRef,
 ) -> bool {
-  if let Some(table_name) = &col.table_name {
-    if table_name == source.name() {
-      if lookup(key_cols, &col.col_name).is_some() {
-        return true;
-      }
-    }
-  } else {
-    if lookup(key_cols, &col.col_name).is_some() {
-      return true;
-    }
-  }
-  false
+  &col.table_name == source.name() && lookup(key_cols, &col.col_name).is_some()
 }
 
 /// Construct a `KBExpr` for evaluating KeyBounds. The `col_map` contains values for
@@ -638,7 +627,7 @@ fn full_poly_col_bounds(col_type: &ColType) -> Vec<PolyColBound> {
 
 /// Eliminates intersection between the `ColBound`s
 fn merged_col_bounds<T: Ord + BoundType + Clone>(col_bounds: Vec<ColBound<T>>) -> Vec<ColBound<T>> {
-  // TODO: Do this properly. This is a non-critical optimization.
+  // TODO: do properly. This is a non-critical optimization.
   col_bounds
 }
 

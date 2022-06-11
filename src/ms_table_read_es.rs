@@ -37,8 +37,9 @@ impl SelectInner {
 }
 
 impl SqlQueryInner for SelectInner {
+  /// This function shouly only be called if we know `from` is not a `JoinNode`.
   fn table_path(&self) -> &TablePath {
-    cast!(proc::GeneralSourceRef::TablePath, &self.sql_query.from.source_ref).unwrap()
+    self.sql_query.from.to_table_path()
   }
 
   fn request_region_locks<IO: CoreIOCtx>(

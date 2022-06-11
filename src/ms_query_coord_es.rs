@@ -13,11 +13,10 @@ use crate::common::{
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::expression::EvalError;
-use crate::master_query_planning_es::{
-  master_query_planning, ColPresenceReq, StaticDBSchemaView, StaticDBSchemaViewError,
-};
+use crate::master_query_planning_es::{master_query_planning, ColPresenceReq, StaticDBSchemaView};
 use crate::message as msg;
 use crate::server::{CTServerContext, CommonQuery, ServerContextBase};
+use crate::sql_ast::iast;
 use crate::sql_ast::proc;
 use crate::table_read_es::perform_aggregation;
 use crate::tm_status::{SendHelper, TMStatus};
@@ -58,7 +57,8 @@ pub struct MSCoordES {
   pub timestamp: Timestamp,
 
   pub query_id: QueryId,
-  pub sql_query: proc::MSQuery,
+  pub orig_query: iast::Query,
+  pub sql_query: proc::MSQuery, // TODO: do properly. Call this msquery, and the above sql_query.
 
   // Results of the query planning.
   pub query_plan: CoordQueryPlan,
@@ -99,7 +99,7 @@ pub enum MSQueryCoordAction {
   /// This tells the parent Server to execute the given TMStatus.
   ExecuteTMStatus(TMStatus),
   /// Indicates that a valid MSCoordES was successful, and was ECU.
-  Success(Vec<TQueryPath>, proc::MSQuery, QueryResult, Timestamp),
+  Success(Vec<TQueryPath>, iast::Query, QueryResult, Timestamp),
   /// Indicates that a valid MSCoordES was unsuccessful and there is no
   /// chance of success, and was ECU.
   FatalFailure(msg::ExternalAbortedData),
@@ -160,11 +160,12 @@ impl FullMSCoordES {
     if let FullMSCoordES::QueryPlanning(plan_es) = self {
       match action {
         QueryPlanningAction::Wait => MSQueryCoordAction::Wait,
-        QueryPlanningAction::Success(query_plan) => {
+        QueryPlanningAction::Success(ms_query, query_plan) => {
           *self = FullMSCoordES::Executing(MSCoordES {
             timestamp: plan_es.timestamp.clone(),
             query_id: plan_es.query_id.clone(),
-            sql_query: plan_es.sql_query.clone(),
+            orig_query: plan_es.sql_query.clone(),
+            sql_query: ms_query,
             query_plan: query_plan.clone(),
             all_rms: Default::default(),
             trans_table_views: vec![],
@@ -424,7 +425,7 @@ impl FullMSCoordES {
       es.state = CoordState::Done;
       MSQueryCoordAction::Success(
         es.all_rms.iter().cloned().collect(),
-        es.sql_query.clone(),
+        es.orig_query.clone(),
         QueryResult { schema, data },
         es.timestamp.clone(),
       )
@@ -480,8 +481,8 @@ impl FullMSCoordES {
     // Send out the PerformQuery.
     let helper = match ms_query_stage {
       proc::MSQueryStage::SuperSimpleSelect(select_query) => {
-        match &select_query.from.source_ref {
-          proc::GeneralSourceRef::TablePath(table_path) => {
+        match &select_query.from {
+          proc::GeneralSource::TablePath { table_path, .. } => {
             let general_query =
               msg::GeneralQuery::SuperSimpleTableSelectQuery(msg::SuperSimpleTableSelectQuery {
                 timestamp: es.timestamp.clone(),
@@ -494,7 +495,9 @@ impl FullMSCoordES {
               ctx.get_min_tablets(&table_path, gen, &select_query.from, &select_query.selection);
             SendHelper::TableQuery(general_query, tids)
           }
-          proc::GeneralSourceRef::TransTableName(sub_trans_table_name) => {
+          proc::GeneralSource::TransTableName {
+            trans_table_name: sub_trans_table_name, ..
+          } => {
             // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
             let location_prefix = context
               .context_schema
@@ -512,6 +515,10 @@ impl FullMSCoordES {
               },
             );
             SendHelper::TransTableQuery(general_query, location_prefix)
+          }
+          proc::GeneralSource::JoinNode(_) => {
+            // TODO: do properly.
+            panic!()
           }
         }
       }
@@ -639,7 +646,7 @@ pub enum QueryPlanningS {
 pub struct QueryPlanningES {
   pub timestamp: Timestamp,
   /// The query to do the planning with.
-  pub sql_query: proc::MSQuery,
+  pub sql_query: iast::Query,
   /// The OrigP of the Task holding this MSQueryCoordPlanningES
   pub query_id: QueryId,
   /// Used for managing MasterQueryPlanning
@@ -651,7 +658,7 @@ pub enum QueryPlanningAction {
   Wait,
   /// Indicates the that QueryPlanningES has computed a valid query, and it's stored
   /// in the `query_plan` field.
-  Success(CoordQueryPlan),
+  Success(proc::MSQuery, CoordQueryPlan),
   /// Indicates that a valid QueryPlan couldn't be computed. The ES will have
   /// also been cleaned up.
   Failed(msg::ExternalAbortedData),
@@ -696,7 +703,7 @@ impl QueryPlanningES {
           sender_path,
           query_id: master_query_id.clone(),
           timestamp: self.timestamp.clone(),
-          ms_query: self.sql_query.clone(),
+          sql_query: self.sql_query.clone(),
         },
       )),
     );
@@ -713,13 +720,16 @@ impl QueryPlanningES {
     master_query_plan: msg::MasterQueryPlan,
   ) -> QueryPlanningAction {
     self.state = QueryPlanningS::Done;
-    QueryPlanningAction::Success(CoordQueryPlan {
-      all_tier_maps: master_query_plan.all_tier_maps,
-      query_leader_map: self.compute_query_leader_map(ctx, &master_query_plan.table_location_map),
-      table_location_map: master_query_plan.table_location_map,
-      col_presence_req: master_query_plan.col_presence_req,
-      col_usage_nodes: master_query_plan.col_usage_nodes,
-    })
+    QueryPlanningAction::Success(
+      master_query_plan.ms_query,
+      CoordQueryPlan {
+        all_tier_maps: master_query_plan.all_tier_maps,
+        query_leader_map: self.compute_query_leader_map(ctx, &master_query_plan.table_location_map),
+        table_location_map: master_query_plan.table_location_map,
+        col_presence_req: master_query_plan.col_presence_req,
+        col_usage_nodes: master_query_plan.col_usage_nodes,
+      },
+    )
   }
 
   /// Computes the Leaderships of `SlaveGroupId`s whose LeadershipChanges would require us to

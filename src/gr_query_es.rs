@@ -476,8 +476,8 @@ impl GRQueryES {
     // Send out the PerformQuery and populate TMStatus accordingly.
     let (_, stage) = self.sql_query.trans_tables.get(stage_idx).unwrap();
     let child_sql_query = cast!(proc::GRQueryStage::SuperSimpleSelect, stage).unwrap();
-    let helper = match &child_sql_query.from.source_ref {
-      proc::GeneralSourceRef::TablePath(table_path) => {
+    let helper = match &child_sql_query.from {
+      proc::GeneralSource::TablePath { table_path, .. } => {
         // Here, we must do a SuperSimpleTableSelectQuery.
         let general_query =
           msg::GeneralQuery::SuperSimpleTableSelectQuery(msg::SuperSimpleTableSelectQuery {
@@ -495,7 +495,7 @@ impl GRQueryES {
         );
         SendHelper::TableQuery(general_query, tids)
       }
-      proc::GeneralSourceRef::TransTableName(trans_table_name) => {
+      proc::GeneralSource::TransTableName { trans_table_name, .. } => {
         // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
         let location_prefix = context
           .context_schema
@@ -513,6 +513,10 @@ impl GRQueryES {
           },
         );
         SendHelper::TransTableQuery(general_query, location_prefix)
+      }
+      proc::GeneralSource::JoinNode(_) => {
+        // TODO: do properly.
+        panic!()
       }
     };
 
