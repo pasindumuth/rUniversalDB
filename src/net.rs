@@ -104,41 +104,44 @@ fn handle_conn<GenericInputT: 'static + GenericInputTrait + Send>(
     let ip = ip.clone();
     let to_server_sender = to_server_sender.clone();
     let stream = stream.try_clone().unwrap();
-    thread::Builder::new().name(format!("FromNetwork {}", ip)).spawn(move || {
-      let error = match recv(&stream) {
-        Ok(data) => {
-          // Read the Initialization message and construct the EndpointId accordingly.
-          let init_msg: msg::InitMessage = rmp_serde::from_read_ref(&data).unwrap();
-          let eid = EndpointId::new(ip.clone(), init_msg.is_internal);
+    thread::Builder::new()
+      .name(format!("FromNetwork {}", ip))
+      .spawn(move || {
+        let error = match recv(&stream) {
+          Ok(data) => {
+            // Read the Initialization message and construct the EndpointId accordingly.
+            let init_msg: msg::InitMessage = rmp_serde::from_read_ref(&data).unwrap();
+            let eid = EndpointId::new(ip.clone(), init_msg.is_internal);
 
-          // Read data until the connection closes.
-          loop {
-            match recv(&stream) {
-              Ok(data) => {
-                let network_msg: msg::NetworkMessage = rmp_serde::from_read_ref(&data).unwrap();
-                to_server_sender
-                  .send(GenericInputT::from_network(eid.clone(), network_msg))
-                  .unwrap();
-              }
-              Err(error) => {
-                // This means that the connection effectively closed.
-                break error;
-              }
-            };
+            // Read data until the connection closes.
+            loop {
+              match recv(&stream) {
+                Ok(data) => {
+                  let network_msg: msg::NetworkMessage = rmp_serde::from_read_ref(&data).unwrap();
+                  to_server_sender
+                    .send(GenericInputT::from_network(eid.clone(), network_msg))
+                    .unwrap();
+                }
+                Err(error) => {
+                  // This means that the connection effectively closed.
+                  break error;
+                }
+              };
+            }
           }
-        }
-        Err(error) => {
-          // This means that the connection effectively closed.
-          error
-        }
-      };
+          Err(error) => {
+            // This means that the connection effectively closed.
+            error
+          }
+        };
 
-      info!(
-        "Thread 'FromNetwork {}' shutting down. \
+        info!(
+          "Thread 'FromNetwork {}' shutting down. \
          Connection closed with error: {}",
-        ip, error
-      );
-    });
+          ip, error
+        );
+      })
+      .unwrap();
   }
 }
 
@@ -156,14 +159,19 @@ pub fn handle_self_conn<GenericInputT: 'static + GenericInputTrait + Send>(
   // Setup Self Connection Thread
   let to_server_sender = to_server_sender.clone();
   let this_eid = this_eid.clone();
-  thread::Builder::new().name(format!("Self Connection")).spawn(move || loop {
-    let send_action = receiver.recv().unwrap();
-    to_server_sender.send(GenericInputT::from_network(this_eid.clone(), send_action.msg)).unwrap();
-    if let Some(confirm_target) = send_action.maybe_confirm_target {
-      // If a `confirm_target` is specified, then send a confirmation of the send.
-      confirm_target.send(());
-    }
-  });
+  thread::Builder::new()
+    .name(format!("Self Connection"))
+    .spawn(move || loop {
+      let send_action = receiver.recv().unwrap();
+      to_server_sender
+        .send(GenericInputT::from_network(this_eid.clone(), send_action.msg))
+        .unwrap();
+      if let Some(confirm_target) = send_action.maybe_confirm_target {
+        // If a `confirm_target` is specified, then send a confirmation of the send.
+        let _ = confirm_target.send(());
+      }
+    })
+    .unwrap();
 }
 
 /// The object that is passed to `send_msg` with instruction on what to send and
@@ -208,41 +216,47 @@ pub fn send_msg(
     let locked_out_conn_map = locked_out_conn_map.clone();
     let eid = eid.clone();
     let this_eid_internal = this_eid_internal.clone();
-    thread::Builder::new().name(format!("ToNetwork {}", eid.ip)).spawn(move || {
-      let stream = TcpStream::connect(format!("{}:{}", eid.ip, SERVER_PORT)).unwrap();
-      // Configure the stream to block indefinitely for reads and writes.
-      stream.set_read_timeout(None).unwrap();
-      stream.set_write_timeout(None).unwrap();
+    thread::Builder::new()
+      .name(format!("ToNetwork {}", eid.ip))
+      .spawn(move || {
+        let stream = TcpStream::connect(format!("{}:{}", eid.ip, SERVER_PORT)).unwrap();
+        // Configure the stream to block indefinitely for reads and writes.
+        stream.set_read_timeout(None).unwrap();
+        stream.set_write_timeout(None).unwrap();
 
-      // Send Initialization message
-      let init_msg = msg::InitMessage { is_internal: this_eid_internal.clone() };
-      let data_out = rmp_serde::to_vec(&init_msg).unwrap();
-      send_bytes(&data_out, &stream);
+        // Send Initialization message
+        let init_msg = msg::InitMessage { is_internal: this_eid_internal.clone() };
+        let data_out = rmp_serde::to_vec(&init_msg).unwrap();
+        let _ = send_bytes(&data_out, &stream);
 
-      // Send data until the connection closes.
-      let error = loop {
-        let send_action = receiver.recv().unwrap();
-        let data_out = rmp_serde::to_vec(&send_action.msg).unwrap();
-        if let Err(error) = send_bytes(&data_out, &stream) {
-          // This means that the connection effectively closed.
-          break error;
-        } else if let Some(confirm_target) = send_action.maybe_confirm_target {
-          // If a `confirm_target` is specified, then send a confirmation of the send.
-          confirm_target.send(());
+        // Send data until the connection closes.
+        let error = loop {
+          let send_action = receiver.recv().unwrap();
+          let data_out = rmp_serde::to_vec(&send_action.msg).unwrap();
+          if let Err(error) = send_bytes(&data_out, &stream) {
+            // This means that the connection effectively closed.
+            break error;
+          } else if let Some(confirm_target) = send_action.maybe_confirm_target {
+            // If a `confirm_target` is specified, then send a confirmation of the send.
+            let _ = confirm_target.send(());
+          }
+        };
+
+        // If the other `EndpointId` is not an Internal, then we clean up `out_conn_map`
+        // so that next time we try sending a message to that `EndpointId`, we will establish
+        // a new connection. Importantly, observe that this is the only code that will ever
+        // remove an element from `out_conn_map`.
+        if let InternalMode::External { .. } = &eid.mode {
+          let mut out_conn_map = locked_out_conn_map.lock().unwrap();
+          out_conn_map.remove(&eid).unwrap();
         }
-      };
 
-      // If the other `EndpointId` is not an Internal, then we clean up `out_conn_map`
-      // so that next time we try sending a message to that `EndpointId`, we will establish
-      // a new connection. Importantly, observe that this is the only code that will ever
-      // remove an element from `out_conn_map`.
-      if let InternalMode::External { .. } = &eid.mode {
-        let mut out_conn_map = locked_out_conn_map.lock().unwrap();
-        out_conn_map.remove(&eid).unwrap();
-      }
-
-      info!("Thread 'ToNetwork {:?}' shutting down. Connection closed with error: {}", eid, error);
-    });
+        info!(
+          "Thread 'ToNetwork {:?}' shutting down. Connection closed with error: {}",
+          eid, error
+        );
+      })
+      .unwrap();
   }
 
   // Send the `msg` to the ToNetwork thread. If the `receiver` was deallocated because the
@@ -250,5 +264,5 @@ pub fn send_msg(
   // behavior continues to adhere to FIFO network behavior, where network messages are never
   // received on the other side.
   let sender = out_conn_map.get(eid).unwrap();
-  sender.send(action);
+  let _ = sender.send(action);
 }

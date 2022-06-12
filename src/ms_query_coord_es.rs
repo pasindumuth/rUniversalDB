@@ -1,6 +1,5 @@
 use crate::col_usage::{
-  iterate_stage_ms_query, node_external_trans_tables, ColUsageError, ColUsageNode, ColUsagePlanner,
-  GeneralStage,
+  iterate_stage_ms_query, node_external_trans_tables, ColUsageNode, ColUsagePlanner, GeneralStage,
 };
 use crate::common::{
   lookup, merge_table_views, mk_qid, FullGen, OrigP, QueryPlan, QueryResult, Timestamp,
@@ -57,8 +56,8 @@ pub struct MSCoordES {
   pub timestamp: Timestamp,
 
   pub query_id: QueryId,
-  pub orig_query: iast::Query,
-  pub sql_query: proc::MSQuery, // TODO: do properly. Call this msquery, and the above sql_query.
+  pub sql_query: iast::Query,
+  pub ms_query: proc::MSQuery,
 
   // Results of the query planning.
   pub query_plan: CoordQueryPlan,
@@ -164,8 +163,8 @@ impl FullMSCoordES {
           *self = FullMSCoordES::Executing(MSCoordES {
             timestamp: plan_es.timestamp.clone(),
             query_id: plan_es.query_id.clone(),
-            orig_query: plan_es.sql_query.clone(),
-            sql_query: ms_query,
+            sql_query: plan_es.sql_query.clone(),
+            ms_query,
             query_plan: query_plan.clone(),
             all_rms: Default::default(),
             trans_table_views: vec![],
@@ -201,7 +200,7 @@ impl FullMSCoordES {
         match &es.state {
           CoordState::Stage(stage) if tm_qid == stage.stage_query_id => {
             // Combine the results into a single one
-            let (_, query_stage) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
+            let (_, query_stage) = es.ms_query.trans_tables.get(stage.stage_idx).unwrap();
             let table_views = match query_stage {
               proc::MSQueryStage::SuperSimpleSelect(sql_query) => {
                 let pre_agg_table_views = merge_table_views(results);
@@ -227,7 +226,7 @@ impl FullMSCoordES {
               proc::MSQueryStage::Delete(_) => merge_table_views(results),
             };
 
-            let (trans_table_name, _) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
+            let (trans_table_name, _) = es.ms_query.trans_tables.get(stage.stage_idx).unwrap();
             let node = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
             let schema = node.schema.clone();
 
@@ -384,7 +383,7 @@ impl FullMSCoordES {
       _ => panic!(),
     };
 
-    if next_stage_idx < es.sql_query.trans_tables.len() {
+    if next_stage_idx < es.ms_query.trans_tables.len() {
       self.process_ms_query_stage(ctx, io_ctx, next_stage_idx)
     } else {
       // Check that none of the Leaderships in `all_rms` have changed.
@@ -419,13 +418,13 @@ impl FullMSCoordES {
       let (_, (schema, data)) = es
         .trans_table_views
         .iter()
-        .find(|(trans_table_name, _)| trans_table_name == &es.sql_query.returning)
+        .find(|(trans_table_name, _)| trans_table_name == &es.ms_query.returning)
         .unwrap()
         .clone();
       es.state = CoordState::Done;
       MSQueryCoordAction::Success(
         es.all_rms.iter().cloned().collect(),
-        es.orig_query.clone(),
+        es.sql_query.clone(),
         QueryResult { schema, data },
         es.timestamp.clone(),
       )
@@ -443,7 +442,7 @@ impl FullMSCoordES {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
 
     // Get the corresponding MSQueryStage and ColUsageNode.
-    let (trans_table_name, ms_query_stage) = es.sql_query.trans_tables.get(stage_idx).unwrap();
+    let (trans_table_name, ms_query_stage) = es.ms_query.trans_tables.get(stage_idx).unwrap();
     let col_usage_node = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
 
     // Compute the Context for this stage. Recall there must be exactly one row.

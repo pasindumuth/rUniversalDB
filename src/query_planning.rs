@@ -2,9 +2,8 @@ use crate::col_usage::{iterate_stage_ms_query, GeneralStage};
 use crate::common::{
   lookup, ColName, FullGen, Gen, TablePath, TableSchema, TierMap, Timestamp, TransTableName,
 };
-use crate::master_query_planning_es::{
-  DBSchemaView, ReqColPresenceError, ReqTablePresenceError, StaticValidationErrorTrait,
-};
+use crate::master_query_planning_es::{DBSchemaView, ErrorTrait};
+use crate::message as msg;
 use crate::multiversion_map::MVM;
 use crate::sql_ast::proc;
 use sqlparser::test_utils::table;
@@ -93,17 +92,9 @@ pub fn compute_table_location_map<ViewT: DBSchemaView>(
   Ok(table_location_map)
 }
 
-pub enum StaticValidationError {
-  InvalidUpdate,
-  InvalidInsert,
-}
-
 /// Validates the `MSQuery` in various ways. In particularly, this checks whether the
 /// columnt that are written by an Insert or Update are valid and present in `view`.
-pub fn perform_validations<
-  ErrorT: StaticValidationErrorTrait + ReqColPresenceError,
-  ViewT: DBSchemaView<ErrorT = ErrorT>,
->(
+pub fn perform_validations<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>>(
   view: &mut ViewT,
   ms_query: &proc::MSQuery,
 ) -> Result<(), ErrorT> {
@@ -118,10 +109,12 @@ pub fn perform_validations<
         let mut all_cols = BTreeSet::<&ColName>::new();
         for (col_name, _) in &query.assignment {
           if !all_cols.insert(col_name) || lookup(&key_cols, col_name).is_some() {
-            return Err(StaticValidationErrorTrait::mk_error(StaticValidationError::InvalidUpdate));
+            return Err(ErrorTrait::mk_error(msg::QueryPlanningError::InvalidUpdate));
           }
           if !view.contains_col(table_path, col_name)? {
-            return Err(ReqColPresenceError::mk_error(col_name.clone()));
+            return Err(ErrorTrait::mk_error(msg::QueryPlanningError::RequiredColumnDNE(
+              col_name.clone(),
+            )));
           }
         }
       }
@@ -131,14 +124,16 @@ pub fn perform_validations<
         let key_cols = view.key_cols(table_path)?;
         for (col_name, _) in key_cols {
           if !query.columns.contains(col_name) {
-            return Err(StaticValidationErrorTrait::mk_error(StaticValidationError::InvalidInsert));
+            return Err(ErrorTrait::mk_error(msg::QueryPlanningError::InvalidInsert));
           }
         }
 
         // Check that every inserted column is present
         for col_name in &query.columns {
           if !view.contains_col(table_path, col_name)? {
-            return Err(ReqColPresenceError::mk_error(col_name.clone()));
+            return Err(ErrorTrait::mk_error(msg::QueryPlanningError::RequiredColumnDNE(
+              col_name.clone(),
+            )));
           }
         }
 
@@ -146,14 +141,14 @@ pub fn perform_validations<
         let mut all_cols = BTreeSet::<&ColName>::new();
         for col_name in &query.columns {
           if !all_cols.insert(col_name) {
-            return Err(StaticValidationErrorTrait::mk_error(StaticValidationError::InvalidInsert));
+            return Err(ErrorTrait::mk_error(msg::QueryPlanningError::InvalidInsert));
           }
         }
 
         // Check that `values` has equal length to `columns`.
         for row in &query.values {
           if row.len() != query.columns.len() {
-            return Err(StaticValidationErrorTrait::mk_error(StaticValidationError::InvalidInsert));
+            return Err(ErrorTrait::mk_error(msg::QueryPlanningError::InvalidInsert));
           }
         }
       }

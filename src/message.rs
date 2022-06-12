@@ -618,9 +618,21 @@ pub struct ExternalQuerySuccess {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum QueryPlanningError {
+  /// The LATERAL keyword is used in the wrong place.
+  InvalidLateralJoin,
+  /// A Derived Table `JoinLeaf` does not have an alias.
+  NonAliasedDerivedTable,
+  /// A `JoinLeaf` in a JoinTree does not have a unique alias.
+  NonUniqueJoinLeafName,
+  /// A `ColumnRef` is qualified by an alias that is not defined in the Query.
+  NonExistentTableQualification,
+  /// A Column does not appear in either a Table or a TransTable.
+  NonExistentColumn(String),
+  /// A `ColumnRef` resolved to two different possible real columns.
+  AmbiguousColumnRef,
   /// Occurs when the query contains a `TablePath` that does exist in the database schema.
   /// This is idempotent.
-  TablesDNE(Vec<TablePath>),
+  TablesDNE(TablePath),
   /// Occurs if an `Update` occurs as a subquery or if it is trying to write to a KeyCol.
   InvalidUpdate,
   /// Occurs if an Insert appears as a Subquery, if it does not write to every KeyCol,
@@ -628,14 +640,15 @@ pub enum QueryPlanningError {
   InvalidInsert,
   /// Occurs if a Delete appears as a Subquery.
   InvalidDelete,
-  /// Occurs if an Select has a mixure of aggregate columns and non-aggregate columns.
-  InvalidSelect,
-  /// Occurs if a `ColumnRef` has an `table_name`, but the reference table does not exist, or
-  /// the does not contain the `col_name`, or if the `ColumnRef` appears as an `external_cols`
-  /// in the top-level `ColUsageNode`s
-  InvalidColUsage,
+  /// This is returned two ways:
+  ///   1. If `ColumnRef` has a `source` that does not exist.
+  ///   2. If `ColumnRef` has a `source` that exists, but the `ColName` is not in the
+  ///      schema of that table.
+  InvalidColumnRef,
+  /// Returned if we detect that the Select clause is not right.
+  InvalidSelectClause,
   /// Occurs when `ColName`s are not present in the database schema.
-  RequiredColumnDNE(Vec<ColName>),
+  RequiredColumnDNE(ColName),
 }
 
 /// Data to send back to the External in case of a fatal Error.

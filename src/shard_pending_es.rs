@@ -165,7 +165,7 @@ impl PendingShardingES {
 
         // Send all buffered data to the new Tablet.
         for msg in buffered_messages {
-          io_ctx.tablet_forward(&this_tid, TabletForwardMsg::TabletMessage(msg));
+          io_ctx.tablet_forward(&this_tid, TabletForwardMsg::TabletMessage(msg)).unwrap();
         }
 
         // Send back a `ShardingConfirmed` to current Leadership of the sending Tablet.

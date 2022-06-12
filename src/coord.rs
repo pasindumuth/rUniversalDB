@@ -827,7 +827,7 @@ impl CoordContext {
             cur_timestamp(io_ctx, self.coord_config.timestamp_suffix_divisor),
             exec.timestamp.add(mk_t(1)),
           ),
-          sql_query: exec.orig_query.clone(),
+          sql_query: exec.sql_query.clone(),
           query_id: query_id.clone(),
           state: QueryPlanningS::Start,
         });

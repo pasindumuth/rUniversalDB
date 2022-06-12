@@ -1,6 +1,7 @@
 use crate::common::{lookup, TableSchema, Timestamp};
 use crate::common::{ColName, ColType, Gen, TablePath, TierMap, TransTableName};
-use crate::master_query_planning_es::{ColPresenceReq, ColUsageErrorTrait, DBSchemaView};
+use crate::master_query_planning_es::{ColPresenceReq, DBSchemaView, ErrorTrait};
+use crate::message as msg;
 use crate::multiversion_map::MVM;
 use crate::sql_ast::{iast, proc};
 use serde::{Deserialize, Serialize};
@@ -60,17 +61,6 @@ impl ColUsageNode {
   }
 }
 
-#[derive(Debug)]
-pub enum ColUsageError {
-  /// This is returned two ways:
-  ///   1. If `ColumnRef` has a `source` that does not exist.
-  ///   2. If `ColumnRef` has a `source` that exists, but the `ColName` is not in the
-  ///      schema of that table.
-  InvalidColumnRef,
-  /// Returned if we detect that the Select clause is not right.
-  InvalidSelectClause,
-}
-
 /// This algorithm computes a `Vec<(TransTableName, ColUsageNode)>`
 /// that is parallel to the provided `MSQuery`. This is a tree. Every `ColUsageNode`
 /// corresponds to an `(MS/GR)QueryStage`, and every `Vec<(TransTableName, ColUsageNode)>`
@@ -82,7 +72,7 @@ pub struct ColUsagePlanner<ViewT: DBSchemaView> {
   pub view: ViewT,
 }
 
-impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsagePlanner<ViewT> {
+impl<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsagePlanner<ViewT> {
   /// This is a generic function for computing a `ColUsageNode` for both Selects
   /// as well as Updates. Here, we use `trans_table_ctx` to check for column inclusions in
   /// the TransTables, and `self.gossip_db_schema` to check for column inclusion in the Tables.
@@ -141,7 +131,7 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
         if contains_col(&col.col_name)? {
           node.safe_present_cols.push(col.col_name);
         } else {
-          return Err(ErrorT::mk_error(ColUsageError::InvalidColumnRef));
+          return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidColumnRef));
         }
       } else {
         node.external_cols.push(col);
@@ -201,7 +191,7 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
           }
         }
         if val_expr_count > 0 && unary_agg_count > 0 {
-          return Err(ErrorT::mk_error(ColUsageError::InvalidSelectClause));
+          return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidSelectClause));
         }
       }
       proc::SelectClause::Wildcard => {}
@@ -334,7 +324,7 @@ impl<ErrorT: ColUsageErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsageP
     // The top level `ColUsageNode`s cannot have external `ColumnRef`s.
     for (_, child) in &children {
       if !child.external_cols.is_empty() {
-        return Err(ErrorT::mk_error(ColUsageError::InvalidColumnRef));
+        return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidColumnRef));
       }
     }
 

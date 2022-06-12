@@ -1160,6 +1160,7 @@ pub enum TabletPLm {
 
 pub type TabletBundle = Vec<TabletPLm>;
 
+#[derive(Debug)]
 pub enum TabletForwardMsg {
   TabletBundle(TabletBundle),
   TabletMessage(msg::TabletMessage),

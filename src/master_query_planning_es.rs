@@ -1,6 +1,4 @@
-use crate::col_usage::{
-  iterate_stage_ms_query, ColUsageError, ColUsageNode, ColUsagePlanner, GeneralStage,
-};
+use crate::col_usage::{iterate_stage_ms_query, ColUsageNode, ColUsagePlanner, GeneralStage};
 use crate::common::{
   add_item, default_get_mut, lookup, map_insert, FullGen, MasterIOCtx, RemoteLeaderChangedPLm,
   TableSchema, Timestamp,
@@ -16,7 +14,6 @@ use crate::multiversion_map::MVM;
 use crate::query_converter::convert_to_msquery;
 use crate::query_planning::{
   collect_table_paths, compute_all_tier_maps, compute_table_location_map, perform_validations,
-  StaticValidationError,
 };
 use crate::server::ServerContextBase;
 use crate::sql_ast::iast;
@@ -29,20 +26,8 @@ use std::collections::BTreeMap;
 //  Error Traits
 // -----------------------------------------------------------------------------------------------
 
-pub trait ColUsageErrorTrait {
-  fn mk_error(err: ColUsageError) -> Self;
-}
-
-pub trait StaticValidationErrorTrait {
-  fn mk_error(err: StaticValidationError) -> Self;
-}
-
-pub trait ReqTablePresenceError {
-  fn mk_error(missing_col: TablePath) -> Self;
-}
-
-pub trait ReqColPresenceError {
-  fn mk_error(missing_col: ColName) -> Self;
+pub trait ErrorTrait {
+  fn mk_error(err: msg::QueryPlanningError) -> Self;
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -181,10 +166,7 @@ pub trait DBSchemaView {
 
 pub enum CheckingDBSchemaViewError {
   InsufficientLat,
-  TableDNE(TablePath),
-  ColUsageError(ColUsageError),
-  StaticValidationError(StaticValidationError),
-  ReqColPresenceError(ColName),
+  QueryPlanningError(msg::QueryPlanningError),
 }
 
 /// In this implementation of `DBSchemaView`, all functions are idempotent if they succeed.
@@ -229,7 +211,9 @@ impl<'a> DBSchemaView for CheckingDBSchemaView<'a> {
       {
         Ok(full_gen.clone())
       } else {
-        Err(CheckingDBSchemaViewError::TableDNE(table_path.clone()))
+        Err(CheckingDBSchemaViewError::QueryPlanningError(msg::QueryPlanningError::TablesDNE(
+          table_path.clone(),
+        )))
       }
     }
   }
@@ -288,27 +272,9 @@ impl<'a> DBSchemaView for CheckingDBSchemaView<'a> {
   }
 }
 
-impl ColUsageErrorTrait for CheckingDBSchemaViewError {
-  fn mk_error(err: ColUsageError) -> CheckingDBSchemaViewError {
-    CheckingDBSchemaViewError::ColUsageError(err)
-  }
-}
-
-impl StaticValidationErrorTrait for CheckingDBSchemaViewError {
-  fn mk_error(err: StaticValidationError) -> Self {
-    CheckingDBSchemaViewError::StaticValidationError(err)
-  }
-}
-
-impl ReqTablePresenceError for CheckingDBSchemaViewError {
-  fn mk_error(missing_table: TablePath) -> Self {
-    CheckingDBSchemaViewError::TableDNE(missing_table)
-  }
-}
-
-impl ReqColPresenceError for CheckingDBSchemaViewError {
-  fn mk_error(missing_col: ColName) -> Self {
-    CheckingDBSchemaViewError::ReqColPresenceError(missing_col)
+impl ErrorTrait for CheckingDBSchemaViewError {
+  fn mk_error(err: msg::QueryPlanningError) -> Self {
+    CheckingDBSchemaViewError::QueryPlanningError(err)
   }
 }
 
@@ -317,10 +283,7 @@ impl ReqColPresenceError for CheckingDBSchemaViewError {
 // -----------------------------------------------------------------------------------------------
 
 pub enum LockingDBSchemaViewError {
-  TableDNE(TablePath),
-  ColUsageError(ColUsageError),
-  StaticValidationError(StaticValidationError),
-  ReqColPresenceError(ColName),
+  QueryPlanningError(msg::QueryPlanningError),
 }
 
 /// In this implementation of `DBSchemaView`, all functions are idempotent if they succeed.
@@ -357,7 +320,9 @@ impl<'a> DBSchemaView for LockingDBSchemaView<'a> {
     if let Some(full_gen) = self.table_generation.read(table_path, &self.timestamp) {
       Ok(full_gen)
     } else {
-      Err(LockingDBSchemaViewError::TableDNE(table_path.clone()))
+      Err(LockingDBSchemaViewError::QueryPlanningError(msg::QueryPlanningError::TablesDNE(
+        table_path.clone(),
+      )))
     }
   }
 
@@ -404,27 +369,9 @@ impl<'a> DBSchemaView for LockingDBSchemaView<'a> {
   }
 }
 
-impl ColUsageErrorTrait for LockingDBSchemaViewError {
-  fn mk_error(err: ColUsageError) -> LockingDBSchemaViewError {
-    LockingDBSchemaViewError::ColUsageError(err)
-  }
-}
-
-impl StaticValidationErrorTrait for LockingDBSchemaViewError {
-  fn mk_error(err: StaticValidationError) -> Self {
-    LockingDBSchemaViewError::StaticValidationError(err)
-  }
-}
-
-impl ReqTablePresenceError for LockingDBSchemaViewError {
-  fn mk_error(missing_table: TablePath) -> Self {
-    LockingDBSchemaViewError::TableDNE(missing_table)
-  }
-}
-
-impl ReqColPresenceError for LockingDBSchemaViewError {
-  fn mk_error(missing_col: ColName) -> Self {
-    LockingDBSchemaViewError::ReqColPresenceError(missing_col)
+impl ErrorTrait for LockingDBSchemaViewError {
+  fn mk_error(err: msg::QueryPlanningError) -> Self {
+    LockingDBSchemaViewError::QueryPlanningError(err)
   }
 }
 
@@ -433,10 +380,7 @@ impl ReqColPresenceError for LockingDBSchemaViewError {
 // -----------------------------------------------------------------------------------------------
 
 pub enum StaticDBSchemaViewError {
-  TableDNE(TablePath),
-  ColUsageError(ColUsageError),
-  StaticValidationError(StaticValidationError),
-  ReqColPresenceError(ColName),
+  QueryPlanningError(msg::QueryPlanningError),
 }
 
 /// In this implementation of `DBSchemaView`, functions are not idempotent. We just use
@@ -472,7 +416,9 @@ impl<'a> DBSchemaView for StaticDBSchemaView<'a> {
     if let Some(full_gen) = self.table_generation.static_read(table_path, &self.timestamp) {
       Ok(full_gen.clone())
     } else {
-      Err(StaticDBSchemaViewError::TableDNE(table_path.clone()))
+      Err(StaticDBSchemaViewError::QueryPlanningError(msg::QueryPlanningError::TablesDNE(
+        table_path.clone(),
+      )))
     }
   }
 
@@ -518,27 +464,9 @@ impl<'a> DBSchemaView for StaticDBSchemaView<'a> {
   }
 }
 
-impl ColUsageErrorTrait for StaticDBSchemaViewError {
-  fn mk_error(err: ColUsageError) -> StaticDBSchemaViewError {
-    StaticDBSchemaViewError::ColUsageError(err)
-  }
-}
-
-impl StaticValidationErrorTrait for StaticDBSchemaViewError {
-  fn mk_error(err: StaticValidationError) -> Self {
-    StaticDBSchemaViewError::StaticValidationError(err)
-  }
-}
-
-impl ReqTablePresenceError for StaticDBSchemaViewError {
-  fn mk_error(missing_table: TablePath) -> Self {
-    StaticDBSchemaViewError::TableDNE(missing_table)
-  }
-}
-
-impl ReqColPresenceError for StaticDBSchemaViewError {
-  fn mk_error(missing_col: ColName) -> Self {
-    StaticDBSchemaViewError::ReqColPresenceError(missing_col)
+impl ErrorTrait for StaticDBSchemaViewError {
+  fn mk_error(err: msg::QueryPlanningError) -> Self {
+    StaticDBSchemaViewError::QueryPlanningError(err)
   }
 }
 
@@ -552,10 +480,7 @@ pub enum MasterQueryPlanningAction {
   Respond(msg::MasteryQueryPlanningResult),
 }
 
-pub fn master_query_planning<
-  ErrorT: ColUsageErrorTrait + StaticValidationErrorTrait + ReqTablePresenceError + ReqColPresenceError,
-  ViewT: DBSchemaView<ErrorT = ErrorT>,
->(
+pub fn master_query_planning<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>>(
   mut view: ViewT,
   query: &iast::Query,
 ) -> Result<msg::MasterQueryPlan, ErrorT> {
@@ -630,20 +555,7 @@ fn master_query_planning_pre(
     ),
     Err(error) => match error {
       CheckingDBSchemaViewError::InsufficientLat => MasterQueryPlanningAction::Wait,
-      CheckingDBSchemaViewError::TableDNE(table_path) => {
-        respond_error(msg::QueryPlanningError::TablesDNE(vec![table_path]))
-      }
-      CheckingDBSchemaViewError::ColUsageError(error) => respond_error(match error {
-        ColUsageError::InvalidColumnRef => msg::QueryPlanningError::InvalidColUsage,
-        ColUsageError::InvalidSelectClause => msg::QueryPlanningError::InvalidSelect,
-      }),
-      CheckingDBSchemaViewError::StaticValidationError(error) => respond_error(match error {
-        StaticValidationError::InvalidUpdate => msg::QueryPlanningError::InvalidUpdate,
-        StaticValidationError::InvalidInsert => msg::QueryPlanningError::InvalidInsert,
-      }),
-      CheckingDBSchemaViewError::ReqColPresenceError(missing_col) => {
-        respond_error(msg::QueryPlanningError::RequiredColumnDNE(vec![missing_col]))
-      }
+      CheckingDBSchemaViewError::QueryPlanningError(err) => respond_error(err),
     },
   }
 }
@@ -664,20 +576,7 @@ fn master_query_planning_post(
     match master_query_planning(view, &planning_plm.sql_query) {
       Ok(master_query_plan) => msg::MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan),
       Err(error) => msg::MasteryQueryPlanningResult::QueryPlanningError(match error {
-        LockingDBSchemaViewError::TableDNE(table_path) => {
-          msg::QueryPlanningError::TablesDNE(vec![table_path.clone()])
-        }
-        LockingDBSchemaViewError::ColUsageError(error) => match error {
-          ColUsageError::InvalidColumnRef => msg::QueryPlanningError::InvalidColUsage,
-          ColUsageError::InvalidSelectClause => msg::QueryPlanningError::InvalidSelect,
-        },
-        LockingDBSchemaViewError::StaticValidationError(error) => match error {
-          StaticValidationError::InvalidUpdate => msg::QueryPlanningError::InvalidUpdate,
-          StaticValidationError::InvalidInsert => msg::QueryPlanningError::InvalidInsert,
-        },
-        LockingDBSchemaViewError::ReqColPresenceError(missing_col) => {
-          msg::QueryPlanningError::RequiredColumnDNE(vec![missing_col])
-        }
+        LockingDBSchemaViewError::QueryPlanningError(err) => err,
       }),
     }
   })

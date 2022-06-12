@@ -129,7 +129,7 @@ impl<'a> ConcurrentWriter<'a> {
   /// thread encountered an error.
   fn flush_error(&mut self) {
     let text = self.mk_text();
-    self.sender.send(ParallelTestMessage::Error(text));
+    self.sender.send(ParallelTestMessage::Error(text)).unwrap();
   }
 }
 
@@ -141,7 +141,7 @@ impl<'a> Writer for ConcurrentWriter<'a> {
   /// Flushes the currently bufferred string normally.
   fn flush(&mut self) {
     let text = self.mk_text();
-    self.sender.send(ParallelTestMessage::PrintMessage(text));
+    self.sender.send(ParallelTestMessage::PrintMessage(text)).unwrap();
   }
 }
 
@@ -197,7 +197,7 @@ fn execute_multi(rand: &mut XorShiftRng, instances: u32, rounds: u32) {
       match result {
         Ok(done) => {
           writer.flush();
-          sender.send(ParallelTestMessage::Done(done));
+          sender.send(ParallelTestMessage::Done(done)).unwrap();
         }
         Err(_) => writer.flush_error(),
       }

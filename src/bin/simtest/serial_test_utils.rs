@@ -184,8 +184,7 @@ impl TestContext {
       msg::NetworkMessage::External(msg::ExternalMessage::ExternalQueryAborted(payload)) => {
         assert_eq!(payload.request_id, request_id);
         if !abort_check(&payload.payload) {
-          // TODO: do properly. Fix the serial test that causes this to fail.
-          println!("Incorrect error payload: {:#?}", payload);
+          panic!("Incorrect error payload: {:#?}", payload);
         }
       }
       _ => panic!("Incorrect Response: {:#?}", response),

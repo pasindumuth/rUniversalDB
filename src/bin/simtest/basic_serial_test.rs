@@ -1165,9 +1165,9 @@ fn drop_column(seed: [u8; 16]) {
       ",
       10000,
       |abort_data| match abort_data {
-        msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidColUsage) => {
-          true
-        }
+        msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::NonExistentColumn(_),
+        ) => true,
         _ => false,
       },
     );

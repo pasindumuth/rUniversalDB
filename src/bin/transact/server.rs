@@ -62,28 +62,31 @@ impl ProdIOCtx {
   pub fn start(&mut self) {
     let to_top = self.to_top.clone();
     let tasks = self.tasks.clone();
-    thread::Builder::new().name(format!("Timer")).spawn(move || loop {
-      // Sleep
-      let increment = std::time::Duration::from_micros(TIMER_INCREMENT);
-      thread::sleep(increment);
+    thread::Builder::new()
+      .name(format!("Timer"))
+      .spawn(move || loop {
+        // Sleep
+        let increment = std::time::Duration::from_micros(TIMER_INCREMENT);
+        thread::sleep(increment);
 
-      // Poll all tasks from `tasks` prior to the current time, and push them to the Slave.
-      let now = mk_t(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
+        // Poll all tasks from `tasks` prior to the current time, and push them to the Slave.
+        let now = mk_t(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
 
-      // Process tasks
-      let mut tasks = tasks.lock().unwrap();
-      while let Some((next_timestamp, _)) = tasks.first_key_value() {
-        if next_timestamp <= &now {
-          // All data in this first entry should be dispatched.
-          let next_timestamp = next_timestamp.clone();
-          for timer_input in tasks.remove(&next_timestamp).unwrap() {
-            to_top.send(GenericInput::TimerInput(timer_input));
+        // Process tasks
+        let mut tasks = tasks.lock().unwrap();
+        while let Some((next_timestamp, _)) = tasks.first_key_value() {
+          if next_timestamp <= &now {
+            // All data in this first entry should be dispatched.
+            let next_timestamp = next_timestamp.clone();
+            for timer_input in tasks.remove(&next_timestamp).unwrap() {
+              to_top.send(GenericInput::TimerInput(timer_input)).unwrap();
+            }
+          } else {
+            break;
           }
-        } else {
-          break;
         }
-      }
-    });
+      })
+      .unwrap();
   }
 }
 
@@ -123,13 +126,16 @@ impl FreeNodeIOCtx for ProdIOCtx {
       rand: XorShiftRng::from_entropy(),
       to_top: self.to_top.clone(),
     };
-    thread::Builder::new().name(format!("TabletGroup {}", snapshot.this_tid.0)).spawn(move || {
-      let mut tablet = TabletState::create_reconfig(gossip, snapshot, this_eid, tablet_config);
-      loop {
-        let tablet_msg = to_tablet_receiver.recv().unwrap();
-        tablet.handle_input(&mut io_ctx, tablet_msg);
-      }
-    });
+    thread::Builder::new()
+      .name(format!("TabletGroup {}", snapshot.this_tid.0))
+      .spawn(move || {
+        let mut tablet = TabletState::create_reconfig(gossip, snapshot, this_eid, tablet_config);
+        loop {
+          let tablet_msg = to_tablet_receiver.recv().unwrap();
+          tablet.handle_input(&mut io_ctx, tablet_msg);
+        }
+      })
+      .unwrap();
   }
 
   fn create_coord_full(&mut self, mut ctx: CoordContext) {
@@ -143,13 +149,16 @@ impl FreeNodeIOCtx for ProdIOCtx {
       rand: XorShiftRng::from_entropy(),
       to_top: self.to_top.clone(),
     };
-    thread::Builder::new().name(format!("CoordGroup {}", ctx.this_cid.0)).spawn(move || {
-      let mut coord = CoordState::new(ctx);
-      loop {
-        let coord_msg = to_coord_receiver.recv().unwrap();
-        coord.handle_input(&mut io_ctx, coord_msg);
-      }
-    });
+    thread::Builder::new()
+      .name(format!("CoordGroup {}", ctx.this_cid.0))
+      .spawn(move || {
+        let mut coord = CoordState::new(ctx);
+        loop {
+          let coord_msg = to_coord_receiver.recv().unwrap();
+          coord.handle_input(&mut io_ctx, coord_msg);
+        }
+      })
+      .unwrap();
   }
 
   fn defer(&mut self, defer_time: Timestamp, timer_input: GenericTimerInput) {
@@ -183,13 +192,16 @@ impl SlaveIOCtx for ProdIOCtx {
       rand: XorShiftRng::from_entropy(),
       to_top: self.to_top.clone(),
     };
-    thread::Builder::new().name(format!("TabletGroup {}", ctx.this_tid.0)).spawn(move || {
-      let mut tablet = TabletState::new(ctx);
-      loop {
-        let tablet_msg = to_tablet_receiver.recv().unwrap();
-        tablet.handle_input(&mut io_ctx, tablet_msg);
-      }
-    });
+    thread::Builder::new()
+      .name(format!("TabletGroup {}", ctx.this_tid.0))
+      .spawn(move || {
+        let mut tablet = TabletState::new(ctx);
+        loop {
+          let tablet_msg = to_tablet_receiver.recv().unwrap();
+          tablet.handle_input(&mut io_ctx, tablet_msg);
+        }
+      })
+      .unwrap();
   }
 
   fn tablet_forward(
@@ -286,6 +298,6 @@ impl BasicIOCtx for ProdCoreIOCtx {
 
 impl CoreIOCtx for ProdCoreIOCtx {
   fn slave_forward(&mut self, msg: SlaveBackMessage) {
-    self.to_top.send(GenericInput::SlaveBackMessage(msg));
+    self.to_top.send(GenericInput::SlaveBackMessage(msg)).unwrap();
   }
 }

@@ -1,5 +1,5 @@
 use crate::common::{ColName, TablePath, TransTableName};
-use crate::master_query_planning_es::{ColUsageErrorTrait, DBSchemaView, ReqTablePresenceError};
+use crate::master_query_planning_es::{DBSchemaView, ErrorTrait};
 use crate::message as msg;
 use crate::sql_ast::{iast, proc};
 use sqlparser::test_utils::table;
@@ -9,14 +9,12 @@ use std::iter::FromIterator;
 #[path = "test/query_converter_test.rs"]
 pub mod query_converter_test;
 
-pub fn convert_to_msquery<ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>(
+pub fn convert_to_msquery<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>>(
   view: &mut ViewT,
   mut query: iast::Query,
 ) -> Result<proc::MSQuery, ErrorT> {
-  if !validate_under_query(&query) {
-    // TODO: do properly.
-    return Err(ErrorT::mk_error(TablePath("First validation Error".to_string())));
-  }
+  // Validate Join Trees
+  validate_under_query(&query)?;
 
   // Add aliases
   process_under_query(&mut query);
@@ -27,32 +25,16 @@ pub fn convert_to_msquery<ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<Err
 
   // Rename Aliases
   let mut ctx = AliasRenameContext { alias_rename_map: BTreeMap::new(), counter: ctx.counter };
-  if let Err(e) = alias_rename_under_query(&mut ctx, (), &mut query) {
-    return Err(ErrorT::mk_error(TablePath(format!("{:#?}", e)))); // TODO: do properly.
-  }
+  alias_rename_under_query(&mut ctx, &mut query)?;
 
   // Resolve Columns
   let mut resolver =
     ColResolver { col_usage_map: Default::default(), trans_table_map: Default::default(), view };
-  let (_, unresolved) = resolver.resolve_cols_under_query(&mut query)?;
-  if !unresolved.free_cols.is_empty() || !unresolved.qualified_cols.is_empty() {
-    // TODO: do properly.
-    return Err(ErrorT::mk_error(TablePath(
-      "Some ColumnRefs do not refer to a real column".to_string(),
-    )));
-  }
+  resolver.resolve_cols(&mut query)?;
 
   // Convert to MSQUery
-
-  // Next, we flatten the `renamed_query` to produce an MSQuery. Since we renamed
-  // all TransTable references, this won't change the semantics.
   let mut ctx = ConversionContext { col_usage_map: resolver.col_usage_map, counter: ctx.counter };
-  match ctx.flatten_top_level_query(&query) {
-    Ok(ms_query) => Ok(ms_query),
-    Err(e) => {
-      return Err(ErrorT::mk_error(TablePath(format!("{:#?}", e)))); // TODO: do properly.
-    }
-  }
+  ctx.flatten_top_level_query(&query)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -64,54 +46,51 @@ pub fn convert_to_msquery<ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<Err
 ///   1. Checks that any Lateral Derived Tables are not on the left of a JOIN.
 ///   2. Checks that every Derived Table (in the JoinLeafs) have an alias.
 ///   3. Checks that every JoinLeaf has a unique JoinLeaf Name (JLN) in the Join Tree.
-fn validate_under_query(query: &iast::Query) -> bool {
-  fn validate_under_expr(expr: &iast::ValExpr) -> bool {
+fn validate_under_query<ErrorT: ErrorTrait>(query: &iast::Query) -> Result<(), ErrorT> {
+  fn validate_under_expr<ErrorT: ErrorTrait>(expr: &iast::ValExpr) -> Result<(), ErrorT> {
     match expr {
-      iast::ValExpr::ColumnRef { .. } => true,
+      iast::ValExpr::ColumnRef { .. } => Ok(()),
       iast::ValExpr::UnaryExpr { expr, .. } => validate_under_expr(expr),
       iast::ValExpr::BinaryExpr { left, right, .. } => {
-        validate_under_expr(left) && validate_under_expr(right)
+        validate_under_expr(left)?;
+        validate_under_expr(right)
       }
-      iast::ValExpr::Value { .. } => true,
+      iast::ValExpr::Value { .. } => Ok(()),
       iast::ValExpr::Subquery { query } => validate_under_query(query),
     }
   }
 
   // Check that Join Trees under the Derived Tables in the `join_node` are also valid.
-  fn validate_under_join_tree(join_node: &iast::JoinNode) -> bool {
+  fn validate_under_join_tree<ErrorT: ErrorTrait>(
+    join_node: &iast::JoinNode,
+  ) -> Result<(), ErrorT> {
     match join_node {
       iast::JoinNode::JoinInnerNode(inner) => {
-        validate_under_join_tree(&inner.left)
-          && validate_under_join_tree(&inner.right)
-          && validate_under_expr(&inner.on)
+        validate_under_join_tree(&inner.left)?;
+        validate_under_join_tree(&inner.right)?;
+        validate_under_expr(&inner.on)
       }
       iast::JoinNode::JoinLeaf(leaf) => {
         if let iast::JoinNodeSource::DerivedTable { query, .. } = &leaf.source {
           validate_under_query(query)
         } else {
-          true
+          Ok(())
         }
       }
     }
   }
 
   for (_, child_query) in &query.ctes {
-    if !validate_under_query(child_query) {
-      return false;
-    }
+    validate_under_query(child_query)?;
   }
 
   match &query.body {
     iast::QueryBody::Query(child_query) => {
-      if !validate_under_query(child_query) {
-        return false;
-      }
+      validate_under_query(child_query)?;
     }
     iast::QueryBody::SuperSimpleSelect(select) => {
       // Validate the JoinTree without validating child queries within.
-      if !validate_join_tree(&select.from) {
-        return false;
-      }
+      validate_join_tree(&select.from)?;
 
       // Validate Projection Clause
       match &select.projection {
@@ -119,14 +98,10 @@ fn validate_under_query(query: &iast::Query) -> bool {
           for (select_item, _) in select_list {
             match select_item {
               iast::SelectItem::ValExpr(val_expr) => {
-                if !validate_under_expr(val_expr) {
-                  return false;
-                }
+                validate_under_expr(val_expr)?;
               }
               iast::SelectItem::UnaryAggregate(unary_agg) => {
-                if !validate_under_expr(&unary_agg.expr) {
-                  return false;
-                }
+                validate_under_expr(&unary_agg.expr)?;
               }
             }
           }
@@ -135,64 +110,58 @@ fn validate_under_query(query: &iast::Query) -> bool {
       }
 
       // Validate Where Clause
-      if !validate_under_expr(&select.selection) {
-        return false;
-      }
+      validate_under_expr(&select.selection)?;
 
       // Validate child queries within the Join Tree
-      if !validate_under_join_tree(&select.from) {
-        return false;
-      }
+      validate_under_join_tree(&select.from)?;
     }
     iast::QueryBody::Update(update) => {
       for (_, expr) in &update.assignments {
-        if !validate_under_expr(expr) {
-          return false;
-        }
+        validate_under_expr(expr)?;
       }
 
-      if !validate_under_expr(&update.selection) {
-        return false;
-      }
+      validate_under_expr(&update.selection)?;
     }
     iast::QueryBody::Insert(insert) => {
       for row in &insert.values {
         for val in row {
-          if !validate_under_expr(val) {
-            return false;
-          }
+          validate_under_expr(val)?;
         }
       }
     }
     iast::QueryBody::Delete(delete) => {
-      if !validate_under_expr(&delete.selection) {
-        return false;
-      }
+      validate_under_expr(&delete.selection)?;
     }
   };
 
-  true
+  Ok(())
 }
 
 /// Run all validations for a Join Tree.
-fn validate_join_tree(join_node: &iast::JoinNode) -> bool {
-  validate_lateral(join_node) && validate_aliases(join_node)
+fn validate_join_tree<ErrorT: ErrorTrait>(join_node: &iast::JoinNode) -> Result<(), ErrorT> {
+  validate_lateral(join_node)?;
+  validate_aliases(join_node)
 }
 
 /// Check that there are no left Lateral Derived Tables in `join_node` without
 /// digging into the subqueries.
-fn validate_lateral(join_node: &iast::JoinNode) -> bool {
-  fn validate_lateral_r(is_left: bool, join_node: &iast::JoinNode) -> bool {
+fn validate_lateral<ErrorT: ErrorTrait>(join_node: &iast::JoinNode) -> Result<(), ErrorT> {
+  fn validate_lateral_r<ErrorT: ErrorTrait>(
+    is_left: bool,
+    join_node: &iast::JoinNode,
+  ) -> Result<(), ErrorT> {
     match join_node {
       iast::JoinNode::JoinInnerNode(inner) => {
-        validate_lateral_r(true, &inner.left) && validate_lateral_r(false, &inner.right)
+        validate_lateral_r(true, &inner.left)?;
+        validate_lateral_r(false, &inner.right)
       }
       iast::JoinNode::JoinLeaf(leaf) => {
         if let iast::JoinNodeSource::DerivedTable { lateral, .. } = &leaf.source {
-          !(*lateral && is_left)
-        } else {
-          true
+          if !(*lateral && is_left) {
+            return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidLateralJoin));
+          }
         }
+        Ok(())
       }
     }
   }
@@ -204,26 +173,26 @@ fn validate_lateral(join_node: &iast::JoinNode) -> bool {
 
 /// Ensure that every JoinLeaf has a JoinLeaf Name (JLN) by making sure ever Derived
 /// Table has an alias, and makes sure every JLN is unique.
-fn validate_aliases(join_node: &iast::JoinNode) -> bool {
-  fn validate_aliases_r<'a>(
+fn validate_aliases<ErrorT: ErrorTrait>(join_node: &iast::JoinNode) -> Result<(), ErrorT> {
+  fn validate_aliases_r<'a, ErrorT: ErrorTrait>(
     seen_jlns: &mut BTreeSet<&'a String>,
     join_node: &'a iast::JoinNode,
-  ) -> bool {
+  ) -> Result<(), ErrorT> {
     match join_node {
       iast::JoinNode::JoinInnerNode(inner) => {
-        validate_aliases_r(seen_jlns, &inner.left) && validate_aliases_r(seen_jlns, &inner.right)
+        validate_aliases_r(seen_jlns, &inner.left)?;
+        validate_aliases_r(seen_jlns, &inner.right)
       }
       iast::JoinNode::JoinLeaf(leaf) => {
         if let Some(jln) = leaf.join_leaf_name() {
           if seen_jlns.contains(jln) {
-            false
+            Err(ErrorT::mk_error(msg::QueryPlanningError::NonUniqueJoinLeafName))
           } else {
             seen_jlns.insert(jln);
-            true
+            Ok(())
           }
         } else {
-          // If the JLN does not exist, then we return false.
-          false
+          Err(ErrorT::mk_error(msg::QueryPlanningError::NonAliasedDerivedTable))
         }
       }
     }
@@ -524,9 +493,9 @@ struct AliasRenameContext {
   counter: u32,
 }
 
-fn alias_rename_query<SaltT>(query: &mut iast::Query, s: SaltT) -> Result<SaltT, String> {
+fn alias_rename_query<ErrorT: ErrorTrait>(query: &mut iast::Query) -> Result<(), ErrorT> {
   let mut ctx = AliasRenameContext { alias_rename_map: Default::default(), counter: 0 };
-  alias_rename_under_query(&mut ctx, s, query)
+  alias_rename_under_query(&mut ctx, query)
 }
 
 /// Renames all Table aliases in the JoinLeafs. This means we also rename all
@@ -541,11 +510,10 @@ fn alias_rename_query<SaltT>(query: &mut iast::Query, s: SaltT) -> Result<SaltT,
 /// counter the increments by 1 for every TransTable.
 ///
 /// Note: this function leaves the `ctx.alias_rename_map` that is passed in unmodified.
-fn alias_rename_under_query<SaltT>(
+fn alias_rename_under_query<ErrorT: ErrorTrait>(
   ctx: &mut AliasRenameContext,
-  s: SaltT,
   query: &mut iast::Query,
-) -> Result<SaltT, String> {
+) -> Result<(), ErrorT> {
   // Basic Helpers
 
   // Renames the alias in all `JoinLeaf`s and creates a map that maps back to the old name.
@@ -626,167 +594,148 @@ fn alias_rename_under_query<SaltT>(
 
   // Rename helpers
 
-  fn alias_rename_under_expr<SaltT>(
+  fn alias_rename_under_expr<ErrorT: ErrorTrait>(
     ctx: &mut AliasRenameContext,
-    s: SaltT,
     expr: &mut iast::ValExpr,
-  ) -> Result<SaltT, String> {
+  ) -> Result<(), ErrorT> {
     match expr {
       iast::ValExpr::ColumnRef { table_name, .. } => {
         if let Some(table_name) = table_name {
           if let Some(rename_stack) = ctx.alias_rename_map.get(table_name) {
             *table_name = rename_stack.last().unwrap().clone();
-            Ok(s)
+            Ok(())
           } else {
-            // If the table_name is not in scope, then this is an error.
-            Err(format!("Table name {} does not exist.", table_name))
+            Err(ErrorT::mk_error(msg::QueryPlanningError::NonExistentTableQualification))
           }
         } else {
-          Ok(s)
+          Ok(())
         }
       }
-      iast::ValExpr::UnaryExpr { expr, .. } => alias_rename_under_expr(ctx, s, expr),
+      iast::ValExpr::UnaryExpr { expr, .. } => alias_rename_under_expr(ctx, expr),
       iast::ValExpr::BinaryExpr { left, right, .. } => {
-        let s = alias_rename_under_expr(ctx, s, left)?;
-        alias_rename_under_expr(ctx, s, right)
+        alias_rename_under_expr(ctx, left)?;
+        alias_rename_under_expr(ctx, right)
       }
-      iast::ValExpr::Value { .. } => Ok(s),
-      iast::ValExpr::Subquery { query } => alias_rename_under_query(ctx, s, query),
+      iast::ValExpr::Value { .. } => Ok(()),
+      iast::ValExpr::Subquery { query } => alias_rename_under_query(ctx, query),
     }
   }
 
   // This function renames all `ColumnRef`s that appears underneath the `join_node`.
   // Note: This function leaves `ctx.alias_rename_map` unmodified.
-  fn alias_rename_under_join_tree<SaltT>(
+  fn alias_rename_under_join_tree<ErrorT: ErrorTrait>(
     ctx: &mut AliasRenameContext,
-    s: SaltT,
     name_map: &BTreeMap<String, String>,
     join_node: &mut iast::JoinNode,
-  ) -> Result<SaltT, String> {
+  ) -> Result<(), ErrorT> {
     match join_node {
       iast::JoinNode::JoinInnerNode(inner) => {
-        let s = alias_rename_under_join_tree(ctx, s, name_map, &mut inner.left)?;
+        alias_rename_under_join_tree(ctx, name_map, &mut inner.left)?;
 
         // If the right child is a Lateral Derived Table, we need to add the renames
         // from the left child.
-        let s = if let iast::JoinNode::JoinLeaf(iast::JoinLeaf {
+        if let iast::JoinNode::JoinLeaf(iast::JoinLeaf {
           source: iast::JoinNodeSource::DerivedTable { lateral: true, .. },
           ..
         }) = inner.right.as_ref()
         {
           add_renames_in_node(ctx, name_map, &inner.left);
-          let s = alias_rename_under_join_tree(ctx, s, name_map, &mut inner.right)?;
+          alias_rename_under_join_tree(ctx, name_map, &mut inner.right)?;
           remove_renames_in_node(ctx, name_map, &inner.left);
-          s
-        } else {
-          s
         };
 
         // For the ON clause, renames from both sides must be added.
         add_renames_in_node(ctx, name_map, &inner.left);
         add_renames_in_node(ctx, name_map, &inner.right);
-        let s = alias_rename_under_expr(ctx, s, &mut inner.on)?;
+        alias_rename_under_expr(ctx, &mut inner.on)?;
         remove_renames_in_node(ctx, name_map, &inner.left);
         remove_renames_in_node(ctx, name_map, &inner.right);
-        Ok(s)
+        Ok(())
       }
       iast::JoinNode::JoinLeaf(leaf) => {
         if let iast::JoinNodeSource::DerivedTable { query, .. } = &mut leaf.source {
-          alias_rename_under_query(ctx, s, query)
+          alias_rename_under_query(ctx, query)
         } else {
-          Ok(s)
+          Ok(())
         }
       }
     }
   }
 
   // Start the function
-
-  let mut s_opt = Some(s);
   for (_, cte_query) in &mut query.ctes {
-    let s = s_opt.take().unwrap();
-    s_opt = Some(alias_rename_under_query(ctx, s, cte_query)?);
+    alias_rename_under_query(ctx, cte_query)?
   }
-  let s = s_opt.take().unwrap();
 
   match &mut query.body {
-    iast::QueryBody::Query(child_query) => alias_rename_under_query(ctx, s, child_query),
+    iast::QueryBody::Query(child_query) => alias_rename_under_query(ctx, child_query),
     iast::QueryBody::SuperSimpleSelect(select) => {
       // First, rename all `JoinLeaf` aliases without renaming ColumnRefs
       let name_map = alias_rename_generation(ctx, &mut select.from);
 
       // Rename the `ColumnRef`s in the JoinTree.
-      let s = alias_rename_under_join_tree(ctx, s, &name_map, &mut select.from)?;
+      alias_rename_under_join_tree(ctx, &name_map, &mut select.from)?;
 
       // Before processing the `ValExpr`s in the query, we add all renames introduced by the
       // `from` clause since they will be in scope. We also make sure to remove these afterwards.
       add_renames_in_node(ctx, &name_map, &select.from);
 
       // Process Projection
-      let mut s_opt = Some(s);
       match &mut select.projection {
         iast::SelectClause::SelectList(select_list) => {
           for (select_item, _) in select_list {
-            let s = s_opt.take().unwrap();
-            s_opt = Some(match select_item {
-              iast::SelectItem::ValExpr(val_expr) => alias_rename_under_expr(ctx, s, val_expr)?,
+            match select_item {
+              iast::SelectItem::ValExpr(val_expr) => alias_rename_under_expr(ctx, val_expr)?,
               iast::SelectItem::UnaryAggregate(unary_agg) => {
-                alias_rename_under_expr(ctx, s, &mut unary_agg.expr)?
+                alias_rename_under_expr(ctx, &mut unary_agg.expr)?
               }
-            });
+            };
           }
         }
         iast::SelectClause::Wildcard => {}
       }
-      let s = s_opt.take().unwrap();
 
       // Proces Where Clause
-      let s = alias_rename_under_expr(ctx, s, &mut select.selection)?;
+      alias_rename_under_expr(ctx, &mut select.selection)?;
 
       remove_renames_in_node(ctx, &name_map, &select.from);
-      Ok(s)
+      Ok(())
     }
     iast::QueryBody::Update(update) => {
       let old_name = rename_table_ref(ctx, &mut update.table);
 
       // Process Assignment
-      let mut s_opt = Some(s);
       for (_, expr) in &mut update.assignments {
-        let s = s_opt.take().unwrap();
-        s_opt = Some(alias_rename_under_expr(ctx, s, expr)?);
+        alias_rename_under_expr(ctx, expr)?;
       }
-      let s = s_opt.take().unwrap();
 
       // Proces Where Clause
-      let s = alias_rename_under_expr(ctx, s, &mut update.selection)?;
+      alias_rename_under_expr(ctx, &mut update.selection)?;
 
       pop_rename(&mut ctx.alias_rename_map, &old_name);
-      Ok(s)
+      Ok(())
     }
     iast::QueryBody::Insert(insert) => {
       let old_name = rename_table_ref(ctx, &mut insert.table);
 
       // Process Inset Values
-      let mut s_opt = Some(s);
       for row in &mut insert.values {
         for val in row {
-          let s = s_opt.take().unwrap();
-          s_opt = Some(alias_rename_under_expr(ctx, s, val)?);
+          alias_rename_under_expr(ctx, val)?;
         }
       }
-      let s = s_opt.take().unwrap();
 
       pop_rename(&mut ctx.alias_rename_map, &old_name);
-      Ok(s)
+      Ok(())
     }
     iast::QueryBody::Delete(delete) => {
       let old_name = rename_table_ref(ctx, &mut delete.table);
 
       // Process Inset Values
-      let s = alias_rename_under_expr(ctx, s, &mut delete.selection)?;
+      alias_rename_under_expr(ctx, &mut delete.selection)?;
 
       pop_rename(&mut ctx.alias_rename_map, &old_name);
-      Ok(s)
+      Ok(())
     }
   }
 }
@@ -852,9 +801,24 @@ struct ColResolver<'a, ViewT: DBSchemaView> {
   view: &'a mut ViewT,
 }
 
-impl<'b, ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>
-  ColResolver<'b, ViewT>
-{
+impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'b, ViewT> {
+  fn resolve_cols(&mut self, query: &mut iast::Query) -> Result<(), ErrorT> {
+    let (_, mut unresolved) = self.resolve_cols_under_query(query)?;
+
+    // Check if there are any columns that were unresolved.
+    if let Some(col) = if let Some(entry) = unresolved.free_cols.first_entry() {
+      Some(entry.key().clone())
+    } else if let Some(entry) = unresolved.qualified_cols.first_entry() {
+      entry.remove().into_iter().next()
+    } else {
+      None
+    } {
+      Err(ErrorT::mk_error(msg::QueryPlanningError::NonExistentColumn(col)))
+    } else {
+      Ok(())
+    }
+  }
+
   fn resolve_cols_under_query<'a>(
     &mut self,
     query: &'a mut iast::Query,
@@ -873,7 +837,7 @@ impl<'b, ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>
         let (schema, child_unresolved) = self.resolve_cols_under_query(child_query)?;
         unresolved.merge(child_unresolved);
 
-        return Ok((schema, unresolved));
+        Ok((schema, unresolved))
       }
       iast::QueryBody::SuperSimpleSelect(select) => {
         let (_, jlns, join_node_cols, mut cur_unresolved) =
@@ -927,7 +891,7 @@ impl<'b, ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>
           }
         }
 
-        return Ok((projection, unresolved));
+        Ok((projection, unresolved))
       }
       iast::QueryBody::Update(update) => {
         let join_node_cols = self.mk_join_node_cols(&update.table);
@@ -950,7 +914,7 @@ impl<'b, ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>
           self.process_expr(&mut unresolved, &join_node_cols, expr)?;
         }
 
-        return Ok((projection, unresolved));
+        Ok((projection, unresolved))
       }
       iast::QueryBody::Insert(insert) => {
         let join_node_cols = self.mk_join_node_cols(&insert.table);
@@ -965,7 +929,7 @@ impl<'b, ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>
           }
         }
 
-        return Ok((projection, unresolved));
+        Ok((projection, unresolved))
       }
       iast::QueryBody::Delete(delete) => {
         let join_node_cols = self.mk_join_node_cols(&delete.table);
@@ -973,7 +937,7 @@ impl<'b, ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>
         // Process WHERE
         self.process_expr(&mut unresolved, &join_node_cols, &mut delete.selection)?;
 
-        return Ok((vec![], unresolved));
+        Ok((vec![], unresolved))
       }
     }
   }
@@ -1031,7 +995,7 @@ impl<'b, ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>
             } else {
               let table_path = TablePath(table_name.clone());
               if !self.view.contains_table(&table_path)? {
-                return Err(ErrorT::mk_error(table_path));
+                return Err(ErrorT::mk_error(msg::QueryPlanningError::TablesDNE(table_path)));
               } else {
                 join_node_cols.insert(jln.clone(), SchemaSource::TablePath(table_path));
               }
@@ -1160,8 +1124,7 @@ impl<'b, ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>
             // If more than one element of `schema` matches `jln`, this is an
             // "ambiguous column" error.
             if num_matches > 1 {
-              // TODO: do properly.
-              return Err(ErrorT::mk_error(TablePath("Ambiguous Column Error".to_string())));
+              return Err(ErrorT::mk_error(msg::QueryPlanningError::AmbiguousColumnRef));
             } else {
               num_matches == 1
             }
@@ -1206,7 +1169,7 @@ impl<'b, ErrorT: ReqTablePresenceError, ViewT: DBSchemaView<ErrorT = ErrorT>>
               self.view.contains_col(table_path, &ColName(col.clone()))?
             }
           } {
-            return Err(ErrorT::mk_error(TablePath("Missing Column".to_string())));
+            return Err(ErrorT::mk_error(msg::QueryPlanningError::NonExistentColumn(col.clone())));
           } else {
             // Otherwise, amend `col_usage_map` accordingly.
             self.amend_col_usage(jln, col.clone());
@@ -1247,11 +1210,12 @@ struct ConversionContext {
 }
 
 impl ConversionContext {
-  /// Flattens the `query` into a into a `MSQuery`.
-  fn flatten_top_level_query(
+  /// Flattens the `query` into a into a `MSQuery`. Since we renamed
+  /// all TransTable references, this does not change the semantics of the query.
+  fn flatten_top_level_query<ErrorT: ErrorTrait>(
     &mut self,
     query: &iast::Query,
-  ) -> Result<proc::MSQuery, msg::ExternalAbortedData> {
+  ) -> Result<proc::MSQuery, ErrorT> {
     let aux_table_name = unique_tt_name(&mut self.counter, &"".to_string());
     let mut ms_query = proc::MSQuery {
       trans_tables: Vec::default(),
@@ -1266,12 +1230,12 @@ impl ConversionContext {
   /// name of `assignment_name` and add it into the map as well.
   /// Note: we need `counter` because we need to create auxiliary TransTables
   /// for the query bodies.
-  fn flatten_top_level_query_r(
+  fn flatten_top_level_query_r<ErrorT: ErrorTrait>(
     &mut self,
     assignment_name: &String,
     query: &iast::Query,
     trans_table_map: &mut Vec<(TransTableName, proc::MSQueryStage)>,
-  ) -> Result<(), msg::ExternalAbortedData> {
+  ) -> Result<(), ErrorT> {
     // First, have the CTEs flatten their Querys and add their TransTables to the map.
     for (trans_table_name, cte_query) in &query.ctes {
       self.flatten_top_level_query_r(trans_table_name, cte_query, trans_table_map)?;
@@ -1341,10 +1305,10 @@ impl ConversionContext {
     }
   }
 
-  fn flatten_val_expr_r(
+  fn flatten_val_expr_r<ErrorT: ErrorTrait>(
     &mut self,
     val_expr: &iast::ValExpr,
-  ) -> Result<proc::ValExpr, msg::ExternalAbortedData> {
+  ) -> Result<proc::ValExpr, ErrorT> {
     match val_expr {
       iast::ValExpr::ColumnRef { table_name, col_name } => {
         Ok(proc::ValExpr::ColumnRef(proc::ColumnRef {
@@ -1377,12 +1341,12 @@ impl ConversionContext {
     }
   }
 
-  fn flatten_sub_query_r(
+  fn flatten_sub_query_r<ErrorT: ErrorTrait>(
     &mut self,
     assignment_name: &String,
     query: &iast::Query,
     trans_table_map: &mut Vec<(TransTableName, proc::GRQueryStage)>,
-  ) -> Result<(), msg::ExternalAbortedData> {
+  ) -> Result<(), ErrorT> {
     // First, have the CTEs flatten their Querys and add their TransTables to the map.
     for (trans_table_name, cte_query) in &query.ctes {
       self.flatten_sub_query_r(trans_table_name, cte_query, trans_table_map)?;
@@ -1400,22 +1364,16 @@ impl ConversionContext {
         ));
         Ok(())
       }
-      iast::QueryBody::Update(_) => {
-        Err(msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidUpdate))
-      }
-      iast::QueryBody::Insert(_) => {
-        Err(msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidInsert))
-      }
-      iast::QueryBody::Delete(_) => {
-        Err(msg::ExternalAbortedData::QueryPlanningError(msg::QueryPlanningError::InvalidDelete))
-      }
+      iast::QueryBody::Update(_) => Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidUpdate)),
+      iast::QueryBody::Insert(_) => Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidInsert)),
+      iast::QueryBody::Delete(_) => Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidDelete)),
     }
   }
 
-  fn flatten_select(
+  fn flatten_select<ErrorT: ErrorTrait>(
     &mut self,
     select: &iast::SuperSimpleSelect,
-  ) -> Result<proc::SuperSimpleSelect, msg::ExternalAbortedData> {
+  ) -> Result<proc::SuperSimpleSelect, ErrorT> {
     let p_projection = match &select.projection {
       iast::SelectClause::SelectList(select_list) => {
         let mut p_select_list = Vec::<(proc::SelectItem, Option<ColName>)>::new();
@@ -1459,10 +1417,10 @@ impl ConversionContext {
   }
 
   /// Converts the Join Tree analogously, except the JoinLeafs are converted into GRQuerys
-  fn flatten_join_node(
+  fn flatten_join_node<ErrorT: ErrorTrait>(
     &mut self,
     join_node: &iast::JoinNode,
-  ) -> Result<proc::JoinNode, msg::ExternalAbortedData> {
+  ) -> Result<proc::JoinNode, ErrorT> {
     match join_node {
       iast::JoinNode::JoinInnerNode(inner) => {
         Ok(proc::JoinNode::JoinInnerNode(proc::JoinInnerNode {

@@ -513,7 +513,7 @@ impl SlaveContext {
               let all_tids = io_ctx.all_tids();
               for tid in all_tids {
                 let forward_msg = TabletForwardMsg::LeaderChanged(leader_changed.clone());
-                io_ctx.tablet_forward(&tid, forward_msg);
+                io_ctx.tablet_forward(&tid, forward_msg).unwrap();
               }
 
               // Forward the LeaderChanged to all Coords.
@@ -613,7 +613,7 @@ impl SlaveContext {
       slave_forward_msgs.push(forward_msg);
       for tid in &all_tids {
         let forward_msg = TabletForwardMsg::RemoteLeaderChanged(remote_change.clone());
-        io_ctx.tablet_forward(&tid, forward_msg);
+        io_ctx.tablet_forward(&tid, forward_msg).unwrap();
       }
       for cid in &all_cids {
         let forward_msg = CoordForwardMsg::RemoteLeaderChanged(remote_change.clone());
@@ -626,7 +626,7 @@ impl SlaveContext {
       let gossip = Arc::new(gossip_data);
       for tid in &all_tids {
         let forward_msg = TabletForwardMsg::GossipData(gossip.clone(), some_leader_map.clone());
-        io_ctx.tablet_forward(&tid, forward_msg);
+        io_ctx.tablet_forward(&tid, forward_msg).unwrap();
       }
       for cid in &all_cids {
         let forward_msg = CoordForwardMsg::GossipData(gossip.clone(), some_leader_map.clone());
@@ -639,7 +639,9 @@ impl SlaveContext {
     slave_forward_msgs.push(SlaveForwardMsg::SlaveBundle(slave_bundle.plms));
     for (tid, tablet_bundle) in shared_bundle.tablet {
       let forward_msg = TabletForwardMsg::TabletBundle(tablet_bundle);
-      io_ctx.tablet_forward(&tid, forward_msg);
+      // Recall that a Tablet always exists in the target Slave before any
+      // messages get sent to it.
+      io_ctx.tablet_forward(&tid, forward_msg).unwrap();
     }
 
     // Forward to Slave Backend
@@ -1017,7 +1019,7 @@ impl SlaveContext {
 
       // Request the Tablets to send back a TabletSnapshot
       for tid in io_ctx.all_tids() {
-        io_ctx.tablet_forward(&tid, TabletForwardMsg::ConstructTabletSnapshot);
+        io_ctx.tablet_forward(&tid, TabletForwardMsg::ConstructTabletSnapshot).unwrap();
       }
 
       // If there are no Tablets in this Slave, then we can send off the SlaveSnapshot
