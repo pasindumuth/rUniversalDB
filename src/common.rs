@@ -1032,13 +1032,10 @@ impl OrigP {
 
 /// Here, every element of `results` has the same `Vec<ColName>`, and all `Vec<TableView>`s
 /// have the same length. This function essentially merges together corresponding `TableView`.
-pub fn merge_table_views(
-  mut results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
-) -> Vec<TableView> {
+pub fn merge_table_views(mut results: Vec<Vec<TableView>>) -> Vec<TableView> {
   let mut it = results.into_iter();
-  if let Some((schema, mut views)) = it.next() {
-    while let Some((cur_schema, cur_views)) = it.next() {
-      assert_eq!(cur_schema, schema);
+  if let Some(mut views) = it.next() {
+    while let Some(cur_views) = it.next() {
       assert_eq!(cur_views.len(), views.len());
       for (idx, cur_view) in cur_views.into_iter().enumerate() {
         let view = views.get_mut(idx).unwrap();
@@ -1220,7 +1217,7 @@ pub struct WriteRegion {
 /// Contains the result of ESs like *Table*ES and TransTableReadES.
 #[derive(Debug, Clone)]
 pub struct QueryESResult {
-  pub result: (Vec<Option<ColName>>, Vec<TableView>),
+  pub result: Vec<TableView>,
   pub new_rms: Vec<TQueryPath>,
 }
 

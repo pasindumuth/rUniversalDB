@@ -249,7 +249,7 @@ impl SqlQueryInner for InsertInner {
     // Signal Success and return the data.
     let res_table_view = pending.res_table_view.clone();
     TPESAction::Success(QueryESResult {
-      result: (es.query_plan.col_usage_node.schema.clone(), vec![res_table_view]),
+      result: vec![res_table_view],
       new_rms: es.new_rms.iter().cloned().collect(),
     })
   }

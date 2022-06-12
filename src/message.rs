@@ -491,7 +491,7 @@ pub struct QuerySuccess {
   pub return_qid: QueryId,
   /// Contains QueryId of the query that was succeeded.
   pub responder_path: CTQueryPath,
-  pub result: (Vec<Option<ColName>>, Vec<TableView>),
+  pub result: Vec<TableView>,
   pub new_rms: Vec<TQueryPath>,
 }
 

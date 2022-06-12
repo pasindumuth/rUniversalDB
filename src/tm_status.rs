@@ -33,7 +33,7 @@ pub struct TMStatus {
   /// Holds the number of nodes that responded (used to decide when this TM is done).
   responded_count: usize,
   /// Holds all child Querys, initially mapping to `None`. As results come in, we hold them here.
-  tm_state: BTreeMap<CTNodePath, Option<(Vec<Option<ColName>>, Vec<TableView>)>>,
+  tm_state: BTreeMap<CTNodePath, Option<Vec<TableView>>>,
   pub orig_p: OrigP,
 }
 
@@ -154,11 +154,9 @@ impl TMStatus {
 
   /// Merge there `TableView`s together. Note that this should be only called when
   /// all child queries have responded.
-  pub fn get_results(
-    self,
-  ) -> (OrigP, Vec<(Vec<Option<ColName>>, Vec<TableView>)>, BTreeSet<TQueryPath>) {
+  pub fn get_results(self) -> (OrigP, Vec<Vec<TableView>>, BTreeSet<TQueryPath>) {
     debug_assert!(self.is_complete());
-    let mut results = Vec::<(Vec<Option<ColName>>, Vec<TableView>)>::new();
+    let mut results = Vec::<Vec<TableView>>::new();
     for (_, rm_result) in self.tm_state {
       results.push(rm_result.unwrap());
     }

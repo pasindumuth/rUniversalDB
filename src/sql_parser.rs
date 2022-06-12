@@ -435,7 +435,7 @@ pub fn convert_expr(expr: ast::Expr) -> Result<iast::ValExpr, String> {
     ast::Expr::Nested(expr) => convert_expr(*expr)?,
     ast::Expr::Value(value) => iast::ValExpr::Value { val: convert_value(value)? },
     ast::Expr::Subquery(query) => {
-      iast::ValExpr::Subquery { query: Box::new(convert_query(*query)?) }
+      iast::ValExpr::Subquery { query: Box::new(convert_query(*query)?), trans_table_name: None }
     }
     _ => return Err(format!("Expr {:?} not supported", expr)),
   })

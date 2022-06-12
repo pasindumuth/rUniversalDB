@@ -608,7 +608,7 @@ impl CoordContext {
     orig_p: OrigP,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
+    results: Vec<Vec<TableView>>,
   ) {
     let query_id = orig_p.query_id;
     // Route TM results to MSQueryES

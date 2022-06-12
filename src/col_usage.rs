@@ -294,7 +294,7 @@ impl<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsagePlanner<V
     gr_query: &proc::GRQuery,
   ) -> Result<Vec<(TransTableName, ColUsageNode)>, ErrorT> {
     let mut children = Vec::<(TransTableName, ColUsageNode)>::new();
-    for (trans_table_name, child_query) in &gr_query.trans_tables {
+    for (trans_table_name, (_, child_query)) in &gr_query.trans_tables {
       match child_query {
         proc::GRQueryStage::SuperSimpleSelect(select) => {
           let node = self.plan_select(trans_table_ctx, select)?;
@@ -314,7 +314,7 @@ impl<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsagePlanner<V
   ) -> Result<Vec<(TransTableName, ColUsageNode)>, ErrorT> {
     let mut trans_table_ctx = BTreeMap::<TransTableName, Vec<Option<ColName>>>::new();
     let mut children = Vec::<(TransTableName, ColUsageNode)>::new();
-    for (trans_table_name, child_query) in &ms_query.trans_tables {
+    for (trans_table_name, (_, child_query)) in &ms_query.trans_tables {
       let node = self.plan_ms_query_stage(&mut trans_table_ctx, child_query)?;
       let cols = node.schema.clone();
       children.push((trans_table_name.clone(), node));
@@ -338,7 +338,7 @@ impl<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColUsagePlanner<V
   }
 }
 
-fn compute_update_schema(
+pub fn compute_update_schema(
   update: &proc::Update,
   key_cols: &Vec<(ColName, ColType)>,
 ) -> Vec<Option<ColName>> {
@@ -523,7 +523,7 @@ fn iterate_stage_gr_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
   cb: &mut CbT,
   query: &'a proc::GRQuery,
 ) {
-  for (_, stage) in &query.trans_tables {
+  for (_, (_, stage)) in &query.trans_tables {
     match stage {
       proc::GRQueryStage::SuperSimpleSelect(query) => {
         cb(GeneralStage::SuperSimpleSelect(query));
@@ -537,7 +537,7 @@ pub fn iterate_stage_ms_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
   cb: &mut CbT,
   query: &'a proc::MSQuery,
 ) {
-  for (_, stage) in &query.trans_tables {
+  for (_, (_, stage)) in &query.trans_tables {
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(query) => {
         cb(GeneralStage::SuperSimpleSelect(query));

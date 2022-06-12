@@ -1,4 +1,5 @@
-use crate::common::{ColName, TablePath, TransTableName};
+use crate::col_usage::compute_update_schema;
+use crate::common::{lookup, ColName, TablePath, TransTableName};
 use crate::master_query_planning_es::{DBSchemaView, ErrorTrait};
 use crate::message as msg;
 use crate::sql_ast::{iast, proc};
@@ -28,13 +29,22 @@ pub fn convert_to_msquery<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = Error
   alias_rename_under_query(&mut ctx, &mut query)?;
 
   // Resolve Columns
-  let mut resolver =
-    ColResolver { col_usage_map: Default::default(), trans_table_map: Default::default(), view };
-  resolver.resolve_cols(&mut query)?;
+  let mut resolver = ColResolver {
+    col_usage_map: Default::default(),
+    trans_table_map: Default::default(),
+    counter: ctx.counter,
+    view,
+  };
+  let aux_table_name = resolver.resolve_cols(&mut query)?;
 
   // Convert to MSQUery
-  let mut ctx = ConversionContext { col_usage_map: resolver.col_usage_map, counter: ctx.counter };
-  ctx.flatten_top_level_query(&query)
+  let mut ctx = ConversionContext {
+    col_usage_map: resolver.col_usage_map,
+    trans_table_map: resolver.trans_table_map,
+    counter: ctx.counter,
+    view,
+  };
+  ctx.flatten_top_level_query(&query, aux_table_name)
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -56,7 +66,7 @@ fn validate_under_query<ErrorT: ErrorTrait>(query: &iast::Query) -> Result<(), E
         validate_under_expr(right)
       }
       iast::ValExpr::Value { .. } => Ok(()),
-      iast::ValExpr::Subquery { query } => validate_under_query(query),
+      iast::ValExpr::Subquery { query, .. } => validate_under_query(query),
     }
   }
 
@@ -216,7 +226,7 @@ fn process_under_query(query: &mut iast::Query) {
         process_under_expr(right);
       }
       iast::ValExpr::Value { .. } => {}
-      iast::ValExpr::Subquery { query } => process_under_query(query),
+      iast::ValExpr::Subquery { query, .. } => process_under_query(query),
     }
   }
 
@@ -388,7 +398,7 @@ fn rename_under_query(ctx: &mut RenameContext, query: &mut iast::Query) {
         rename_under_expr(ctx, right);
       }
       iast::ValExpr::Value { .. } => {}
-      iast::ValExpr::Subquery { query } => rename_under_query(ctx, query),
+      iast::ValExpr::Subquery { query, .. } => rename_under_query(ctx, query),
     }
   }
 
@@ -617,7 +627,7 @@ fn alias_rename_under_query<ErrorT: ErrorTrait>(
         alias_rename_under_expr(ctx, right)
       }
       iast::ValExpr::Value { .. } => Ok(()),
-      iast::ValExpr::Subquery { query } => alias_rename_under_query(ctx, query),
+      iast::ValExpr::Subquery { query, .. } => alias_rename_under_query(ctx, query),
     }
   }
 
@@ -796,14 +806,20 @@ impl<'a> UnresolvedColRefs<'a> {
 struct ColResolver<'a, ViewT: DBSchemaView> {
   col_usage_map: BTreeMap<String, ColUsageCols>,
   trans_table_map: BTreeMap<String, Vec<Option<String>>>,
+  counter: u32,
 
   /// DBSchema to use
   view: &'a mut ViewT,
 }
 
 impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'b, ViewT> {
-  fn resolve_cols(&mut self, query: &mut iast::Query) -> Result<(), ErrorT> {
-    let (_, mut unresolved) = self.resolve_cols_under_query(query)?;
+  /// This returns the auxiliary TransTable name for which the top-level QueryBody was placed in.
+  fn resolve_cols(&mut self, query: &mut iast::Query) -> Result<String, ErrorT> {
+    let (schema, mut unresolved) = self.resolve_cols_under_query(query)?;
+
+    // Add the top-level schema as a TransTable as well using an auxiliary TransTable name.
+    let aux_table_name = unique_tt_name(&mut self.counter, &"".to_string());
+    self.trans_table_map.insert(aux_table_name.clone(), schema);
 
     // Check if there are any columns that were unresolved.
     if let Some(col) = if let Some(entry) = unresolved.free_cols.first_entry() {
@@ -815,7 +831,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
     } {
       Err(ErrorT::mk_error(msg::QueryPlanningError::NonExistentColumn(col)))
     } else {
-      Ok(())
+      Ok(aux_table_name)
     }
   }
 
@@ -1047,8 +1063,15 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
         unresolved.merge(self.resolve_cols_under_val_expr(right)?);
       }
       iast::ValExpr::Value { .. } => {}
-      iast::ValExpr::Subquery { query, .. } => {
-        unresolved.merge(self.resolve_cols_under_query(query)?.1);
+      iast::ValExpr::Subquery { query, trans_table_name } => {
+        let (schema, mut cur_unresolved) = self.resolve_cols_under_query(query)?;
+
+        // Add the top-level schema as a TransTable as well using an auxiliary TransTable name.
+        let aux_table_name = unique_tt_name(&mut self.counter, &"".to_string());
+        self.trans_table_map.insert(aux_table_name.clone(), schema);
+        *trans_table_name = Some(aux_table_name);
+
+        unresolved.merge(cur_unresolved);
       }
     }
 
@@ -1204,19 +1227,23 @@ fn get_jln(leaf: &iast::JoinLeaf) -> String {
 //  Query to MSQuery
 // -----------------------------------------------------------------------------------------------
 
-struct ConversionContext {
+struct ConversionContext<'a, ViewT: DBSchemaView> {
   col_usage_map: BTreeMap<String, ColUsageCols>,
+  trans_table_map: BTreeMap<String, Vec<Option<String>>>,
   counter: u32,
+
+  /// DBSchema to use
+  view: &'a mut ViewT,
 }
 
-impl ConversionContext {
+impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionContext<'b, ViewT> {
   /// Flattens the `query` into a into a `MSQuery`. Since we renamed
   /// all TransTable references, this does not change the semantics of the query.
-  fn flatten_top_level_query<ErrorT: ErrorTrait>(
+  fn flatten_top_level_query(
     &mut self,
     query: &iast::Query,
+    aux_table_name: String,
   ) -> Result<proc::MSQuery, ErrorT> {
-    let aux_table_name = unique_tt_name(&mut self.counter, &"".to_string());
     let mut ms_query = proc::MSQuery {
       trans_tables: Vec::default(),
       returning: TransTableName(aux_table_name.clone()),
@@ -1230,11 +1257,11 @@ impl ConversionContext {
   /// name of `assignment_name` and add it into the map as well.
   /// Note: we need `counter` because we need to create auxiliary TransTables
   /// for the query bodies.
-  fn flatten_top_level_query_r<ErrorT: ErrorTrait>(
+  fn flatten_top_level_query_r(
     &mut self,
     assignment_name: &String,
     query: &iast::Query,
-    trans_table_map: &mut Vec<(TransTableName, proc::MSQueryStage)>,
+    trans_table_map: &mut Vec<(TransTableName, (Vec<Option<ColName>>, proc::MSQueryStage))>,
   ) -> Result<(), ErrorT> {
     // First, have the CTEs flatten their Querys and add their TransTables to the map.
     for (trans_table_name, cte_query) in &query.ctes {
@@ -1247,10 +1274,10 @@ impl ConversionContext {
         self.flatten_top_level_query_r(assignment_name, child_query, trans_table_map)
       }
       iast::QueryBody::SuperSimpleSelect(select) => {
-        trans_table_map.push((
-          TransTableName(assignment_name.clone()),
-          proc::MSQueryStage::SuperSimpleSelect(self.flatten_select(select)?),
-        ));
+        let ms_select = self.flatten_select(select)?;
+        self.validate_select(&ms_select)?;
+        let stage = proc::MSQueryStage::SuperSimpleSelect(ms_select);
+        self.amend_stage(trans_table_map, assignment_name, stage);
         Ok(())
       }
       iast::QueryBody::Update(update) => {
@@ -1265,8 +1292,7 @@ impl ConversionContext {
         for (col_name, val_expr) in &update.assignments {
           ms_update.assignment.push((ColName(col_name.clone()), self.flatten_val_expr_r(val_expr)?))
         }
-        trans_table_map
-          .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Update(ms_update)));
+        self.amend_stage(trans_table_map, assignment_name, proc::MSQueryStage::Update(ms_update));
         Ok(())
       }
       iast::QueryBody::Insert(insert) => {
@@ -1285,9 +1311,7 @@ impl ConversionContext {
           }
           ms_insert.values.push(p_row);
         }
-
-        trans_table_map
-          .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Insert(ms_insert)));
+        self.amend_stage(trans_table_map, assignment_name, proc::MSQueryStage::Insert(ms_insert));
         Ok(())
       }
       iast::QueryBody::Delete(delete) => {
@@ -1298,17 +1322,13 @@ impl ConversionContext {
           },
           selection: self.flatten_val_expr_r(&delete.selection)?,
         };
-        trans_table_map
-          .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Delete(ms_delete)));
+        self.amend_stage(trans_table_map, assignment_name, proc::MSQueryStage::Delete(ms_delete));
         Ok(())
       }
     }
   }
 
-  fn flatten_val_expr_r<ErrorT: ErrorTrait>(
-    &mut self,
-    val_expr: &iast::ValExpr,
-  ) -> Result<proc::ValExpr, ErrorT> {
+  fn flatten_val_expr_r(&mut self, val_expr: &iast::ValExpr) -> Result<proc::ValExpr, ErrorT> {
     match val_expr {
       iast::ValExpr::ColumnRef { table_name, col_name } => {
         Ok(proc::ValExpr::ColumnRef(proc::ColumnRef {
@@ -1326,11 +1346,11 @@ impl ConversionContext {
         right: Box::new(self.flatten_val_expr_r(right)?),
       }),
       iast::ValExpr::Value { val } => Ok(proc::ValExpr::Value { val: val.clone() }),
-      iast::ValExpr::Subquery { query } => {
+      iast::ValExpr::Subquery { query, trans_table_name } => {
         // Notice that we don't actually need anything after the backslash in the
         // new TransTable name. We only keep it for the original TransTables for
         // debugging purposes.
-        let aux_table_name = unique_tt_name(&mut self.counter, &"".to_string());
+        let aux_table_name = trans_table_name.as_ref().unwrap();
         let mut gr_query = proc::GRQuery {
           trans_tables: Vec::default(),
           returning: TransTableName(aux_table_name.clone()),
@@ -1341,11 +1361,11 @@ impl ConversionContext {
     }
   }
 
-  fn flatten_sub_query_r<ErrorT: ErrorTrait>(
+  fn flatten_sub_query_r(
     &mut self,
     assignment_name: &String,
     query: &iast::Query,
-    trans_table_map: &mut Vec<(TransTableName, proc::GRQueryStage)>,
+    trans_table_map: &mut Vec<(TransTableName, (Vec<Option<ColName>>, proc::GRQueryStage))>,
   ) -> Result<(), ErrorT> {
     // First, have the CTEs flatten their Querys and add their TransTables to the map.
     for (trans_table_name, cte_query) in &query.ctes {
@@ -1358,9 +1378,11 @@ impl ConversionContext {
         self.flatten_sub_query_r(assignment_name, child_query, trans_table_map)
       }
       iast::QueryBody::SuperSimpleSelect(select) => {
+        let ms_select = self.flatten_select(select)?;
+        self.validate_select(&ms_select)?;
         trans_table_map.push((
           TransTableName(assignment_name.clone()),
-          proc::GRQueryStage::SuperSimpleSelect(self.flatten_select(select)?),
+          (self.compute_schema(assignment_name), proc::GRQueryStage::SuperSimpleSelect(ms_select)),
         ));
         Ok(())
       }
@@ -1370,7 +1392,7 @@ impl ConversionContext {
     }
   }
 
-  fn flatten_select<ErrorT: ErrorTrait>(
+  fn flatten_select(
     &mut self,
     select: &iast::SuperSimpleSelect,
   ) -> Result<proc::SuperSimpleSelect, ErrorT> {
@@ -1417,10 +1439,7 @@ impl ConversionContext {
   }
 
   /// Converts the Join Tree analogously, except the JoinLeafs are converted into GRQuerys
-  fn flatten_join_node<ErrorT: ErrorTrait>(
-    &mut self,
-    join_node: &iast::JoinNode,
-  ) -> Result<proc::JoinNode, ErrorT> {
+  fn flatten_join_node(&mut self, join_node: &iast::JoinNode) -> Result<proc::JoinNode, ErrorT> {
     match join_node {
       iast::JoinNode::JoinInnerNode(inner) => {
         Ok(proc::JoinNode::JoinInnerNode(proc::JoinInnerNode {
@@ -1439,7 +1458,7 @@ impl ConversionContext {
         };
 
         // Get the table to read from using the `source`.
-        let (table_name, lateral) = match &leaf.source {
+        let (aux_table_name, lateral) = match &leaf.source {
           iast::JoinNodeSource::Table(table_name) => (table_name.clone(), false),
           iast::JoinNodeSource::DerivedTable { query, lateral } => {
             let aux_table_name = unique_tt_name(&mut self.counter, &"".to_string());
@@ -1453,10 +1472,12 @@ impl ConversionContext {
 
         // Construct projection
         let col_usage_cols = self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap();
-        let select_clause = match col_usage_cols {
+        let (schema, select_clause) = match col_usage_cols {
           ColUsageCols::Cols(cols) => {
+            let mut schema = Vec::<Option<ColName>>::new();
             let mut select_list = Vec::<(proc::SelectItem, Option<ColName>)>::new();
             for col in cols {
+              schema.push(Some(ColName(col.clone())));
               select_list.push((
                 proc::SelectItem::ValExpr(proc::ValExpr::ColumnRef(proc::ColumnRef {
                   table_name: alias.clone(),
@@ -1465,20 +1486,27 @@ impl ConversionContext {
                 None,
               ))
             }
-            proc::SelectClause::SelectList(select_list)
+            (schema, proc::SelectClause::SelectList(select_list))
           }
-          ColUsageCols::All => proc::SelectClause::Wildcard,
+          ColUsageCols::All => {
+            let (schema, _) =
+              lookup(&gr_query.trans_tables, &TransTableName(aux_table_name.clone())).unwrap();
+            (schema.clone(), proc::SelectClause::Wildcard)
+          }
         };
 
         // Generate `selection_table_name` and add it into `gr_query`.
         gr_query.trans_tables.push((
           TransTableName(selection_table_name),
-          proc::GRQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
-            distinct: false,
-            projection: select_clause,
-            from: to_source(&table_name, alias),
-            selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
-          }),
+          (
+            schema,
+            proc::GRQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+              distinct: false,
+              projection: select_clause,
+              from: to_source(&aux_table_name, alias),
+              selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
+            }),
+          ),
         ));
 
         Ok(proc::JoinNode::JoinLeaf(proc::JoinLeaf {
@@ -1488,5 +1516,53 @@ impl ConversionContext {
         }))
       }
     }
+  }
+
+  // Utilities
+
+  /// Lookup the correct schema for the `assignment_name`, and amend
+  /// `trans_table_map` accordingly.
+  fn amend_stage(
+    &mut self,
+    trans_table_map: &mut Vec<(TransTableName, (Vec<Option<ColName>>, proc::MSQueryStage))>,
+    assignment_name: &String,
+    stage: proc::MSQueryStage,
+  ) {
+    let schema = self.compute_schema(assignment_name);
+    trans_table_map.push((TransTableName(assignment_name.clone()), (schema, stage)));
+  }
+
+  fn compute_schema(&self, assignment_name: &String) -> Vec<Option<ColName>> {
+    let mut schema = Vec::<Option<ColName>>::new();
+    for col in self.trans_table_map.get(assignment_name).unwrap() {
+      schema.push(col.as_ref().map(|val| ColName(val.clone())));
+    }
+    schema
+  }
+
+  /// Validates the `Select`.
+  pub fn validate_select(&mut self, select: &proc::SuperSimpleSelect) -> Result<(), ErrorT> {
+    match &select.projection {
+      proc::SelectClause::SelectList(select_list) => {
+        let mut val_expr_count = 0;
+        let mut unary_agg_count = 0;
+        for (select_item, _) in select_list {
+          match select_item {
+            proc::SelectItem::ValExpr(_) => {
+              val_expr_count += 1;
+            }
+            proc::SelectItem::UnaryAggregate(_) => {
+              unary_agg_count += 1;
+            }
+          }
+        }
+        if val_expr_count > 0 && unary_agg_count > 0 {
+          return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidSelectClause));
+        }
+      }
+      proc::SelectClause::Wildcard => {}
+    }
+
+    Ok(())
   }
 }

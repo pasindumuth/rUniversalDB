@@ -321,7 +321,7 @@ impl TableReadES {
       StorageLocalTable::new(
         &ctx.table_schema,
         &self.timestamp,
-        &self.query_plan.col_usage_node.source,
+        &self.sql_query.from,
         &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
@@ -342,7 +342,7 @@ impl TableReadES {
     match eval_res {
       Ok(res_table_views) => {
         let res = QueryESResult {
-          result: (schema, res_table_views),
+          result: res_table_views,
           new_rms: self.new_rms.iter().cloned().collect(),
         };
 
@@ -469,7 +469,7 @@ impl TPESBase for TableReadES {
           StorageLocalTable::new(
             &ctx.table_schema,
             &self.timestamp,
-            &self.query_plan.col_usage_node.source,
+            &self.sql_query.from,
             &ctx.this_tablet_key_range,
             &self.sql_query.selection,
             SimpleStorageView::new(&ctx.storage, &ctx.table_schema),

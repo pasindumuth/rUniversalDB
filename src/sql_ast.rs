@@ -120,7 +120,7 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct GRQuery {
-    pub trans_tables: Vec<(TransTableName, GRQueryStage)>,
+    pub trans_tables: Vec<(TransTableName, (Vec<Option<ColName>>, GRQueryStage))>,
     pub returning: TransTableName,
   }
 
@@ -136,7 +136,7 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct MSQuery {
-    pub trans_tables: Vec<(TransTableName, MSQueryStage)>,
+    pub trans_tables: Vec<(TransTableName, (Vec<Option<ColName>>, MSQueryStage))>,
     pub returning: TransTableName,
   }
 
@@ -210,11 +210,27 @@ pub mod iast {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum ValExpr {
-    ColumnRef { table_name: Option<String>, col_name: String },
-    UnaryExpr { op: UnaryOp, expr: Box<ValExpr> },
-    BinaryExpr { op: BinaryOp, left: Box<ValExpr>, right: Box<ValExpr> },
-    Value { val: Value },
-    Subquery { query: Box<Query> },
+    ColumnRef {
+      table_name: Option<String>,
+      col_name: String,
+    },
+    UnaryExpr {
+      op: UnaryOp,
+      expr: Box<ValExpr>,
+    },
+    BinaryExpr {
+      op: BinaryOp,
+      left: Box<ValExpr>,
+      right: Box<ValExpr>,
+    },
+    Value {
+      val: Value,
+    },
+    /// The `trans_table_name` is a convenience field we populate in the `query_converter`.
+    Subquery {
+      query: Box<Query>,
+      trans_table_name: Option<String>,
+    },
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

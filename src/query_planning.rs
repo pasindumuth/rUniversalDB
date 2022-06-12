@@ -44,7 +44,7 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
 pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableName, TierMap> {
   let mut all_tier_maps = BTreeMap::<TransTableName, TierMap>::new();
   let mut cur_tier_map = BTreeMap::<TablePath, u32>::new();
-  for (_, stage) in &ms_query.trans_tables {
+  for (_, (_, stage)) in &ms_query.trans_tables {
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(update) => {
@@ -58,7 +58,7 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
       }
     }
   }
-  for (trans_table_name, stage) in ms_query.trans_tables.iter().rev() {
+  for (trans_table_name, (_, stage)) in ms_query.trans_tables.iter().rev() {
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(update) => {
@@ -98,7 +98,7 @@ pub fn perform_validations<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = Erro
   view: &mut ViewT,
   ms_query: &proc::MSQuery,
 ) -> Result<(), ErrorT> {
-  for (_, stage) in &ms_query.trans_tables {
+  for (_, (_, stage)) in &ms_query.trans_tables {
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(_) => {}
       proc::MSQueryStage::Update(query) => {

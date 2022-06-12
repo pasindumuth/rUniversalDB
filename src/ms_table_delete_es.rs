@@ -105,7 +105,7 @@ impl SqlQueryInner for DeleteInner {
       StorageLocalTable::new(
         &ctx.table_schema,
         &es.timestamp,
-        &es.query_plan.col_usage_node.source,
+        &self.sql_query.table.to_read_source(),
         &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         MSStorageView::new(
@@ -130,12 +130,13 @@ impl SqlQueryInner for DeleteInner {
     ms_query_es: &mut MSQueryES,
   ) -> TPESAction {
     // Create the ContextConstructor.
+    let source = self.sql_query.table.to_read_source();
     let context_constructor = ContextConstructor::new(
       es.context.context_schema.clone(),
       StorageLocalTable::new(
         &ctx.table_schema,
         &es.timestamp,
-        &es.query_plan.col_usage_node.source,
+        &source,
         &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         MSStorageView::new(
@@ -152,7 +153,7 @@ impl SqlQueryInner for DeleteInner {
     // This consists of all Top-Level Columns for every expression, as well as all Key
     // Columns (since they are included in the resulting table).
     let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
-    let cur_alias = es.query_plan.col_usage_node.source.name();
+    let cur_alias = &self.sql_query.table.alias;
     top_level_cols_set.extend(ctx.table_schema.get_key_col_refs(cur_alias));
     top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
     let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
@@ -161,7 +162,6 @@ impl SqlQueryInner for DeleteInner {
 
     // Setup the TableView that we are going to return and the UpdateView that we're going
     // to hold in the MSQueryES.
-    let res_col_names = es.query_plan.col_usage_node.schema.clone();
     let mut res_table_view = TableView::new();
     let mut update_view = GenericTable::new();
 
@@ -196,7 +196,7 @@ impl SqlQueryInner for DeleteInner {
 
           // We reconstruct the PrimaryKey
           let mut primary_key = PrimaryKey { cols: vec![] };
-          let cur_alias = &es.query_plan.col_usage_node.source.name();
+          let cur_alias = &self.sql_query.table.alias;
           for key_col in &ctx.table_schema.get_key_col_refs(cur_alias) {
             let idx = top_level_col_names.iter().position(|col| key_col == col).unwrap();
             let col_val = top_level_col_vals.get(idx).unwrap().clone();
@@ -218,7 +218,7 @@ impl SqlQueryInner for DeleteInner {
 
         // Signal Success and return the data.
         TPESAction::Success(QueryESResult {
-          result: (res_col_names, vec![res_table_view]),
+          result: vec![res_table_view],
           new_rms: es.new_rms.iter().cloned().collect(),
         })
       }

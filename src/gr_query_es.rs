@@ -223,14 +223,14 @@ impl GRQueryES {
     io_ctx: &mut IO,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    results: Vec<(Vec<Option<ColName>>, Vec<TableView>)>,
+    results: Vec<Vec<TableView>>,
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
     let stage_query_id = &read_stage.stage_query_id;
     assert_eq!(stage_query_id, &tm_qid);
 
     // Combine the results into a single one
-    let (_, proc::GRQueryStage::SuperSimpleSelect(sql_query)) =
+    let (trans_table_name, (schema, proc::GRQueryStage::SuperSimpleSelect(sql_query))) =
       self.sql_query.trans_tables.get(read_stage.stage_idx).unwrap();
     let pre_agg_table_views = merge_table_views(results);
     let table_views = match perform_aggregation(sql_query, pre_agg_table_views) {
@@ -242,11 +242,6 @@ impl GRQueryES {
       }
     };
 
-    // For now, just assert that the schema that we get corresponds to that in the QueryPlan.
-    let (trans_table_name, node) =
-      self.query_plan.col_usage_nodes.get(read_stage.stage_idx).unwrap();
-    let schema = node.schema.clone();
-
     // Amend the `new_trans_table_context`
     for i in 0..self.context.context_rows.len() {
       let idx = read_stage.parent_context_map.get(i).unwrap();
@@ -257,7 +252,7 @@ impl GRQueryES {
     self.new_rms.extend(new_rms);
 
     // Add the `table_views` to the GRQueryES and advance it.
-    self.trans_table_views.push((trans_table_name.clone(), (schema, table_views)));
+    self.trans_table_views.push((trans_table_name.clone(), (schema.clone(), table_views)));
     self.advance(ctx, io_ctx)
   }
 
@@ -474,7 +469,7 @@ impl GRQueryES {
       TMStatus::new(io_ctx, self.root_query_path.clone(), OrigP::new(self.query_id.clone()));
 
     // Send out the PerformQuery and populate TMStatus accordingly.
-    let (_, stage) = self.sql_query.trans_tables.get(stage_idx).unwrap();
+    let (_, (_, stage)) = self.sql_query.trans_tables.get(stage_idx).unwrap();
     let child_sql_query = cast!(proc::GRQueryStage::SuperSimpleSelect, stage).unwrap();
     let helper = match &child_sql_query.from {
       proc::GeneralSource::TablePath { table_path, .. } => {

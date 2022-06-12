@@ -228,7 +228,7 @@ impl TransTableReadES {
       TransLocalTable::new(
         trans_table_source,
         &self.location_prefix.trans_table_name,
-        &self.query_plan.col_usage_node.source,
+        &self.sql_query.from,
       ),
       children,
     );
@@ -320,7 +320,7 @@ impl TransTableReadES {
       TransLocalTable::new(
         trans_table_source,
         &self.location_prefix.trans_table_name,
-        &self.query_plan.col_usage_node.source,
+        &self.sql_query.from,
       ),
       children,
     );
@@ -340,7 +340,7 @@ impl TransTableReadES {
         // Signal Success and return the data.
         self.state = TransExecutionS::Done;
         TPESAction::Success(QueryESResult {
-          result: (schema, res_table_views),
+          result: res_table_views,
           new_rms: self.new_rms.iter().cloned().collect(),
         })
       }

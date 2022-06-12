@@ -98,7 +98,7 @@ impl SqlQueryInner for SelectInner {
       StorageLocalTable::new(
         &ctx.table_schema,
         &es.timestamp,
-        &es.query_plan.col_usage_node.source,
+        &self.sql_query.from,
         &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         MSStorageView::new(
@@ -128,7 +128,7 @@ impl SqlQueryInner for SelectInner {
       StorageLocalTable::new(
         &ctx.table_schema,
         &es.timestamp,
-        &es.query_plan.col_usage_node.source,
+        &self.sql_query.from,
         &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         MSStorageView::new(
@@ -155,7 +155,7 @@ impl SqlQueryInner for SelectInner {
       Ok(res_table_views) => {
         // Signal Success and return the data.
         TPESAction::Success(QueryESResult {
-          result: (schema, res_table_views),
+          result: res_table_views,
           new_rms: es.new_rms.iter().cloned().collect(),
         })
       }
