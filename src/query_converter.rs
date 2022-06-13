@@ -102,20 +102,16 @@ fn validate_under_query<ErrorT: ErrorTrait>(query: &iast::Query) -> Result<(), E
       validate_join_tree(&select.from)?;
 
       // Validate Projection Clause
-      match &select.projection {
-        iast::SelectClause::SelectList(select_list) => {
-          for (select_item, _) in select_list {
-            match select_item {
-              iast::SelectItem::ValExpr(val_expr) => {
-                validate_under_expr(val_expr)?;
-              }
-              iast::SelectItem::UnaryAggregate(unary_agg) => {
-                validate_under_expr(&unary_agg.expr)?;
-              }
-            }
+      for item in &select.projection {
+        match item {
+          iast::SelectItem::ExprWithAlias { item, .. } => {
+            validate_under_expr(match item {
+              iast::SelectExprItem::ValExpr(expr) => expr,
+              iast::SelectExprItem::UnaryAggregate(unary_agg) => &unary_agg.expr,
+            })?;
           }
+          iast::SelectItem::Wildcard { .. } => {}
         }
-        iast::SelectClause::Wildcard => {}
       }
 
       // Validate Where Clause
@@ -261,20 +257,16 @@ fn process_under_query(query: &mut iast::Query) {
       process_under_join_tree(&mut select.from);
 
       // Process Projection Clause
-      match &mut select.projection {
-        iast::SelectClause::SelectList(select_list) => {
-          for (select_item, _) in select_list {
-            match select_item {
-              iast::SelectItem::ValExpr(val_expr) => {
-                process_under_expr(val_expr);
-              }
-              iast::SelectItem::UnaryAggregate(unary_agg) => {
-                process_under_expr(&mut unary_agg.expr);
-              }
-            }
+      for item in &mut select.projection {
+        match item {
+          iast::SelectItem::ExprWithAlias { item, .. } => {
+            process_under_expr(match item {
+              iast::SelectExprItem::ValExpr(expr) => expr,
+              iast::SelectExprItem::UnaryAggregate(unary_agg) => &mut unary_agg.expr,
+            });
           }
+          iast::SelectItem::Wildcard { .. } => {}
         }
-        iast::SelectClause::Wildcard => {}
       }
 
       // Process Where Clause
@@ -442,20 +434,19 @@ fn rename_under_query(ctx: &mut RenameContext, query: &mut iast::Query) {
       rename_under_join_tree(ctx, &mut select.from);
 
       // Process Projection Clause
-      match &mut select.projection {
-        iast::SelectClause::SelectList(select_list) => {
-          for (select_item, _) in select_list {
-            match select_item {
-              iast::SelectItem::ValExpr(val_expr) => {
-                rename_under_expr(ctx, val_expr);
-              }
-              iast::SelectItem::UnaryAggregate(unary_agg) => {
-                rename_under_expr(ctx, &mut unary_agg.expr);
-              }
-            }
+      for item in &mut select.projection {
+        match item {
+          iast::SelectItem::ExprWithAlias { item, .. } => {
+            rename_under_expr(
+              ctx,
+              match item {
+                iast::SelectExprItem::ValExpr(expr) => expr,
+                iast::SelectExprItem::UnaryAggregate(unary_agg) => &mut unary_agg.expr,
+              },
+            );
           }
+          iast::SelectItem::Wildcard { .. } => {}
         }
-        iast::SelectClause::Wildcard => {}
       }
 
       // Process Where Clause
@@ -685,18 +676,19 @@ fn alias_rename_under_query<ErrorT: ErrorTrait>(
       add_renames_in_node(ctx, &name_map, &select.from);
 
       // Process Projection
-      match &mut select.projection {
-        iast::SelectClause::SelectList(select_list) => {
-          for (select_item, _) in select_list {
-            match select_item {
-              iast::SelectItem::ValExpr(val_expr) => alias_rename_under_expr(ctx, val_expr)?,
-              iast::SelectItem::UnaryAggregate(unary_agg) => {
-                alias_rename_under_expr(ctx, &mut unary_agg.expr)?
-              }
-            };
+      for item in &mut select.projection {
+        match item {
+          iast::SelectItem::ExprWithAlias { item, .. } => {
+            alias_rename_under_expr(
+              ctx,
+              match item {
+                iast::SelectExprItem::ValExpr(expr) => expr,
+                iast::SelectExprItem::UnaryAggregate(unary_agg) => &mut unary_agg.expr,
+              },
+            )?;
           }
+          iast::SelectItem::Wildcard { .. } => {}
         }
-        iast::SelectClause::Wildcard => {}
       }
 
       // Proces Where Clause
@@ -859,15 +851,17 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
 
         // Resolve SELECT clause
         let mut projection = Vec::<Option<String>>::new();
-        match &mut select.projection {
-          iast::SelectClause::SelectList(select_list) => {
-            for (select_item, alias) in select_list {
+
+        for item in &mut select.projection {
+          match item {
+            iast::SelectItem::ExprWithAlias { item, alias } => {
               // Amend the projection schema.
               if let Some(col) = alias {
                 projection.push(Some(col.clone()));
-              } else if let iast::SelectItem::ValExpr(iast::ValExpr::ColumnRef {
-                col_name, ..
-              }) = select_item
+              } else if let iast::SelectExprItem::ValExpr(iast::ValExpr::ColumnRef {
+                col_name,
+                ..
+              }) = item
               {
                 projection.push(Some(col_name.clone()));
               } else {
@@ -875,32 +869,57 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
               }
 
               // Evaluate the Select expression:
-              let expr = match select_item {
-                iast::SelectItem::ValExpr(expr) => expr,
-                iast::SelectItem::UnaryAggregate(expr) => &mut expr.expr,
+              let expr = match item {
+                iast::SelectExprItem::ValExpr(expr) => expr,
+                iast::SelectExprItem::UnaryAggregate(expr) => &mut expr.expr,
               };
               self.process_expr(&mut unresolved, &join_node_cols, expr)?;
             }
-          }
-          iast::SelectClause::Wildcard => {
-            for jln in &jlns {
-              match join_node_cols.get(jln).unwrap() {
-                SchemaSource::StaticSchema(schema) => {
-                  projection.extend(schema.iter().cloned());
-                }
-                SchemaSource::TablePath(table_path) => {
-                  for ColName(col) in self.view.get_all_cols(table_path)? {
-                    projection.push(Some(col));
+            iast::SelectItem::Wildcard { table_name } => {
+              // For qualified Wildcards, add the columns from the appropriate `JoinLeaf`.
+              if let Some(table_name) = table_name {
+                if let Some(schema_source) = join_node_cols.get(table_name) {
+                  match schema_source {
+                    SchemaSource::StaticSchema(schema) => {
+                      projection.extend(schema.iter().cloned());
+                    }
+                    SchemaSource::TablePath(table_path) => {
+                      for ColName(col) in self.view.get_all_cols(table_path)? {
+                        projection.push(Some(col));
+                      }
+                    }
                   }
+
+                  // We also update `col_usage_map`.
+                  self.set_col_usage_all(table_name);
+                } else {
+                  // This means that `source` does not exist in the Join Tree,
+                  // so we return an error
+                  return Err(ErrorT::mk_error(
+                    msg::QueryPlanningError::InvalidWildcardQualification,
+                  ));
+                }
+              } else {
+                // For unqualified wildcards, add the columns from all `JoinLeaf`s.
+                for jln in &jlns {
+                  match join_node_cols.get(jln).unwrap() {
+                    SchemaSource::StaticSchema(schema) => {
+                      projection.extend(schema.iter().cloned());
+                    }
+                    SchemaSource::TablePath(table_path) => {
+                      for ColName(col) in self.view.get_all_cols(table_path)? {
+                        projection.push(Some(col));
+                      }
+                    }
+                  }
+
+                  // We also update `col_usage_map`.
+                  self.set_col_usage_all(jln);
                 }
               }
-
-              // We also update `col_usage_map`.
-              self.set_col_usage_all(jln);
             }
           }
         }
-
         Ok((projection, unresolved))
       }
       iast::QueryBody::Update(update) => {
@@ -1397,28 +1416,29 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
     assignment_name: &String,
     select: &iast::SuperSimpleSelect,
   ) -> Result<proc::SuperSimpleSelect, ErrorT> {
-    let p_projection = match &select.projection {
-      iast::SelectClause::SelectList(select_list) => {
-        let mut p_select_list = Vec::<(proc::SelectItem, Option<ColName>)>::new();
-        for (item, alias) in select_list {
-          let select_item = match item {
-            iast::SelectItem::ValExpr(val_expr) => {
-              proc::SelectItem::ValExpr(self.flatten_val_expr_r(val_expr)?)
+    let mut p_projection = Vec::<proc::SelectItem>::new();
+    for item in &select.projection {
+      p_projection.push(match item {
+        iast::SelectItem::ExprWithAlias { item, alias } => proc::SelectItem::ExprWithAlias {
+          item: match item {
+            iast::SelectExprItem::ValExpr(val_expr) => {
+              proc::SelectExprItem::ValExpr(self.flatten_val_expr_r(val_expr)?)
             }
-            iast::SelectItem::UnaryAggregate(unary_agg) => {
-              proc::SelectItem::UnaryAggregate(proc::UnaryAggregate {
+            iast::SelectExprItem::UnaryAggregate(unary_agg) => {
+              proc::SelectExprItem::UnaryAggregate(proc::UnaryAggregate {
                 distinct: unary_agg.distinct,
                 op: unary_agg.op.clone(),
                 expr: self.flatten_val_expr_r(&unary_agg.expr)?,
               })
             }
-          };
-          p_select_list.push((select_item, alias.clone().map(|x| ColName(x))))
+          },
+          alias: alias.clone().map(|x| ColName(x)),
+        },
+        iast::SelectItem::Wildcard { table_name } => {
+          proc::SelectItem::Wildcard { table_name: table_name.clone() }
         }
-        proc::SelectClause::SelectList(p_select_list)
-      }
-      iast::SelectClause::Wildcard => proc::SelectClause::Wildcard,
-    };
+      });
+    }
 
     let from = match &select.from {
       iast::JoinNode::JoinLeaf(iast::JoinLeaf {
@@ -1474,26 +1494,28 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
 
         // Construct projection
         let col_usage_cols = self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap();
-        let (schema, select_clause) = match col_usage_cols {
+        let (schema, projection) = match col_usage_cols {
           ColUsageCols::Cols(cols) => {
             let mut schema = Vec::<Option<ColName>>::new();
-            let mut select_list = Vec::<(proc::SelectItem, Option<ColName>)>::new();
+            let mut select_list = Vec::<proc::SelectItem>::new();
             for col in cols {
               schema.push(Some(ColName(col.clone())));
-              select_list.push((
-                proc::SelectItem::ValExpr(proc::ValExpr::ColumnRef(proc::ColumnRef {
-                  table_name: alias.clone(),
-                  col_name: ColName(col.clone()),
-                })),
-                None,
-              ))
+              select_list.push(
+                (proc::SelectItem::ExprWithAlias {
+                  item: proc::SelectExprItem::ValExpr(proc::ValExpr::ColumnRef(proc::ColumnRef {
+                    table_name: alias.clone(),
+                    col_name: ColName(col.clone()),
+                  })),
+                  alias: None,
+                }),
+              )
             }
-            (schema, proc::SelectClause::SelectList(select_list))
+            (schema, select_list)
           }
           ColUsageCols::All => {
             let stage =
               lookup(&gr_query.trans_tables, &TransTableName(aux_table_name.clone())).unwrap();
-            (stage.schema().clone(), proc::SelectClause::Wildcard)
+            (stage.schema().clone(), vec![proc::SelectItem::Wildcard { table_name: None }])
           }
         };
 
@@ -1502,7 +1524,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
           TransTableName(selection_table_name),
           proc::GRQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
             distinct: false,
-            projection: select_clause,
+            projection,
             from: to_source(&aux_table_name, alias),
             selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
             schema,
@@ -1531,25 +1553,27 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
 
   /// Validates the `Select`.
   pub fn validate_select(&mut self, select: &proc::SuperSimpleSelect) -> Result<(), ErrorT> {
-    match &select.projection {
-      proc::SelectClause::SelectList(select_list) => {
-        let mut val_expr_count = 0;
-        let mut unary_agg_count = 0;
-        for (select_item, _) in select_list {
-          match select_item {
-            proc::SelectItem::ValExpr(_) => {
-              val_expr_count += 1;
-            }
-            proc::SelectItem::UnaryAggregate(_) => {
-              unary_agg_count += 1;
-            }
+    let mut val_expr_count = 0;
+    let mut unary_agg_count = 0;
+    let mut wildcard_count = 0;
+    for item in &select.projection {
+      match item {
+        proc::SelectItem::ExprWithAlias { item, .. } => match item {
+          proc::SelectExprItem::ValExpr(_) => {
+            val_expr_count += 1;
           }
-        }
-        if val_expr_count > 0 && unary_agg_count > 0 {
-          return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidSelectClause));
+          proc::SelectExprItem::UnaryAggregate(_) => {
+            unary_agg_count += 1;
+          }
+        },
+        proc::SelectItem::Wildcard { .. } => {
+          wildcard_count += 1;
         }
       }
-      proc::SelectClause::Wildcard => {}
+    }
+
+    if unary_agg_count > 0 && (val_expr_count > 0 || wildcard_count > 0) {
+      return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidSelectClause));
     }
 
     Ok(())

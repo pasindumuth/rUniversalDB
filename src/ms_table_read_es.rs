@@ -9,7 +9,7 @@ use crate::message as msg;
 use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
 use crate::server::{mk_eval_error, ContextConstructor};
 use crate::sql_ast::proc;
-use crate::sql_ast::proc::SelectClause;
+
 use crate::storage::{GenericTable, MSStorageView};
 use crate::table_read_es::{compute_read_region, fully_evaluate_select};
 use crate::tablet::{
@@ -50,10 +50,18 @@ impl SqlQueryInner for SelectInner {
     es: &GeneralQueryES,
   ) -> Result<QueryId, msg::QueryError> {
     // Get extra columns that must be in the region due to SELECT * .
-    let mut extra_cols = match &self.sql_query.projection {
-      SelectClause::SelectList(_) => vec![],
-      SelectClause::Wildcard => ctx.table_schema.get_schema_val_cols_static(&es.timestamp),
-    };
+    let mut extra_cols = Vec::<ColName>::new();
+    for item in &self.sql_query.projection {
+      match item {
+        proc::SelectItem::ExprWithAlias { .. } => {}
+        proc::SelectItem::Wildcard { .. } => {
+          // Choose all columns in the Table, and break out early
+          // since there is no reason to continue.
+          extra_cols = ctx.table_schema.get_schema_val_cols_static(&es.timestamp);
+          break;
+        }
+      }
+    }
 
     // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
     let mut safe_present_cols = Vec::<ColName>::new();

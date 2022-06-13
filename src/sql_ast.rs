@@ -47,21 +47,28 @@ pub mod proc {
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub enum SelectItem {
+  pub enum SelectExprItem {
     ValExpr(ValExpr),
     UnaryAggregate(UnaryAggregate),
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub enum SelectClause {
-    SelectList(Vec<(SelectItem, Option<ColName>)>),
-    Wildcard,
+  pub enum SelectItem {
+    ExprWithAlias {
+      item: SelectExprItem,
+      alias: Option<ColName>,
+    },
+    /// Here, `source` is the particular Table Alias to in the `from` clause.
+    /// (This is only useful for `JoinSelect`s).
+    Wildcard {
+      table_name: Option<String>,
+    },
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
     pub distinct: bool,
-    pub projection: SelectClause,
+    pub projection: Vec<SelectItem>,
     pub from: GeneralSource,
     pub selection: ValExpr,
 
@@ -378,21 +385,28 @@ pub mod iast {
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub enum SelectItem {
+  pub enum SelectExprItem {
     ValExpr(ValExpr),
     UnaryAggregate(UnaryAggregate),
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub enum SelectClause {
-    SelectList(Vec<(SelectItem, Option<String>)>),
-    Wildcard,
+  pub enum SelectItem {
+    ExprWithAlias {
+      item: SelectExprItem,
+      alias: Option<String>,
+    },
+    /// Here, `source` is the particular Table Alias to in the `from` clause.
+    /// (This is only useful for `JoinSelect`s).
+    Wildcard {
+      table_name: Option<String>,
+    },
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct SuperSimpleSelect {
     pub distinct: bool,
-    pub projection: SelectClause,
+    pub projection: Vec<SelectItem>,
     pub from: JoinNode,
     pub selection: ValExpr, // The where clause
   }

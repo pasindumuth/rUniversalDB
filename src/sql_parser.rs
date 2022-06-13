@@ -141,20 +141,8 @@ fn convert_select(select: ast::Select) -> Result<iast::QueryBody, String> {
 
 fn convert_select_clause(
   select_clause: Vec<ast::SelectItem>,
-) -> Result<iast::SelectClause, String> {
-  // First, handle the case of a Wildcard (i.e. SELECT *)
-  if let Some(ast::SelectItem::Wildcard) = select_clause.first() {
-    if select_clause.len() > 1 {
-      return Err(format!("Cannot have other elements besides * in a SELECT."));
-    }
-
-    return Ok(iast::SelectClause::Wildcard);
-  }
-
-  // Otherwise, we assume this is a SELECT list.
-  let mut select_list = Vec::<(iast::SelectItem, Option<String>)>::new();
-
-  fn select_item(expr: ast::Expr) -> Result<iast::SelectItem, String> {
+) -> Result<Vec<iast::SelectItem>, String> {
+  fn select_item(expr: ast::Expr) -> Result<iast::SelectExprItem, String> {
     // We hande `func` as a special case, since `convert_expr` ignores it.
     if let ast::Expr::Function(func) = expr {
       let func_name = &func.name.0.get(0).unwrap().value.clone();
@@ -165,35 +153,34 @@ fn convert_select_clause(
         _ => return Err(format!("{:?} aggregate function", func_name)),
       };
       let expr = cast!(ast::FunctionArg::Unnamed, func.args.get(0).unwrap()).unwrap();
-      let i_select_item = iast::SelectItem::UnaryAggregate(iast::UnaryAggregate {
+      let item = iast::SelectExprItem::UnaryAggregate(iast::UnaryAggregate {
         distinct: func.distinct,
         op,
         expr: convert_expr(expr.clone())?,
       });
-      Ok(i_select_item)
+      Ok(item)
     } else {
-      Ok(iast::SelectItem::ValExpr(convert_expr(expr)?))
+      Ok(iast::SelectExprItem::ValExpr(convert_expr(expr)?))
     }
   }
 
+  let mut select_list = Vec::<iast::SelectItem>::new();
   for item in select_clause {
-    match item.clone() {
+    select_list.push(match item.clone() {
       ast::SelectItem::UnnamedExpr(expr) => {
-        select_list.push((select_item(expr)?, None));
+        iast::SelectItem::ExprWithAlias { item: select_item(expr)?, alias: None }
       }
       ast::SelectItem::ExprWithAlias { expr, alias } => {
-        select_list.push((select_item(expr)?, Some(alias.value)));
+        iast::SelectItem::ExprWithAlias { item: select_item(expr)?, alias: Some(alias.value) }
       }
-      ast::SelectItem::Wildcard => {
-        return Err(format!("Cannot have other elements besides * in a SELECT."));
+      ast::SelectItem::Wildcard => iast::SelectItem::Wildcard { table_name: None },
+      ast::SelectItem::QualifiedWildcard(name) => {
+        iast::SelectItem::Wildcard { table_name: Some(name.0.get(0).unwrap().value.clone()) }
       }
-      ast::SelectItem::QualifiedWildcard(_) => {
-        return Err(format!("{:?} is not supported in SelectItem", item))
-      }
-    }
+    });
   }
 
-  Ok(iast::SelectClause::SelectList(select_list))
+  Ok(select_list)
 }
 
 // -----------------------------------------------------------------------------------------------

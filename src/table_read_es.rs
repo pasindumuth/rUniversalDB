@@ -19,7 +19,7 @@ use crate::server::{
   ExtraColumnRef, LocalColumnRef,
 };
 use crate::server::{LocalTable, ServerContextBase};
-use crate::sql_ast::proc::SelectClause;
+
 use crate::sql_ast::{iast, proc};
 use crate::storage::SimpleStorageView;
 use crate::tablet::{
@@ -272,10 +272,18 @@ impl TableReadES {
     io_ctx: &mut IO,
   ) -> TPESAction {
     // Get extra columns that must be in the region due to SELECT * .
-    let mut extra_cols = match &self.sql_query.projection {
-      SelectClause::SelectList(_) => vec![],
-      SelectClause::Wildcard => ctx.table_schema.get_schema_val_cols_static(&self.timestamp),
-    };
+    let mut extra_cols = Vec::<ColName>::new();
+    for item in &self.sql_query.projection {
+      match item {
+        proc::SelectItem::ExprWithAlias { .. } => {}
+        proc::SelectItem::Wildcard { .. } => {
+          extra_cols = ctx.table_schema.get_schema_val_cols_static(&self.timestamp);
+
+          // Break out early, since there is no reason to continue.
+          break;
+        }
+      }
+    }
 
     // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
     let mut safe_present_cols = Vec::<ColName>::new();
@@ -574,20 +582,25 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
     top_level_cols_set.into_iter().map(|c| ExtraColumnRef::Named(c)).collect();
 
   // Add any extra columns arise as a consequence of Wildcards.
-  match &sql_query.projection {
-    SelectClause::SelectList(_) => {}
-    SelectClause::Wildcard => {
-      // For `ColName`s that are present in `schema`, read the column.
-      // Otherwise, read the index.
-      for (index, maybe_col_name) in sql_query.schema.iter().enumerate() {
-        if let Some(col_name) = maybe_col_name {
-          top_level_extra_cols_set.insert(ExtraColumnRef::Named(proc::ColumnRef {
-            table_name: sql_query.from.name().clone(),
-            col_name: col_name.clone(),
-          }));
-        } else {
-          top_level_extra_cols_set.insert(ExtraColumnRef::Unnamed(index));
+  for item in &sql_query.projection {
+    match item {
+      proc::SelectItem::ExprWithAlias { .. } => {}
+      proc::SelectItem::Wildcard { .. } => {
+        // For `ColName`s that are present in `schema`, read the column.
+        // Otherwise, read the index.
+        for (index, maybe_col_name) in sql_query.schema.iter().enumerate() {
+          if let Some(col_name) = maybe_col_name {
+            top_level_extra_cols_set.insert(ExtraColumnRef::Named(proc::ColumnRef {
+              table_name: sql_query.from.name().clone(),
+              col_name: col_name.clone(),
+            }));
+          } else {
+            top_level_extra_cols_set.insert(ExtraColumnRef::Unnamed(index));
+          }
         }
+
+        // Break out early, since there is no reason to continue.
+        break;
       }
     }
   }
@@ -649,9 +662,8 @@ pub fn perform_aggregation(
       // there are in the final result table (due to how all SelectItems must be aggregates,
       // and how all aggregates take only one argument).
       // TODO perhaps introduce a SingleColumn type.
-      let select_list = cast!(proc::SelectClause::SelectList, &sql_query.projection).unwrap();
       let mut columns = Vec::<TableView>::new();
-      for _ in 0..select_list.len() {
+      for _ in 0..sql_query.projection.len() {
         columns.push(TableView::new());
       }
       for (row, count) in pre_agg_table_view.rows {
@@ -662,8 +674,14 @@ pub fn perform_aggregation(
 
       // Perform the aggregation
       let mut res_row = Vec::<ColValN>::new();
-      for ((select_item, _), mut column) in select_list.iter().zip(columns.into_iter()) {
-        let unary_agg = cast!(proc::SelectItem::UnaryAggregate, select_item).unwrap();
+      for (item, mut column) in sql_query.projection.iter().zip(columns.into_iter()) {
+        let unary_agg = match item {
+          proc::SelectItem::ExprWithAlias { item, .. } => match item {
+            proc::SelectExprItem::UnaryAggregate(unary_agg) => unary_agg,
+            proc::SelectExprItem::ValExpr(_) => panic!(),
+          },
+          proc::SelectItem::Wildcard { .. } => panic!(),
+        };
 
         // Handle inner DISTICT
         if unary_agg.distinct {
@@ -749,14 +767,15 @@ pub fn perform_aggregation(
 /// NOTE: Recall that in this case, all elements in the projection are aggregates
 /// for now for simplicity.
 pub fn is_agg(sql_query: &proc::SuperSimpleSelect) -> bool {
-  match &sql_query.projection {
-    SelectClause::SelectList(select_list) => {
-      if let Some((proc::SelectItem::UnaryAggregate(_), _)) = select_list.first() {
-        true
-      } else {
-        false
-      }
+  for item in &sql_query.projection {
+    match item {
+      proc::SelectItem::ExprWithAlias { item, .. } => match item {
+        proc::SelectExprItem::UnaryAggregate(_) => return true,
+        proc::SelectExprItem::ValExpr(_) => {}
+      },
+      proc::SelectItem::Wildcard { .. } => {}
     }
-    SelectClause::Wildcard => false,
   }
+
+  false
 }

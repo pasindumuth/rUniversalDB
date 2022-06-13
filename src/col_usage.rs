@@ -66,17 +66,17 @@ impl QueryIterator {
     query: &'a proc::SuperSimpleSelect,
   ) {
     cb(QueryElement::SuperSimpleSelect(query));
-    match &query.projection {
-      proc::SelectClause::SelectList(select_list) => {
-        for (item, _) in select_list {
+    for item in &query.projection {
+      match item {
+        proc::SelectItem::ExprWithAlias { item, .. } => {
           let expr = match item {
-            proc::SelectItem::ValExpr(expr) => expr,
-            proc::SelectItem::UnaryAggregate(agg) => &agg.expr,
+            proc::SelectExprItem::ValExpr(expr) => expr,
+            proc::SelectExprItem::UnaryAggregate(agg) => &agg.expr,
           };
           self.iterate_expr(cb, expr);
         }
+        proc::SelectItem::Wildcard { .. } => {}
       }
-      proc::SelectClause::Wildcard => {}
     }
     self.iterate_expr(cb, &query.selection)
   }

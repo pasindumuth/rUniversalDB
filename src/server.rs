@@ -10,7 +10,7 @@ use crate::common::{
 use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, EvalError};
 use crate::message as msg;
 use crate::sql_ast::proc;
-use crate::sql_ast::proc::SelectClause;
+
 use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
@@ -406,31 +406,31 @@ pub fn evaluate_super_simple_select(
   // Construct the Evaluated Select
   let mut evaluated_select = EvaluatedSuperSimpleSelect::default();
   let mut next_subquery_idx = 0;
-  match &select.projection {
-    SelectClause::SelectList(select_list) => {
-      for (select_item, _) in select_list {
-        let expr = match select_item {
-          proc::SelectItem::ValExpr(expr) => expr,
-          proc::SelectItem::UnaryAggregate(unary_agg) => &unary_agg.expr,
+  for item in &select.projection {
+    match item {
+      proc::SelectItem::ExprWithAlias { item, .. } => {
+        let expr = match item {
+          proc::SelectExprItem::ValExpr(expr) => expr,
+          proc::SelectExprItem::UnaryAggregate(unary_agg) => &unary_agg.expr,
         };
         let c_expr = construct_cexpr(expr, &named_col_map, &subquery_vals, &mut next_subquery_idx)?;
         evaluated_select.projection.push(evaluate_c_expr(&c_expr)?);
       }
-    }
-    SelectClause::Wildcard => {
-      for (i, maybe_col_name) in schema.iter().enumerate() {
-        let col_val = if let Some(col_name) = maybe_col_name {
-          named_col_map
-            .get(&proc::ColumnRef {
-              table_name: select.from.name().clone(),
-              col_name: col_name.clone(),
-            })
-            .unwrap()
-            .clone()
-        } else {
-          index_col_map.get(&i).unwrap().clone()
-        };
-        evaluated_select.projection.push(col_val);
+      proc::SelectItem::Wildcard { .. } => {
+        for (i, maybe_col_name) in schema.iter().enumerate() {
+          let col_val = if let Some(col_name) = maybe_col_name {
+            named_col_map
+              .get(&proc::ColumnRef {
+                table_name: select.from.name().clone(),
+                col_name: col_name.clone(),
+              })
+              .unwrap()
+              .clone()
+          } else {
+            index_col_map.get(&i).unwrap().clone()
+          };
+          evaluated_select.projection.push(col_val);
+        }
       }
     }
   }

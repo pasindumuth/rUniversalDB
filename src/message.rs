@@ -625,6 +625,8 @@ pub enum QueryPlanningError {
   NonUniqueJoinLeafName,
   /// A `ColumnRef` is qualified by an alias that is not defined in the Query.
   NonExistentTableQualification,
+  /// A `Wildcard` has a qualification that does not exist in the Join Tree.
+  InvalidWildcardQualification,
   /// A Column does not appear in either a Table or a TransTable.
   NonExistentColumn(String),
   /// A `ColumnRef` resolved to two different possible real columns.

@@ -14,7 +14,7 @@ fn basic_join_node(name: String, alias: Option<String>) -> iast::JoinNode {
 fn basic_select(table_ref: &str) -> iast::SuperSimpleSelect {
   iast::SuperSimpleSelect {
     distinct: false,
-    projection: iast::SelectClause::SelectList(vec![]),
+    projection: vec![],
     from: basic_join_node(table_ref.to_string(), None),
     selection: iast::ValExpr::Value { val: iast::Value::Boolean(true) },
   }
