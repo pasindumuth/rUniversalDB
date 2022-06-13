@@ -1,4 +1,3 @@
-use crate::col_usage::ColUsageNode;
 use crate::coord::{CoordContext, CoordForwardMsg, CoordState};
 use crate::expression::does_types_match;
 use crate::master::MasterTimerInput;
@@ -1140,14 +1139,11 @@ pub struct QueryPlan {
   /// See the `compute_query_leader_map` in `QueryPlanningES`.
   pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   pub table_location_map: BTreeMap<TablePath, FullGen>,
-  /// These are additional required columns that the QueryPlan expects that these `TablePaths`
-  /// to have. These are columns that are not already present in the `col_usage_node`, such as
-  /// projected columns in SELECT queries or assigned columns in UPDATE queries. While a TP is
-  /// happen is happening, we must verify the presence of these `ColName`.
+  /// These are the presence/absence requirements of columns in TableSchemas that TP
+  /// needs to verify and lock in order for the query to execute properly.
   ///
   /// Note: not all `TablePaths` used in the MSQuery needs to be here.
   pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
-  pub col_usage_node: ColUsageNode,
 }
 
 // -------------------------------------------------------------------------------------------------

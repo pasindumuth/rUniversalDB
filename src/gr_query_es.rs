@@ -1,7 +1,7 @@
 use crate::col_usage::{
   alias_collecting_cb, collect_delete_subqueries, collect_select_subqueries,
   collect_update_subqueries, external_col_collecting_cb, external_trans_table_collecting_cb,
-  iterate_gr_query_stage, trans_table_collecting_cb, ColUsageNode,
+  iterate_gr_query_stage, trans_table_collecting_cb,
 };
 use crate::common::{
   lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, FullGen, OrigP, QueryPlan, Timestamp,
@@ -75,7 +75,6 @@ pub struct GRQueryPlan {
   pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   pub table_location_map: BTreeMap<TablePath, FullGen>,
   pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
-  pub col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
 
 #[derive(Debug)]
@@ -173,7 +172,6 @@ impl<'a, SqlQueryT: SubqueryComputableSql> GRQueryConstructorView<'a, SqlQueryT>
     subquery_idx: usize,
   ) -> GRQueryES {
     // Filter the TransTables in the QueryPlan based on the TransTables available for this subquery.
-    let col_usage_nodes = self.query_plan.col_usage_node.children.get(subquery_idx).unwrap();
     let new_trans_table_context = (0..context.context_rows.len()).map(|_| Vec::new()).collect();
     // Finally, construct the GRQueryES.
     GRQueryES {
@@ -188,7 +186,6 @@ impl<'a, SqlQueryT: SubqueryComputableSql> GRQueryConstructorView<'a, SqlQueryT>
         query_leader_map: self.query_plan.query_leader_map.clone(),
         table_location_map: self.query_plan.table_location_map.clone(),
         col_presence_req: self.query_plan.col_presence_req.clone(),
-        col_usage_nodes: col_usage_nodes.clone(),
       },
       new_rms: Default::default(),
       trans_table_views: vec![],
@@ -474,7 +471,6 @@ impl GRQueryES {
     let context = Context { context_schema: new_context_schema, context_rows: new_context_rows };
 
     // Construct the QueryPlan. We amend this Slave to the `query_leader_map`.
-    let (_, col_usage_node) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
     let mut query_leader_map = self.query_plan.query_leader_map.clone();
     query_leader_map
       .insert(ctx.this_sid().clone(), ctx.leader_map().get(ctx.this_gid()).unwrap().clone());
@@ -483,7 +479,6 @@ impl GRQueryES {
       query_leader_map: query_leader_map.clone(),
       table_location_map: self.query_plan.table_location_map.clone(),
       col_presence_req: self.query_plan.col_presence_req.clone(),
-      col_usage_node: col_usage_node.clone(),
     };
 
     // Construct the TMStatus

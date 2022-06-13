@@ -1,4 +1,4 @@
-use crate::col_usage::{ColUsageNode, ColUsagePlanner, QueryElement};
+use crate::col_usage::QueryElement;
 use crate::common::{
   add_item, default_get_mut, lookup, map_insert, FullGen, MasterIOCtx, RemoteLeaderChangedPLm,
   TableSchema, Timestamp,
@@ -494,18 +494,13 @@ pub fn master_query_planning<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = Er
   // Next, we do various validations on the MSQuery.
   perform_validations(&mut view, &ms_query)?;
 
-  // Next, we run the FrozenColUsageAlgorithm
-  let mut planner = ColUsagePlanner { view };
-  let col_usage_nodes = planner.plan_ms_query(&ms_query)?;
-
   // Finally we construct a MasterQueryPlan and respond to the sender.
   let all_tier_maps = compute_all_tier_maps(&ms_query);
   Ok(msg::MasterQueryPlan {
     ms_query,
     all_tier_maps,
     table_location_map,
-    col_presence_req: planner.finish(),
-    col_usage_nodes,
+    col_presence_req: view.finish(),
   })
 }
 

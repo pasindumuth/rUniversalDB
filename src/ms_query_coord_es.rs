@@ -1,6 +1,6 @@
 use crate::col_usage::{
   external_trans_table_collecting_cb, iterate_ms_query_stage, trans_table_collecting_cb,
-  ColUsageNode, ColUsagePlanner, QueryElement,
+  QueryElement,
 };
 use crate::common::{
   lookup, merge_table_views, mk_qid, FullGen, OrigP, QueryPlan, QueryResult, Timestamp,
@@ -34,7 +34,6 @@ pub struct CoordQueryPlan {
   query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
   table_location_map: BTreeMap<TablePath, FullGen>,
   col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
-  col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
 
 #[derive(Debug)]
@@ -443,7 +442,6 @@ impl FullMSCoordES {
 
     // Get the corresponding MSQueryStage and ColUsageNode.
     let (trans_table_name, stage) = es.ms_query.trans_tables.get(stage_idx).unwrap();
-    let col_usage_node = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
 
     // Compute the Context for this stage. Recall there must be exactly one row.
     let mut trans_table_names = Vec::<TransTableName>::new();
@@ -478,7 +476,6 @@ impl FullMSCoordES {
       query_leader_map: query_leader_map.clone(),
       table_location_map: es.query_plan.table_location_map.clone(),
       col_presence_req: es.query_plan.col_presence_req.clone(),
-      col_usage_node: col_usage_node.clone(),
     };
 
     // Construct the TMStatus that is going to be used to coordinate this stage
@@ -737,7 +734,6 @@ impl QueryPlanningES {
         query_leader_map: self.compute_query_leader_map(ctx, &master_query_plan.table_location_map),
         table_location_map: master_query_plan.table_location_map,
         col_presence_req: master_query_plan.col_presence_req,
-        col_usage_nodes: master_query_plan.col_usage_nodes,
       },
     )
   }

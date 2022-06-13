@@ -1,5 +1,4 @@
 use crate::alter_table_tm_es::AlterTableTMPayloadTypes;
-use crate::col_usage::ColUsageNode;
 use crate::common::{
   CQueryPath, CTQueryPath, ColName, Context, CoordGroupId, EndpointId, Gen, InternalMode,
   LeadershipId, PaxosGroupId, QueryId, QueryResult, RequestId, SlaveGroupId, TNodePath, TQueryPath,
@@ -711,7 +710,6 @@ pub struct MasterQueryPlan {
   pub all_tier_maps: BTreeMap<TransTableName, TierMap>,
   pub table_location_map: BTreeMap<TablePath, FullGen>,
   pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
-  pub col_usage_nodes: Vec<(TransTableName, ColUsageNode)>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

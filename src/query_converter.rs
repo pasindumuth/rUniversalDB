@@ -1,4 +1,3 @@
-use crate::col_usage::compute_update_schema;
 use crate::common::{lookup, ColName, TablePath, TransTableName};
 use crate::master_query_planning_es::{DBSchemaView, ErrorTrait};
 use crate::message as msg;
@@ -503,11 +502,6 @@ struct AliasRenameContext {
   counter: u32,
 }
 
-fn alias_rename_query<ErrorT: ErrorTrait>(query: &mut iast::Query) -> Result<(), ErrorT> {
-  let mut ctx = AliasRenameContext { alias_rename_map: Default::default(), counter: 0 };
-  alias_rename_under_query(&mut ctx, query)
-}
-
 /// Renames all Table aliases in the JoinLeafs. This means we also rename all
 /// qualified `ColumnRef`s that used the old name.
 ///
@@ -901,7 +895,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
                 }
               }
 
-              // We also update `col_usage_nodes`.
+              // We also update `col_usage_map`.
               self.set_col_usage_all(jln);
             }
           }
