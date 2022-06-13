@@ -1,4 +1,4 @@
-use crate::col_usage::{collect_top_level_cols, nodes_external_cols, nodes_external_trans_tables};
+use crate::col_usage::collect_top_level_cols;
 use crate::common::{mk_qid, remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp};
 use crate::common::{
   CQueryPath, ColName, ColValN, ContextRow, ContextSchema, PaxosGroupId, PaxosGroupIdTrait,
@@ -13,7 +13,9 @@ use crate::server::{
 };
 use crate::sql_ast::proc;
 use crate::table_read_es::{check_gossip, fully_evaluate_select};
-use crate::tablet::{compute_contexts, Executing, TPESAction, TPESBase, TabletContext};
+use crate::tablet::{
+  compute_children, compute_contexts, Executing, TPESAction, TPESBase, TabletContext,
+};
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use std::ops::Deref;
@@ -217,10 +219,7 @@ impl TransTableReadES {
     // ContextConstructor, and then we construct GRQueryESs.
 
     // Compute children.
-    let mut children = Vec::<(Vec<proc::ColumnRef>, Vec<TransTableName>)>::new();
-    for child in &self.query_plan.col_usage_node.children {
-      children.push((nodes_external_cols(child), nodes_external_trans_tables(child)));
-    }
+    let children = compute_children(&self.sql_query);
 
     // Create the child context.
     let child_contexts = compute_contexts(

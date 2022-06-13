@@ -192,6 +192,10 @@ pub mod proc {
   }
 
   impl SimpleSource {
+    pub fn name(&self) -> &String {
+      &self.alias
+    }
+
     pub fn to_read_source(&self) -> GeneralSource {
       GeneralSource::TablePath { table_path: self.source_ref.clone(), alias: self.alias.clone() }
     }

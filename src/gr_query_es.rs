@@ -1,6 +1,7 @@
 use crate::col_usage::{
-  collect_delete_subqueries, collect_select_subqueries, collect_update_subqueries,
-  node_external_trans_tables, ColUsageNode,
+  alias_collecting_cb, collect_delete_subqueries, collect_select_subqueries,
+  collect_update_subqueries, external_col_collecting_cb, external_trans_table_collecting_cb,
+  iterate_gr_query_stage, trans_table_collecting_cb, ColUsageNode,
 };
 use crate::common::{
   lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, FullGen, OrigP, QueryPlan, Timestamp,
@@ -337,13 +338,33 @@ impl GRQueryES {
     io_ctx: &mut IO,
     stage_idx: usize,
   ) -> GRQueryAction {
-    assert!(stage_idx < self.query_plan.col_usage_nodes.len());
-    let (_, child) = self.query_plan.col_usage_nodes.get(stage_idx).unwrap();
+    let (_, (_, stage)) = self.sql_query.trans_tables.get(stage_idx).unwrap();
 
-    // Compute the `ColName`s and `TransTableNames` that we want in the child Query,
-    // and process that.
-    let col_names = &child.external_cols;
-    let trans_table_names = &node_external_trans_tables(child);
+    // Collect the external `ColumnRef`s
+    let mut col_names = Vec::<proc::ColumnRef>::new();
+    {
+      let mut alias_container = BTreeSet::<String>::new();
+      iterate_gr_query_stage(&mut alias_collecting_cb(&mut alias_container), stage);
+      let mut external_cols_set = BTreeSet::<proc::ColumnRef>::new();
+      iterate_gr_query_stage(
+        &mut external_col_collecting_cb(&alias_container, &mut external_cols_set),
+        stage,
+      );
+      col_names.extend(external_cols_set.into_iter());
+    }
+
+    // Collect the external `TransTableName`s
+    let mut trans_table_names = Vec::<TransTableName>::new();
+    {
+      let mut trans_table_container = BTreeSet::<TransTableName>::new();
+      iterate_gr_query_stage(&mut trans_table_collecting_cb(&mut trans_table_container), &stage);
+      let mut external_trans_table = BTreeSet::<TransTableName>::new();
+      iterate_gr_query_stage(
+        &mut external_trans_table_collecting_cb(&trans_table_container, &mut external_trans_table),
+        &stage,
+      );
+      trans_table_names.extend(external_trans_table.into_iter());
+    }
 
     // We first compute the Context
     let mut new_context_schema = ContextSchema::default();
@@ -358,7 +379,7 @@ impl GRQueryES {
           .context_schema
           .column_context_schema
           .iter()
-          .position(|name| col_name == name)
+          .position(|name| &col_name == name)
           .unwrap(),
       );
     }
@@ -372,7 +393,7 @@ impl GRQueryES {
         .context_schema
         .trans_table_context_schema
         .iter()
-        .position(|prefix| &prefix.trans_table_name == trans_table_name)
+        .position(|prefix| prefix.trans_table_name == trans_table_name)
       {
         trans_table_name_indicies.push(TransTableIdx::External(idx));
       } else {
@@ -380,7 +401,7 @@ impl GRQueryES {
           self
             .trans_table_views
             .iter()
-            .position(|(name, (_, _))| name == trans_table_name)
+            .position(|(name, (_, _))| name == &trans_table_name)
             .unwrap(),
         ));
       }
@@ -469,7 +490,6 @@ impl GRQueryES {
       TMStatus::new(io_ctx, self.root_query_path.clone(), OrigP::new(self.query_id.clone()));
 
     // Send out the PerformQuery and populate TMStatus accordingly.
-    let (_, (_, stage)) = self.sql_query.trans_tables.get(stage_idx).unwrap();
     let child_sql_query = cast!(proc::GRQueryStage::SuperSimpleSelect, stage).unwrap();
     let helper = match &child_sql_query.from {
       proc::GeneralSource::TablePath { table_path, .. } => {

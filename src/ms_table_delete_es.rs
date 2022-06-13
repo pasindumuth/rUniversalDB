@@ -1,4 +1,4 @@
-use crate::col_usage::{collect_top_level_cols, get_collecting_cb, iterate_delete};
+use crate::col_usage::{col_collecting_cb, collect_top_level_cols, iterate_delete};
 use crate::common::{mk_qid, ColName, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
 use crate::common::{
   ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView, TransTableName,
@@ -49,7 +49,7 @@ impl SqlQueryInner for DeleteInner {
     // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
     let mut safe_present_cols = Vec::<ColName>::new();
     iterate_delete(
-      &mut get_collecting_cb(&self.sql_query.table.alias, &mut safe_present_cols),
+      &mut col_collecting_cb(&self.sql_query.table.alias, &mut safe_present_cols),
       &self.sql_query,
     );
 

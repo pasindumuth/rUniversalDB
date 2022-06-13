@@ -30,6 +30,8 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
         table_paths.insert(query.table.source_ref.clone());
       }
       QueryElement::ValExpr(_) => {}
+      QueryElement::MSQuery(_) => {}
+      QueryElement::GRQuery(_) => {}
     },
     query,
   );

@@ -45,7 +45,7 @@ pub struct ColUsageNode {
   /// The External Cols Property is where if a `table_name` is present in a `ColumnRef`, this
   /// will be different from `source.name()`. This can be seen since such a `ColumnRef` must
   /// either be placed into `safe_present_cols`, or the QueryPlanning should fail.
-  pub external_cols: Vec<proc::ColumnRef>,
+  external_cols: Vec<proc::ColumnRef>,
 }
 
 impl ColUsageNode {
@@ -428,73 +428,11 @@ fn collect_expr_subqueries_r(expr: &proc::ValExpr, subqueries: &mut Vec<proc::GR
 }
 
 // -----------------------------------------------------------------------------------------------
-//  External Column and TransTable Computation
-// -----------------------------------------------------------------------------------------------
-
-/// Accumulates and returns all External `TransTableName`s that appear under `node`.
-/// Recall that all `TransTablesName`s are unique. This should be determinisitic.
-pub fn node_external_trans_tables(col_usage_node: &ColUsageNode) -> Vec<TransTableName> {
-  let mut accum = Vec::<TransTableName>::new();
-  node_external_trans_tables_r(col_usage_node, &mut BTreeSet::new(), &mut accum);
-  accum
-}
-
-/// Same as above, except for multiple `nodes`. This should be determinisitic.
-pub fn nodes_external_trans_tables(
-  nodes: &Vec<(TransTableName, ColUsageNode)>,
-) -> Vec<TransTableName> {
-  let mut accum = Vec::<TransTableName>::new();
-  nodes_external_trans_tables_r(nodes, &mut BTreeSet::new(), &mut accum);
-  accum
-}
-
-/// Accumulates all External `TransTableName`s that appear under `node` into `accum`, where we
-/// also exclude any that appear in `defined_trans_tables`.
-///
-/// Here, `defined_trans_tables` should remain unchanged, and `accum` should be determinisitic.
-fn node_external_trans_tables_r(
-  node: &ColUsageNode,
-  defined_trans_tables: &mut BTreeSet<TransTableName>,
-  accum: &mut Vec<TransTableName>,
-) {
-  if let proc::GeneralSource::TransTableName { trans_table_name, .. } = &node.source {
-    if !defined_trans_tables.contains(trans_table_name) {
-      accum.push(trans_table_name.clone())
-    }
-  }
-  for nodes in &node.children {
-    nodes_external_trans_tables_r(nodes, defined_trans_tables, accum);
-  }
-}
-
-/// Same as the above function, except for multiple `nodes`.
-fn nodes_external_trans_tables_r(
-  nodes: &Vec<(TransTableName, ColUsageNode)>,
-  defined_trans_tables: &mut BTreeSet<TransTableName>,
-  accum: &mut Vec<TransTableName>,
-) {
-  for (trans_table_name, node) in nodes {
-    defined_trans_tables.insert(trans_table_name.clone());
-    node_external_trans_tables_r(node, defined_trans_tables, accum);
-  }
-  for (trans_table_name, _) in nodes {
-    defined_trans_tables.remove(trans_table_name);
-  }
-}
-
-/// Accumulates all External Columns in `nodes`.
-pub fn nodes_external_cols(nodes: &Vec<(TransTableName, ColUsageNode)>) -> Vec<proc::ColumnRef> {
-  let mut col_name_set = BTreeSet::<proc::ColumnRef>::new();
-  for (_, node) in nodes {
-    col_name_set.extend(node.external_cols.clone())
-  }
-  col_name_set.into_iter().collect()
-}
-
-// -----------------------------------------------------------------------------------------------
 //  Query Element Iteration
 // -----------------------------------------------------------------------------------------------
 pub enum QueryElement<'a> {
+  MSQuery(&'a proc::MSQuery),
+  GRQuery(&'a proc::GRQuery),
   SuperSimpleSelect(&'a proc::SuperSimpleSelect),
   Update(&'a proc::Update),
   Insert(&'a proc::Insert),
@@ -573,6 +511,7 @@ pub fn iterate_ms_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
   cb: &mut CbT,
   query: &'a proc::MSQuery,
 ) {
+  cb(QueryElement::MSQuery(query));
   for (_, (_, stage)) in &query.trans_tables {
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(query) => {
@@ -591,16 +530,24 @@ pub fn iterate_ms_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
   }
 }
 
+pub fn iterate_gr_query_stage<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+  cb: &mut CbT,
+  stage: &'a proc::GRQueryStage,
+) {
+  match stage {
+    proc::GRQueryStage::SuperSimpleSelect(query) => {
+      iterate_select(cb, query);
+    }
+  }
+}
+
 pub fn iterate_gr_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
   cb: &mut CbT,
   query: &'a proc::GRQuery,
 ) {
+  cb(QueryElement::GRQuery(query));
   for (_, (_, stage)) in &query.trans_tables {
-    match stage {
-      proc::GRQueryStage::SuperSimpleSelect(query) => {
-        iterate_select(cb, query);
-      }
-    }
+    iterate_gr_query_stage(cb, stage);
   }
 }
 
@@ -608,15 +555,11 @@ pub fn iterate_gr_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
 //  Expression iteration
 // -----------------------------------------------------------------------------------------------
 
-pub fn get_collecting_cb<'a>(
+pub fn col_collecting_cb<'a>(
   source: &'a String,
   col_container: &'a mut Vec<ColName>,
 ) -> impl FnMut(QueryElement) -> () + 'a {
   move |elem: QueryElement| match elem {
-    QueryElement::SuperSimpleSelect(_) => {}
-    QueryElement::Update(_) => {}
-    QueryElement::Insert(_) => {}
-    QueryElement::Delete(_) => {}
     QueryElement::ValExpr(expr) => {
       if let proc::ValExpr::ColumnRef(col_ref) = expr {
         if source == &col_ref.table_name {
@@ -624,5 +567,82 @@ pub fn get_collecting_cb<'a>(
         }
       }
     }
+    _ => {}
+  }
+}
+
+/// Construct a CB that collects every Table Alias underneath a `QueryElement`.
+pub fn alias_collecting_cb<'a>(
+  alias_container: &'a mut BTreeSet<String>,
+) -> impl FnMut(QueryElement) -> () + 'a {
+  move |elem: QueryElement| match elem {
+    QueryElement::SuperSimpleSelect(select) => {
+      alias_container.insert(select.from.name().clone());
+    }
+    QueryElement::Update(update) => {
+      alias_container.insert(update.table.name().clone());
+    }
+    QueryElement::Insert(insert) => {
+      alias_container.insert(insert.table.name().clone());
+    }
+    QueryElement::Delete(delete) => {
+      alias_container.insert(delete.table.name().clone());
+    }
+    _ => {}
+  }
+}
+
+/// Construct a CB that collects every `ColumnRef` under a `QueryElement`
+/// not included in `alias_container`.
+pub fn external_col_collecting_cb<'a>(
+  alias_container: &'a BTreeSet<String>,
+  external_cols: &'a mut BTreeSet<proc::ColumnRef>,
+) -> impl FnMut(QueryElement) -> () + 'a {
+  move |elem: QueryElement| match elem {
+    QueryElement::ValExpr(expr) => {
+      if let proc::ValExpr::ColumnRef(col_ref) = expr {
+        if !alias_container.contains(&col_ref.table_name) {
+          external_cols.insert(col_ref.clone());
+        }
+      }
+    }
+    _ => {}
+  }
+}
+
+/// Construct a CB that collects every `TransTableName` underneath a `QueryElement`.
+pub fn trans_table_collecting_cb<'a>(
+  trans_table_container: &'a mut BTreeSet<TransTableName>,
+) -> impl FnMut(QueryElement) -> () + 'a {
+  move |elem: QueryElement| match elem {
+    QueryElement::MSQuery(query) => {
+      for (trans_table_name, _) in &query.trans_tables {
+        trans_table_container.insert(trans_table_name.clone());
+      }
+    }
+    QueryElement::GRQuery(query) => {
+      for (trans_table_name, _) in &query.trans_tables {
+        trans_table_container.insert(trans_table_name.clone());
+      }
+    }
+    _ => {}
+  }
+}
+
+/// Construct a CB that collects every `TransTableName` usage underneath a `QueryElement`
+/// that is not included in `trans_table_container`.
+pub fn external_trans_table_collecting_cb<'a>(
+  trans_table_container: &'a BTreeSet<TransTableName>,
+  external_trans_table: &'a mut BTreeSet<TransTableName>,
+) -> impl FnMut(QueryElement) -> () + 'a {
+  move |elem: QueryElement| match elem {
+    QueryElement::SuperSimpleSelect(select) => {
+      if let proc::GeneralSource::TransTableName { trans_table_name, .. } = &select.from {
+        if !trans_table_container.contains(trans_table_name) {
+          external_trans_table.insert(trans_table_name.clone());
+        }
+      }
+    }
+    _ => {}
   }
 }

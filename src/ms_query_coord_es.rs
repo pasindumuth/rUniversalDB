@@ -1,4 +1,4 @@
-use crate::col_usage::{node_external_trans_tables, ColUsageNode, ColUsagePlanner, QueryElement};
+use crate::col_usage::{ColUsageNode, ColUsagePlanner, QueryElement};
 use crate::common::{
   lookup, merge_table_views, mk_qid, FullGen, OrigP, QueryPlan, QueryResult, Timestamp,
 };

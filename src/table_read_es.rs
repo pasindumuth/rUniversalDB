@@ -1,4 +1,4 @@
-use crate::col_usage::{collect_top_level_cols, get_collecting_cb, iterate_select};
+use crate::col_usage::{col_collecting_cb, collect_top_level_cols, iterate_select};
 use crate::common::{
   btree_multimap_insert, lookup, mk_qid, CoreIOCtx, GossipData, GossipDataView, KeyBound, OrigP,
   QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
@@ -280,7 +280,7 @@ impl TableReadES {
     // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
     let mut safe_present_cols = Vec::<ColName>::new();
     iterate_select(
-      &mut get_collecting_cb(self.sql_query.from.name(), &mut safe_present_cols),
+      &mut col_collecting_cb(self.sql_query.from.name(), &mut safe_present_cols),
       &self.sql_query,
     );
 
