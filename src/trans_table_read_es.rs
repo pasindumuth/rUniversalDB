@@ -325,13 +325,11 @@ impl TransTableReadES {
     );
 
     // Evaluate
-    let schema = self.query_plan.col_usage_node.schema.clone();
     let eval_res = fully_evaluate_select(
       context_constructor,
       &self.context.deref(),
       subquery_results,
       &self.sql_query,
-      &schema,
     );
 
     match eval_res {

@@ -151,13 +151,11 @@ impl SqlQueryInner for SelectInner {
     );
 
     // Evaluate
-    let schema = es.query_plan.col_usage_node.schema.clone();
     let eval_res = fully_evaluate_select(
       context_constructor,
       &es.context.deref(),
       subquery_results,
       &self.sql_query,
-      &schema,
     );
 
     match eval_res {

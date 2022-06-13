@@ -1261,7 +1261,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
     &mut self,
     assignment_name: &String,
     query: &iast::Query,
-    trans_table_map: &mut Vec<(TransTableName, (Vec<Option<ColName>>, proc::MSQueryStage))>,
+    trans_table_map: &mut Vec<(TransTableName, proc::MSQueryStage)>,
   ) -> Result<(), ErrorT> {
     // First, have the CTEs flatten their Querys and add their TransTables to the map.
     for (trans_table_name, cte_query) in &query.ctes {
@@ -1274,10 +1274,10 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
         self.flatten_top_level_query_r(assignment_name, child_query, trans_table_map)
       }
       iast::QueryBody::SuperSimpleSelect(select) => {
-        let ms_select = self.flatten_select(select)?;
+        let ms_select = self.flatten_select(assignment_name, select)?;
         self.validate_select(&ms_select)?;
         let stage = proc::MSQueryStage::SuperSimpleSelect(ms_select);
-        self.amend_stage(trans_table_map, assignment_name, stage);
+        trans_table_map.push((TransTableName(assignment_name.clone()), stage));
         Ok(())
       }
       iast::QueryBody::Update(update) => {
@@ -1288,11 +1288,13 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
           },
           assignment: Vec::new(),
           selection: self.flatten_val_expr_r(&update.selection)?,
+          schema: self.compute_schema(assignment_name),
         };
         for (col_name, val_expr) in &update.assignments {
           ms_update.assignment.push((ColName(col_name.clone()), self.flatten_val_expr_r(val_expr)?))
         }
-        self.amend_stage(trans_table_map, assignment_name, proc::MSQueryStage::Update(ms_update));
+        trans_table_map
+          .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Update(ms_update)));
         Ok(())
       }
       iast::QueryBody::Insert(insert) => {
@@ -1303,6 +1305,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
           },
           columns: insert.columns.iter().map(|x| ColName(x.clone())).collect(),
           values: Vec::new(),
+          schema: self.compute_schema(assignment_name),
         };
         for row in &insert.values {
           let mut p_row = Vec::<proc::ValExpr>::new();
@@ -1311,7 +1314,8 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
           }
           ms_insert.values.push(p_row);
         }
-        self.amend_stage(trans_table_map, assignment_name, proc::MSQueryStage::Insert(ms_insert));
+        trans_table_map
+          .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Insert(ms_insert)));
         Ok(())
       }
       iast::QueryBody::Delete(delete) => {
@@ -1321,8 +1325,10 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
             alias: delete.table.alias.clone().unwrap(),
           },
           selection: self.flatten_val_expr_r(&delete.selection)?,
+          schema: self.compute_schema(assignment_name),
         };
-        self.amend_stage(trans_table_map, assignment_name, proc::MSQueryStage::Delete(ms_delete));
+        trans_table_map
+          .push((TransTableName(assignment_name.clone()), proc::MSQueryStage::Delete(ms_delete)));
         Ok(())
       }
     }
@@ -1365,7 +1371,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
     &mut self,
     assignment_name: &String,
     query: &iast::Query,
-    trans_table_map: &mut Vec<(TransTableName, (Vec<Option<ColName>>, proc::GRQueryStage))>,
+    trans_table_map: &mut Vec<(TransTableName, proc::GRQueryStage)>,
   ) -> Result<(), ErrorT> {
     // First, have the CTEs flatten their Querys and add their TransTables to the map.
     for (trans_table_name, cte_query) in &query.ctes {
@@ -1378,11 +1384,11 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
         self.flatten_sub_query_r(assignment_name, child_query, trans_table_map)
       }
       iast::QueryBody::SuperSimpleSelect(select) => {
-        let ms_select = self.flatten_select(select)?;
+        let ms_select = self.flatten_select(assignment_name, select)?;
         self.validate_select(&ms_select)?;
         trans_table_map.push((
           TransTableName(assignment_name.clone()),
-          (self.compute_schema(assignment_name), proc::GRQueryStage::SuperSimpleSelect(ms_select)),
+          proc::GRQueryStage::SuperSimpleSelect(ms_select),
         ));
         Ok(())
       }
@@ -1394,6 +1400,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
 
   fn flatten_select(
     &mut self,
+    assignment_name: &String,
     select: &iast::SuperSimpleSelect,
   ) -> Result<proc::SuperSimpleSelect, ErrorT> {
     let p_projection = match &select.projection {
@@ -1435,6 +1442,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
       projection: p_projection,
       from,
       selection: self.flatten_val_expr_r(&select.selection)?,
+      schema: self.compute_schema(assignment_name),
     })
   }
 
@@ -1489,24 +1497,22 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
             (schema, proc::SelectClause::SelectList(select_list))
           }
           ColUsageCols::All => {
-            let (schema, _) =
+            let stage =
               lookup(&gr_query.trans_tables, &TransTableName(aux_table_name.clone())).unwrap();
-            (schema.clone(), proc::SelectClause::Wildcard)
+            (stage.schema().clone(), proc::SelectClause::Wildcard)
           }
         };
 
         // Generate `selection_table_name` and add it into `gr_query`.
         gr_query.trans_tables.push((
           TransTableName(selection_table_name),
-          (
+          proc::GRQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+            distinct: false,
+            projection: select_clause,
+            from: to_source(&aux_table_name, alias),
+            selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
             schema,
-            proc::GRQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
-              distinct: false,
-              projection: select_clause,
-              from: to_source(&aux_table_name, alias),
-              selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
-            }),
-          ),
+          }),
         ));
 
         Ok(proc::JoinNode::JoinLeaf(proc::JoinLeaf {
@@ -1520,18 +1526,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
 
   // Utilities
 
-  /// Lookup the correct schema for the `assignment_name`, and amend
-  /// `trans_table_map` accordingly.
-  fn amend_stage(
-    &mut self,
-    trans_table_map: &mut Vec<(TransTableName, (Vec<Option<ColName>>, proc::MSQueryStage))>,
-    assignment_name: &String,
-    stage: proc::MSQueryStage,
-  ) {
-    let schema = self.compute_schema(assignment_name);
-    trans_table_map.push((TransTableName(assignment_name.clone()), (schema, stage)));
-  }
-
+  /// Lookup the schema in the `trans_table_map`.
   fn compute_schema(&self, assignment_name: &String) -> Vec<Option<ColName>> {
     let mut schema = Vec::<Option<ColName>>::new();
     for col in self.trans_table_map.get(assignment_name).unwrap() {

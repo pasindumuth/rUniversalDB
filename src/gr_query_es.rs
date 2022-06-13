@@ -231,7 +231,7 @@ impl GRQueryES {
     assert_eq!(stage_query_id, &tm_qid);
 
     // Combine the results into a single one
-    let (trans_table_name, (schema, proc::GRQueryStage::SuperSimpleSelect(sql_query))) =
+    let (trans_table_name, proc::GRQueryStage::SuperSimpleSelect(sql_query)) =
       self.sql_query.trans_tables.get(read_stage.stage_idx).unwrap();
     let pre_agg_table_views = merge_table_views(results);
     let table_views = match perform_aggregation(sql_query, pre_agg_table_views) {
@@ -253,7 +253,8 @@ impl GRQueryES {
     self.new_rms.extend(new_rms);
 
     // Add the `table_views` to the GRQueryES and advance it.
-    self.trans_table_views.push((trans_table_name.clone(), (schema.clone(), table_views)));
+    let schema = sql_query.schema.clone();
+    self.trans_table_views.push((trans_table_name.clone(), (schema, table_views)));
     self.advance(ctx, io_ctx)
   }
 
@@ -303,7 +304,7 @@ impl GRQueryES {
       _ => panic!(),
     };
 
-    if next_stage_idx < self.query_plan.col_usage_nodes.len() {
+    if next_stage_idx < self.sql_query.trans_tables.len() {
       // This means that we have still have stages to evaluate, so we move on.
       self.process_gr_query_stage(ctx, io_ctx, next_stage_idx)
     } else {
@@ -338,7 +339,7 @@ impl GRQueryES {
     io_ctx: &mut IO,
     stage_idx: usize,
   ) -> GRQueryAction {
-    let (_, (_, stage)) = self.sql_query.trans_tables.get(stage_idx).unwrap();
+    let (_, stage) = self.sql_query.trans_tables.get(stage_idx).unwrap();
 
     // Collect the external `ColumnRef`s
     let mut col_names = Vec::<proc::ColumnRef>::new();

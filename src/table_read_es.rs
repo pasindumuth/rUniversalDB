@@ -339,13 +339,11 @@ impl TableReadES {
     );
 
     // Evaluate
-    let schema = self.query_plan.col_usage_node.schema.clone();
     let eval_res = fully_evaluate_select(
       context_constructor,
       &self.context.deref(),
       subquery_results,
       &self.sql_query,
-      &schema,
     );
 
     match eval_res {
@@ -567,7 +565,6 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
   context: &Context,
   subquery_results: Vec<Vec<TableView>>,
   sql_query: &proc::SuperSimpleSelect,
-  schema: &Vec<Option<ColName>>,
 ) -> Result<Vec<TableView>, EvalError> {
   // These are all of the `ExtraColumnRef`s we need in order to evaluate the Select.
   let mut top_level_extra_cols_set = BTreeSet::<ExtraColumnRef>::new();
@@ -590,7 +587,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
     SelectClause::Wildcard => {
       // For `ColName`s that are present in `schema`, read the column.
       // Otherwise, read the index.
-      for (index, maybe_col_name) in schema.iter().enumerate() {
+      for (index, maybe_col_name) in sql_query.schema.iter().enumerate() {
         if let Some(col_name) = maybe_col_name {
           top_level_extra_cols_set.insert(ExtraColumnRef::Named(proc::ColumnRef {
             table_name: sql_query.from.name().clone(),
@@ -628,7 +625,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
       // result to this TableView (if the WHERE clause evaluates to true).
       let evaluated_select = evaluate_super_simple_select(
         &sql_query,
-        schema,
+        &sql_query.schema,
         &top_level_extra_col_refs,
         &top_level_col_vals,
         &subquery_vals,

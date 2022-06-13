@@ -64,6 +64,9 @@ pub mod proc {
     pub projection: SelectClause,
     pub from: GeneralSource,
     pub selection: ValExpr,
+
+    /// The TransTable Schema produced by this query
+    pub schema: Vec<Option<ColName>>,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -71,6 +74,9 @@ pub mod proc {
     pub table: SimpleSource,
     pub assignment: Vec<(ColName, ValExpr)>,
     pub selection: ValExpr,
+
+    /// The TransTable Schema produced by this query
+    pub schema: Vec<Option<ColName>>,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -80,12 +86,18 @@ pub mod proc {
     pub columns: Vec<ColName>,
     /// The values to insert (where the inner `Vec` is a row)
     pub values: Vec<Vec<ValExpr>>,
+
+    /// The TransTable Schema produced by this query
+    pub schema: Vec<Option<ColName>>,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Delete {
     pub table: SimpleSource,
     pub selection: ValExpr,
+
+    /// The TransTable Schema produced by this query
+    pub schema: Vec<Option<ColName>>,
   }
 
   // Join
@@ -118,9 +130,17 @@ pub mod proc {
     SuperSimpleSelect(SuperSimpleSelect),
   }
 
+  impl GRQueryStage {
+    pub fn schema(&self) -> &Vec<Option<ColName>> {
+      match self {
+        GRQueryStage::SuperSimpleSelect(query) => &query.schema,
+      }
+    }
+  }
+
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct GRQuery {
-    pub trans_tables: Vec<(TransTableName, (Vec<Option<ColName>>, GRQueryStage))>,
+    pub trans_tables: Vec<(TransTableName, GRQueryStage)>,
     pub returning: TransTableName,
   }
 
@@ -134,9 +154,20 @@ pub mod proc {
     Delete(Delete),
   }
 
+  impl MSQueryStage {
+    pub fn schema(&self) -> &Vec<Option<ColName>> {
+      match self {
+        MSQueryStage::SuperSimpleSelect(query) => &query.schema,
+        MSQueryStage::Update(query) => &query.schema,
+        MSQueryStage::Insert(query) => &query.schema,
+        MSQueryStage::Delete(query) => &query.schema,
+      }
+    }
+  }
+
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct MSQuery {
-    pub trans_tables: Vec<(TransTableName, (Vec<Option<ColName>>, MSQueryStage))>,
+    pub trans_tables: Vec<(TransTableName, MSQueryStage)>,
     pub returning: TransTableName,
   }
 

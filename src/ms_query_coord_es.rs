@@ -1,4 +1,7 @@
-use crate::col_usage::{ColUsageNode, ColUsagePlanner, QueryElement};
+use crate::col_usage::{
+  external_trans_table_collecting_cb, iterate_ms_query_stage, trans_table_collecting_cb,
+  ColUsageNode, ColUsagePlanner, QueryElement,
+};
 use crate::common::{
   lookup, merge_table_views, mk_qid, FullGen, OrigP, QueryPlan, QueryResult, Timestamp,
 };
@@ -198,7 +201,7 @@ impl FullMSCoordES {
         match &es.state {
           CoordState::Stage(stage) if tm_qid == stage.stage_query_id => {
             // Combine the results into a single one
-            let (_, (_, query_stage)) = es.ms_query.trans_tables.get(stage.stage_idx).unwrap();
+            let (_, query_stage) = es.ms_query.trans_tables.get(stage.stage_idx).unwrap();
             let table_views = match query_stage {
               proc::MSQueryStage::SuperSimpleSelect(sql_query) => {
                 let pre_agg_table_views = merge_table_views(results);
@@ -224,15 +227,15 @@ impl FullMSCoordES {
               proc::MSQueryStage::Delete(_) => merge_table_views(results),
             };
 
-            let (trans_table_name, (schema, _)) =
-              es.ms_query.trans_tables.get(stage.stage_idx).unwrap();
+            let (trans_table_name, stage) = es.ms_query.trans_tables.get(stage.stage_idx).unwrap();
+            let schema = stage.schema().clone();
 
             // Recall that since we only send out one ContextRow, there should only be one TableView.
             assert_eq!(table_views.len(), 1);
 
             // Then, the results to the `trans_table_views`
             let table_view = table_views.into_iter().next().unwrap();
-            es.trans_table_views.push((trans_table_name.clone(), (schema.clone(), table_view)));
+            es.trans_table_views.push((trans_table_name.clone(), (schema, table_view)));
             es.all_rms.extend(new_rms);
             self.advance(ctx, io_ctx)
           }
@@ -439,11 +442,22 @@ impl FullMSCoordES {
     let es = cast!(FullMSCoordES::Executing, self).unwrap();
 
     // Get the corresponding MSQueryStage and ColUsageNode.
-    let (trans_table_name, (_, ms_query_stage)) = es.ms_query.trans_tables.get(stage_idx).unwrap();
+    let (trans_table_name, stage) = es.ms_query.trans_tables.get(stage_idx).unwrap();
     let col_usage_node = lookup(&es.query_plan.col_usage_nodes, trans_table_name).unwrap();
 
     // Compute the Context for this stage. Recall there must be exactly one row.
-    let trans_table_names = node_external_trans_tables(col_usage_node);
+    let mut trans_table_names = Vec::<TransTableName>::new();
+    {
+      let mut trans_table_container = BTreeSet::<TransTableName>::new();
+      iterate_ms_query_stage(&mut trans_table_collecting_cb(&mut trans_table_container), &stage);
+      let mut external_trans_table = BTreeSet::<TransTableName>::new();
+      iterate_ms_query_stage(
+        &mut external_trans_table_collecting_cb(&trans_table_container, &mut external_trans_table),
+        &stage,
+      );
+      trans_table_names.extend(external_trans_table.into_iter());
+    }
+
     let mut context = Context::default();
     let mut context_row = ContextRow::default();
     for trans_table_name in &trans_table_names {
@@ -475,7 +489,7 @@ impl FullMSCoordES {
     );
 
     // Send out the PerformQuery.
-    let helper = match ms_query_stage {
+    let helper = match stage {
       proc::MSQueryStage::SuperSimpleSelect(select_query) => {
         match &select_query.from {
           proc::GeneralSource::TablePath { table_path, .. } => {
