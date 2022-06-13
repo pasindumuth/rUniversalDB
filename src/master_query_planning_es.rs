@@ -1,4 +1,4 @@
-use crate::col_usage::{iterate_stage_ms_query, ColUsageNode, ColUsagePlanner, GeneralStage};
+use crate::col_usage::{ColUsageNode, ColUsagePlanner, QueryElement};
 use crate::common::{
   add_item, default_get_mut, lookup, map_insert, FullGen, MasterIOCtx, RemoteLeaderChangedPLm,
   TableSchema, Timestamp,

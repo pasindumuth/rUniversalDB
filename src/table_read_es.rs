@@ -1,4 +1,4 @@
-use crate::col_usage::collect_top_level_cols;
+use crate::col_usage::{collect_top_level_cols, get_collecting_cb, iterate_select};
 use crate::common::{
   btree_multimap_insert, lookup, mk_qid, CoreIOCtx, GossipData, GossipDataView, KeyBound, OrigP,
   QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
@@ -130,9 +130,10 @@ pub fn check_gossip<'a>(gossip: &GossipDataView<'a>, query_plan: &QueryPlan) -> 
 pub fn compute_read_region(
   key_cols: &Vec<(ColName, ColType)>,
   range: &TabletKeyRange,
-  query_plan: &QueryPlan,
   context: &Context,
   selection: &proc::ValExpr,
+  source: &proc::GeneralSource,
+  safe_present_cols: Vec<ColName>,
   extra_local_cols: Vec<ColName>,
 ) -> ReadRegion {
   // Compute the Row Region by taking the union across all ContextRows
@@ -141,7 +142,7 @@ pub fn compute_read_region(
     let key_bounds = compute_key_region(
       selection,
       compute_col_map(&context.context_schema, context_row),
-      &query_plan.col_usage_node.source,
+      source,
       key_cols,
     );
     for key_bound in key_bounds {
@@ -152,7 +153,7 @@ pub fn compute_read_region(
 
   // Compute the Column Region.
   let mut val_col_region = BTreeSet::<ColName>::new();
-  val_col_region.extend(query_plan.col_usage_node.safe_present_cols.clone());
+  val_col_region.extend(safe_present_cols);
   val_col_region.extend(extra_local_cols);
   for (key_col, _) in key_cols {
     val_col_region.remove(key_col);
@@ -276,13 +277,21 @@ impl TableReadES {
       SelectClause::Wildcard => ctx.table_schema.get_schema_val_cols_static(&self.timestamp),
     };
 
+    // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
+    let mut safe_present_cols = Vec::<ColName>::new();
+    iterate_select(
+      &mut get_collecting_cb(self.sql_query.from.name(), &mut safe_present_cols),
+      &self.sql_query,
+    );
+
     // Compute the ReadRegion
     let read_region = compute_read_region(
       &ctx.table_schema.key_cols,
       &ctx.this_tablet_key_range,
-      &self.query_plan,
       &self.context,
       &self.sql_query.selection,
+      &self.sql_query.from,
+      safe_present_cols,
       extra_cols,
     );
 

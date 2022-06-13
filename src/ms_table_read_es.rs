@@ -1,4 +1,5 @@
-use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
+use crate::col_usage::{get_collecting_cb, iterate_select};
+use crate::common::{mk_qid, ColName, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
 use crate::common::{
   ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView, TransTableName,
 };
@@ -54,13 +55,21 @@ impl SqlQueryInner for SelectInner {
       SelectClause::Wildcard => ctx.table_schema.get_schema_val_cols_static(&es.timestamp),
     };
 
+    // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
+    let mut safe_present_cols = Vec::<ColName>::new();
+    iterate_select(
+      &mut get_collecting_cb(self.sql_query.from.name(), &mut safe_present_cols),
+      &self.sql_query,
+    );
+
     // Compute the ReadRegion
     let read_region = compute_read_region(
       &ctx.table_schema.key_cols,
       &ctx.this_tablet_key_range,
-      &es.query_plan,
       &es.context,
       &self.sql_query.selection,
+      &self.sql_query.from,
+      safe_present_cols,
       extra_cols,
     );
 

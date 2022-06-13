@@ -1,6 +1,4 @@
-use crate::col_usage::{
-  iterate_stage_ms_query, node_external_trans_tables, ColUsageNode, ColUsagePlanner, GeneralStage,
-};
+use crate::col_usage::{node_external_trans_tables, ColUsageNode, ColUsagePlanner, QueryElement};
 use crate::common::{
   lookup, merge_table_views, mk_qid, FullGen, OrigP, QueryPlan, QueryResult, Timestamp,
 };

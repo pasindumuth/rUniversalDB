@@ -1,5 +1,5 @@
-use crate::col_usage::collect_top_level_cols;
-use crate::common::{mk_qid, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
+use crate::col_usage::{collect_top_level_cols, get_collecting_cb, iterate_delete};
+use crate::common::{mk_qid, ColName, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
 use crate::common::{
   ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView, TransTableName,
 };
@@ -46,13 +46,22 @@ impl SqlQueryInner for DeleteInner {
     io_ctx: &mut IO,
     es: &GeneralQueryES,
   ) -> Result<QueryId, msg::QueryError> {
+    // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
+    let mut safe_present_cols = Vec::<ColName>::new();
+    iterate_delete(
+      &mut get_collecting_cb(&self.sql_query.table.alias, &mut safe_present_cols),
+      &self.sql_query,
+    );
+
     // Compute the ReadRegion
+    let source = self.sql_query.table.to_read_source();
     let read_region = compute_read_region(
       &ctx.table_schema.key_cols,
       &ctx.this_tablet_key_range,
-      &es.query_plan,
       &es.context,
       &self.sql_query.selection,
+      &source,
+      safe_present_cols,
       vec![],
     );
 

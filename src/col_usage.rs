@@ -1,4 +1,4 @@
-use crate::common::{lookup, TableSchema, Timestamp};
+use crate::common::{add_item, lookup, TableSchema, Timestamp};
 use crate::common::{ColName, ColType, Gen, TablePath, TierMap, TransTableName};
 use crate::master_query_planning_es::{ColPresenceReq, DBSchemaView, ErrorTrait};
 use crate::message as msg;
@@ -25,8 +25,8 @@ use std::ops::Deref;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ColUsageNode {
   /// The (Trans)Table used in the `proc::GeneralQuery` corresponding to this node.
-  pub source: proc::GeneralSource,
-  pub safe_present_cols: Vec<ColName>,
+  source: proc::GeneralSource,
+  safe_present_cols: Vec<ColName>,
 
   /// The schema of the TransTable produced by this `ColUsageNode`.
   pub schema: Vec<Option<ColName>>,
@@ -492,70 +492,136 @@ pub fn nodes_external_cols(nodes: &Vec<(TransTableName, ColUsageNode)>) -> Vec<p
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Stage Iteration
+//  Query Element Iteration
 // -----------------------------------------------------------------------------------------------
-pub enum GeneralStage<'a> {
+pub enum QueryElement<'a> {
   SuperSimpleSelect(&'a proc::SuperSimpleSelect),
   Update(&'a proc::Update),
   Insert(&'a proc::Insert),
   Delete(&'a proc::Delete),
+  ValExpr(&'a proc::ValExpr),
 }
 
-fn iterate_stage_expr<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
-  cb: &mut CbT,
-  expr: &'a proc::ValExpr,
-) {
+fn iterate_expr<'a, CbT: FnMut(QueryElement<'a>) -> ()>(cb: &mut CbT, expr: &'a proc::ValExpr) {
+  cb(QueryElement::ValExpr(expr));
   match expr {
     proc::ValExpr::ColumnRef { .. } => {}
-    proc::ValExpr::UnaryExpr { expr, .. } => iterate_stage_expr(cb, expr),
+    proc::ValExpr::UnaryExpr { expr, .. } => iterate_expr(cb, expr),
     proc::ValExpr::BinaryExpr { left, right, .. } => {
-      iterate_stage_expr(cb, left);
-      iterate_stage_expr(cb, right);
+      iterate_expr(cb, left);
+      iterate_expr(cb, right);
     }
     proc::ValExpr::Value { .. } => {}
     proc::ValExpr::Subquery { query } => {
-      iterate_stage_gr_query(cb, query);
+      iterate_gr_query(cb, query);
     }
   }
 }
 
-fn iterate_stage_gr_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
+pub fn iterate_select<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
   cb: &mut CbT,
-  query: &'a proc::GRQuery,
+  query: &'a proc::SuperSimpleSelect,
 ) {
-  for (_, (_, stage)) in &query.trans_tables {
-    match stage {
-      proc::GRQueryStage::SuperSimpleSelect(query) => {
-        cb(GeneralStage::SuperSimpleSelect(query));
-        iterate_stage_expr(cb, &query.selection)
+  cb(QueryElement::SuperSimpleSelect(query));
+  match &query.projection {
+    proc::SelectClause::SelectList(select_list) => {
+      for (item, _) in select_list {
+        let expr = match item {
+          proc::SelectItem::ValExpr(expr) => expr,
+          proc::SelectItem::UnaryAggregate(agg) => &agg.expr,
+        };
+        iterate_expr(cb, expr);
       }
     }
+    proc::SelectClause::Wildcard => {}
+  }
+  iterate_expr(cb, &query.selection)
+}
+
+pub fn iterate_update<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+  cb: &mut CbT,
+  query: &'a proc::Update,
+) {
+  cb(QueryElement::Update(query));
+  for (_, expr) in &query.assignment {
+    iterate_expr(cb, expr)
+  }
+  iterate_expr(cb, &query.selection)
+}
+
+pub fn iterate_insert<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+  cb: &mut CbT,
+  query: &'a proc::Insert,
+) {
+  cb(QueryElement::Insert(query));
+  for row in &query.values {
+    for expr in row {
+      iterate_expr(cb, expr);
+    }
   }
 }
 
-pub fn iterate_stage_ms_query<'a, CbT: FnMut(GeneralStage<'a>) -> ()>(
+pub fn iterate_delete<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+  cb: &mut CbT,
+  query: &'a proc::Delete,
+) {
+  cb(QueryElement::Delete(query));
+  iterate_expr(cb, &query.selection)
+}
+
+pub fn iterate_ms_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
   cb: &mut CbT,
   query: &'a proc::MSQuery,
 ) {
   for (_, (_, stage)) in &query.trans_tables {
     match stage {
       proc::MSQueryStage::SuperSimpleSelect(query) => {
-        cb(GeneralStage::SuperSimpleSelect(query));
-        iterate_stage_expr(cb, &query.selection)
+        iterate_select(cb, query);
       }
       proc::MSQueryStage::Update(query) => {
-        cb(GeneralStage::Update(query));
-        for (_, expr) in &query.assignment {
-          iterate_stage_expr(cb, expr)
-        }
-        iterate_stage_expr(cb, &query.selection)
+        iterate_update(cb, query);
       }
       proc::MSQueryStage::Insert(query) => {
-        cb(GeneralStage::Insert(query));
+        iterate_insert(cb, query);
       }
       proc::MSQueryStage::Delete(query) => {
-        cb(GeneralStage::Delete(query));
-        iterate_stage_expr(cb, &query.selection)
+        iterate_delete(cb, query);
+      }
+    }
+  }
+}
+
+pub fn iterate_gr_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+  cb: &mut CbT,
+  query: &'a proc::GRQuery,
+) {
+  for (_, (_, stage)) in &query.trans_tables {
+    match stage {
+      proc::GRQueryStage::SuperSimpleSelect(query) => {
+        iterate_select(cb, query);
+      }
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Expression iteration
+// -----------------------------------------------------------------------------------------------
+
+pub fn get_collecting_cb<'a>(
+  source: &'a String,
+  col_container: &'a mut Vec<ColName>,
+) -> impl FnMut(QueryElement) -> () + 'a {
+  move |elem: QueryElement| match elem {
+    QueryElement::SuperSimpleSelect(_) => {}
+    QueryElement::Update(_) => {}
+    QueryElement::Insert(_) => {}
+    QueryElement::Delete(_) => {}
+    QueryElement::ValExpr(expr) => {
+      if let proc::ValExpr::ColumnRef(col_ref) = expr {
+        if source == &col_ref.table_name {
+          add_item(col_container, &col_ref.col_name);
+        }
       }
     }
   }

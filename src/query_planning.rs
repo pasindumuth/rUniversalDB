@@ -1,4 +1,4 @@
-use crate::col_usage::{iterate_stage_ms_query, GeneralStage};
+use crate::col_usage::{iterate_ms_query, QueryElement};
 use crate::common::{
   lookup, ColName, FullGen, Gen, TablePath, TableSchema, TierMap, Timestamp, TransTableName,
 };
@@ -12,23 +12,24 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Gather every reference to a `TablePath` found in the `query`.
 pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
   let mut table_paths = BTreeSet::<TablePath>::new();
-  iterate_stage_ms_query(
-    &mut |stage: GeneralStage| match stage {
-      GeneralStage::SuperSimpleSelect(query) => {
+  iterate_ms_query(
+    &mut |stage: QueryElement| match stage {
+      QueryElement::SuperSimpleSelect(query) => {
         // TODO: do properly.
         if let proc::GeneralSource::TablePath { table_path, .. } = &query.from {
           table_paths.insert(table_path.clone());
         }
       }
-      GeneralStage::Update(query) => {
+      QueryElement::Update(query) => {
         table_paths.insert(query.table.source_ref.clone());
       }
-      GeneralStage::Insert(query) => {
+      QueryElement::Insert(query) => {
         table_paths.insert(query.table.source_ref.clone());
       }
-      GeneralStage::Delete(query) => {
+      QueryElement::Delete(query) => {
         table_paths.insert(query.table.source_ref.clone());
       }
+      QueryElement::ValExpr(_) => {}
     },
     query,
   );
