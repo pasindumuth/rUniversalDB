@@ -10,75 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 // -----------------------------------------------------------------------------------------------
-//  Collection functions
-// -----------------------------------------------------------------------------------------------
-
-/// This function returns all `ColName`s in the `expr` that don't fall
-/// under a `Subquery`.
-pub fn collect_top_level_cols(expr: &proc::ValExpr) -> Vec<proc::ColumnRef> {
-  let mut cols = Vec::<proc::ColumnRef>::new();
-  collect_top_level_cols_r(expr, &mut cols);
-  cols
-}
-
-fn collect_top_level_cols_r(expr: &proc::ValExpr, cols: &mut Vec<proc::ColumnRef>) {
-  match expr {
-    proc::ValExpr::ColumnRef(col_ref) => cols.push(col_ref.clone()),
-    proc::ValExpr::UnaryExpr { expr, .. } => collect_top_level_cols_r(&expr, cols),
-    proc::ValExpr::BinaryExpr { left, right, .. } => {
-      collect_top_level_cols_r(&left, cols);
-      collect_top_level_cols_r(&right, cols);
-    }
-    proc::ValExpr::Value { .. } => {}
-    proc::ValExpr::Subquery { .. } => {}
-  }
-}
-
-/// This function collects and returns all GRQueries that belongs to a `Update`.
-pub fn collect_update_subqueries(sql_query: &proc::Update) -> Vec<proc::GRQuery> {
-  let mut subqueries = Vec::<proc::GRQuery>::new();
-  for (_, expr) in &sql_query.assignment {
-    collect_expr_subqueries_r(expr, &mut subqueries);
-  }
-  collect_expr_subqueries_r(&sql_query.selection, &mut subqueries);
-  return subqueries;
-}
-
-/// This function collects and returns all GRQueries that belongs to a `SuperSimpleSelect`.
-pub fn collect_select_subqueries(sql_query: &proc::SuperSimpleSelect) -> Vec<proc::GRQuery> {
-  return collect_expr_subqueries(&sql_query.selection);
-}
-
-/// This function collects and returns all GRQueries that belongs to a `Delete`.
-pub fn collect_delete_subqueries(sql_query: &proc::Delete) -> Vec<proc::GRQuery> {
-  let mut subqueries = Vec::<proc::GRQuery>::new();
-  collect_expr_subqueries_r(&sql_query.selection, &mut subqueries);
-  return subqueries;
-}
-
-// Computes the set of all GRQuerys that appear as immediate children of `expr`.
-fn collect_expr_subqueries(expr: &proc::ValExpr) -> Vec<proc::GRQuery> {
-  let mut subqueries = Vec::<proc::GRQuery>::new();
-  collect_expr_subqueries_r(expr, &mut subqueries);
-  subqueries
-}
-
-fn collect_expr_subqueries_r(expr: &proc::ValExpr, subqueries: &mut Vec<proc::GRQuery>) {
-  match expr {
-    proc::ValExpr::ColumnRef { .. } => {}
-    proc::ValExpr::UnaryExpr { expr, .. } => collect_expr_subqueries_r(expr, subqueries),
-    proc::ValExpr::BinaryExpr { left, right, .. } => {
-      collect_expr_subqueries_r(left, subqueries);
-      collect_expr_subqueries_r(right, subqueries);
-    }
-    proc::ValExpr::Value { .. } => {}
-    proc::ValExpr::Subquery { query, .. } => subqueries.push(query.deref().clone()),
-  }
-}
-
-// -----------------------------------------------------------------------------------------------
 //  Query Element Iteration
 // -----------------------------------------------------------------------------------------------
+
 pub enum QueryElement<'a> {
   MSQuery(&'a proc::MSQuery),
   GRQuery(&'a proc::GRQuery),
@@ -89,121 +23,151 @@ pub enum QueryElement<'a> {
   ValExpr(&'a proc::ValExpr),
 }
 
-fn iterate_expr<'a, CbT: FnMut(QueryElement<'a>) -> ()>(cb: &mut CbT, expr: &'a proc::ValExpr) {
-  cb(QueryElement::ValExpr(expr));
-  match expr {
-    proc::ValExpr::ColumnRef { .. } => {}
-    proc::ValExpr::UnaryExpr { expr, .. } => iterate_expr(cb, expr),
-    proc::ValExpr::BinaryExpr { left, right, .. } => {
-      iterate_expr(cb, left);
-      iterate_expr(cb, right);
-    }
-    proc::ValExpr::Value { .. } => {}
-    proc::ValExpr::Subquery { query } => {
-      iterate_gr_query(cb, query);
-    }
-  }
+pub struct QueryIterator {
+  /// If this is true, we do not call `iterate_gr_query` for any elements underneath
+  /// the query we passed in.
+  top_level: bool,
 }
 
-pub fn iterate_select<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
-  cb: &mut CbT,
-  query: &'a proc::SuperSimpleSelect,
-) {
-  cb(QueryElement::SuperSimpleSelect(query));
-  match &query.projection {
-    proc::SelectClause::SelectList(select_list) => {
-      for (item, _) in select_list {
-        let expr = match item {
-          proc::SelectItem::ValExpr(expr) => expr,
-          proc::SelectItem::UnaryAggregate(agg) => &agg.expr,
-        };
-        iterate_expr(cb, expr);
+impl QueryIterator {
+  pub fn new() -> QueryIterator {
+    QueryIterator { top_level: false }
+  }
+
+  pub fn new_top_level() -> QueryIterator {
+    QueryIterator { top_level: true }
+  }
+
+  pub fn iterate_expr<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    expr: &'a proc::ValExpr,
+  ) {
+    cb(QueryElement::ValExpr(expr));
+    match expr {
+      proc::ValExpr::ColumnRef(_) => {}
+      proc::ValExpr::UnaryExpr { expr, .. } => self.iterate_expr(cb, expr),
+      proc::ValExpr::BinaryExpr { left, right, .. } => {
+        self.iterate_expr(cb, left);
+        self.iterate_expr(cb, right);
+      }
+      proc::ValExpr::Value { .. } => {}
+      proc::ValExpr::Subquery { query } => {
+        if !self.top_level {
+          self.iterate_gr_query(cb, query);
+        }
       }
     }
-    proc::SelectClause::Wildcard => {}
   }
-  iterate_expr(cb, &query.selection)
-}
 
-pub fn iterate_update<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
-  cb: &mut CbT,
-  query: &'a proc::Update,
-) {
-  cb(QueryElement::Update(query));
-  for (_, expr) in &query.assignment {
-    iterate_expr(cb, expr)
+  pub fn iterate_select<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &'a proc::SuperSimpleSelect,
+  ) {
+    cb(QueryElement::SuperSimpleSelect(query));
+    match &query.projection {
+      proc::SelectClause::SelectList(select_list) => {
+        for (item, _) in select_list {
+          let expr = match item {
+            proc::SelectItem::ValExpr(expr) => expr,
+            proc::SelectItem::UnaryAggregate(agg) => &agg.expr,
+          };
+          self.iterate_expr(cb, expr);
+        }
+      }
+      proc::SelectClause::Wildcard => {}
+    }
+    self.iterate_expr(cb, &query.selection)
   }
-  iterate_expr(cb, &query.selection)
-}
 
-pub fn iterate_insert<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
-  cb: &mut CbT,
-  query: &'a proc::Insert,
-) {
-  cb(QueryElement::Insert(query));
-  for row in &query.values {
-    for expr in row {
-      iterate_expr(cb, expr);
+  pub fn iterate_update<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &'a proc::Update,
+  ) {
+    cb(QueryElement::Update(query));
+    for (_, expr) in &query.assignment {
+      self.iterate_expr(cb, expr)
+    }
+    self.iterate_expr(cb, &query.selection)
+  }
+
+  pub fn iterate_insert<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &'a proc::Insert,
+  ) {
+    cb(QueryElement::Insert(query));
+    for row in &query.values {
+      for expr in row {
+        self.iterate_expr(cb, expr);
+      }
     }
   }
-}
 
-pub fn iterate_delete<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
-  cb: &mut CbT,
-  query: &'a proc::Delete,
-) {
-  cb(QueryElement::Delete(query));
-  iterate_expr(cb, &query.selection)
-}
+  pub fn iterate_delete<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &'a proc::Delete,
+  ) {
+    cb(QueryElement::Delete(query));
+    self.iterate_expr(cb, &query.selection)
+  }
 
-pub fn iterate_ms_query_stage<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
-  cb: &mut CbT,
-  stage: &'a proc::MSQueryStage,
-) {
-  match stage {
-    proc::MSQueryStage::SuperSimpleSelect(query) => {
-      iterate_select(cb, query);
-    }
-    proc::MSQueryStage::Update(query) => {
-      iterate_update(cb, query);
-    }
-    proc::MSQueryStage::Insert(query) => {
-      iterate_insert(cb, query);
-    }
-    proc::MSQueryStage::Delete(query) => {
-      iterate_delete(cb, query);
+  pub fn iterate_ms_query_stage<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    stage: &'a proc::MSQueryStage,
+  ) {
+    match stage {
+      proc::MSQueryStage::SuperSimpleSelect(query) => {
+        self.iterate_select(cb, query);
+      }
+      proc::MSQueryStage::Update(query) => {
+        self.iterate_update(cb, query);
+      }
+      proc::MSQueryStage::Insert(query) => {
+        self.iterate_insert(cb, query);
+      }
+      proc::MSQueryStage::Delete(query) => {
+        self.iterate_delete(cb, query);
+      }
     }
   }
-}
 
-pub fn iterate_ms_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
-  cb: &mut CbT,
-  query: &'a proc::MSQuery,
-) {
-  cb(QueryElement::MSQuery(query));
-  for (_, stage) in &query.trans_tables {
-    iterate_ms_query_stage(cb, stage);
-  }
-}
-
-pub fn iterate_gr_query_stage<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
-  cb: &mut CbT,
-  stage: &'a proc::GRQueryStage,
-) {
-  match stage {
-    proc::GRQueryStage::SuperSimpleSelect(query) => {
-      iterate_select(cb, query);
+  pub fn iterate_ms_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &'a proc::MSQuery,
+  ) {
+    cb(QueryElement::MSQuery(query));
+    for (_, stage) in &query.trans_tables {
+      self.iterate_ms_query_stage(cb, stage);
     }
   }
-}
 
-pub fn iterate_gr_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
-  cb: &mut CbT,
-  query: &'a proc::GRQuery,
-) {
-  cb(QueryElement::GRQuery(query));
-  for (_, stage) in &query.trans_tables {
-    iterate_gr_query_stage(cb, stage);
+  pub fn iterate_gr_query_stage<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    stage: &'a proc::GRQueryStage,
+  ) {
+    match stage {
+      proc::GRQueryStage::SuperSimpleSelect(query) => {
+        self.iterate_select(cb, query);
+      }
+    }
+  }
+
+  pub fn iterate_gr_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &'a proc::GRQuery,
+  ) {
+    cb(QueryElement::GRQuery(query));
+    for (_, stage) in &query.trans_tables {
+      self.iterate_gr_query_stage(cb, stage);
+    }
   }
 }
 
@@ -211,6 +175,8 @@ pub fn iterate_gr_query<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
 //  Expression iteration
 // -----------------------------------------------------------------------------------------------
 
+/// Collects all `ColName`s that are paret of a `ColumnRef` that refers to `source`
+/// underneath a `QueryElement`.
 pub fn col_collecting_cb<'a>(
   source: &'a String,
   col_container: &'a mut Vec<ColName>,
@@ -221,6 +187,34 @@ pub fn col_collecting_cb<'a>(
         if source == &col_ref.table_name {
           add_item(col_container, &col_ref.col_name);
         }
+      }
+    }
+    _ => {}
+  }
+}
+
+/// Collects all `ColumnRef`s underneath a `QueryElement`.
+pub fn col_ref_collecting_cb<'a>(
+  col_container: &'a mut BTreeSet<proc::ColumnRef>,
+) -> impl FnMut(QueryElement) -> () + 'a {
+  move |elem: QueryElement| match elem {
+    QueryElement::ValExpr(expr) => {
+      if let proc::ValExpr::ColumnRef(col_ref) = expr {
+        col_container.insert(col_ref.clone());
+      }
+    }
+    _ => {}
+  }
+}
+
+/// Collects all `GRQuery`s underneath a `QueryElement`.
+pub fn gr_query_collecting_cb<'a>(
+  gr_query_container: &'a mut Vec<proc::GRQuery>,
+) -> impl FnMut(QueryElement) -> () + 'a {
+  move |elem: QueryElement| match elem {
+    QueryElement::ValExpr(expr) => {
+      if let proc::ValExpr::Subquery { query } = expr {
+        gr_query_container.push(query.deref().clone());
       }
     }
     _ => {}

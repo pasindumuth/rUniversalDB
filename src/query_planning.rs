@@ -1,4 +1,4 @@
-use crate::col_usage::{iterate_ms_query, QueryElement};
+use crate::col_usage::{QueryElement, QueryIterator};
 use crate::common::{
   lookup, ColName, FullGen, Gen, TablePath, TableSchema, TierMap, Timestamp, TransTableName,
 };
@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Gather every reference to a `TablePath` found in the `query`.
 pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
   let mut table_paths = BTreeSet::<TablePath>::new();
-  iterate_ms_query(
+  QueryIterator::new().iterate_ms_query(
     &mut |stage: QueryElement| match stage {
       QueryElement::SuperSimpleSelect(query) => {
         // TODO: do properly.

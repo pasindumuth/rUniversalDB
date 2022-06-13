@@ -1,4 +1,3 @@
-use crate::col_usage::collect_top_level_cols;
 use crate::common::{mk_qid, remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp};
 use crate::common::{
   CQueryPath, ColName, ColValN, ContextRow, ContextSchema, PaxosGroupId, PaxosGroupIdTrait,

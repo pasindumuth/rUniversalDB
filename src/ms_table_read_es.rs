@@ -1,4 +1,4 @@
-use crate::col_usage::{col_collecting_cb, iterate_select};
+use crate::col_usage::{col_collecting_cb, QueryIterator};
 use crate::common::{mk_qid, ColName, CoreIOCtx, OrigP, QueryESResult, WriteRegion};
 use crate::common::{
   ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView, TransTableName,
@@ -57,7 +57,7 @@ impl SqlQueryInner for SelectInner {
 
     // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
     let mut safe_present_cols = Vec::<ColName>::new();
-    iterate_select(
+    QueryIterator::new().iterate_select(
       &mut col_collecting_cb(self.sql_query.from.name(), &mut safe_present_cols),
       &self.sql_query,
     );

@@ -1,4 +1,4 @@
-use crate::col_usage::{col_collecting_cb, collect_top_level_cols, iterate_select};
+use crate::col_usage::{col_collecting_cb, col_ref_collecting_cb, QueryIterator};
 use crate::common::{
   btree_multimap_insert, lookup, mk_qid, CoreIOCtx, GossipData, GossipDataView, KeyBound, OrigP,
   QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
@@ -279,7 +279,7 @@ impl TableReadES {
 
     // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
     let mut safe_present_cols = Vec::<ColName>::new();
-    iterate_select(
+    QueryIterator::new().iterate_select(
       &mut col_collecting_cb(self.sql_query.from.name(), &mut safe_present_cols),
       &self.sql_query,
     );
@@ -567,23 +567,15 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
   sql_query: &proc::SuperSimpleSelect,
 ) -> Result<Vec<TableView>, EvalError> {
   // These are all of the `ExtraColumnRef`s we need in order to evaluate the Select.
-  let mut top_level_extra_cols_set = BTreeSet::<ExtraColumnRef>::new();
-  top_level_extra_cols_set.extend(
-    collect_top_level_cols(&sql_query.selection).into_iter().map(|c| ExtraColumnRef::Named(c)),
-  );
+  let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
+  QueryIterator::new_top_level()
+    .iterate_select(&mut col_ref_collecting_cb(&mut top_level_cols_set), sql_query);
+  let mut top_level_extra_cols_set: BTreeSet<_> =
+    top_level_cols_set.into_iter().map(|c| ExtraColumnRef::Named(c)).collect();
+
+  // Add any extra columns arise as a consequence of Wildcards.
   match &sql_query.projection {
-    SelectClause::SelectList(select_list) => {
-      for (select_item, _) in select_list {
-        top_level_extra_cols_set.extend(
-          collect_top_level_cols(match select_item {
-            proc::SelectItem::ValExpr(expr) => expr,
-            proc::SelectItem::UnaryAggregate(unary_agg) => &unary_agg.expr,
-          })
-          .into_iter()
-          .map(|c| ExtraColumnRef::Named(c)),
-        );
-      }
-    }
+    SelectClause::SelectList(_) => {}
     SelectClause::Wildcard => {
       // For `ColName`s that are present in `schema`, read the column.
       // Otherwise, read the index.

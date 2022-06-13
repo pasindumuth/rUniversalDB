@@ -1,6 +1,5 @@
 use crate::col_usage::{
-  external_trans_table_collecting_cb, iterate_ms_query_stage, trans_table_collecting_cb,
-  QueryElement,
+  external_trans_table_collecting_cb, trans_table_collecting_cb, QueryElement, QueryIterator,
 };
 use crate::common::{
   lookup, merge_table_views, mk_qid, FullGen, OrigP, QueryPlan, QueryResult, Timestamp,
@@ -446,10 +445,11 @@ impl FullMSCoordES {
     // Compute the Context for this stage. Recall there must be exactly one row.
     let mut trans_table_names = Vec::<TransTableName>::new();
     {
+      let it = QueryIterator::new();
       let mut trans_table_container = BTreeSet::<TransTableName>::new();
-      iterate_ms_query_stage(&mut trans_table_collecting_cb(&mut trans_table_container), &stage);
+      it.iterate_ms_query_stage(&mut trans_table_collecting_cb(&mut trans_table_container), &stage);
       let mut external_trans_table = BTreeSet::<TransTableName>::new();
-      iterate_ms_query_stage(
+      it.iterate_ms_query_stage(
         &mut external_trans_table_collecting_cb(&trans_table_container, &mut external_trans_table),
         &stage,
       );

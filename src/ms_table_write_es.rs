@@ -1,4 +1,4 @@
-use crate::col_usage::{col_collecting_cb, collect_top_level_cols, iterate_update};
+use crate::col_usage::{col_collecting_cb, col_ref_collecting_cb, QueryIterator};
 use crate::common::{mk_qid, ColName, CoreIOCtx, OrigP, QueryESResult, Timestamp, WriteRegion};
 use crate::common::{
   ColType, ColVal, ColValN, ContextRow, PrimaryKey, QueryId, TablePath, TableView, TransTableName,
@@ -48,7 +48,7 @@ impl SqlQueryInner for UpdateInner {
   ) -> Result<QueryId, msg::QueryError> {
     // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
     let mut safe_present_cols = Vec::<ColName>::new();
-    iterate_update(
+    QueryIterator::new().iterate_update(
       &mut col_collecting_cb(&self.sql_query.table.alias, &mut safe_present_cols),
       &self.sql_query,
     );
@@ -164,10 +164,8 @@ impl SqlQueryInner for UpdateInner {
     let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
     let cur_alias = &self.sql_query.table.alias;
     top_level_cols_set.extend(ctx.table_schema.get_key_col_refs(cur_alias));
-    top_level_cols_set.extend(collect_top_level_cols(&self.sql_query.selection));
-    for (_, expr) in &self.sql_query.assignment {
-      top_level_cols_set.extend(collect_top_level_cols(expr));
-    }
+    QueryIterator::new_top_level()
+      .iterate_update(&mut col_ref_collecting_cb(&mut top_level_cols_set), &self.sql_query);
     let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
     let top_level_extra_col_refs =
       Vec::from_iter(top_level_col_names.iter().map(|c| ExtraColumnRef::Named(c.clone())));

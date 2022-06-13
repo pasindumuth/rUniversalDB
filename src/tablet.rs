@@ -3,8 +3,8 @@ use crate::alter_table_rm_es::{
 };
 use crate::alter_table_tm_es::AlterTableTMPayloadTypes;
 use crate::col_usage::{
-  alias_collecting_cb, collect_top_level_cols, external_col_collecting_cb,
-  external_trans_table_collecting_cb, iterate_gr_query, trans_table_collecting_cb,
+  alias_collecting_cb, external_col_collecting_cb, external_trans_table_collecting_cb,
+  trans_table_collecting_cb, QueryIterator,
 };
 use crate::common::{
   btree_multimap_insert, lookup, map_insert, mk_qid, mk_t, remove_item, update_leader_map,
@@ -3309,10 +3309,11 @@ pub fn compute_children<SqlQueryT: SubqueryComputableSql>(
     // Collect the external `ColumnRef`s
     let mut col_names = Vec::<proc::ColumnRef>::new();
     {
+      let it = QueryIterator::new();
       let mut alias_container = BTreeSet::<String>::new();
-      iterate_gr_query(&mut alias_collecting_cb(&mut alias_container), &subquery);
+      it.iterate_gr_query(&mut alias_collecting_cb(&mut alias_container), &subquery);
       let mut external_cols_set = BTreeSet::<proc::ColumnRef>::new();
-      iterate_gr_query(
+      it.iterate_gr_query(
         &mut external_col_collecting_cb(&alias_container, &mut external_cols_set),
         &subquery,
       );
@@ -3322,10 +3323,11 @@ pub fn compute_children<SqlQueryT: SubqueryComputableSql>(
     // Collect the external `TransTableName`s
     let mut trans_table_names = Vec::<TransTableName>::new();
     {
+      let it = QueryIterator::new();
       let mut trans_table_container = BTreeSet::<TransTableName>::new();
-      iterate_gr_query(&mut trans_table_collecting_cb(&mut trans_table_container), &subquery);
+      it.iterate_gr_query(&mut trans_table_collecting_cb(&mut trans_table_container), &subquery);
       let mut external_trans_table = BTreeSet::<TransTableName>::new();
-      iterate_gr_query(
+      it.iterate_gr_query(
         &mut external_trans_table_collecting_cb(&trans_table_container, &mut external_trans_table),
         &subquery,
       );

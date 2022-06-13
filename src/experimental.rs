@@ -23,7 +23,7 @@ impl<'a> Iterator for SubqueryIter<'a> {
   // node, then the parent node, then its' parent, and so-on.
   fn next(&mut self) -> Option<Self::Item> {
     match self.expr {
-      proc::ValExpr::ColumnRef { .. } => {
+      proc::ValExpr::ColumnRef(_) => {
         if let Some(parent) = self.parent.take() {
           *self = *parent;
           self.next()

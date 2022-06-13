@@ -1,7 +1,6 @@
 use crate::col_usage::{
-  alias_collecting_cb, collect_delete_subqueries, collect_select_subqueries,
-  collect_update_subqueries, external_col_collecting_cb, external_trans_table_collecting_cb,
-  iterate_gr_query_stage, trans_table_collecting_cb,
+  alias_collecting_cb, external_col_collecting_cb, external_trans_table_collecting_cb,
+  gr_query_collecting_cb, trans_table_collecting_cb, QueryIterator,
 };
 use crate::common::{
   lookup, lookup_pos, merge_table_views, mk_qid, CoreIOCtx, FullGen, OrigP, QueryPlan, Timestamp,
@@ -135,19 +134,28 @@ pub trait SubqueryComputableSql {
 
 impl SubqueryComputableSql for proc::SuperSimpleSelect {
   fn collect_subqueries(&self) -> Vec<proc::GRQuery> {
-    collect_select_subqueries(self)
+    let mut top_level_cols_set = Vec::<proc::GRQuery>::new();
+    QueryIterator::new_top_level()
+      .iterate_select(&mut gr_query_collecting_cb(&mut top_level_cols_set), self);
+    top_level_cols_set
   }
 }
 
 impl SubqueryComputableSql for proc::Update {
   fn collect_subqueries(&self) -> Vec<proc::GRQuery> {
-    collect_update_subqueries(self)
+    let mut top_level_cols_set = Vec::<proc::GRQuery>::new();
+    QueryIterator::new_top_level()
+      .iterate_update(&mut gr_query_collecting_cb(&mut top_level_cols_set), self);
+    top_level_cols_set
   }
 }
 
 impl SubqueryComputableSql for proc::Delete {
   fn collect_subqueries(&self) -> Vec<proc::GRQuery> {
-    collect_delete_subqueries(self)
+    let mut top_level_cols_set = Vec::<proc::GRQuery>::new();
+    QueryIterator::new_top_level()
+      .iterate_delete(&mut gr_query_collecting_cb(&mut top_level_cols_set), self);
+    top_level_cols_set
   }
 }
 
@@ -341,10 +349,11 @@ impl GRQueryES {
     // Collect the external `ColumnRef`s
     let mut col_names = Vec::<proc::ColumnRef>::new();
     {
+      let it = QueryIterator::new();
       let mut alias_container = BTreeSet::<String>::new();
-      iterate_gr_query_stage(&mut alias_collecting_cb(&mut alias_container), stage);
+      it.iterate_gr_query_stage(&mut alias_collecting_cb(&mut alias_container), stage);
       let mut external_cols_set = BTreeSet::<proc::ColumnRef>::new();
-      iterate_gr_query_stage(
+      it.iterate_gr_query_stage(
         &mut external_col_collecting_cb(&alias_container, &mut external_cols_set),
         stage,
       );
@@ -354,10 +363,11 @@ impl GRQueryES {
     // Collect the external `TransTableName`s
     let mut trans_table_names = Vec::<TransTableName>::new();
     {
+      let it = QueryIterator::new();
       let mut trans_table_container = BTreeSet::<TransTableName>::new();
-      iterate_gr_query_stage(&mut trans_table_collecting_cb(&mut trans_table_container), &stage);
+      it.iterate_gr_query_stage(&mut trans_table_collecting_cb(&mut trans_table_container), &stage);
       let mut external_trans_table = BTreeSet::<TransTableName>::new();
-      iterate_gr_query_stage(
+      it.iterate_gr_query_stage(
         &mut external_trans_table_collecting_cb(&trans_table_container, &mut external_trans_table),
         &stage,
       );
