@@ -581,6 +581,9 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
   let mut top_level_extra_cols_set: BTreeSet<_> =
     top_level_cols_set.into_iter().map(|c| ExtraColumnRef::Named(c)).collect();
 
+  // Get the current schema of the LocalTable.
+  let table_schema = context_constructor.local_table.schema().clone();
+
   // Add any extra columns arise as a consequence of Wildcards.
   for item in &sql_query.projection {
     match item {
@@ -588,7 +591,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
       proc::SelectItem::Wildcard { .. } => {
         // For `ColName`s that are present in `schema`, read the column.
         // Otherwise, read the index.
-        for (index, maybe_col_name) in sql_query.schema.iter().enumerate() {
+        for (index, maybe_col_name) in table_schema.iter().enumerate() {
           if let Some(col_name) = maybe_col_name {
             top_level_extra_cols_set.insert(ExtraColumnRef::Named(proc::ColumnRef {
               table_name: sql_query.from.name().clone(),
@@ -630,7 +633,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
       // result to this TableView (if the WHERE clause evaluates to true).
       let evaluated_select = evaluate_super_simple_select(
         &sql_query,
-        &sql_query.schema,
+        &table_schema,
         &top_level_extra_col_refs,
         &top_level_col_vals,
         &subquery_vals,

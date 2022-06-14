@@ -400,6 +400,25 @@ fn select_projection_test(seed: [u8; 16]) {
       exp_result,
     );
 
+    let mut exp_result =
+      QueryResult::new(vec![cno("email"), cno("balance"), None, cno("email"), cno("balance")]);
+    exp_result.add_row(vec![
+      Some(cvs("my_email_0")),
+      Some(cvi(50)),
+      Some(cvi(80)),
+      Some(cvs("my_email_0")),
+      Some(cvi(50)),
+    ]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT *, (SELECT SUM(count) FROM inventory) * 2, *
+        FROM user
+        WHERE email = 'my_email_0';
+      ",
+      10000,
+      exp_result,
+    );
+
     // Tests that SELECT * will read anonymous columns from a CTE properly.
     let mut exp_result = QueryResult::new(vec![cno("e"), None]);
     exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(100))]);

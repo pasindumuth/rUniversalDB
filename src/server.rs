@@ -379,7 +379,7 @@ pub struct EvaluatedSuperSimpleSelect {
 /// Note that `schema` is the Schema of the `LocalTable` that this SELECT is reading.
 pub fn evaluate_super_simple_select(
   select: &proc::SuperSimpleSelect,
-  schema: &Vec<Option<ColName>>,
+  table_schema: &Vec<Option<ColName>>,
   col_refs: &Vec<ExtraColumnRef>,
   col_vals: &Vec<ColValN>,
   raw_subquery_vals: &Vec<TableView>,
@@ -417,7 +417,7 @@ pub fn evaluate_super_simple_select(
         evaluated_select.projection.push(evaluate_c_expr(&c_expr)?);
       }
       proc::SelectItem::Wildcard { .. } => {
-        for (i, maybe_col_name) in schema.iter().enumerate() {
+        for (i, maybe_col_name) in table_schema.iter().enumerate() {
           let col_val = if let Some(col_name) = maybe_col_name {
             named_col_map
               .get(&proc::ColumnRef {
@@ -799,7 +799,7 @@ pub trait LocalTable {
 /// run a custom callback.
 pub struct ContextConstructor<LocalTableT: LocalTable> {
   parent_context_schema: ContextSchema,
-  local_table: LocalTableT,
+  pub local_table: LocalTableT,
 
   /// Here, there is on converter for each element in `children` passed into the constructor.
   converters: Vec<ContextConverter>,
