@@ -1,4 +1,4 @@
-use crate::col_usage::{col_collecting_cb, col_ref_collecting_cb, QueryIterator};
+use crate::col_usage::{col_collecting_cb, col_ref_collecting_cb, QueryElement, QueryIterator};
 use crate::common::{
   btree_multimap_insert, lookup, mk_qid, CoreIOCtx, GossipData, GossipDataView, KeyBound, OrigP,
   QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
@@ -132,7 +132,7 @@ pub fn compute_read_region(
   range: &TabletKeyRange,
   context: &Context,
   selection: &proc::ValExpr,
-  source: &proc::GeneralSource,
+  table_name: &String,
   safe_present_cols: Vec<ColName>,
   extra_local_cols: Vec<ColName>,
 ) -> ReadRegion {
@@ -142,7 +142,7 @@ pub fn compute_read_region(
     let key_bounds = compute_key_region(
       selection,
       compute_col_map(&context.context_schema, context_row),
-      source,
+      table_name,
       key_cols,
     );
     for key_bound in key_bounds {
@@ -189,7 +189,7 @@ pub struct TableReadES {
   pub query_id: QueryId,
 
   // Query-related fields.
-  pub sql_query: proc::SuperSimpleSelect,
+  pub sql_query: proc::TableSelect,
   pub query_plan: QueryPlan,
 
   // Dynamically evolving fields.
@@ -287,8 +287,8 @@ impl TableReadES {
 
     // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
     let mut safe_present_cols = Vec::<ColName>::new();
-    QueryIterator::new().iterate_select(
-      &mut col_collecting_cb(self.sql_query.from.name(), &mut safe_present_cols),
+    QueryIterator::new().iterate_table_select(
+      &mut col_collecting_cb(&self.sql_query.from.alias, &mut safe_present_cols),
       &self.sql_query,
     );
 
@@ -298,7 +298,7 @@ impl TableReadES {
       &ctx.this_tablet_key_range,
       &self.context,
       &self.sql_query.selection,
-      &self.sql_query.from,
+      &self.sql_query.from.alias,
       safe_present_cols,
       extra_cols,
     );
@@ -567,17 +567,97 @@ impl TPESBase for TableReadES {
   }
 }
 
+// -----------------------------------------------------------------------------------------------
+//  Top-Level Select Query Common
+// -----------------------------------------------------------------------------------------------
+
+/// Adaptor Trait for `TableSelect` and `TransTableSelect`
+pub trait SelectQuery {
+  fn distinct(&self) -> bool;
+  fn projection(&self) -> &Vec<proc::SelectItem>;
+  fn name(&self) -> &String;
+  fn selection(&self) -> &proc::ValExpr;
+  fn schema(&self) -> &Vec<Option<ColName>>;
+
+  // Iteration
+  fn iterate<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &'a self,
+    iterator: QueryIterator,
+    cb: &mut CbT,
+  );
+}
+
+impl SelectQuery for proc::TableSelect {
+  fn distinct(&self) -> bool {
+    self.distinct
+  }
+
+  fn projection(&self) -> &Vec<proc::SelectItem> {
+    &self.projection
+  }
+
+  fn name(&self) -> &String {
+    &self.from.alias
+  }
+
+  fn selection(&self) -> &proc::ValExpr {
+    &self.selection
+  }
+
+  fn schema(&self) -> &Vec<Option<ColName>> {
+    &self.schema
+  }
+
+  fn iterate<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &'a self,
+    iterator: QueryIterator,
+    cb: &mut CbT,
+  ) {
+    iterator.iterate_table_select(cb, self);
+  }
+}
+
+impl SelectQuery for proc::TransTableSelect {
+  fn distinct(&self) -> bool {
+    self.distinct
+  }
+
+  fn projection(&self) -> &Vec<proc::SelectItem> {
+    &self.projection
+  }
+
+  fn name(&self) -> &String {
+    &self.from.alias
+  }
+
+  fn selection(&self) -> &proc::ValExpr {
+    &self.selection
+  }
+
+  fn schema(&self) -> &Vec<Option<ColName>> {
+    &self.schema
+  }
+
+  fn iterate<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &'a self,
+    iterator: QueryIterator,
+    cb: &mut CbT,
+  ) {
+    iterator.iterate_trans_table_select(cb, self);
+  }
+}
+
 /// Fully evaluate a `Select` query, including aggregation.
-pub fn fully_evaluate_select<LocalTableT: LocalTable>(
+pub fn fully_evaluate_select<LocalTableT: LocalTable, SelectQueryT: SelectQuery>(
   context_constructor: ContextConstructor<LocalTableT>,
   context: &Context,
   subquery_results: Vec<Vec<TableView>>,
-  sql_query: &proc::SuperSimpleSelect,
+  sql_query: &SelectQueryT,
 ) -> Result<Vec<TableView>, EvalError> {
   // These are all of the `ExtraColumnRef`s we need in order to evaluate the Select.
   let mut top_level_cols_set = BTreeSet::<proc::ColumnRef>::new();
-  QueryIterator::new_top_level()
-    .iterate_select(&mut col_ref_collecting_cb(&mut top_level_cols_set), sql_query);
+  sql_query
+    .iterate(QueryIterator::new_top_level(), &mut col_ref_collecting_cb(&mut top_level_cols_set));
   let mut top_level_extra_cols_set: BTreeSet<_> =
     top_level_cols_set.into_iter().map(|c| ExtraColumnRef::Named(c)).collect();
 
@@ -585,7 +665,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
   let table_schema = context_constructor.local_table.schema().clone();
 
   // Add any extra columns arise as a consequence of Wildcards.
-  for item in &sql_query.projection {
+  for item in sql_query.projection() {
     match item {
       proc::SelectItem::ExprWithAlias { .. } => {}
       proc::SelectItem::Wildcard { .. } => {
@@ -594,7 +674,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
         for (index, maybe_col_name) in table_schema.iter().enumerate() {
           if let Some(col_name) = maybe_col_name {
             top_level_extra_cols_set.insert(ExtraColumnRef::Named(proc::ColumnRef {
-              table_name: sql_query.from.name().clone(),
+              table_name: sql_query.name().clone(),
               col_name: col_name.clone(),
             }));
           } else {
@@ -632,7 +712,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
       // Now, we evaluate all expressions in the SQL query and amend the
       // result to this TableView (if the WHERE clause evaluates to true).
       let evaluated_select = evaluate_super_simple_select(
-        &sql_query,
+        sql_query,
         &table_schema,
         &top_level_extra_col_refs,
         &top_level_col_vals,
@@ -649,8 +729,8 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable>(
   Ok(pre_agg_table_views)
 }
 
-pub fn perform_aggregation(
-  sql_query: &proc::SuperSimpleSelect,
+pub fn perform_aggregation<SelectQueryT: SelectQuery>(
+  sql_query: &SelectQueryT,
   pre_agg_table_views: Vec<TableView>,
 ) -> Result<Vec<TableView>, EvalError> {
   // Produce the result table, handling aggregates and DISTINCT accordingly.
@@ -666,7 +746,7 @@ pub fn perform_aggregation(
       // and how all aggregates take only one argument).
       // TODO perhaps introduce a SingleColumn type.
       let mut columns = Vec::<TableView>::new();
-      for _ in 0..sql_query.projection.len() {
+      for _ in 0..sql_query.projection().len() {
         columns.push(TableView::new());
       }
       for (row, count) in pre_agg_table_view.rows {
@@ -677,7 +757,7 @@ pub fn perform_aggregation(
 
       // Perform the aggregation
       let mut res_row = Vec::<ColValN>::new();
-      for (item, mut column) in sql_query.projection.iter().zip(columns.into_iter()) {
+      for (item, mut column) in sql_query.projection().iter().zip(columns.into_iter()) {
         let unary_agg = match item {
           proc::SelectItem::ExprWithAlias { item, .. } => match item {
             proc::SelectExprItem::UnaryAggregate(unary_agg) => unary_agg,
@@ -754,7 +834,7 @@ pub fn perform_aggregation(
     }
 
     // Handle outer DISTINCT
-    if sql_query.distinct {
+    if sql_query.distinct() {
       for (_, count) in &mut res_table_view.rows {
         *count = 1;
       }
@@ -769,8 +849,8 @@ pub fn perform_aggregation(
 /// Checks if the `SuperSimpleSelect` has aggregates in its projection.
 /// NOTE: Recall that in this case, all elements in the projection are aggregates
 /// for now for simplicity.
-pub fn is_agg(sql_query: &proc::SuperSimpleSelect) -> bool {
-  for item in &sql_query.projection {
+pub fn is_agg<SelectQueryT: SelectQuery>(sql_query: &SelectQueryT) -> bool {
+  for item in sql_query.projection() {
     match item {
       proc::SelectItem::ExprWithAlias { item, .. } => match item {
         proc::SelectExprItem::UnaryAggregate(_) => return true,

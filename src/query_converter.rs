@@ -97,7 +97,7 @@ fn validate_under_query<ErrorT: ErrorTrait>(query: &iast::Query) -> Result<(), E
     iast::QueryBody::Query(child_query) => {
       validate_under_query(child_query)?;
     }
-    iast::QueryBody::SuperSimpleSelect(select) => {
+    iast::QueryBody::Select(select) => {
       // Validate the JoinTree without validating child queries within.
       validate_join_tree(&select.from)?;
 
@@ -252,7 +252,7 @@ fn process_under_query(query: &mut iast::Query) {
 
   match &mut query.body {
     iast::QueryBody::Query(child_query) => process_under_query(child_query),
-    iast::QueryBody::SuperSimpleSelect(select) => {
+    iast::QueryBody::Select(select) => {
       // Process Join Tree
       process_under_join_tree(&mut select.from);
 
@@ -318,18 +318,6 @@ fn unique_tt_name(counter: &mut u32, trans_table_name: &String) -> String {
 fn unique_alias_name(counter: &mut u32, table_name: &String) -> String {
   *counter += 1;
   format!("ali\\{}\\{}", *counter - 1, table_name)
-}
-
-/// Check if a `table_name` is a TransTable, assuming that it would already have been made unique.
-fn to_source(table_name: &String, alias: String) -> proc::GeneralSource {
-  if table_name.len() >= 3 && &table_name[..3] == "tt\\" {
-    proc::GeneralSource::TransTableName {
-      trans_table_name: TransTableName(table_name.clone()),
-      alias,
-    }
-  } else {
-    proc::GeneralSource::TablePath { table_path: TablePath(table_name.clone()), alias }
-  }
 }
 
 fn push_rename(
@@ -429,7 +417,7 @@ fn rename_under_query(ctx: &mut RenameContext, query: &mut iast::Query) {
 
   match &mut query.body {
     iast::QueryBody::Query(child_query) => rename_under_query(ctx, child_query),
-    iast::QueryBody::SuperSimpleSelect(select) => {
+    iast::QueryBody::Select(select) => {
       // Process Join Tree
       rename_under_join_tree(ctx, &mut select.from);
 
@@ -664,7 +652,7 @@ fn alias_rename_under_query<ErrorT: ErrorTrait>(
 
   match &mut query.body {
     iast::QueryBody::Query(child_query) => alias_rename_under_query(ctx, child_query),
-    iast::QueryBody::SuperSimpleSelect(select) => {
+    iast::QueryBody::Select(select) => {
       // First, rename all `JoinLeaf` aliases without renaming ColumnRefs
       let name_map = alias_rename_generation(ctx, &mut select.from);
 
@@ -841,7 +829,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
 
         Ok((schema, unresolved))
       }
-      iast::QueryBody::SuperSimpleSelect(select) => {
+      iast::QueryBody::Select(select) => {
         let (_, jlns, join_node_cols, mut cur_unresolved) =
           self.resolve_cols_under_join_node(&mut select.from)?;
         unresolved.merge(cur_unresolved);
@@ -1240,6 +1228,12 @@ fn get_jln(leaf: &iast::JoinLeaf) -> String {
 //  Query to MSQuery
 // -----------------------------------------------------------------------------------------------
 
+enum SelectEnum {
+  TableSelect(proc::TableSelect),
+  TransTableSelect(proc::TransTableSelect),
+  JoinSelect(proc::JoinSelect),
+}
+
 struct ConversionContext<'a, ViewT: DBSchemaView> {
   col_usage_map: BTreeMap<String, ColUsageCols>,
   trans_table_map: BTreeMap<String, Vec<Option<String>>>,
@@ -1286,17 +1280,21 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
       iast::QueryBody::Query(child_query) => {
         self.flatten_top_level_query_r(assignment_name, child_query, trans_table_map)
       }
-      iast::QueryBody::SuperSimpleSelect(select) => {
+      iast::QueryBody::Select(select) => {
         let ms_select = self.flatten_select(assignment_name, select)?;
         self.validate_select(&ms_select)?;
-        let stage = proc::MSQueryStage::SuperSimpleSelect(ms_select);
+        let stage = match ms_select {
+          SelectEnum::TableSelect(select) => proc::MSQueryStage::TableSelect(select),
+          SelectEnum::TransTableSelect(select) => proc::MSQueryStage::TransTableSelect(select),
+          SelectEnum::JoinSelect(select) => proc::MSQueryStage::JoinSelect(select),
+        };
         trans_table_map.push((TransTableName(assignment_name.clone()), stage));
         Ok(())
       }
       iast::QueryBody::Update(update) => {
         let mut ms_update = proc::Update {
-          table: proc::SimpleSource {
-            source_ref: TablePath(update.table.source_ref.clone()),
+          table: proc::TableSource {
+            table_path: TablePath(update.table.source_ref.clone()),
             alias: update.table.alias.clone().unwrap(),
           },
           assignment: Vec::new(),
@@ -1312,8 +1310,8 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
       }
       iast::QueryBody::Insert(insert) => {
         let mut ms_insert = proc::Insert {
-          table: proc::SimpleSource {
-            source_ref: TablePath(insert.table.source_ref.clone()),
+          table: proc::TableSource {
+            table_path: TablePath(insert.table.source_ref.clone()),
             alias: insert.table.alias.clone().unwrap(),
           },
           columns: insert.columns.iter().map(|x| ColName(x.clone())).collect(),
@@ -1333,8 +1331,8 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
       }
       iast::QueryBody::Delete(delete) => {
         let ms_delete = proc::Delete {
-          table: proc::SimpleSource {
-            source_ref: TablePath(delete.table.source_ref.clone()),
+          table: proc::TableSource {
+            table_path: TablePath(delete.table.source_ref.clone()),
             alias: delete.table.alias.clone().unwrap(),
           },
           selection: self.flatten_val_expr_r(&delete.selection)?,
@@ -1396,13 +1394,15 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
       iast::QueryBody::Query(child_query) => {
         self.flatten_sub_query_r(assignment_name, child_query, trans_table_map)
       }
-      iast::QueryBody::SuperSimpleSelect(select) => {
+      iast::QueryBody::Select(select) => {
         let ms_select = self.flatten_select(assignment_name, select)?;
         self.validate_select(&ms_select)?;
-        trans_table_map.push((
-          TransTableName(assignment_name.clone()),
-          proc::GRQueryStage::SuperSimpleSelect(ms_select),
-        ));
+        let stage = match ms_select {
+          SelectEnum::TableSelect(select) => proc::GRQueryStage::TableSelect(select),
+          SelectEnum::TransTableSelect(select) => proc::GRQueryStage::TransTableSelect(select),
+          SelectEnum::JoinSelect(select) => proc::GRQueryStage::JoinSelect(select),
+        };
+        trans_table_map.push((TransTableName(assignment_name.clone()), stage));
         Ok(())
       }
       iast::QueryBody::Update(_) => Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidUpdate)),
@@ -1414,8 +1414,8 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
   fn flatten_select(
     &mut self,
     assignment_name: &String,
-    select: &iast::SuperSimpleSelect,
-  ) -> Result<proc::SuperSimpleSelect, ErrorT> {
+    select: &iast::Select,
+  ) -> Result<SelectEnum, ErrorT> {
     let mut p_projection = Vec::<proc::SelectItem>::new();
     for item in &select.projection {
       p_projection.push(match item {
@@ -1440,24 +1440,43 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
       });
     }
 
-    let from = match &select.from {
+    match &select.from {
       iast::JoinNode::JoinLeaf(iast::JoinLeaf {
         source: iast::JoinNodeSource::Table(table_name),
         alias,
       }) => {
-        // If the FROM clause is just a single table, then handle this clase differently.
-        to_source(table_name, alias.clone().unwrap())
+        if self.trans_table_map.contains_key(table_name) {
+          Ok(SelectEnum::TransTableSelect(proc::TransTableSelect {
+            distinct: select.distinct,
+            projection: p_projection,
+            from: proc::TransTableSource {
+              trans_table_name: TransTableName(table_name.clone()),
+              alias: alias.clone().unwrap(),
+            },
+            selection: self.flatten_val_expr_r(&select.selection)?,
+            schema: self.compute_schema(assignment_name),
+          }))
+        } else {
+          Ok(SelectEnum::TableSelect(proc::TableSelect {
+            distinct: select.distinct,
+            projection: p_projection,
+            from: proc::TableSource {
+              table_path: TablePath(table_name.clone()),
+              alias: alias.clone().unwrap(),
+            },
+            selection: self.flatten_val_expr_r(&select.selection)?,
+            schema: self.compute_schema(assignment_name),
+          }))
+        }
       }
-      _ => proc::GeneralSource::JoinNode(self.flatten_join_node(&select.from)?),
-    };
-
-    Ok(proc::SuperSimpleSelect {
-      distinct: select.distinct,
-      projection: p_projection,
-      from,
-      selection: self.flatten_val_expr_r(&select.selection)?,
-      schema: self.compute_schema(assignment_name),
-    })
+      _ => Ok(SelectEnum::JoinSelect(proc::JoinSelect {
+        distinct: select.distinct,
+        projection: p_projection,
+        from: self.flatten_join_node(&select.from)?,
+        selection: self.flatten_val_expr_r(&select.selection)?,
+        schema: self.compute_schema(assignment_name),
+      })),
+    }
   }
 
   /// Converts the Join Tree analogously, except the JoinLeafs are converted into GRQuerys
@@ -1493,6 +1512,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
         let alias = unique_alias_name(&mut self.counter, &"".to_string());
 
         // Construct projection
+        let aux_table_name = TransTableName(aux_table_name.clone());
         let col_usage_cols = self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap();
         let (schema, projection) = match col_usage_cols {
           ColUsageCols::Cols(cols) => {
@@ -1513,8 +1533,7 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
             (schema, select_list)
           }
           ColUsageCols::All => {
-            let stage =
-              lookup(&gr_query.trans_tables, &TransTableName(aux_table_name.clone())).unwrap();
+            let stage = lookup(&gr_query.trans_tables, &aux_table_name).unwrap();
             (stage.schema().clone(), vec![proc::SelectItem::Wildcard { table_name: None }])
           }
         };
@@ -1522,10 +1541,10 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
         // Generate `selection_table_name` and add it into `gr_query`.
         gr_query.trans_tables.push((
           TransTableName(selection_table_name),
-          proc::GRQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+          proc::GRQueryStage::TransTableSelect(proc::TransTableSelect {
             distinct: false,
             projection,
-            from: to_source(&aux_table_name, alias),
+            from: proc::TransTableSource { trans_table_name: aux_table_name, alias },
             selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
             schema,
           }),
@@ -1552,11 +1571,15 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
   }
 
   /// Validates the `Select`.
-  pub fn validate_select(&mut self, select: &proc::SuperSimpleSelect) -> Result<(), ErrorT> {
+  pub fn validate_select(&mut self, select: &SelectEnum) -> Result<(), ErrorT> {
     let mut val_expr_count = 0;
     let mut unary_agg_count = 0;
     let mut wildcard_count = 0;
-    for item in &select.projection {
+    for item in match select {
+      SelectEnum::TableSelect(select) => &select.projection,
+      SelectEnum::TransTableSelect(select) => &select.projection,
+      SelectEnum::JoinSelect(select) => &select.projection,
+    } {
       match item {
         proc::SelectItem::ExprWithAlias { item, .. } => match item {
           proc::SelectExprItem::ValExpr(_) => {

@@ -10,16 +10,15 @@ pub mod proc {
   // Basic types
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct SimpleSource {
-    pub source_ref: TablePath,
+  pub struct TableSource {
+    pub table_path: TablePath,
     pub alias: String,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub enum GeneralSource {
-    TablePath { table_path: TablePath, alias: String },
-    TransTableName { trans_table_name: TransTableName, alias: String },
-    JoinNode(JoinNode),
+  pub struct TransTableSource {
+    pub trans_table_name: TransTableName,
+    pub alias: String,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -66,10 +65,32 @@ pub mod proc {
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct SuperSimpleSelect {
+  pub struct TableSelect {
     pub distinct: bool,
     pub projection: Vec<SelectItem>,
-    pub from: GeneralSource,
+    pub from: TableSource,
+    pub selection: ValExpr,
+
+    /// The TransTable Schema produced by this query
+    pub schema: Vec<Option<ColName>>,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct TransTableSelect {
+    pub distinct: bool,
+    pub projection: Vec<SelectItem>,
+    pub from: TransTableSource,
+    pub selection: ValExpr,
+
+    /// The TransTable Schema produced by this query
+    pub schema: Vec<Option<ColName>>,
+  }
+
+  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+  pub struct JoinSelect {
+    pub distinct: bool,
+    pub projection: Vec<SelectItem>,
+    pub from: JoinNode,
     pub selection: ValExpr,
 
     /// The TransTable Schema produced by this query
@@ -78,7 +99,7 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Update {
-    pub table: SimpleSource,
+    pub table: TableSource,
     pub assignment: Vec<(ColName, ValExpr)>,
     pub selection: ValExpr,
 
@@ -88,7 +109,7 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Insert {
-    pub table: SimpleSource,
+    pub table: TableSource,
     /// The columns to insert to
     pub columns: Vec<ColName>,
     /// The values to insert (where the inner `Vec` is a row)
@@ -100,7 +121,7 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct Delete {
-    pub table: SimpleSource,
+    pub table: TableSource,
     pub selection: ValExpr,
 
     /// The TransTable Schema produced by this query
@@ -134,13 +155,17 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum GRQueryStage {
-    SuperSimpleSelect(SuperSimpleSelect),
+    TableSelect(TableSelect),
+    TransTableSelect(TransTableSelect),
+    JoinSelect(JoinSelect),
   }
 
   impl GRQueryStage {
     pub fn schema(&self) -> &Vec<Option<ColName>> {
       match self {
-        GRQueryStage::SuperSimpleSelect(query) => &query.schema,
+        GRQueryStage::TableSelect(query) => &query.schema,
+        GRQueryStage::TransTableSelect(query) => &query.schema,
+        GRQueryStage::JoinSelect(query) => &query.schema,
       }
     }
   }
@@ -155,7 +180,9 @@ pub mod proc {
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum MSQueryStage {
-    SuperSimpleSelect(SuperSimpleSelect),
+    TableSelect(TableSelect),
+    TransTableSelect(TransTableSelect),
+    JoinSelect(JoinSelect),
     Update(Update),
     Insert(Insert),
     Delete(Delete),
@@ -164,7 +191,9 @@ pub mod proc {
   impl MSQueryStage {
     pub fn schema(&self) -> &Vec<Option<ColName>> {
       match self {
-        MSQueryStage::SuperSimpleSelect(query) => &query.schema,
+        MSQueryStage::TableSelect(query) => &query.schema,
+        MSQueryStage::TransTableSelect(query) => &query.schema,
+        MSQueryStage::JoinSelect(query) => &query.schema,
         MSQueryStage::Update(query) => &query.schema,
         MSQueryStage::Insert(query) => &query.schema,
         MSQueryStage::Delete(query) => &query.schema,
@@ -207,36 +236,6 @@ pub mod proc {
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct DropTable {
     pub table_path: TablePath,
-  }
-
-  // Implementations
-
-  // TODO: remove this
-  impl GeneralSource {
-    pub fn name(&self) -> &String {
-      match self {
-        GeneralSource::TablePath { alias, .. } => alias,
-        GeneralSource::TransTableName { alias, .. } => alias,
-        GeneralSource::JoinNode(_) => panic!(),
-      }
-    }
-
-    pub fn to_table_path(&self) -> &TablePath {
-      match &self {
-        GeneralSource::TablePath { table_path, .. } => table_path,
-        _ => panic!(),
-      }
-    }
-  }
-
-  impl SimpleSource {
-    pub fn name(&self) -> &String {
-      &self.alias
-    }
-
-    pub fn to_read_source(&self) -> GeneralSource {
-      GeneralSource::TablePath { table_path: self.source_ref.clone(), alias: self.alias.clone() }
-    }
   }
 }
 
@@ -358,7 +357,7 @@ pub mod iast {
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum QueryBody {
     Query(Box<Query>),
-    SuperSimpleSelect(SuperSimpleSelect),
+    Select(Select),
     Update(Update),
     Insert(Insert),
     Delete(Delete),
@@ -404,7 +403,7 @@ pub mod iast {
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-  pub struct SuperSimpleSelect {
+  pub struct Select {
     pub distinct: bool,
     pub projection: Vec<SelectItem>,
     pub from: JoinNode,

@@ -14,20 +14,25 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
   let mut table_paths = BTreeSet::<TablePath>::new();
   QueryIterator::new().iterate_ms_query(
     &mut |stage: QueryElement| match stage {
-      QueryElement::SuperSimpleSelect(query) => {
-        // TODO: do properly.
-        if let proc::GeneralSource::TablePath { table_path, .. } = &query.from {
-          table_paths.insert(table_path.clone());
-        }
+      QueryElement::TableSelect(query) => {
+        table_paths.insert(query.from.table_path.clone());
+      }
+      QueryElement::TransTableSelect(_) => {}
+      QueryElement::JoinSelect(_) => {
+        // TODO: properly
+        unimplemented!()
+      }
+      QueryElement::TableSelect(query) => {
+        table_paths.insert(query.from.table_path.clone());
       }
       QueryElement::Update(query) => {
-        table_paths.insert(query.table.source_ref.clone());
+        table_paths.insert(query.table.table_path.clone());
       }
       QueryElement::Insert(query) => {
-        table_paths.insert(query.table.source_ref.clone());
+        table_paths.insert(query.table.table_path.clone());
       }
       QueryElement::Delete(query) => {
-        table_paths.insert(query.table.source_ref.clone());
+        table_paths.insert(query.table.table_path.clone());
       }
       QueryElement::ValExpr(_) => {}
       QueryElement::MSQuery(_) => {}
@@ -49,29 +54,33 @@ pub fn compute_all_tier_maps(ms_query: &proc::MSQuery) -> BTreeMap<TransTableNam
   let mut cur_tier_map = BTreeMap::<TablePath, u32>::new();
   for (_, stage) in &ms_query.trans_tables {
     match stage {
-      proc::MSQueryStage::SuperSimpleSelect(_) => {}
+      proc::MSQueryStage::TableSelect(_) => {}
+      proc::MSQueryStage::TransTableSelect(_) => {}
+      proc::MSQueryStage::JoinSelect(_) => {}
       proc::MSQueryStage::Update(update) => {
-        cur_tier_map.insert(update.table.source_ref.clone(), 0);
+        cur_tier_map.insert(update.table.table_path.clone(), 0);
       }
       proc::MSQueryStage::Insert(insert) => {
-        cur_tier_map.insert(insert.table.source_ref.clone(), 0);
+        cur_tier_map.insert(insert.table.table_path.clone(), 0);
       }
       proc::MSQueryStage::Delete(delete) => {
-        cur_tier_map.insert(delete.table.source_ref.clone(), 0);
+        cur_tier_map.insert(delete.table.table_path.clone(), 0);
       }
     }
   }
   for (trans_table_name, stage) in ms_query.trans_tables.iter().rev() {
     match stage {
-      proc::MSQueryStage::SuperSimpleSelect(_) => {}
+      proc::MSQueryStage::TableSelect(_) => {}
+      proc::MSQueryStage::TransTableSelect(_) => {}
+      proc::MSQueryStage::JoinSelect(_) => {}
       proc::MSQueryStage::Update(update) => {
-        *cur_tier_map.get_mut(&update.table.source_ref).unwrap() += 1;
+        *cur_tier_map.get_mut(&update.table.table_path).unwrap() += 1;
       }
       proc::MSQueryStage::Insert(insert) => {
-        *cur_tier_map.get_mut(&insert.table.source_ref).unwrap() += 1;
+        *cur_tier_map.get_mut(&insert.table.table_path).unwrap() += 1;
       }
       proc::MSQueryStage::Delete(delete) => {
-        *cur_tier_map.get_mut(&delete.table.source_ref).unwrap() += 1;
+        *cur_tier_map.get_mut(&delete.table.table_path).unwrap() += 1;
       }
     }
     all_tier_maps.insert(trans_table_name.clone(), TierMap { map: cur_tier_map.clone() });
@@ -103,11 +112,13 @@ pub fn perform_validations<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = Erro
 ) -> Result<(), ErrorT> {
   for (_, stage) in &ms_query.trans_tables {
     match stage {
-      proc::MSQueryStage::SuperSimpleSelect(_) => {}
+      proc::MSQueryStage::TableSelect(_) => {}
+      proc::MSQueryStage::TransTableSelect(_) => {}
+      proc::MSQueryStage::JoinSelect(_) => {}
       proc::MSQueryStage::Update(query) => {
         // Check that the `stage` is not trying to modify a KeyCol,
         // all assigned columns are unique, and they are present.
-        let table_path = &query.table.source_ref;
+        let table_path = &query.table.table_path;
         let key_cols = view.key_cols(table_path)?.clone();
         let mut all_cols = BTreeSet::<&ColName>::new();
         for (col_name, _) in &query.assignment {
@@ -123,7 +134,7 @@ pub fn perform_validations<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = Erro
       }
       proc::MSQueryStage::Insert(query) => {
         // Check that the `stage` is inserting to all KeyCols.
-        let table_path = &query.table.source_ref;
+        let table_path = &query.table.table_path;
         let key_cols = view.key_cols(table_path)?;
         for (col_name, _) in key_cols {
           if !query.columns.contains(col_name) {

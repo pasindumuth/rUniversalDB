@@ -11,6 +11,7 @@ use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, Ev
 use crate::message as msg;
 use crate::sql_ast::proc;
 
+use crate::table_read_es::SelectQuery;
 use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
@@ -269,24 +270,27 @@ pub trait CTServerContext: ServerContextBase {
   /// will perform Column Locking as well to ensure idempotence).
   fn get_min_tablets(
     &self,
-    table_path: &TablePath,
+    table_source: &proc::TableSource,
     full_gen: &FullGen,
-    table_ref: &proc::GeneralSource,
     selection: &proc::ValExpr,
   ) -> Vec<TabletGroupId> {
     // Compute the Row Region that this selection is accessing.
     let (gen, _) = full_gen;
-    let table_path_gen = (table_path.clone(), gen.clone());
+    let table_path_gen = (table_source.table_path.clone(), gen.clone());
     let key_cols = &self.gossip().get().db_schema.get(&table_path_gen).unwrap().key_cols;
 
     // TODO: We use a trivial implementation for now. Do a proper implementation later.
-    let _ = compute_key_region(selection, BTreeMap::new(), table_ref, key_cols);
-    self.get_all_tablets(table_path, full_gen)
+    let _ = compute_key_region(selection, BTreeMap::new(), &table_source.alias, key_cols);
+    self.get_all_tablets(table_source, full_gen)
   }
 
   /// Simply returns all `TabletGroupId`s for a `TablePath` and `Gen`
-  fn get_all_tablets(&self, table_path: &TablePath, full_gen: &FullGen) -> Vec<TabletGroupId> {
-    let table_path_gen = (table_path.clone(), full_gen.clone());
+  fn get_all_tablets(
+    &self,
+    table_source: &proc::TableSource,
+    full_gen: &FullGen,
+  ) -> Vec<TabletGroupId> {
+    let table_path_gen = (table_source.table_path.clone(), full_gen.clone());
     let tablet_groups = self.gossip().get().sharding_config.get(&table_path_gen).unwrap();
     tablet_groups.iter().map(|(_, tablet_group_id)| tablet_group_id.clone()).collect()
   }
@@ -377,8 +381,8 @@ pub struct EvaluatedSuperSimpleSelect {
 /// `subquery_vals` and substite it in for evaluation.
 ///
 /// Note that `schema` is the Schema of the `LocalTable` that this SELECT is reading.
-pub fn evaluate_super_simple_select(
-  select: &proc::SuperSimpleSelect,
+pub fn evaluate_super_simple_select<SqlQueryT: SelectQuery>(
+  select: &SqlQueryT,
   table_schema: &Vec<Option<ColName>>,
   col_refs: &Vec<ExtraColumnRef>,
   col_vals: &Vec<ColValN>,
@@ -406,7 +410,7 @@ pub fn evaluate_super_simple_select(
   // Construct the Evaluated Select
   let mut evaluated_select = EvaluatedSuperSimpleSelect::default();
   let mut next_subquery_idx = 0;
-  for item in &select.projection {
+  for item in select.projection() {
     match item {
       proc::SelectItem::ExprWithAlias { item, .. } => {
         let expr = match item {
@@ -421,7 +425,7 @@ pub fn evaluate_super_simple_select(
           let col_val = if let Some(col_name) = maybe_col_name {
             named_col_map
               .get(&proc::ColumnRef {
-                table_name: select.from.name().clone(),
+                table_name: select.name().clone(),
                 col_name: col_name.clone(),
               })
               .unwrap()
@@ -436,7 +440,7 @@ pub fn evaluate_super_simple_select(
   }
 
   evaluated_select.selection = evaluate_c_expr(&construct_cexpr(
-    &select.selection,
+    select.selection(),
     &named_col_map,
     &subquery_vals,
     &mut next_subquery_idx,
@@ -737,10 +741,10 @@ pub enum LocalColumnRef {
 }
 
 pub trait LocalTable {
-  /// The `GeneralSource` used in the query that this `LocalTable` is being used as a Data
+  /// The Table Alias used in the query that this `LocalTable` is being used as a Data
   /// Source for. This is needed to interpret whether a `ColumnRef`s is referring to the
   /// Data Source or not.
-  fn source(&self) -> &proc::GeneralSource;
+  fn source_name(&self) -> &String;
 
   /// Gets the schema of the `LocalTable`.
   fn schema(&self) -> &Vec<Option<ColName>>;
@@ -766,7 +770,7 @@ pub trait LocalTable {
   /// Checks whether this `ColumnRef` refers to a column in this `LocalTable`, taking the alias
   /// in the `source` into account.
   fn contains_col_ref(&self, col: &proc::ColumnRef) -> bool {
-    if self.source().name() == &col.table_name {
+    if self.source_name() == &col.table_name {
       debug_assert!(self.contains_col(&col.col_name));
       true
     } else {

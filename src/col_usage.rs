@@ -16,7 +16,9 @@ use std::ops::Deref;
 pub enum QueryElement<'a> {
   MSQuery(&'a proc::MSQuery),
   GRQuery(&'a proc::GRQuery),
-  SuperSimpleSelect(&'a proc::SuperSimpleSelect),
+  TableSelect(&'a proc::TableSelect),
+  TransTableSelect(&'a proc::TransTableSelect),
+  JoinSelect(&'a proc::JoinSelect),
   Update(&'a proc::Update),
   Insert(&'a proc::Insert),
   Delete(&'a proc::Delete),
@@ -60,12 +62,12 @@ impl QueryIterator {
     }
   }
 
-  pub fn iterate_select<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+  pub fn iterate_table_select<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
     &self,
     cb: &mut CbT,
-    query: &'a proc::SuperSimpleSelect,
+    query: &'a proc::TableSelect,
   ) {
-    cb(QueryElement::SuperSimpleSelect(query));
+    cb(QueryElement::TableSelect(query));
     for item in &query.projection {
       match item {
         proc::SelectItem::ExprWithAlias { item, .. } => {
@@ -79,6 +81,36 @@ impl QueryIterator {
       }
     }
     self.iterate_expr(cb, &query.selection)
+  }
+
+  pub fn iterate_trans_table_select<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &'a proc::TransTableSelect,
+  ) {
+    cb(QueryElement::TransTableSelect(query));
+    for item in &query.projection {
+      match item {
+        proc::SelectItem::ExprWithAlias { item, .. } => {
+          let expr = match item {
+            proc::SelectExprItem::ValExpr(expr) => expr,
+            proc::SelectExprItem::UnaryAggregate(agg) => &agg.expr,
+          };
+          self.iterate_expr(cb, expr);
+        }
+        proc::SelectItem::Wildcard { .. } => {}
+      }
+    }
+    self.iterate_expr(cb, &query.selection)
+  }
+
+  pub fn iterate_join_select<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &'a proc::JoinSelect,
+  ) {
+    // TODO: do properly
+    unimplemented!();
   }
 
   pub fn iterate_update<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
@@ -121,8 +153,14 @@ impl QueryIterator {
     stage: &'a proc::MSQueryStage,
   ) {
     match stage {
-      proc::MSQueryStage::SuperSimpleSelect(query) => {
-        self.iterate_select(cb, query);
+      proc::MSQueryStage::TableSelect(query) => {
+        self.iterate_table_select(cb, query);
+      }
+      proc::MSQueryStage::TransTableSelect(query) => {
+        self.iterate_trans_table_select(cb, query);
+      }
+      proc::MSQueryStage::JoinSelect(query) => {
+        self.iterate_join_select(cb, query);
       }
       proc::MSQueryStage::Update(query) => {
         self.iterate_update(cb, query);
@@ -153,8 +191,14 @@ impl QueryIterator {
     stage: &'a proc::GRQueryStage,
   ) {
     match stage {
-      proc::GRQueryStage::SuperSimpleSelect(query) => {
-        self.iterate_select(cb, query);
+      proc::GRQueryStage::TableSelect(query) => {
+        self.iterate_table_select(cb, query);
+      }
+      proc::GRQueryStage::TransTableSelect(query) => {
+        self.iterate_trans_table_select(cb, query);
+      }
+      proc::GRQueryStage::JoinSelect(query) => {
+        self.iterate_join_select(cb, query);
       }
     }
   }
@@ -226,17 +270,24 @@ pub fn alias_collecting_cb<'a>(
   alias_container: &'a mut BTreeSet<String>,
 ) -> impl FnMut(QueryElement) -> () + 'a {
   move |elem: QueryElement| match elem {
-    QueryElement::SuperSimpleSelect(select) => {
-      alias_container.insert(select.from.name().clone());
+    QueryElement::TableSelect(select) => {
+      alias_container.insert(select.from.alias.clone());
+    }
+    QueryElement::TransTableSelect(select) => {
+      alias_container.insert(select.from.alias.clone());
+    }
+    QueryElement::JoinSelect(_) => {
+      // TODO: do properly
+      unimplemented!()
     }
     QueryElement::Update(update) => {
-      alias_container.insert(update.table.name().clone());
+      alias_container.insert(update.table.alias.clone());
     }
     QueryElement::Insert(insert) => {
-      alias_container.insert(insert.table.name().clone());
+      alias_container.insert(insert.table.alias.clone());
     }
     QueryElement::Delete(delete) => {
-      alias_container.insert(delete.table.name().clone());
+      alias_container.insert(delete.table.alias.clone());
     }
     _ => {}
   }
@@ -286,11 +337,10 @@ pub fn external_trans_table_collecting_cb<'a>(
   external_trans_table: &'a mut BTreeSet<TransTableName>,
 ) -> impl FnMut(QueryElement) -> () + 'a {
   move |elem: QueryElement| match elem {
-    QueryElement::SuperSimpleSelect(select) => {
-      if let proc::GeneralSource::TransTableName { trans_table_name, .. } = &select.from {
-        if !trans_table_container.contains(trans_table_name) {
-          external_trans_table.insert(trans_table_name.clone());
-        }
+    QueryElement::TransTableSelect(select) => {
+      let trans_table_name = &select.from.trans_table_name;
+      if !trans_table_container.contains(trans_table_name) {
+        external_trans_table.insert(trans_table_name.clone());
       }
     }
     _ => {}

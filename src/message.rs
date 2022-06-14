@@ -470,8 +470,8 @@ pub struct PerformQuery {
 impl PerformQuery {
   pub fn get_query_plan(&self) -> &QueryPlan {
     match &self.query {
-      GeneralQuery::SuperSimpleTransTableSelectQuery(query) => &query.query_plan,
-      GeneralQuery::SuperSimpleTableSelectQuery(query) => &query.query_plan,
+      GeneralQuery::TransTableSelectQuery(query) => &query.query_plan,
+      GeneralQuery::TableSelectQuery(query) => &query.query_plan,
       GeneralQuery::UpdateQuery(query) => &query.query_plan,
       GeneralQuery::InsertQuery(query) => &query.query_plan,
       GeneralQuery::DeleteQuery(query) => &query.query_plan,
@@ -530,8 +530,8 @@ pub struct QueryAborted {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum GeneralQuery {
-  SuperSimpleTransTableSelectQuery(SuperSimpleTransTableSelectQuery),
-  SuperSimpleTableSelectQuery(SuperSimpleTableSelectQuery),
+  TransTableSelectQuery(TransTableSelectQuery),
+  TableSelectQuery(TableSelectQuery),
   UpdateQuery(UpdateQuery),
   InsertQuery(InsertQuery),
   DeleteQuery(DeleteQuery),
@@ -542,18 +542,18 @@ pub enum GeneralQuery {
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct SuperSimpleTransTableSelectQuery {
+pub struct TransTableSelectQuery {
   pub location_prefix: TransTableLocationPrefix,
   pub context: Context,
-  pub sql_query: proc::SuperSimpleSelect,
+  pub sql_query: proc::TransTableSelect,
   pub query_plan: QueryPlan,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct SuperSimpleTableSelectQuery {
+pub struct TableSelectQuery {
   pub timestamp: Timestamp,
   pub context: Context,
-  pub sql_query: proc::SuperSimpleSelect,
+  pub sql_query: proc::TableSelect,
   pub query_plan: QueryPlan,
 }
 

@@ -804,7 +804,7 @@ fn verify_req_res(
         // Otherwise, collect stats for Single-Stage queries.
         let ast = convert_ast(parsed_ast).unwrap();
         match ast.body {
-          iast::QueryBody::SuperSimpleSelect(_) => {
+          iast::QueryBody::Select(_) => {
             let i = ast.ctes.len();
             for _ in stats_ncte_1stage.len()..(i + 1) {
               stats_ncte_1stage.push(AvgCounter { num_elems: 0, sum: 0 });

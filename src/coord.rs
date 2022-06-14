@@ -304,7 +304,7 @@ impl CoordContext {
         match message {
           msg::CoordMessage::PerformQuery(perform_query) => {
             match perform_query.query {
-              msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
+              msg::GeneralQuery::TransTableSelectQuery(query) => {
                 // First, we check if the MSCoordES or GRCoordES still exists in the Statuses,
                 // continuing if so and aborting if not.
                 if let Some(ms_coord) =
@@ -386,7 +386,7 @@ impl CoordContext {
                   return;
                 }
               }
-              msg::GeneralQuery::SuperSimpleTableSelectQuery(_) => panic!(),
+              msg::GeneralQuery::TableSelectQuery(_) => panic!(),
               msg::GeneralQuery::UpdateQuery(_) => panic!(),
               msg::GeneralQuery::InsertQuery(_) => panic!(),
               msg::GeneralQuery::DeleteQuery(_) => panic!(),

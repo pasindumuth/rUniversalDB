@@ -44,7 +44,7 @@ impl InsertInner {
 
 impl SqlQueryInner for InsertInner {
   fn table_path(&self) -> &TablePath {
-    &self.sql_query.table.source_ref
+    &self.sql_query.table.table_path
   }
 
   fn request_region_locks<IO: CoreIOCtx>(

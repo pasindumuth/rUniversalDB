@@ -44,7 +44,7 @@ pub struct TransTableReadES {
   pub query_id: QueryId,
 
   // Query-related fields.
-  pub sql_query: proc::SuperSimpleSelect,
+  pub sql_query: proc::TransTableSelect,
   pub query_plan: QueryPlan,
 
   // Dynamically evolving fields.
@@ -65,7 +65,7 @@ struct TransLocalTable<'a, SourceT: TransTableSource> {
   trans_table_source: &'a SourceT,
   trans_table_name: &'a TransTableName,
   /// The `GeneralSource` in the Data Source of the Query.
-  source: &'a proc::GeneralSource,
+  source: &'a proc::TransTableSource,
   /// The schema read TransTable.
   schema: Vec<Option<ColName>>,
 }
@@ -74,7 +74,7 @@ impl<'a, SourceT: TransTableSource> TransLocalTable<'a, SourceT> {
   fn new(
     trans_table_source: &'a SourceT,
     trans_table_name: &'a TransTableName,
-    source: &'a proc::GeneralSource,
+    source: &'a proc::TransTableSource,
   ) -> TransLocalTable<'a, SourceT> {
     TransLocalTable {
       trans_table_source,
@@ -86,8 +86,8 @@ impl<'a, SourceT: TransTableSource> TransLocalTable<'a, SourceT> {
 }
 
 impl<'a, SourceT: TransTableSource> LocalTable for TransLocalTable<'a, SourceT> {
-  fn source(&self) -> &proc::GeneralSource {
-    self.source
+  fn source_name(&self) -> &String {
+    &self.source.alias
   }
 
   fn schema(&self) -> &Vec<Option<ColName>> {

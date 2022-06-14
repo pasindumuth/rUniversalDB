@@ -331,11 +331,11 @@ pub fn evaluate_c_expr(c_expr: &CExpr) -> Result<ColValN, EvalError> {
 /// Data Source Name (i.e. FROM clause), this function checks whether the `ColumnRef` is
 /// referring to a KeyCol in this Table.
 fn contains_key_col_ref(
-  source: &proc::GeneralSource,
+  source_name: &String,
   key_cols: &Vec<(ColName, ColType)>,
   col: &proc::ColumnRef,
 ) -> bool {
-  &col.table_name == source.name() && lookup(key_cols, &col.col_name).is_some()
+  &col.table_name == source_name && lookup(key_cols, &col.col_name).is_some()
 }
 
 /// Construct a `KBExpr` for evaluating KeyBounds. The `col_map` contains values for
@@ -346,7 +346,7 @@ fn contains_key_col_ref(
 fn construct_kb_expr(
   expr: proc::ValExpr,
   col_map: &BTreeMap<proc::ColumnRef, ColValN>,
-  source: &proc::GeneralSource,
+  source_name: &String,
   key_cols: &Vec<(ColName, ColType)>,
 ) -> Result<KBExpr, EvalError> {
   let kb_expr = match expr {
@@ -354,20 +354,21 @@ fn construct_kb_expr(
       if let Some(val) = col_map.get(&col) {
         KBExpr::Value { val: val.clone() }
       } else {
-        if contains_key_col_ref(source, key_cols, &col) {
+        if contains_key_col_ref(source_name, key_cols, &col) {
           KBExpr::KeyColumnRef { col_name: col.col_name }
         } else {
           KBExpr::UnknownValue
         }
       }
     }
-    proc::ValExpr::UnaryExpr { op, expr } => {
-      KBExpr::UnaryExpr { op, expr: Box::new(construct_kb_expr(*expr, col_map, source, key_cols)?) }
-    }
+    proc::ValExpr::UnaryExpr { op, expr } => KBExpr::UnaryExpr {
+      op,
+      expr: Box::new(construct_kb_expr(*expr, col_map, source_name, key_cols)?),
+    },
     proc::ValExpr::BinaryExpr { op, left, right } => KBExpr::BinaryExpr {
       op,
-      left: Box::new(construct_kb_expr(*left, col_map, source, key_cols)?),
-      right: Box::new(construct_kb_expr(*right, col_map, source, key_cols)?),
+      left: Box::new(construct_kb_expr(*left, col_map, source_name, key_cols)?),
+      right: Box::new(construct_kb_expr(*right, col_map, source_name, key_cols)?),
     },
     proc::ValExpr::Value { val } => KBExpr::Value { val: construct_colvaln(val.clone())? },
     proc::ValExpr::Subquery { .. } => KBExpr::UnknownValue,
@@ -653,20 +654,20 @@ pub fn compress_row_region(row_region: Vec<KeyBound>) -> Vec<KeyBound> {
 pub fn compute_key_region(
   expr: &proc::ValExpr,
   col_map: BTreeMap<proc::ColumnRef, ColValN>,
-  source: &proc::GeneralSource,
+  source_name: &String,
   key_cols: &Vec<(ColName, ColType)>,
 ) -> Vec<KeyBound> {
   // Enforce the precondition.
   debug_assert!((|| {
     for (col, _) in &col_map {
-      if contains_key_col_ref(source, key_cols, &col) {
+      if contains_key_col_ref(source_name, key_cols, &col) {
         return false;
       }
     }
     true
   })());
 
-  let kb_expr_res = construct_kb_expr(expr.clone(), &col_map, source, key_cols);
+  let kb_expr_res = construct_kb_expr(expr.clone(), &col_map, source_name, key_cols);
   let mut key_bounds = Vec::<KeyBound>::new();
 
   // The strategy here is to start with an all-encompassing KeyRegion, then reduce the

@@ -37,7 +37,7 @@ impl DeleteInner {
 
 impl SqlQueryInner for DeleteInner {
   fn table_path(&self) -> &TablePath {
-    &self.sql_query.table.source_ref
+    &self.sql_query.table.table_path
   }
 
   fn request_region_locks<IO: CoreIOCtx>(
@@ -54,13 +54,12 @@ impl SqlQueryInner for DeleteInner {
     );
 
     // Compute the ReadRegion
-    let source = self.sql_query.table.to_read_source();
     let read_region = compute_read_region(
       &ctx.table_schema.key_cols,
       &ctx.this_tablet_key_range,
       &es.context,
       &self.sql_query.selection,
-      &source,
+      &self.sql_query.table.alias,
       safe_present_cols,
       vec![],
     );
@@ -114,7 +113,7 @@ impl SqlQueryInner for DeleteInner {
       StorageLocalTable::new(
         &ctx.table_schema,
         &es.timestamp,
-        &self.sql_query.table.to_read_source(),
+        &self.sql_query.table,
         &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         MSStorageView::new(
@@ -139,13 +138,12 @@ impl SqlQueryInner for DeleteInner {
     ms_query_es: &mut MSQueryES,
   ) -> TPESAction {
     // Create the ContextConstructor.
-    let source = self.sql_query.table.to_read_source();
     let context_constructor = ContextConstructor::new(
       es.context.context_schema.clone(),
       StorageLocalTable::new(
         &ctx.table_schema,
         &es.timestamp,
-        &source,
+        &self.sql_query.table,
         &ctx.this_tablet_key_range,
         &self.sql_query.selection,
         MSStorageView::new(

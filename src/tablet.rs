@@ -1022,7 +1022,7 @@ pub struct StorageLocalTable<'a, StorageViewT: StorageView> {
   /// The Timestamp which we are reading data at.
   timestamp: &'a Timestamp,
   /// The `GeneralSource` in the Data Source of the Query.
-  source: &'a proc::GeneralSource,
+  source: &'a proc::TableSource,
   /// The `TabletKeyRange` of the Tablet. Recall that the underlying storage might temporarily
   /// have keys outside of this range during the Sharding process.
   tablet_key_range: &'a TabletKeyRange,
@@ -1038,7 +1038,7 @@ impl<'a, StorageViewT: StorageView> StorageLocalTable<'a, StorageViewT> {
   pub fn new(
     table_schema: &'a TableSchema,
     timestamp: &'a Timestamp,
-    source: &'a proc::GeneralSource,
+    source: &'a proc::TableSource,
     tablet_key_range: &'a TabletKeyRange,
     selection: &'a proc::ValExpr,
     storage: StorageViewT,
@@ -1057,8 +1057,8 @@ impl<'a, StorageViewT: StorageView> StorageLocalTable<'a, StorageViewT> {
 }
 
 impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, StorageViewT> {
-  fn source(&self) -> &proc::GeneralSource {
-    self.source
+  fn source_name(&self) -> &String {
+    &self.source.alias
   }
 
   fn schema(&self) -> &Vec<Option<ColName>> {
@@ -1089,7 +1089,7 @@ impl<'a, StorageViewT: StorageView> LocalTable for StorageLocalTable<'a, Storage
     let key_bounds = range_row_region_intersection(
       &self.table_schema.key_cols,
       &self.tablet_key_range,
-      compute_key_region(&self.selection, col_map, &self.source, &self.table_schema.key_cols),
+      compute_key_region(&self.selection, col_map, &self.source.alias, &self.table_schema.key_cols),
     );
     self.storage.compute_subtable(&key_bounds, &col_names, self.timestamp)
   }
@@ -1886,7 +1886,7 @@ impl TabletContext {
 
     // Otherwise, we may process the PerformQuery
     match perform_query.query {
-      msg::GeneralQuery::SuperSimpleTransTableSelectQuery(query) => {
+      msg::GeneralQuery::TransTableSelectQuery(query) => {
         // First, we check if the GRQueryES still exists in the Statuses, continuing
         // if so and aborting if not.
         if let Some(gr_query) = statuses.gr_query_ess.get(&query.location_prefix.source.query_id) {
@@ -1923,9 +1923,9 @@ impl TabletContext {
           return;
         }
       }
-      msg::GeneralQuery::SuperSimpleTableSelectQuery(query) => {
+      msg::GeneralQuery::TableSelectQuery(query) => {
         // We inspect the TierMap to see what kind of ES to create
-        let table_path = query.sql_query.from.to_table_path();
+        let table_path = &query.sql_query.from.table_path;
         if query.query_plan.tier_map.map.contains_key(table_path) {
           self.start_ms_table_es(
             io_ctx,

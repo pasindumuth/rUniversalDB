@@ -132,11 +132,20 @@ pub trait SubqueryComputableSql {
   fn collect_subqueries(&self) -> Vec<proc::GRQuery>;
 }
 
-impl SubqueryComputableSql for proc::SuperSimpleSelect {
+impl SubqueryComputableSql for proc::TableSelect {
   fn collect_subqueries(&self) -> Vec<proc::GRQuery> {
     let mut top_level_cols_set = Vec::<proc::GRQuery>::new();
     QueryIterator::new_top_level()
-      .iterate_select(&mut gr_query_collecting_cb(&mut top_level_cols_set), self);
+      .iterate_table_select(&mut gr_query_collecting_cb(&mut top_level_cols_set), self);
+    top_level_cols_set
+  }
+}
+
+impl SubqueryComputableSql for proc::TransTableSelect {
+  fn collect_subqueries(&self) -> Vec<proc::GRQuery> {
+    let mut top_level_cols_set = Vec::<proc::GRQuery>::new();
+    QueryIterator::new_top_level()
+      .iterate_trans_table_select(&mut gr_query_collecting_cb(&mut top_level_cols_set), self);
     top_level_cols_set
   }
 }
@@ -232,14 +241,23 @@ impl GRQueryES {
     results: Vec<Vec<TableView>>,
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
-    let stage_query_id = &read_stage.stage_query_id;
-    assert_eq!(stage_query_id, &tm_qid);
+    assert_eq!(&read_stage.stage_query_id, &tm_qid);
 
     // Combine the results into a single one
-    let (trans_table_name, proc::GRQueryStage::SuperSimpleSelect(sql_query)) =
-      self.sql_query.trans_tables.get(read_stage.stage_idx).unwrap();
+    let (trans_table_name, stage) = self.sql_query.trans_tables.get(read_stage.stage_idx).unwrap();
     let pre_agg_table_views = merge_table_views(results);
-    let table_views = match perform_aggregation(sql_query, pre_agg_table_views) {
+    let table_views = match match stage {
+      proc::GRQueryStage::TableSelect(sql_query) => {
+        perform_aggregation(sql_query, pre_agg_table_views)
+      }
+      proc::GRQueryStage::TransTableSelect(sql_query) => {
+        perform_aggregation(sql_query, pre_agg_table_views)
+      }
+      proc::GRQueryStage::JoinSelect(_) => {
+        // TODO: do properly
+        unimplemented!()
+      }
+    } {
       Ok(result) => result,
       Err(eval_error) => {
         return GRQueryAction::QueryError(msg::QueryError::RuntimeError {
@@ -258,7 +276,7 @@ impl GRQueryES {
     self.new_rms.extend(new_rms);
 
     // Add the `table_views` to the GRQueryES and advance it.
-    let schema = sql_query.schema.clone();
+    let schema = stage.schema().clone();
     self.trans_table_views.push((trans_table_name.clone(), (schema, table_views)));
     self.advance(ctx, io_ctx)
   }
@@ -496,48 +514,39 @@ impl GRQueryES {
       TMStatus::new(io_ctx, self.root_query_path.clone(), OrigP::new(self.query_id.clone()));
 
     // Send out the PerformQuery and populate TMStatus accordingly.
-    let child_sql_query = cast!(proc::GRQueryStage::SuperSimpleSelect, stage).unwrap();
-    let helper = match &child_sql_query.from {
-      proc::GeneralSource::TablePath { table_path, .. } => {
-        // Here, we must do a SuperSimpleTableSelectQuery.
-        let general_query =
-          msg::GeneralQuery::SuperSimpleTableSelectQuery(msg::SuperSimpleTableSelectQuery {
-            timestamp: self.timestamp.clone(),
-            context: context.clone(),
-            sql_query: child_sql_query.clone(),
-            query_plan,
-          });
-        let full_gen = self.query_plan.table_location_map.get(table_path).unwrap();
-        let tids = ctx.get_min_tablets(
-          table_path,
-          full_gen,
-          &child_sql_query.from,
-          &child_sql_query.selection,
-        );
+    let helper = match stage {
+      proc::GRQueryStage::TableSelect(select) => {
+        // Here, we must do a TableSelectQuery.
+        let general_query = msg::GeneralQuery::TableSelectQuery(msg::TableSelectQuery {
+          timestamp: self.timestamp.clone(),
+          context: context.clone(),
+          sql_query: select.clone(),
+          query_plan,
+        });
+        let full_gen = self.query_plan.table_location_map.get(&select.from.table_path).unwrap();
+        let tids = ctx.get_min_tablets(&select.from, full_gen, &select.selection);
         SendHelper::TableQuery(general_query, tids)
       }
-      proc::GeneralSource::TransTableName { trans_table_name, .. } => {
-        // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
+      proc::GRQueryStage::TransTableSelect(select) => {
+        // Here, we must do a TransTableSelectQuery. Recall there is only one RM.
         let location_prefix = context
           .context_schema
           .trans_table_context_schema
           .iter()
-          .find(|prefix| &prefix.trans_table_name == trans_table_name)
+          .find(|prefix| &prefix.trans_table_name == &select.from.trans_table_name)
           .unwrap()
           .clone();
-        let general_query = msg::GeneralQuery::SuperSimpleTransTableSelectQuery(
-          msg::SuperSimpleTransTableSelectQuery {
-            location_prefix: location_prefix.clone(),
-            context: context.clone(),
-            sql_query: child_sql_query.clone(),
-            query_plan,
-          },
-        );
+        let general_query = msg::GeneralQuery::TransTableSelectQuery(msg::TransTableSelectQuery {
+          location_prefix: location_prefix.clone(),
+          context: context.clone(),
+          sql_query: select.clone(),
+          query_plan,
+        });
         SendHelper::TransTableQuery(general_query, location_prefix)
       }
-      proc::GeneralSource::JoinNode(_) => {
+      proc::GRQueryStage::JoinSelect(_) => {
         // TODO: do properly.
-        panic!()
+        unimplemented!()
       }
     };
 

@@ -127,7 +127,7 @@ fn convert_query(query: ast::Query) -> Result<iast::Query, String> {
 // -----------------------------------------------------------------------------------------------
 
 fn convert_select(select: ast::Select) -> Result<iast::QueryBody, String> {
-  Ok(iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
+  Ok(iast::QueryBody::Select(iast::Select {
     distinct: select.distinct,
     projection: convert_select_clause(select.projection)?,
     from: convert_from(select.from)?,

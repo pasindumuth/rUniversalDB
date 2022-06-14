@@ -28,11 +28,11 @@ pub type MSTableReadES = MSTableES<SelectInner>;
 
 #[derive(Debug)]
 pub struct SelectInner {
-  sql_query: proc::SuperSimpleSelect,
+  sql_query: proc::TableSelect,
 }
 
 impl SelectInner {
-  pub fn new(sql_query: proc::SuperSimpleSelect) -> Self {
+  pub fn new(sql_query: proc::TableSelect) -> Self {
     SelectInner { sql_query }
   }
 }
@@ -40,7 +40,7 @@ impl SelectInner {
 impl SqlQueryInner for SelectInner {
   /// This function shouly only be called if we know `from` is not a `JoinNode`.
   fn table_path(&self) -> &TablePath {
-    self.sql_query.from.to_table_path()
+    &self.sql_query.from.table_path
   }
 
   fn request_region_locks<IO: CoreIOCtx>(
@@ -65,8 +65,8 @@ impl SqlQueryInner for SelectInner {
 
     // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
     let mut safe_present_cols = Vec::<ColName>::new();
-    QueryIterator::new().iterate_select(
-      &mut col_collecting_cb(self.sql_query.from.name(), &mut safe_present_cols),
+    QueryIterator::new().iterate_table_select(
+      &mut col_collecting_cb(&self.sql_query.from.alias, &mut safe_present_cols),
       &self.sql_query,
     );
 
@@ -76,7 +76,7 @@ impl SqlQueryInner for SelectInner {
       &ctx.this_tablet_key_range,
       &es.context,
       &self.sql_query.selection,
-      &self.sql_query.from,
+      &self.sql_query.from.alias,
       safe_present_cols,
       extra_cols,
     );

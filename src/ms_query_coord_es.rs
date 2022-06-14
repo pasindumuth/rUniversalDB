@@ -197,42 +197,45 @@ impl FullMSCoordES {
     match self {
       FullMSCoordES::Executing(es) => {
         match &es.state {
-          CoordState::Stage(stage) if tm_qid == stage.stage_query_id => {
+          CoordState::Stage(coord_stage) if tm_qid == coord_stage.stage_query_id => {
             // Combine the results into a single one
-            let (_, query_stage) = es.ms_query.trans_tables.get(stage.stage_idx).unwrap();
-            let table_views = match query_stage {
-              proc::MSQueryStage::SuperSimpleSelect(sql_query) => {
-                let pre_agg_table_views = merge_table_views(results);
-                match perform_aggregation(sql_query, pre_agg_table_views) {
-                  Ok(result) => result,
-                  Err(eval_error) => {
-                    self.exit_and_clean_up(ctx, io_ctx);
-                    return MSQueryCoordAction::FatalFailure(
-                      msg::ExternalAbortedData::QueryExecutionError(
-                        msg::ExternalQueryError::RuntimeError {
-                          msg: format!(
-                            "Aggregation of MSQueryES failed with error {:?}",
-                            eval_error
-                          ),
-                        },
-                      ),
-                    );
-                  }
-                }
+            let (trans_table_name, stage) =
+              es.ms_query.trans_tables.get(coord_stage.stage_idx).unwrap();
+            let pre_agg_table_views = merge_table_views(results);
+            let table_views = match match stage {
+              proc::MSQueryStage::TableSelect(sql_query) => {
+                perform_aggregation(sql_query, pre_agg_table_views)
               }
-              proc::MSQueryStage::Update(_) => merge_table_views(results),
-              proc::MSQueryStage::Insert(_) => merge_table_views(results),
-              proc::MSQueryStage::Delete(_) => merge_table_views(results),
+              proc::MSQueryStage::TransTableSelect(sql_query) => {
+                perform_aggregation(sql_query, pre_agg_table_views)
+              }
+              proc::MSQueryStage::JoinSelect(_) => {
+                // TODO: do properly
+                unimplemented!()
+              }
+              proc::MSQueryStage::Update(_) => Ok(pre_agg_table_views),
+              proc::MSQueryStage::Insert(_) => Ok(pre_agg_table_views),
+              proc::MSQueryStage::Delete(_) => Ok(pre_agg_table_views),
+            } {
+              Ok(result) => result,
+              Err(eval_error) => {
+                self.exit_and_clean_up(ctx, io_ctx);
+                return MSQueryCoordAction::FatalFailure(
+                  msg::ExternalAbortedData::QueryExecutionError(
+                    msg::ExternalQueryError::RuntimeError {
+                      msg: format!("Aggregation of MSQueryES failed with error {:?}", eval_error),
+                    },
+                  ),
+                );
+              }
             };
-
-            let (trans_table_name, stage) = es.ms_query.trans_tables.get(stage.stage_idx).unwrap();
-            let schema = stage.schema().clone();
 
             // Recall that since we only send out one ContextRow, there should only be one TableView.
             assert_eq!(table_views.len(), 1);
 
             // Then, the results to the `trans_table_views`
             let table_view = table_views.into_iter().next().unwrap();
+            let schema = stage.schema().clone();
             es.trans_table_views.push((trans_table_name.clone(), (schema, table_view)));
             es.all_rms.extend(new_rms);
             self.advance(ctx, io_ctx)
@@ -487,47 +490,38 @@ impl FullMSCoordES {
 
     // Send out the PerformQuery.
     let helper = match stage {
-      proc::MSQueryStage::SuperSimpleSelect(select_query) => {
-        match &select_query.from {
-          proc::GeneralSource::TablePath { table_path, .. } => {
-            let general_query =
-              msg::GeneralQuery::SuperSimpleTableSelectQuery(msg::SuperSimpleTableSelectQuery {
-                timestamp: es.timestamp.clone(),
-                context: context.clone(),
-                sql_query: select_query.clone(),
-                query_plan,
-              });
-            let gen = es.query_plan.table_location_map.get(table_path).unwrap();
-            let tids =
-              ctx.get_min_tablets(&table_path, gen, &select_query.from, &select_query.selection);
-            SendHelper::TableQuery(general_query, tids)
-          }
-          proc::GeneralSource::TransTableName {
-            trans_table_name: sub_trans_table_name, ..
-          } => {
-            // Here, we must do a SuperSimpleTransTableSelectQuery. Recall there is only one RM.
-            let location_prefix = context
-              .context_schema
-              .trans_table_context_schema
-              .iter()
-              .find(|prefix| &prefix.trans_table_name == sub_trans_table_name)
-              .unwrap()
-              .clone();
-            let general_query = msg::GeneralQuery::SuperSimpleTransTableSelectQuery(
-              msg::SuperSimpleTransTableSelectQuery {
-                location_prefix: location_prefix.clone(),
-                context: context.clone(),
-                sql_query: select_query.clone(),
-                query_plan,
-              },
-            );
-            SendHelper::TransTableQuery(general_query, location_prefix)
-          }
-          proc::GeneralSource::JoinNode(_) => {
-            // TODO: do properly.
-            panic!()
-          }
-        }
+      proc::MSQueryStage::TableSelect(select) => {
+        // Here, we must do a TableSelectQuery.
+        let general_query = msg::GeneralQuery::TableSelectQuery(msg::TableSelectQuery {
+          timestamp: es.timestamp.clone(),
+          context: context.clone(),
+          sql_query: select.clone(),
+          query_plan,
+        });
+        let full_gen = es.query_plan.table_location_map.get(&select.from.table_path).unwrap();
+        let tids = ctx.get_min_tablets(&select.from, full_gen, &select.selection);
+        SendHelper::TableQuery(general_query, tids)
+      }
+      proc::MSQueryStage::TransTableSelect(select) => {
+        // Here, we must do a TransTableSelectQuery. Recall there is only one RM.
+        let location_prefix = context
+          .context_schema
+          .trans_table_context_schema
+          .iter()
+          .find(|prefix| &prefix.trans_table_name == &select.from.trans_table_name)
+          .unwrap()
+          .clone();
+        let general_query = msg::GeneralQuery::TransTableSelectQuery(msg::TransTableSelectQuery {
+          location_prefix: location_prefix.clone(),
+          context: context.clone(),
+          sql_query: select.clone(),
+          query_plan,
+        });
+        SendHelper::TransTableQuery(general_query, location_prefix)
+      }
+      proc::MSQueryStage::JoinSelect(_) => {
+        // TODO: do properly.
+        unimplemented!()
       }
       proc::MSQueryStage::Update(update_query) => {
         let general_query = msg::GeneralQuery::UpdateQuery(msg::UpdateQuery {
@@ -536,14 +530,9 @@ impl FullMSCoordES {
           sql_query: update_query.clone(),
           query_plan,
         });
-        let table_path = &update_query.table;
-        let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
-        let tids = ctx.get_min_tablets(
-          &table_path.source_ref,
-          gen,
-          &table_path.to_read_source(),
-          &update_query.selection,
-        );
+        let table_source = &update_query.table;
+        let gen = es.query_plan.table_location_map.get(&table_source.table_path).unwrap();
+        let tids = ctx.get_min_tablets(table_source, gen, &update_query.selection);
         SendHelper::TableQuery(general_query, tids)
       }
       proc::MSQueryStage::Insert(insert_query) => {
@@ -555,9 +544,9 @@ impl FullMSCoordES {
         });
         // As an optimization, for inserts, we can evaluate the VALUES and select only the
         // Tablets that are written to. For now, we just consider all.
-        let table_path = &insert_query.table;
-        let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
-        let tids = ctx.get_all_tablets(&table_path.source_ref, gen);
+        let table_source = &insert_query.table;
+        let gen = es.query_plan.table_location_map.get(&table_source.table_path).unwrap();
+        let tids = ctx.get_all_tablets(table_source, gen);
         SendHelper::TableQuery(general_query, tids)
       }
       proc::MSQueryStage::Delete(delete_query) => {
@@ -567,14 +556,9 @@ impl FullMSCoordES {
           sql_query: delete_query.clone(),
           query_plan,
         });
-        let table_path = &delete_query.table;
-        let gen = es.query_plan.table_location_map.get(&table_path.source_ref).unwrap();
-        let tids = ctx.get_min_tablets(
-          &table_path.source_ref,
-          gen,
-          &table_path.to_read_source(),
-          &delete_query.selection,
-        );
+        let table_source = &delete_query.table;
+        let gen = es.query_plan.table_location_map.get(&table_source.table_path).unwrap();
+        let tids = ctx.get_min_tablets(table_source, gen, &delete_query.selection);
         SendHelper::TableQuery(general_query, tids)
       }
     };

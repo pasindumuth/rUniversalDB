@@ -11,8 +11,8 @@ fn basic_join_node(name: String, alias: Option<String>) -> iast::JoinNode {
   iast::JoinNode::JoinLeaf(iast::JoinLeaf { alias, source: iast::JoinNodeSource::Table(name) })
 }
 
-fn basic_select(table_ref: &str) -> iast::SuperSimpleSelect {
-  iast::SuperSimpleSelect {
+fn basic_select(table_ref: &str) -> iast::Select {
+  iast::Select {
     distinct: false,
     projection: vec![],
     from: basic_join_node(table_ref.to_string(), None),
@@ -23,7 +23,7 @@ fn basic_select(table_ref: &str) -> iast::SuperSimpleSelect {
 fn basic_select_query(ctes: Vec<(&str, iast::Query)>, table_ref: &str) -> iast::Query {
   iast::Query {
     ctes: ctes.iter().map(|(name, query)| (name.to_string(), query.clone())).collect(),
-    body: iast::QueryBody::SuperSimpleSelect(basic_select(table_ref)),
+    body: iast::QueryBody::Select(basic_select(table_ref)),
   }
 }
 
@@ -54,7 +54,7 @@ fn test_basic_rename() {
         "tt\\0\\tt1".to_string(),
         iast::Query {
           ctes: vec![],
-          body: iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
+          body: iast::QueryBody::Select(iast::Select {
             distinct: false,
             projection: iast::SelectClause::SelectList(vec![]),
             from: basic_join_node("t2".to_string(), None),
@@ -69,7 +69,7 @@ fn test_basic_rename() {
             "tt\\1\\tt1".to_string(),
             iast::Query {
               ctes: vec![],
-              body: iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
+              body: iast::QueryBody::Select(iast::Select {
                 distinct: false,
                 projection: iast::SelectClause::SelectList(vec![]),
                 from: basic_join_node("tt\\0\\tt1".to_string(), Some("tt1".to_string())),
@@ -77,7 +77,7 @@ fn test_basic_rename() {
               }),
             },
           )],
-          body: iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
+          body: iast::QueryBody::Select(iast::Select {
             distinct: false,
             projection: iast::SelectClause::SelectList(vec![]),
             from: basic_join_node("tt\\1\\tt1".to_string(), Some("tt1".to_string())),
@@ -86,7 +86,7 @@ fn test_basic_rename() {
         },
       ),
     ],
-    body: iast::QueryBody::SuperSimpleSelect(iast::SuperSimpleSelect {
+    body: iast::QueryBody::Select(iast::Select {
       distinct: false,
       projection: iast::SelectClause::SelectList(vec![]),
       from: basic_join_node("tt\\2\\tt2".to_string(), Some("tt2".to_string())),
@@ -123,7 +123,7 @@ fn test_basic_flatten() {
     trans_tables: vec![
       (
         TransTableName("tt\\0\\tt1".to_string()),
-        proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+        proc::MSQueryStage::TableSelect(proc::TableSelect {
           distinct: false,
           projection: proc::SelectClause::SelectList(vec![]),
           from: proc::GeneralSource {
@@ -135,7 +135,7 @@ fn test_basic_flatten() {
       ),
       (
         TransTableName("tt\\1\\tt1".to_string()),
-        proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+        proc::MSQueryStage::TableSelect(proc::TableSelect {
           distinct: false,
           projection: proc::SelectClause::SelectList(vec![]),
           from: proc::GeneralSource {
@@ -149,7 +149,7 @@ fn test_basic_flatten() {
       ),
       (
         TransTableName("tt\\2\\tt2".to_string()),
-        proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+        proc::MSQueryStage::TableSelect(proc::TableSelect {
           distinct: false,
           projection: proc::SelectClause::SelectList(vec![]),
           from: proc::GeneralSource {
@@ -163,7 +163,7 @@ fn test_basic_flatten() {
       ),
       (
         TransTableName("tt\\3\\".to_string()),
-        proc::MSQueryStage::SuperSimpleSelect(proc::SuperSimpleSelect {
+        proc::MSQueryStage::TableSelect(proc::TableSelect {
           distinct: false,
           projection: proc::SelectClause::SelectList(vec![]),
           from: proc::GeneralSource {
