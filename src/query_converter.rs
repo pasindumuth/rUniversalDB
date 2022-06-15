@@ -1,4 +1,4 @@
-use crate::common::{lookup, ColName, TablePath, TransTableName};
+use crate::common::{lookup, ColName, ReadOnlySet, TablePath, TransTableName};
 use crate::master_query_planning_es::{DBSchemaView, ErrorTrait};
 use crate::message as msg;
 use crate::sql_ast::{iast, proc};
@@ -1469,13 +1469,22 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
           }))
         }
       }
-      _ => Ok(SelectEnum::JoinSelect(proc::JoinSelect {
-        distinct: select.distinct,
-        projection: p_projection,
-        from: self.flatten_join_node(&select.from)?,
-        selection: self.flatten_val_expr_r(&select.selection)?,
-        schema: self.compute_schema(assignment_name),
-      })),
+      _ => {
+        let mut from = self.flatten_join_node(&select.from)?;
+        let mut jls = self.optimize_jls(&mut from);
+
+        // Optimize `from` using the WHERE clause as well.
+        let selection = self.flatten_val_expr_r(&select.selection)?;
+        self.update_jls_with_conjunctions(&mut jls, &selection);
+
+        Ok(SelectEnum::JoinSelect(proc::JoinSelect {
+          distinct: select.distinct,
+          projection: p_projection,
+          from,
+          selection,
+          schema: self.compute_schema(assignment_name),
+        }))
+      }
     }
   }
 
@@ -1600,5 +1609,107 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
     }
 
     Ok(())
+  }
+
+  //  Join Optimization Utilities
+
+  /// Add various optimizations for the JLSs based on the ON clauses.
+  fn optimize_jls<'a>(
+    &self,
+    node: &'a mut proc::JoinNode,
+  ) -> BTreeMap<String, &'a mut proc::ValExpr> {
+    let mut jls = BTreeMap::<String, &mut proc::ValExpr>::new();
+    match node {
+      proc::JoinNode::JoinInnerNode(inner) => {
+        let mut left_jls = self.optimize_jls(&mut inner.left);
+        let mut right_jls = self.optimize_jls(&mut inner.right);
+
+        // Process the conjuctions in the ON clause and amend the JLSs accordingly.
+        match &inner.join_type {
+          iast::JoinType::Inner => {
+            self.update_jls_with_conjunctions(&mut left_jls, &inner.on);
+            self.update_jls_with_conjunctions(&mut right_jls, &inner.on);
+          }
+          iast::JoinType::Left => {
+            self.update_jls_with_conjunctions(&mut right_jls, &inner.on);
+          }
+          iast::JoinType::Right => {
+            self.update_jls_with_conjunctions(&mut left_jls, &inner.on);
+          }
+          iast::JoinType::Outer => {}
+        };
+
+        jls.extend(left_jls.into_iter());
+        jls.extend(right_jls.into_iter());
+      }
+      proc::JoinNode::JoinLeaf(leaf) => {
+        // The last stage in the GRQuery should contain the desired WHERE clause.
+        let (_, stage) = leaf.query.trans_tables.last_mut().unwrap();
+        let selection = match stage {
+          proc::GRQueryStage::TableSelect(select) => &mut select.selection,
+          proc::GRQueryStage::TransTableSelect(select) => &mut select.selection,
+          proc::GRQueryStage::JoinSelect(_) => panic!(),
+        };
+        jls.insert(leaf.alias.clone(), selection);
+      }
+    }
+    jls
+  }
+
+  /// Iterates over the top-level conjunctions of `expr` and pushes it down to the
+  /// appropriate JLS WHERE Clause if it only concerns that JLS (which will ultimately
+  /// make the query more efficient.
+  fn update_jls_with_conjunctions<'a>(
+    &self,
+    jls: &mut BTreeMap<String, &'a mut proc::ValExpr>,
+    expr: &proc::ValExpr,
+  ) {
+    if let proc::ValExpr::BinaryExpr { left, right, op: iast::BinaryOp::And } = expr {
+      self.update_jls_with_conjunctions(jls, left);
+      self.update_jls_with_conjunctions(jls, right);
+    } else {
+      if let Ok(Some(table_name)) = self.does_concern_one_jls(jls, expr) {
+        let selection_ref = jls.get_mut(&table_name).unwrap();
+
+        // Replace `selection_ref` with a sentinal and take what was already there.
+        let old_selection = std::mem::replace(
+          *selection_ref,
+          proc::ValExpr::Value { val: iast::Value::Boolean(false) },
+        );
+
+        // Replace `selection_ref` with the final value, combining `expr` and `old_selection`.
+        **selection_ref = proc::ValExpr::BinaryExpr {
+          op: iast::BinaryOp::And,
+          left: Box::new(old_selection),
+          right: Box::new(expr.clone()),
+        };
+      }
+    }
+  }
+
+  /// This function returns `Ok(None)` if there are no `ColumnRefs` underneath `expr` that do
+  /// not have a `table_name` in `jlns`, and there are no `GRQuery`s. It returns `Ok(Some(_))` if
+  /// there is exactly one, and `Err(())` if there is more than one or if there is a `GRQuery`.
+  fn does_concern_one_jls<SetT: ReadOnlySet<String>>(
+    &self,
+    jlns: &SetT,
+    expr: &proc::ValExpr,
+  ) -> Result<Option<String>, ()> {
+    match expr {
+      proc::ValExpr::ColumnRef(col) => {
+        Ok(if jlns.contains(&col.table_name) { Some(col.table_name.clone()) } else { None })
+      }
+      proc::ValExpr::UnaryExpr { expr, .. } => self.does_concern_one_jls(jlns, expr),
+      proc::ValExpr::BinaryExpr { left, right, .. } => {
+        match (self.does_concern_one_jls(jlns, left)?, self.does_concern_one_jls(jlns, right)?) {
+          (Some(_), Some(_)) => Err(()),
+          (Some(left), None) => Ok(Some(left)),
+          (None, Some(right)) => Ok(Some(right)),
+          (None, None) => Ok(None),
+        }
+      }
+      proc::ValExpr::Value { .. } => Ok(None),
+      proc::ValExpr::Subquery { .. } => Err(()),
+    }
   }
 }
