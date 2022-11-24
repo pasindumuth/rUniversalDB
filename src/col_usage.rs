@@ -19,6 +19,7 @@ pub enum QueryElement<'a> {
   TableSelect(&'a proc::TableSelect),
   TransTableSelect(&'a proc::TransTableSelect),
   JoinSelect(&'a proc::JoinSelect),
+  JoinLeaf(&'a proc::JoinLeaf),
   Update(&'a proc::Update),
   Insert(&'a proc::Insert),
   Delete(&'a proc::Delete),
@@ -62,13 +63,12 @@ impl QueryIterator {
     }
   }
 
-  pub fn iterate_table_select<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+  pub fn iterate_select_items<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
     &self,
     cb: &mut CbT,
-    query: &'a proc::TableSelect,
+    projection: &'a Vec<proc::SelectItem>,
   ) {
-    cb(QueryElement::TableSelect(query));
-    for item in &query.projection {
+    for item in projection {
       match item {
         proc::SelectItem::ExprWithAlias { item, .. } => {
           let expr = match item {
@@ -80,6 +80,33 @@ impl QueryIterator {
         proc::SelectItem::Wildcard { .. } => {}
       }
     }
+  }
+
+  pub fn iterate_join_node<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    node: &'a proc::JoinNode,
+  ) {
+    match node {
+      proc::JoinNode::JoinInnerNode(inner) => {
+        self.iterate_join_node(cb, &inner.left);
+        self.iterate_join_node(cb, &inner.right);
+        self.iterate_expr(cb, &inner.on);
+      }
+      proc::JoinNode::JoinLeaf(leaf) => {
+        cb(QueryElement::JoinLeaf(leaf));
+        self.iterate_gr_query(cb, &leaf.query);
+      }
+    }
+  }
+
+  pub fn iterate_table_select<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &'a proc::TableSelect,
+  ) {
+    cb(QueryElement::TableSelect(query));
+    self.iterate_select_items(cb, &query.projection);
     self.iterate_expr(cb, &query.selection)
   }
 
@@ -89,18 +116,7 @@ impl QueryIterator {
     query: &'a proc::TransTableSelect,
   ) {
     cb(QueryElement::TransTableSelect(query));
-    for item in &query.projection {
-      match item {
-        proc::SelectItem::ExprWithAlias { item, .. } => {
-          let expr = match item {
-            proc::SelectExprItem::ValExpr(expr) => expr,
-            proc::SelectExprItem::UnaryAggregate(agg) => &agg.expr,
-          };
-          self.iterate_expr(cb, expr);
-        }
-        proc::SelectItem::Wildcard { .. } => {}
-      }
-    }
+    self.iterate_select_items(cb, &query.projection);
     self.iterate_expr(cb, &query.selection)
   }
 
@@ -109,8 +125,10 @@ impl QueryIterator {
     cb: &mut CbT,
     query: &'a proc::JoinSelect,
   ) {
-    // TODO: do properly
-    unimplemented!();
+    cb(QueryElement::JoinSelect(query));
+    self.iterate_join_node(cb, &query.from);
+    self.iterate_select_items(cb, &query.projection);
+    self.iterate_expr(cb, &query.selection)
   }
 
   pub fn iterate_update<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
@@ -276,9 +294,8 @@ pub fn alias_collecting_cb<'a>(
     QueryElement::TransTableSelect(select) => {
       alias_container.insert(select.from.alias.clone());
     }
-    QueryElement::JoinSelect(_) => {
-      // TODO: do properly
-      unimplemented!()
+    QueryElement::JoinLeaf(leaf) => {
+      alias_container.insert(leaf.alias.clone());
     }
     QueryElement::Update(update) => {
       alias_container.insert(update.table.alias.clone());

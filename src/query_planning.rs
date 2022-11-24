@@ -18,10 +18,8 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
         table_paths.insert(query.from.table_path.clone());
       }
       QueryElement::TransTableSelect(_) => {}
-      QueryElement::JoinSelect(_) => {
-        // TODO: properly
-        unimplemented!()
-      }
+      QueryElement::JoinSelect(_) => {}
+      QueryElement::JoinLeaf(_) => {}
       QueryElement::TableSelect(query) => {
         table_paths.insert(query.from.table_path.clone());
       }

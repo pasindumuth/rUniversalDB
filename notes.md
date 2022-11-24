@@ -17,7 +17,7 @@ cargo build
 cargo run --release --bin paxos &&
 cargo run --release --bin paxos2pc_sim &&
 cargo run --release --bin simtest
-cargo run --release --bin simtest -- -i 19
+cargo run --release --bin simtest -- -i 9
 
 cargo run --bin client 2>/dev/null
 docker run -it runiversal

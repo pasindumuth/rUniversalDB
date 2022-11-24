@@ -647,7 +647,7 @@ pub struct QueryPlanningES {
 pub enum QueryPlanningAction {
   /// Indicates the parent needs to wait, making sure to fowards MasterQueryPlanning responses.
   Wait,
-  /// Indicates the that QueryPlanningES has computed a valid query, and it's stored
+  /// Indicates the that QueryPlanningES has computed a valid query, and it is stored
   /// in the `query_plan` field.
   Success(proc::MSQuery, CoordQueryPlan),
   /// Indicates that a valid QueryPlan couldn't be computed. The ES will have

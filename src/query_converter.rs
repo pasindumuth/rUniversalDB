@@ -28,18 +28,18 @@ pub fn convert_to_msquery<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = Error
   alias_rename_under_query(&mut ctx, &mut query)?;
 
   // Resolve Columns
-  let mut resolver = ColResolver {
+  let mut ctx = ColResolver {
     col_usage_map: Default::default(),
     trans_table_map: Default::default(),
     counter: ctx.counter,
     view,
   };
-  let aux_table_name = resolver.resolve_cols(&mut query)?;
+  let aux_table_name = ctx.resolve_cols(&mut query)?;
 
   // Convert to MSQUery
   let mut ctx = ConversionContext {
-    col_usage_map: resolver.col_usage_map,
-    trans_table_map: resolver.trans_table_map,
+    col_usage_map: ctx.col_usage_map,
+    trans_table_map: ctx.trans_table_map,
     counter: ctx.counter,
     view,
   };
@@ -727,6 +727,8 @@ fn alias_rename_under_query<ErrorT: ErrorTrait>(
 // -----------------------------------------------------------------------------------------------
 //  Column Resolution
 // -----------------------------------------------------------------------------------------------
+// This is where most of the heavy lifting happens, were columns are resolved and
+// where `DBSchemaView` is constructed (which, recall, forms the core of the QueryPlanning).
 
 enum SchemaSource {
   /// This is used for `JoinLeaf`s that are Derived Tables and TransTables.
@@ -745,7 +747,16 @@ enum ColUsageCols {
 }
 
 struct UnresolvedColRefs<'a> {
+  /// Maps the `table_name`s that appear as qualifications in qualified `ColumnRef`s
+  /// to all `col_name`s that appear in these `ColumnRef`s. Once the `table_name`
+  /// is matched with some ancestral JLN, it is removed.
   qualified_cols: BTreeMap<String, Vec<String>>,
+  /// Maps an the `col_name` of an unqualified `ColumnRef` to the missing
+  /// instance of the qualification. Actually, it maps the `col_name` to
+  /// *all* such missing instances of the qualification if the same `col_name` has
+  /// been seen multiple times. This way, once we know figure out the JLN that
+  /// Free `col_name` resolves to, we can qualify all such `ColumnRef`s conveniently
+  /// (after which the `col_name` will be removed from the map).
   free_cols: BTreeMap<String, Vec<&'a mut Option<String>>>,
 }
 
@@ -773,21 +784,34 @@ impl<'a> UnresolvedColRefs<'a> {
   }
 }
 
-/// `trans_table_map` maps the name of a TransTable that we have already visited
-/// to the schema that we computed for it.
-///
-/// `col_usage_map` maps the set of columns that we need to read from each JLN.
 struct ColResolver<'a, ViewT: DBSchemaView> {
+  /// Maps each JLN to the set of columns that we need to read from it.
   col_usage_map: BTreeMap<String, ColUsageCols>,
+  /// Maps the name of a TransTable that we have already visited to the schema that we
+  /// computed for it.
   trans_table_map: BTreeMap<String, Vec<Option<String>>>,
+  /// Counter for generating `aux_table_name`s.
   counter: u32,
-
   /// DBSchema to use
   view: &'a mut ViewT,
 }
 
 impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'b, ViewT> {
+  /// The main purpose of this function is to take very unqualified column in `query`
+  /// and then add a qualification to it, according to what (ancestral) table that it would
+  /// refer to. In the process, this function populates `col_usage_map` for every single JLN
+  /// that appears under `query`, and also, recalling that by this point, every JLN is globally
+  /// unique. It also computes the schema for all TransTables under `query` and then populates
+  /// `trans_table_map` with it. These maps are important productcs of this algorithm.
+  ///
+  /// Recall that by this point, all JLNs are unique, all TransTableNames are unique, and all
+  /// qualified `ColumnRef`'s qualification (i.e. JLNs) exist. However, the resolution
+  /// may still fail for qualified `ColumnRef`s if it is ambiguous (i.e. the `col_name` appears
+  /// multiple times in the `table_name` (which could happen if for TransTables created
+  /// by SELECT *, * , for instance)). We handle this here.
+  ///
   /// This returns the auxiliary TransTable name for which the top-level QueryBody was placed in.
+  /// It returns an error if any of the above fails, or if there are some unresolved `ColumnRef`s.
   fn resolve_cols(&mut self, query: &mut iast::Query) -> Result<String, ErrorT> {
     let (schema, mut unresolved) = self.resolve_cols_under_query(query)?;
 
@@ -809,6 +833,9 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
     }
   }
 
+  /// Same as `resolve_cols`, except we don't expect all `ColumnRef`s to be resolved
+  /// yet, and so we return them as `UnresolvedColRefs`. We also return the schema
+  /// implies by the `query`.
   fn resolve_cols_under_query<'a>(
     &mut self,
     query: &'a mut iast::Query,
@@ -1244,8 +1271,14 @@ struct ConversionContext<'a, ViewT: DBSchemaView> {
 }
 
 impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionContext<'b, ViewT> {
-  /// Flattens the `query` into a into a `MSQuery`. Since we renamed
-  /// all TransTable references, this does not change the semantics of the query.
+  /// Transforms the `query` into a into a `MSQuery`, which differes from `query` in a few
+  /// ways. First, the CTEs are flattened. Recall that this okay, since we renamed
+  /// all TransTable references, and so this does not change the semantics of the query.
+  /// Also, we distinguish between `Select`s that contain a JOIN, and those that do not so
+  /// that they can be processed differently by the system. Finally, for `Select`s with a JOIN
+  /// (i.e. `JoinSelect`s), notice that the `JoinLeaf`s are all `GRQuery`s.
+  ///
+  /// Recall that the difference between an `MSQuery`
   fn flatten_top_level_query(
     &mut self,
     query: &iast::Query,
@@ -1259,11 +1292,11 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
     Ok(ms_query)
   }
 
-  /// Flattens the `query` into a into a `trans_table_map`. For the TableView
-  /// produced by the query itself, create an auxiliary TransTable with the
+  /// Flattens the `query` into a `trans_table_map`. For the `TableView`
+  /// produced by the query itself, we create an auxiliary TransTable with the
   /// name of `assignment_name` and add it into the map as well.
   /// Note: we need `counter` because we need to create auxiliary TransTables
-  /// for the query bodies.
+  /// for the `GRQuery`s that we generate to be the leaves of the JoinTrees.
   fn flatten_top_level_query_r(
     &mut self,
     assignment_name: &String,
@@ -1568,7 +1601,9 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
     }
   }
 
-  // Utilities
+  // -----------------------------------------------------------------------------------------------
+  //  Utilities
+  // -----------------------------------------------------------------------------------------------
 
   /// Lookup the schema in the `trans_table_map`.
   fn compute_schema(&self, assignment_name: &String) -> Vec<Option<ColName>> {
@@ -1604,6 +1639,8 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
       }
     }
 
+    // Recall that for now, the SELECT can only have an aggregation *only if* all
+    // `SelectItem`s are aggregations.
     if unary_agg_count > 0 && (val_expr_count > 0 || wildcard_count > 0) {
       return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidSelectClause));
     }
@@ -1611,14 +1648,19 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
     Ok(())
   }
 
+  // -----------------------------------------------------------------------------------------------
   //  Join Optimization Utilities
+  // -----------------------------------------------------------------------------------------------
 
   /// Add various optimizations for the JLSs based on the ON clauses.
+  ///
+  /// This returns a map that maps JLNs (recall that these are the aliases of a `JoinLeaf`)
+  /// to the WHERE clause of the last stage of the `GRQuery` that the `JoinLeaf` is composed of.
   fn optimize_jls<'a>(
     &self,
     node: &'a mut proc::JoinNode,
   ) -> BTreeMap<String, &'a mut proc::ValExpr> {
-    let mut jls = BTreeMap::<String, &mut proc::ValExpr>::new();
+    let mut jl_selections = BTreeMap::<String, &mut proc::ValExpr>::new();
     match node {
       proc::JoinNode::JoinInnerNode(inner) => {
         let mut left_jls = self.optimize_jls(&mut inner.left);
@@ -1639,8 +1681,8 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
           iast::JoinType::Outer => {}
         };
 
-        jls.extend(left_jls.into_iter());
-        jls.extend(right_jls.into_iter());
+        jl_selections.extend(left_jls.into_iter());
+        jl_selections.extend(right_jls.into_iter());
       }
       proc::JoinNode::JoinLeaf(leaf) => {
         // The last stage in the GRQuery should contain the desired WHERE clause.
@@ -1650,26 +1692,28 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
           proc::GRQueryStage::TransTableSelect(select) => &mut select.selection,
           proc::GRQueryStage::JoinSelect(_) => panic!(),
         };
-        jls.insert(leaf.alias.clone(), selection);
+        jl_selections.insert(leaf.alias.clone(), selection);
       }
     }
-    jls
+    jl_selections
   }
 
   /// Iterates over the top-level conjunctions of `expr` and pushes it down to the
   /// appropriate JLS WHERE Clause if it only concerns that JLS (which will ultimately
-  /// make the query more efficient.
+  /// make the query more efficient).
+  ///
+  /// Here, `jl_selections` is the same type of map that is returned by `optimize_jls`.
   fn update_jls_with_conjunctions<'a>(
     &self,
-    jls: &mut BTreeMap<String, &'a mut proc::ValExpr>,
+    jl_selections: &mut BTreeMap<String, &'a mut proc::ValExpr>,
     expr: &proc::ValExpr,
   ) {
     if let proc::ValExpr::BinaryExpr { left, right, op: iast::BinaryOp::And } = expr {
-      self.update_jls_with_conjunctions(jls, left);
-      self.update_jls_with_conjunctions(jls, right);
+      self.update_jls_with_conjunctions(jl_selections, left);
+      self.update_jls_with_conjunctions(jl_selections, right);
     } else {
-      if let Ok(Some(table_name)) = self.does_concern_one_jls(jls, expr) {
-        let selection_ref = jls.get_mut(&table_name).unwrap();
+      if let Ok(Some(table_name)) = self.does_concern_one_jls(jl_selections, expr) {
+        let selection_ref = jl_selections.get_mut(&table_name).unwrap();
 
         // Replace `selection_ref` with a sentinal and take what was already there.
         let old_selection = std::mem::replace(
@@ -1687,22 +1731,39 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
     }
   }
 
-  /// This function returns `Ok(None)` if there are no `ColumnRefs` underneath `expr` that do
-  /// not have a `table_name` in `jlns`, and there are no `GRQuery`s. It returns `Ok(Some(_))` if
-  /// there is exactly one, and `Err(())` if there is more than one or if there is a `GRQuery`.
+  /// This function returns an `Err(_)` if there is a `GRQuery` in this expression. Otherwise,
+  /// this function returns `Ok(Some(_))` if all `ColumnRef`s whose `table_name` is contained
+  /// in `jl_names_under_consideration` all happen to have the same `table_name`. Here, the `_`
+  /// would take on this `table_name`. If there is more than one such `table_name`, then `Err(_)`
+  /// is returned instead. Otherwise, if there are none, then `Ok(None)` is returned.
   fn does_concern_one_jls<SetT: ReadOnlySet<String>>(
     &self,
-    jlns: &SetT,
+    jl_names_under_consideration: &SetT,
     expr: &proc::ValExpr,
   ) -> Result<Option<String>, ()> {
     match expr {
       proc::ValExpr::ColumnRef(col) => {
-        Ok(if jlns.contains(&col.table_name) { Some(col.table_name.clone()) } else { None })
+        if jl_names_under_consideration.contains(&col.table_name) {
+          Ok(Some(col.table_name.clone()))
+        } else {
+          Ok(None)
+        }
       }
-      proc::ValExpr::UnaryExpr { expr, .. } => self.does_concern_one_jls(jlns, expr),
+      proc::ValExpr::UnaryExpr { expr, .. } => {
+        self.does_concern_one_jls(jl_names_under_consideration, expr)
+      }
       proc::ValExpr::BinaryExpr { left, right, .. } => {
-        match (self.does_concern_one_jls(jlns, left)?, self.does_concern_one_jls(jlns, right)?) {
-          (Some(_), Some(_)) => Err(()),
+        match (
+          self.does_concern_one_jls(jl_names_under_consideration, left)?,
+          self.does_concern_one_jls(jl_names_under_consideration, right)?,
+        ) {
+          (Some(left_name), Some(right_name)) => {
+            if left_name == right_name {
+              Ok(Some(left_name))
+            } else {
+              Err(())
+            }
+          }
           (Some(left), None) => Ok(Some(left)),
           (None, Some(right)) => Ok(Some(right)),
           (None, None) => Ok(None),
