@@ -234,6 +234,230 @@ impl QueryIterator {
 }
 
 // -----------------------------------------------------------------------------------------------
+//  Mutable Query Element Iteration
+// -----------------------------------------------------------------------------------------------
+
+pub enum QueryElementMut<'a> {
+  MSQuery(&'a mut proc::MSQuery),
+  GRQuery(&'a mut proc::GRQuery),
+  TableSelect(&'a mut proc::TableSelect),
+  TransTableSelect(&'a mut proc::TransTableSelect),
+  JoinSelect(&'a mut proc::JoinSelect),
+  JoinLeaf(&'a mut proc::JoinLeaf),
+  Update(&'a mut proc::Update),
+  Insert(&'a mut proc::Insert),
+  Delete(&'a mut proc::Delete),
+  ValExpr(&'a mut proc::ValExpr),
+}
+
+pub struct QueryIteratorMut {
+  /// If this is true, we do not call `iterate_gr_query` for any elements underneath
+  /// the query we passed in.
+  top_level: bool,
+}
+
+impl QueryIteratorMut {
+  pub fn new() -> QueryIteratorMut {
+    QueryIteratorMut { top_level: false }
+  }
+
+  pub fn new_top_level() -> QueryIteratorMut {
+    QueryIteratorMut { top_level: true }
+  }
+
+  pub fn iterate_expr<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    expr: &mut proc::ValExpr,
+  ) {
+    cb(QueryElementMut::ValExpr(expr));
+    match expr {
+      proc::ValExpr::ColumnRef(_) => {}
+      proc::ValExpr::UnaryExpr { expr, .. } => self.iterate_expr(cb, expr),
+      proc::ValExpr::BinaryExpr { left, right, .. } => {
+        self.iterate_expr(cb, left);
+        self.iterate_expr(cb, right);
+      }
+      proc::ValExpr::Value { .. } => {}
+      proc::ValExpr::Subquery { query } => {
+        if !self.top_level {
+          self.iterate_gr_query(cb, query);
+        }
+      }
+    }
+  }
+
+  pub fn iterate_select_items<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    projection: &mut Vec<proc::SelectItem>,
+  ) {
+    for item in projection {
+      match item {
+        proc::SelectItem::ExprWithAlias { item, .. } => {
+          let expr = match item {
+            proc::SelectExprItem::ValExpr(expr) => expr,
+            proc::SelectExprItem::UnaryAggregate(agg) => &mut agg.expr,
+          };
+          self.iterate_expr(cb, expr);
+        }
+        proc::SelectItem::Wildcard { .. } => {}
+      }
+    }
+  }
+
+  pub fn iterate_join_node<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    node: &mut proc::JoinNode,
+  ) {
+    match node {
+      proc::JoinNode::JoinInnerNode(inner) => {
+        self.iterate_join_node(cb, &mut inner.left);
+        self.iterate_join_node(cb, &mut inner.right);
+        self.iterate_expr(cb, &mut inner.on);
+      }
+      proc::JoinNode::JoinLeaf(leaf) => {
+        cb(QueryElementMut::JoinLeaf(leaf));
+        self.iterate_gr_query(cb, &mut leaf.query);
+      }
+    }
+  }
+
+  pub fn iterate_table_select<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &mut proc::TableSelect,
+  ) {
+    cb(QueryElementMut::TableSelect(query));
+    self.iterate_select_items(cb, &mut query.projection);
+    self.iterate_expr(cb, &mut query.selection)
+  }
+
+  pub fn iterate_trans_table_select<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &mut proc::TransTableSelect,
+  ) {
+    cb(QueryElementMut::TransTableSelect(query));
+    self.iterate_select_items(cb, &mut query.projection);
+    self.iterate_expr(cb, &mut query.selection)
+  }
+
+  pub fn iterate_join_select<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &mut proc::JoinSelect,
+  ) {
+    cb(QueryElementMut::JoinSelect(query));
+    self.iterate_join_node(cb, &mut query.from);
+    self.iterate_select_items(cb, &mut query.projection);
+    self.iterate_expr(cb, &mut query.selection)
+  }
+
+  pub fn iterate_update<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &mut proc::Update,
+  ) {
+    cb(QueryElementMut::Update(query));
+    for (_, expr) in &mut query.assignment {
+      self.iterate_expr(cb, expr)
+    }
+    self.iterate_expr(cb, &mut query.selection)
+  }
+
+  pub fn iterate_insert<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &mut proc::Insert,
+  ) {
+    cb(QueryElementMut::Insert(query));
+    for row in &mut query.values {
+      for expr in row {
+        self.iterate_expr(cb, expr);
+      }
+    }
+  }
+
+  pub fn iterate_delete<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &mut proc::Delete,
+  ) {
+    cb(QueryElementMut::Delete(query));
+    self.iterate_expr(cb, &mut query.selection)
+  }
+
+  pub fn iterate_ms_query_stage<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    stage: &mut proc::MSQueryStage,
+  ) {
+    match stage {
+      proc::MSQueryStage::TableSelect(query) => {
+        self.iterate_table_select(cb, query);
+      }
+      proc::MSQueryStage::TransTableSelect(query) => {
+        self.iterate_trans_table_select(cb, query);
+      }
+      proc::MSQueryStage::JoinSelect(query) => {
+        self.iterate_join_select(cb, query);
+      }
+      proc::MSQueryStage::Update(query) => {
+        self.iterate_update(cb, query);
+      }
+      proc::MSQueryStage::Insert(query) => {
+        self.iterate_insert(cb, query);
+      }
+      proc::MSQueryStage::Delete(query) => {
+        self.iterate_delete(cb, query);
+      }
+    }
+  }
+
+  pub fn iterate_ms_query<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &mut proc::MSQuery,
+  ) {
+    cb(QueryElementMut::MSQuery(query));
+    for (_, stage) in &mut query.trans_tables {
+      self.iterate_ms_query_stage(cb, stage);
+    }
+  }
+
+  pub fn iterate_gr_query_stage<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    stage: &mut proc::GRQueryStage,
+  ) {
+    match stage {
+      proc::GRQueryStage::TableSelect(query) => {
+        self.iterate_table_select(cb, query);
+      }
+      proc::GRQueryStage::TransTableSelect(query) => {
+        self.iterate_trans_table_select(cb, query);
+      }
+      proc::GRQueryStage::JoinSelect(query) => {
+        self.iterate_join_select(cb, query);
+      }
+    }
+  }
+
+  pub fn iterate_gr_query<CbT: FnMut(QueryElementMut) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query: &mut proc::GRQuery,
+  ) {
+    cb(QueryElementMut::GRQuery(query));
+    for (_, stage) in &mut query.trans_tables {
+      self.iterate_gr_query_stage(cb, stage);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
 //  Expression iteration
 // -----------------------------------------------------------------------------------------------
 
