@@ -1,15 +1,18 @@
+use crate::col_usage::{QueryElement, QueryElementMut, QueryIterator, QueryIteratorMut};
 use crate::common::{lookup, ColName, ReadOnlySet, TablePath, TransTableName};
 use crate::master_query_planning_es::{DBSchemaView, ErrorTrait};
 use crate::message as msg;
 use crate::sql_ast::{iast, proc};
 use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
 use std::iter::FromIterator;
+use std::ops::{Deref, DerefMut};
 
 #[path = "test/query_converter_test.rs"]
 pub mod query_converter_test;
 
-pub fn convert_to_msquery<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>>(
+pub fn convert_to_msquery<ErrorT: ErrorTrait + Debug, ViewT: DBSchemaView<ErrorT = ErrorT>>(
   view: &mut ViewT,
   mut query: iast::Query,
 ) -> Result<proc::MSQuery, ErrorT> {
@@ -1270,7 +1273,9 @@ struct ConversionContext<'a, ViewT: DBSchemaView> {
   view: &'a mut ViewT,
 }
 
-impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionContext<'b, ViewT> {
+impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
+  ConversionContext<'b, ViewT>
+{
   /// Transforms the `query` into a into a `MSQuery`, which differes from `query` in a few
   /// ways. First, the CTEs are flattened. Recall that this okay, since we renamed
   /// all TransTable references, and so this does not change the semantics of the query.
@@ -1473,6 +1478,34 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
       });
     }
 
+    // A helper function to map the `JoinLeaf`s' alias of a real Table
+    // to the `TablePath` of the Table.
+    fn mk_jln_to_table_map_r(
+      trans_table_map: &BTreeMap<String, Vec<Option<String>>>,
+      node: &iast::JoinNode,
+      jln_to_table_map: &mut BTreeMap<String, TablePath>,
+    ) {
+      match node {
+        iast::JoinNode::JoinInnerNode(inner) => {
+          mk_jln_to_table_map_r(trans_table_map, inner.left.deref(), jln_to_table_map);
+          mk_jln_to_table_map_r(trans_table_map, inner.right.deref(), jln_to_table_map);
+        }
+        iast::JoinNode::JoinLeaf(leaf) => {
+          // Check that the `JoinLeaf` refers to a real Table.
+          if let iast::JoinNodeSource::Table(table_name) = &leaf.source {
+            if !trans_table_map.contains_key(table_name) {
+              // Recall that all `JoinLeaf`s have a non-None alias.
+              jln_to_table_map.insert(leaf.alias.clone().unwrap(), TablePath(table_name.clone()));
+            }
+          }
+        }
+      }
+    }
+
+    // Build a map of `JoinLeaf`s' aliases to real Table `TablePath`s.
+    let mut jln_to_table_map = BTreeMap::<String, TablePath>::new();
+    mk_jln_to_table_map_r(&self.trans_table_map, &select.from, &mut jln_to_table_map);
+
     match &select.from {
       iast::JoinNode::JoinLeaf(iast::JoinLeaf {
         source: iast::JoinNodeSource::Table(table_name),
@@ -1502,102 +1535,234 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
           }))
         }
       }
-      _ => {
-        let mut from = self.flatten_join_node(&select.from)?;
-        let mut jls = self.optimize_jls(&mut from);
+      iast::JoinNode::JoinLeaf(join_leaf) => {
+        // Handle the case where the `JoinNodeSource` is a `DerivedTable`.
+        let mut p_join_leaf = self.flatten_join_leaf(join_leaf)?;
 
-        // Optimize `from` using the WHERE clause as well.
-        let selection = self.flatten_val_expr_r(&select.selection)?;
-        self.update_jls_with_conjunctions(&mut jls, &selection);
+        // Push in the `selection` of the selection into the JoinLeaf, since
+        // proc::JoinSelect does not have a `selection` field.
+        Self::push_expr_leaf(self.flatten_val_expr_r(&select.selection)?, &mut p_join_leaf);
 
-        Ok(SelectEnum::JoinSelect(proc::JoinSelect {
+        let mut p_select = proc::JoinSelect {
           distinct: select.distinct,
           projection: p_projection,
-          from,
-          selection,
+          from: proc::JoinNode::JoinLeaf(p_join_leaf),
+          dependency_graph: BTreeMap::new(),
           schema: self.compute_schema(assignment_name),
-        }))
+        };
+
+        // Add the dependencies for LATERAL JOINs, which is not optional.
+        Self::add_dependencies_for_lateral_joins(
+          String::new(),
+          &mut p_select.from,
+          &mut p_select.dependency_graph,
+        );
+
+        // Optimize
+        self.optimize_all_levels(
+          &jln_to_table_map,
+          &mut p_select.from,
+          &mut p_select.dependency_graph,
+        );
+
+        Ok(SelectEnum::JoinSelect(p_select))
+      }
+      iast::JoinNode::JoinInnerNode(inner) => {
+        let mut p_inner = self.flatten_join_inner_node(inner)?;
+
+        // Convert the WHERE clause of the query and add it as the Strong Conjunctions
+        // if the top-level `p_inner`. (The fact that we can treat the WHERE clause
+        // like this is a happy coincidence of the Strong/Weak Conjunction system.)
+        p_inner.strong_conjunctions =
+          Self::split_into_conjunctions(self.flatten_val_expr_r(&select.selection)?);
+
+        let mut p_select = proc::JoinSelect {
+          distinct: select.distinct,
+          projection: p_projection,
+          from: proc::JoinNode::JoinInnerNode(p_inner),
+          dependency_graph: BTreeMap::new(),
+          schema: self.compute_schema(assignment_name),
+        };
+
+        // Add the dependencies for LATERAL JOINs, which is not optional.
+        Self::add_dependencies_for_lateral_joins(
+          String::new(),
+          &mut p_select.from,
+          &mut p_select.dependency_graph,
+        );
+
+        // Optimize
+        self.optimize_all_levels(
+          &jln_to_table_map,
+          &mut p_select.from,
+          &mut p_select.dependency_graph,
+        );
+
+        Ok(SelectEnum::JoinSelect(p_select))
       }
     }
+  }
+
+  /// Transform `expr` into an equivalent list of conjunctions.
+  fn split_into_conjunctions(expr: proc::ValExpr) -> Vec<proc::ValExpr> {
+    let mut conjunctions = Vec::<proc::ValExpr>::new();
+    fn split_into_conjunctions_r(expr: proc::ValExpr, conjunctions: &mut Vec<proc::ValExpr>) {
+      // If `expr` is a conjunction, split it up and recurse
+      if let proc::ValExpr::BinaryExpr { op: iast::BinaryOp::And, left, right } = expr {
+        split_into_conjunctions_r(*left, conjunctions);
+        split_into_conjunctions_r(*right, conjunctions);
+      } else {
+        // Otherwise, `expr` itself is an leaf of the conjunction tree, and so
+        // we add it to `conjunctions.
+        conjunctions.push(expr);
+      }
+    }
+
+    split_into_conjunctions_r(expr, &mut conjunctions);
+    return conjunctions;
+  }
+
+  /// Converts `JoinInnerNode`.
+  fn flatten_join_inner_node(
+    &mut self,
+    inner: &iast::JoinInnerNode,
+  ) -> Result<proc::JoinInnerNode, ErrorT> {
+    Ok(proc::JoinInnerNode {
+      left: Box::new(self.flatten_join_node(&inner.left)?),
+      right: Box::new(self.flatten_join_node(&inner.right)?),
+      join_type: inner.join_type.clone(),
+      strong_conjunctions: Vec::new(),
+      weak_conjunctions: Self::split_into_conjunctions(self.flatten_val_expr_r(&inner.on)?),
+    })
+  }
+
+  /// Converts `JoinLeaf`.
+  fn flatten_join_leaf(&mut self, leaf: &iast::JoinLeaf) -> Result<proc::JoinLeaf, ErrorT> {
+    // A helper function that conveniently constructs the outputs with the given inputs.
+    fn cols_to_schema(
+      alias: &String,
+      cols: &Vec<String>,
+    ) -> (Vec<Option<ColName>>, Vec<proc::SelectItem>) {
+      let mut schema = Vec::<Option<ColName>>::new();
+      let mut select_list = Vec::<proc::SelectItem>::new();
+      for col in cols {
+        schema.push(Some(ColName(col.clone())));
+        select_list.push(
+          (proc::SelectItem::ExprWithAlias {
+            item: proc::SelectExprItem::ValExpr(proc::ValExpr::ColumnRef(proc::ColumnRef {
+              table_name: alias.clone(),
+              col_name: ColName(col.clone()),
+            })),
+            alias: None,
+          }),
+        )
+      }
+      (schema, select_list)
+    }
+
+    // Next, generate the parts of a `GRQueryES` that will comprise the `JoinLeaf` that we
+    // are building. We completely manufacture the final stage, and this is the alias.
+    let alias = unique_alias_name(&mut self.counter, &"".to_string());
+
+    // Build the parts of the `GRQueryES`.
+    let (select, mut trans_tables, lateral) = match &leaf.source {
+      iast::JoinNodeSource::Table(table_name) => {
+        // Get the columns that are used by the JoinLeaf.
+        let col_usage_cols = self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap();
+
+        // In this case, we construct a single `GRQueryStage` that simply reads from
+        // `table_name`, extracting out only the columns requested in `col_usage_cols`.
+        let select = if self.trans_table_map.contains_key(table_name) {
+          let trans_table_name = TransTableName(table_name.clone());
+          let (schema, projection) = match col_usage_cols {
+            ColUsageCols::Cols(cols) => cols_to_schema(&alias, cols),
+            ColUsageCols::All => (
+              self.compute_schema(table_name),
+              vec![proc::SelectItem::Wildcard { table_name: None }],
+            ),
+          };
+
+          proc::GRQueryStage::TransTableSelect(proc::TransTableSelect {
+            distinct: false,
+            projection,
+            from: proc::TransTableSource { trans_table_name, alias },
+            selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
+            schema,
+          })
+        } else {
+          let table_path = TablePath(table_name.clone());
+          let (schema, projection) = match col_usage_cols {
+            ColUsageCols::Cols(cols) => cols_to_schema(&alias, cols),
+            ColUsageCols::All => {
+              let mut schema = Vec::<Option<ColName>>::new();
+              for col in self.view.get_all_cols(&table_path)? {
+                schema.push(Some(col));
+              }
+              (schema, vec![proc::SelectItem::Wildcard { table_name: None }])
+            }
+          };
+
+          proc::GRQueryStage::TableSelect(proc::TableSelect {
+            distinct: false,
+            projection,
+            from: proc::TableSource { table_path, alias },
+            selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
+            schema,
+          })
+        };
+
+        (select, vec![], false)
+      }
+      iast::JoinNodeSource::DerivedTable { query, lateral } => {
+        // In this case, we expand out the CTEs in the `query` into stages for the
+        // `GRQueryES` we are constructing.
+
+        let mut trans_tables = Vec::<(TransTableName, proc::GRQueryStage)>::new();
+
+        let aux_table_name = unique_tt_name(&mut self.counter, &"".to_string());
+        self.flatten_sub_query_r(&aux_table_name, &query, &mut trans_tables)?;
+        let aux_table_name = TransTableName(aux_table_name.clone());
+
+        // Get the columns that are used by the JoinLeaf.
+        let col_usage_cols = self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap();
+
+        let (schema, projection) = match col_usage_cols {
+          ColUsageCols::Cols(cols) => cols_to_schema(&alias, cols),
+          ColUsageCols::All => {
+            let stage = lookup(&trans_tables, &aux_table_name).unwrap();
+            (stage.schema().clone(), vec![proc::SelectItem::Wildcard { table_name: None }])
+          }
+        };
+
+        let select = proc::GRQueryStage::TransTableSelect(proc::TransTableSelect {
+          distinct: false,
+          projection,
+          from: proc::TransTableSource { trans_table_name: aux_table_name, alias },
+          selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
+          schema,
+        });
+
+        (select, trans_tables, *lateral)
+      }
+    };
+
+    // Finally, assemble the GRQuery and return it as a JoinLeaf.
+    let returning = TransTableName(unique_tt_name(&mut self.counter, &"".to_string()));
+    trans_tables.push((returning.clone(), select));
+    return Ok(proc::JoinLeaf {
+      alias: leaf.alias.clone().unwrap(),
+      lateral,
+      query: proc::GRQuery { trans_tables, returning },
+    });
   }
 
   /// Converts the Join Tree analogously, except the JoinLeafs are converted into GRQuerys
   fn flatten_join_node(&mut self, join_node: &iast::JoinNode) -> Result<proc::JoinNode, ErrorT> {
     match join_node {
       iast::JoinNode::JoinInnerNode(inner) => {
-        Ok(proc::JoinNode::JoinInnerNode(proc::JoinInnerNode {
-          left: Box::new(self.flatten_join_node(&inner.left)?),
-          right: Box::new(self.flatten_join_node(&inner.right)?),
-          join_type: inner.join_type.clone(),
-          on: self.flatten_val_expr_r(&inner.on)?,
-        }))
+        Ok(proc::JoinNode::JoinInnerNode(self.flatten_join_inner_node(inner)?))
       }
-      iast::JoinNode::JoinLeaf(leaf) => {
-        // Construct GRQuery, except with a missing stage for `selection_table_name`.
-        let selection_table_name = unique_tt_name(&mut self.counter, &"".to_string());
-        let mut gr_query = proc::GRQuery {
-          trans_tables: Vec::default(),
-          returning: TransTableName(selection_table_name.clone()),
-        };
-
-        // Get the table to read from using the `source`.
-        let (aux_table_name, lateral) = match &leaf.source {
-          iast::JoinNodeSource::Table(table_name) => (table_name.clone(), false),
-          iast::JoinNodeSource::DerivedTable { query, lateral } => {
-            let aux_table_name = unique_tt_name(&mut self.counter, &"".to_string());
-            self.flatten_sub_query_r(&aux_table_name, &query, &mut gr_query.trans_tables)?;
-            (aux_table_name, *lateral)
-          }
-        };
-
-        // Start generating the `selection_table_name` by construct the alias.
-        let alias = unique_alias_name(&mut self.counter, &"".to_string());
-
-        // Construct projection
-        let aux_table_name = TransTableName(aux_table_name.clone());
-        let col_usage_cols = self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap();
-        let (schema, projection) = match col_usage_cols {
-          ColUsageCols::Cols(cols) => {
-            let mut schema = Vec::<Option<ColName>>::new();
-            let mut select_list = Vec::<proc::SelectItem>::new();
-            for col in cols {
-              schema.push(Some(ColName(col.clone())));
-              select_list.push(
-                (proc::SelectItem::ExprWithAlias {
-                  item: proc::SelectExprItem::ValExpr(proc::ValExpr::ColumnRef(proc::ColumnRef {
-                    table_name: alias.clone(),
-                    col_name: ColName(col.clone()),
-                  })),
-                  alias: None,
-                }),
-              )
-            }
-            (schema, select_list)
-          }
-          ColUsageCols::All => {
-            let stage = lookup(&gr_query.trans_tables, &aux_table_name).unwrap();
-            (stage.schema().clone(), vec![proc::SelectItem::Wildcard { table_name: None }])
-          }
-        };
-
-        // Generate `selection_table_name` and add it into `gr_query`.
-        gr_query.trans_tables.push((
-          TransTableName(selection_table_name),
-          proc::GRQueryStage::TransTableSelect(proc::TransTableSelect {
-            distinct: false,
-            projection,
-            from: proc::TransTableSource { trans_table_name: aux_table_name, alias },
-            selection: proc::ValExpr::Value { val: iast::Value::Boolean(true) },
-            schema,
-          }),
-        ));
-
-        Ok(proc::JoinNode::JoinLeaf(proc::JoinLeaf {
-          alias: leaf.alias.clone().unwrap(),
-          lateral,
-          query: gr_query,
-        }))
-      }
+      iast::JoinNode::JoinLeaf(leaf) => Ok(proc::JoinNode::JoinLeaf(self.flatten_join_leaf(leaf)?)),
     }
   }
 
@@ -1648,129 +1813,310 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ConversionCon
     Ok(())
   }
 
+  /// This function creates all the necessary dependencies between `JoinLeaf`s
+  /// that are LATERAL JOINs.
+  fn add_dependencies_for_lateral_joins(
+    cur_path: String,
+    node: &mut proc::JoinNode,
+    graph: &mut proc::DependencyGraph,
+  ) {
+    if let proc::JoinNode::JoinInnerNode(inner) = node {
+      let left_path = cur_path.clone() + "L";
+      let right_path = cur_path + "R";
+
+      // If the RHS is a JoinLeaf and the Join is a LATERAL Join, then we
+      // add a dependency immediately. Notice that this would not result in cycles.
+      if let proc::JoinNode::JoinLeaf(proc::JoinLeaf { lateral: true, .. }) = inner.right.deref() {
+        graph.insert(left_path.clone(), right_path.clone());
+      }
+
+      // Recurse.
+      Self::add_dependencies_for_lateral_joins(left_path, inner.left.deref_mut(), graph);
+      Self::add_dependencies_for_lateral_joins(right_path, inner.right.deref_mut(), graph);
+    }
+  }
+
   // -----------------------------------------------------------------------------------------------
   //  Join Optimization Utilities
   // -----------------------------------------------------------------------------------------------
 
-  /// Add various optimizations for the JLSs based on the ON clauses.
-  ///
-  /// This returns a map that maps JLNs (recall that these are the aliases of a `JoinLeaf`)
-  /// to the WHERE clause of the last stage of the `GRQuery` that the `JoinLeaf` is composed of.
-  fn optimize_jls<'a>(
-    &self,
-    node: &'a mut proc::JoinNode,
-  ) -> BTreeMap<String, &'a mut proc::ValExpr> {
-    let mut jl_selections = BTreeMap::<String, &mut proc::ValExpr>::new();
-    match node {
-      proc::JoinNode::JoinInnerNode(inner) => {
-        let mut left_jls = self.optimize_jls(&mut inner.left);
-        let mut right_jls = self.optimize_jls(&mut inner.right);
-
-        // Process the conjuctions in the ON clause and amend the JLSs accordingly.
-        match &inner.join_type {
-          iast::JoinType::Inner => {
-            self.update_jls_with_conjunctions(&mut left_jls, &inner.on);
-            self.update_jls_with_conjunctions(&mut right_jls, &inner.on);
-          }
-          iast::JoinType::Left => {
-            self.update_jls_with_conjunctions(&mut right_jls, &inner.on);
-          }
-          iast::JoinType::Right => {
-            self.update_jls_with_conjunctions(&mut left_jls, &inner.on);
-          }
-          iast::JoinType::Outer => {}
-        };
-
-        jl_selections.extend(left_jls.into_iter());
-        jl_selections.extend(right_jls.into_iter());
-      }
-      proc::JoinNode::JoinLeaf(leaf) => {
-        // The last stage in the GRQuery should contain the desired WHERE clause.
-        let (_, stage) = leaf.query.trans_tables.last_mut().unwrap();
-        let selection = match stage {
-          proc::GRQueryStage::TableSelect(select) => &mut select.selection,
-          proc::GRQueryStage::TransTableSelect(select) => &mut select.selection,
-          proc::GRQueryStage::JoinSelect(_) => panic!(),
-        };
-        jl_selections.insert(leaf.alias.clone(), selection);
-      }
-    }
-    jl_selections
-  }
-
-  /// Iterates over the top-level conjunctions of `expr` and pushes it down to the
-  /// appropriate JLS WHERE Clause if it only concerns that JLS (which will ultimately
-  /// make the query more efficient).
-  ///
-  /// Here, `jl_selections` is the same type of map that is returned by `optimize_jls`.
-  fn update_jls_with_conjunctions<'a>(
-    &self,
-    jl_selections: &mut BTreeMap<String, &'a mut proc::ValExpr>,
-    expr: &proc::ValExpr,
+  /// Copies down all conjunctions as far as possible according to the two rules.
+  fn optimize_all_levels(
+    &mut self,
+    jln_to_table_map: &BTreeMap<String, TablePath>,
+    node: &mut proc::JoinNode,
+    graph: &mut proc::DependencyGraph,
   ) {
-    if let proc::ValExpr::BinaryExpr { left, right, op: iast::BinaryOp::And } = expr {
-      self.update_jls_with_conjunctions(jl_selections, left);
-      self.update_jls_with_conjunctions(jl_selections, right);
-    } else {
-      if let Ok(Some(table_name)) = self.does_concern_one_jls(jl_selections, expr) {
-        let selection_ref = jl_selections.get_mut(&table_name).unwrap();
-
-        // Replace `selection_ref` with a sentinal and take what was already there.
-        let old_selection = std::mem::replace(
-          *selection_ref,
-          proc::ValExpr::Value { val: iast::Value::Boolean(false) },
-        );
-
-        // Replace `selection_ref` with the final value, combining `expr` and `old_selection`.
-        **selection_ref = proc::ValExpr::BinaryExpr {
-          op: iast::BinaryOp::And,
-          left: Box::new(old_selection),
-          right: Box::new(expr.clone()),
-        };
-      }
-    }
+    // We loop until a call to `optimize_all_levels_once` returns false, which indicates
+    // that subsequent calls will have no effect.
+    while self.optimize_all_levels_once(jln_to_table_map, String::new(), node, graph) {}
   }
 
-  /// This function returns an `Err(_)` if there is a `GRQuery` in this expression. Otherwise,
-  /// this function returns `Ok(Some(_))` if all `ColumnRef`s whose `table_name` is contained
-  /// in `jl_names_under_consideration` all happen to have the same `table_name`. Here, the `_`
-  /// would take on this `table_name`. If there is more than one such `table_name`, then `Err(_)`
-  /// is returned instead. Otherwise, if there are none, then `Ok(None)` is returned.
-  fn does_concern_one_jls<SetT: ReadOnlySet<String>>(
-    &self,
-    jl_names_under_consideration: &SetT,
-    expr: &proc::ValExpr,
-  ) -> Result<Option<String>, ()> {
-    match expr {
-      proc::ValExpr::ColumnRef(col) => {
-        if jl_names_under_consideration.contains(&col.table_name) {
-          Ok(Some(col.table_name.clone()))
-        } else {
-          Ok(None)
-        }
+  /// Essentially calls `optimize_top_level_once` from the top of the Join Tree rooted
+  /// at `node`, all the way to the bottom.
+  ///
+  /// This function returns `true` iff the `node` or `graph` were mutated.
+  fn optimize_all_levels_once(
+    &mut self,
+    jln_to_table_map: &BTreeMap<String, TablePath>,
+    cur_path: String,
+    node: &mut proc::JoinNode,
+    graph: &mut proc::DependencyGraph,
+  ) -> bool {
+    // A boolean to track whether `node` or `graph` was modified in this optimization round.
+    let mut did_anything_change = false;
+
+    // Optimize top level
+    did_anything_change |=
+      self.optimize_top_level_once(jln_to_table_map, cur_path.clone(), node, graph);
+
+    if let proc::JoinNode::JoinInnerNode(inner) = node {
+      // Recurse on both sides
+      did_anything_change |= self.optimize_all_levels_once(
+        jln_to_table_map,
+        cur_path.clone() + "L",
+        inner.left.deref_mut(),
+        graph,
+      );
+      did_anything_change |= self.optimize_all_levels_once(
+        jln_to_table_map,
+        cur_path.clone() + "R",
+        inner.right.deref_mut(),
+        graph,
+      );
+    }
+
+    did_anything_change
+  }
+
+  /// Copies Strong/Weak Conjunctions one level down the `node` tree from the top `node`
+  /// according to the two rules, as well as the presence of LATERAL JOINs. We also build
+  /// up the `graph` to express execution dependencies.
+  ///
+  /// This function returns `true` iff the `node` or `graph` were mutated.
+  fn optimize_top_level_once(
+    &mut self,
+    jln_to_table_map: &BTreeMap<String, TablePath>,
+    cur_path: String,
+    node: &mut proc::JoinNode,
+    graph: &mut proc::DependencyGraph,
+  ) -> bool {
+    // A boolean to track whether `node` or `graph` was modified in this optimization round.
+    let mut did_anything_change = false;
+
+    // We only need to do something if the `node` is a JoinInnerNode.
+    if let proc::JoinNode::JoinInnerNode(inner) = node {
+      let left_path = cur_path.clone() + "L";
+      let right_path = cur_path.clone() + "R";
+
+      // Collect the JLNs from both sides.
+      let left_jlns = Self::collect_jlns(inner.left.deref());
+      let right_jlns = Self::collect_jlns(inner.right.deref());
+
+      // Create a helper function that pushes a conjunction down to the left or right side
+      // of `inner`, making sure to add a dependency if necessary.
+      enum JoinSide {
+        Right,
+        Left,
       }
-      proc::ValExpr::UnaryExpr { expr, .. } => {
-        self.does_concern_one_jls(jl_names_under_consideration, expr)
-      }
-      proc::ValExpr::BinaryExpr { left, right, .. } => {
-        match (
-          self.does_concern_one_jls(jl_names_under_consideration, left)?,
-          self.does_concern_one_jls(jl_names_under_consideration, right)?,
-        ) {
-          (Some(left_name), Some(right_name)) => {
-            if left_name == right_name {
-              Ok(Some(left_name))
+
+      let join_type = &inner.join_type;
+      let right = &mut inner.right.deref_mut();
+      let left = &mut inner.left.deref_mut();
+
+      let mut push_expr = |conjunction: &proc::ValExpr, is_strong: bool, side: JoinSide| match side
+      {
+        // Try pushing the conjunction to the Right side.
+        JoinSide::Right => {
+          // If the conjunction is Weak, then we need to check that the JOIN is not a RIGHT JOIN.
+          if is_strong || join_type.non_right() {
+            // Next, check whether a right-to-left dependency would need to be added.
+            if Self::does_expr_use_any_jlns(conjunction, &left_jlns) {
+              // If so, we make sure that there is not already a left-to-right dependency.
+              if !graph.contains_key(&left_path) {
+                // Now, we are clear to push the conjunction and update the dependency.
+                Self::push_expr(conjunction.clone(), right.deref_mut());
+                graph.insert(right_path.clone(), left_path.clone());
+                did_anything_change = true;
+              }
             } else {
-              Err(())
+              // Otherwise, we can simply push the conjunction unconditionally.
+              Self::push_expr(conjunction.clone(), right.deref_mut());
+              did_anything_change = true;
             }
           }
-          (Some(left), None) => Ok(Some(left)),
-          (None, Some(right)) => Ok(Some(right)),
-          (None, None) => Ok(None),
         }
-      }
-      proc::ValExpr::Value { .. } => Ok(None),
-      proc::ValExpr::Subquery { .. } => Err(()),
+        // Try pushing the conjunction to the Left side.
+        JoinSide::Left => {
+          // If the conjunction is Weak, then we need to check that the JOIN is not a LEFT JOIN.
+          if is_strong || join_type.non_left() {
+            // Next, check whether a left-to-right dependency would need to be added.
+            if Self::does_expr_use_any_jlns(conjunction, &right_jlns) {
+              // If so, we make sure that there is not already a right-to-left dependency.
+              if !graph.contains_key(&right_path) {
+                // Now, we are clear to push the conjunction and update the dependency.
+                Self::push_expr(conjunction.clone(), left.deref_mut());
+                graph.insert(left_path.clone(), right_path.clone());
+                did_anything_change = true;
+              }
+            } else {
+              // Otherwise, we can simply push the conjunction unconditionally.
+              Self::push_expr(conjunction.clone(), left.deref_mut());
+              did_anything_change = true;
+            }
+          }
+        }
+      };
+
+      // Define function that iteratores through Conjunctions and applies Rule 1.
+      let mut apply_rule_1 = |conjunctions: &Vec<proc::ValExpr>, is_strong: bool| {
+        for conjunction in conjunctions {
+          if !Self::does_expr_use_any_jlns(conjunction, &left_jlns) {
+            // Here, pushing down the conjunction to the right would not
+            // produce a dependency, so we do it.
+            push_expr(conjunction, is_strong, JoinSide::Right);
+          } else if !Self::does_expr_use_any_jlns(conjunction, &right_jlns) {
+            // Here, pushing down the conjunction to the left would not
+            // produce a dependency, so we do it.
+            push_expr(conjunction, is_strong, JoinSide::Left);
+          }
+        }
+      };
+
+      // Apply Rule 1
+      apply_rule_1(&inner.strong_conjunctions, true);
+      apply_rule_1(&inner.weak_conjunctions, false);
+
+      // Define function that iteratores through Conjunctions and applies Rule 2.
+      let mut apply_rule_2 = |conjunctions: &Vec<proc::ValExpr>, is_strong: bool| {
+        // Iterate through the Conjunctions and apply Rule 2.
+        for conjunction in conjunctions {
+          // Check that the conjunction is an equality check.
+          if let proc::ValExpr::BinaryExpr { op: iast::BinaryOp::Eq, left, right } = conjunction {
+            // Define function to check each of the left and right side separately.
+            let mut process_expr_side = |expr_side: &proc::ValExpr| {
+              // Check that the `expr_side` is a single ColumnRef
+              if let proc::ValExpr::ColumnRef(col_ref) = expr_side {
+                // Check that the table referred to by `col_ref` is a real Table.
+                if let Some(table_path) = jln_to_table_map.get(&col_ref.table_name) {
+                  // Check that the ColumnRef refers to the first key column of this real Table.
+                  let key_cols = self.view.key_cols(table_path).unwrap();
+                  if let Some((col_name, _)) = key_cols.first() {
+                    if col_name == &col_ref.col_name {
+                      if left_jlns.contains(&col_ref.table_name) {
+                        // If the real Table is on the left side, we
+                        // push the conjunction to the left.
+                        push_expr(conjunction, is_strong, JoinSide::Left);
+                      } else if right_jlns.contains(&col_ref.table_name) {
+                        // If the real Table is on the right side, we
+                        // push the conjunction to the right.
+                        push_expr(conjunction, is_strong, JoinSide::Right);
+                      }
+
+                      // Note that the real Table might not be on any side of this JoinInnerNode,
+                      // in which case we do nothing.
+                    }
+                  }
+                }
+              }
+            };
+
+            // Process each side of the conjunction separately.
+            process_expr_side(left.deref());
+            process_expr_side(right.deref());
+          }
+        }
+      };
+
+      // Apply Rule 2
+      apply_rule_2(&inner.strong_conjunctions, true);
+      apply_rule_2(&inner.weak_conjunctions, false);
     }
+
+    did_anything_change
+  }
+
+  /// Collect the Join Leaf Names (i.e. aliases) under `node`.
+  fn collect_jlns(node: &proc::JoinNode) -> Vec<String> {
+    fn collect_jlns_r(node: &proc::JoinNode, jlns: &mut Vec<String>) {
+      match node {
+        proc::JoinNode::JoinInnerNode(inner) => {
+          collect_jlns_r(&inner.left, jlns);
+          collect_jlns_r(&inner.right, jlns);
+        }
+        proc::JoinNode::JoinLeaf(leaf) => jlns.push(leaf.alias.clone()),
+      }
+    }
+    let mut jlns = Vec::<String>::new();
+    collect_jlns_r(node, &mut jlns);
+    return jlns;
+  }
+
+  /// Checks whether `expr` has any `ColumnRef`s with `table_name` in `jlns`.
+  fn does_expr_use_any_jlns(expr: &proc::ValExpr, jlns: &Vec<String>) -> bool {
+    let mut expr_does_use_jlns = false;
+    let query_iterator = QueryIterator::new();
+    query_iterator.iterate_expr(
+      &mut |elem| {
+        if let QueryElement::ValExpr(proc::ValExpr::ColumnRef(col_ref)) = elem {
+          if jlns.contains(&col_ref.table_name) {
+            expr_does_use_jlns = true;
+          }
+        }
+      },
+      expr,
+    );
+
+    expr_does_use_jlns
+  }
+
+  /// Push the `expr` down to the `node` according to Rule 1/2.
+  fn push_expr(expr: proc::ValExpr, node: &mut proc::JoinNode) {
+    match node {
+      proc::JoinNode::JoinInnerNode(inner) => {
+        inner.strong_conjunctions.push(expr);
+      }
+      proc::JoinNode::JoinLeaf(leaf) => {
+        Self::push_expr_leaf(expr, leaf);
+      }
+    }
+  }
+
+  /// Pushes down `expr` into the WHERE clause of the final `leaf`. Recall that
+  /// `leaf` will be constructed from `flatten_join_leaf`. Notice for the final stage,
+  /// each `SelectItem` is just a `ColumnRef` of a column in the table in the FROM clause.
+  /// This makes pushing down an `expr` into a straightforward matter.
+  fn push_expr_leaf(mut expr: proc::ValExpr, leaf: &mut proc::JoinLeaf) {
+    // Get the final stage,
+    let final_gr_query_stage = &mut leaf.query.trans_tables.last_mut().unwrap().1;
+    let final_stage = cast!(proc::GRQueryStage::TransTableSelect, final_gr_query_stage).unwrap();
+
+    // Convert `ColumnRef`s in `expr` that refer to `leaf` (which will be prefixed with
+    // `old_alias`) to now use the `new_alias`.
+    let old_alias = leaf.alias.clone();
+    let new_alias = final_stage.from.alias.clone();
+    let query_iterator = QueryIteratorMut::new();
+    query_iterator.iterate_expr(
+      &mut |elem| {
+        if let QueryElementMut::ValExpr(proc::ValExpr::ColumnRef(col_ref)) = elem {
+          if col_ref.table_name == old_alias {
+            col_ref.table_name = new_alias.clone();
+          }
+        }
+      },
+      &mut expr,
+    );
+
+    // Finally, push the modified `expr` into the WHERE clause of the `final_stage` by
+    // AND-ing it with the current WHERE clause.
+    let cur_selection = std::mem::replace(
+      &mut final_stage.selection,
+      proc::ValExpr::Value { val: iast::Value::Boolean(false) }, // Some temporary sentinal.
+    );
+    final_stage.selection = proc::ValExpr::BinaryExpr {
+      op: iast::BinaryOp::And,
+      left: Box::new(expr),
+      right: Box::new(cur_selection),
+    };
   }
 }

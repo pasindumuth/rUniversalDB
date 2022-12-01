@@ -6,6 +6,7 @@ pub mod proc {
   use crate::common::{ColName, ColType, TablePath, TransTableName};
   use crate::sql_ast::iast::{BinaryOp, JoinType, UnaryAggregateOp, UnaryOp, Value};
   use serde::{Deserialize, Serialize};
+  use std::collections::BTreeMap;
 
   // Basic types
 
@@ -86,12 +87,20 @@ pub mod proc {
     pub schema: Vec<Option<ColName>>,
   }
 
+  /// Expresses dependencies between `JoinNode`s
+  pub type DependencyGraph = BTreeMap<String, String>;
+
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub struct JoinSelect {
     pub distinct: bool,
     pub projection: Vec<SelectItem>,
     pub from: JoinNode,
-    pub selection: ValExpr,
+
+    /// Maps nodes in the Join Tree to each other to express execution dependency.
+    /// The identifiers look like `LRLR`, which represents the path down the Join Tree.
+    /// In particular, dependencies are only between sibling `JoinNode`s and are not just
+    /// restricted to leaves.
+    pub dependency_graph: DependencyGraph,
 
     /// The TransTable Schema produced by this query
     pub schema: Vec<Option<ColName>>,
@@ -141,7 +150,12 @@ pub mod proc {
     pub left: Box<JoinNode>,
     pub right: Box<JoinNode>,
     pub join_type: JoinType,
-    pub on: ValExpr,
+
+    /// Conjunctions that can be pushed down the `JoinTree` with no restriction.
+    pub strong_conjunctions: Vec<ValExpr>,
+    /// Conjunctions that can only be pushed down the `JoinTree` only after
+    /// being careful of LEFT/RIGHT/OUTER JOINs.
+    pub weak_conjunctions: Vec<ValExpr>,
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -318,6 +332,16 @@ pub mod iast {
     Outer,
     Left,
     Right,
+  }
+
+  impl JoinType {
+    pub fn non_left(&self) -> bool {
+      self == &JoinType::Right || self == &JoinType::Inner
+    }
+
+    pub fn non_right(&self) -> bool {
+      self == &JoinType::Left || self == &JoinType::Inner
+    }
   }
 
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

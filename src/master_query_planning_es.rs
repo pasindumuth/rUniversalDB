@@ -21,6 +21,7 @@ use crate::sql_ast::proc;
 use serde::{Deserialize, Serialize};
 use sqlparser::test_utils::table;
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 
 // -----------------------------------------------------------------------------------------------
 //  Error Traits
@@ -164,6 +165,7 @@ pub trait DBSchemaView {
 //  CheckingDBSchemaView
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub enum CheckingDBSchemaViewError {
   InsufficientLat,
   QueryPlanningError(msg::QueryPlanningError),
@@ -282,6 +284,7 @@ impl ErrorTrait for CheckingDBSchemaViewError {
 //  LockingDBSchemaView
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub enum LockingDBSchemaViewError {
   QueryPlanningError(msg::QueryPlanningError),
 }
@@ -379,6 +382,7 @@ impl ErrorTrait for LockingDBSchemaViewError {
 //  StaticDBSchemaView
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub enum StaticDBSchemaViewError {
   QueryPlanningError(msg::QueryPlanningError),
 }
@@ -480,7 +484,7 @@ pub enum MasterQueryPlanningAction {
   Respond(msg::MasteryQueryPlanningResult),
 }
 
-pub fn master_query_planning<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>>(
+pub fn master_query_planning<ErrorT: ErrorTrait + Debug, ViewT: DBSchemaView<ErrorT = ErrorT>>(
   mut view: ViewT,
   query: &iast::Query,
 ) -> Result<msg::MasterQueryPlan, ErrorT> {

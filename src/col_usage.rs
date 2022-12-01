@@ -91,7 +91,12 @@ impl QueryIterator {
       proc::JoinNode::JoinInnerNode(inner) => {
         self.iterate_join_node(cb, &inner.left);
         self.iterate_join_node(cb, &inner.right);
-        self.iterate_expr(cb, &inner.on);
+        for expr in &inner.strong_conjunctions {
+          self.iterate_expr(cb, expr);
+        }
+        for expr in &inner.weak_conjunctions {
+          self.iterate_expr(cb, expr);
+        }
       }
       proc::JoinNode::JoinLeaf(leaf) => {
         cb(QueryElement::JoinLeaf(leaf));
@@ -128,7 +133,6 @@ impl QueryIterator {
     cb(QueryElement::JoinSelect(query));
     self.iterate_join_node(cb, &query.from);
     self.iterate_select_items(cb, &query.projection);
-    self.iterate_expr(cb, &query.selection)
   }
 
   pub fn iterate_update<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
@@ -315,7 +319,12 @@ impl QueryIteratorMut {
       proc::JoinNode::JoinInnerNode(inner) => {
         self.iterate_join_node(cb, &mut inner.left);
         self.iterate_join_node(cb, &mut inner.right);
-        self.iterate_expr(cb, &mut inner.on);
+        for expr in &mut inner.strong_conjunctions {
+          self.iterate_expr(cb, expr);
+        }
+        for expr in &mut inner.weak_conjunctions {
+          self.iterate_expr(cb, expr);
+        }
       }
       proc::JoinNode::JoinLeaf(leaf) => {
         cb(QueryElementMut::JoinLeaf(leaf));
@@ -352,7 +361,6 @@ impl QueryIteratorMut {
     cb(QueryElementMut::JoinSelect(query));
     self.iterate_join_node(cb, &mut query.from);
     self.iterate_select_items(cb, &mut query.projection);
-    self.iterate_expr(cb, &mut query.selection)
   }
 
   pub fn iterate_update<CbT: FnMut(QueryElementMut) -> ()>(
