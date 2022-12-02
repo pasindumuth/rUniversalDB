@@ -1043,8 +1043,10 @@ impl OrigP {
   }
 }
 
-/// Here, every element of `results` has the same `Vec<ColName>`, and all `Vec<TableView>`s
-/// have the same length. This function essentially merges together corresponding `TableView`.
+/// Here, every element of `results` has the same schema; all `Vec<ColValN>`s in
+/// across all `TableView`s have the same number of elements and the column types correspond.
+/// In addition all `Vec<TableView>`s have the same length. This function essentially
+/// merges together corresponding `TableView`.
 pub fn merge_table_views(mut results: Vec<Vec<TableView>>) -> Vec<TableView> {
   let mut it = results.into_iter();
   if let Some(mut views) = it.next() {

@@ -3,9 +3,13 @@ use sqlparser::parser::Parser;
 use std::collections::BTreeMap;
 
 fn main() {
-  let mut s = BTreeMap::new();
-  s.insert("hello", 4);
-  println!("{:#?}", s);
+  let d = true;
+  let mut f = 3;
+  println!("{}", f);
+
+  // let mut s = BTreeMap::new();
+  // s.insert("hello", 4);
+  // println!("{:#?}", s);
 }
 
 fn sql() {

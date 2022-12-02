@@ -84,11 +84,6 @@ fn main() {
   } else {
     execute_once(&mut rand, rounds);
   }
-
-  // TODO: this test grinds to a halt when we use the many-messages delivery scheme.
-  // println!("\n");
-  // println!("Advanced Parallel Tests:");
-  // test_all_advanced_parallel(&mut rand);
 }
 
 // -----------------------------------------------------------------------------------------------

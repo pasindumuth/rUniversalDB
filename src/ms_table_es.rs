@@ -279,7 +279,7 @@ impl<SqlQueryInnerT: SqlQueryInner> TPESBase for MSTableES<SqlQueryInnerT> {
     ms_query_es: &mut MSQueryES,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
-    (_, table_views): (Vec<Option<ColName>>, Vec<TableView>),
+    table_views: Vec<TableView>,
   ) -> TPESAction {
     // Add the subquery results into the MSTableES.
     self.general.new_rms.extend(subquery_new_rms);

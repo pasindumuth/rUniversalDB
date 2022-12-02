@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 pub trait TransTableSource {
   fn get_instance(&self, prefix: &TransTableName, idx: usize) -> &TableView;
-  fn get_schema(&self, prefix: &TransTableName) -> Vec<Option<ColName>>;
+  fn get_schema(&self, prefix: &TransTableName) -> &Vec<Option<ColName>>;
 }
 
 #[derive(Debug)]
@@ -80,7 +80,7 @@ impl<'a, SourceT: TransTableSource> TransLocalTable<'a, SourceT> {
       trans_table_source,
       source,
       trans_table_name,
-      schema: trans_table_source.get_schema(trans_table_name),
+      schema: trans_table_source.get_schema(trans_table_name).clone(),
     }
   }
 }
@@ -284,7 +284,7 @@ impl TransTableReadES {
     trans_table_source: &SourceT,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
-    (_, table_views): (Vec<Option<ColName>>, Vec<TableView>),
+    table_views: Vec<TableView>,
   ) -> TPESAction {
     // Add the subquery results into the TableReadES.
     self.new_rms.extend(subquery_new_rms);
@@ -424,7 +424,7 @@ impl TPESBase for TransTableReadES {
     es_ctx: &mut Self::ESContext,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
-    results: (Vec<Option<ColName>>, Vec<TableView>),
+    results: Vec<TableView>,
   ) -> TPESAction {
     TransTableReadES::handle_subquery_done(
       self,

@@ -352,7 +352,7 @@ pub trait TPESBase {
     _es_ctx: &mut Self::ESContext,
     _subquery_id: QueryId,
     _subquery_new_rms: BTreeSet<TQueryPath>,
-    _results: (Vec<Option<ColName>>, Vec<TableView>),
+    _results: Vec<TableView>,
   ) -> TPESAction {
     TPESAction::Wait
   }
@@ -2758,26 +2758,16 @@ impl TabletContext {
     orig_p: OrigP,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
-    result: (Vec<Option<ColName>>, Vec<TableView>),
+    result: Vec<TableView>,
   ) {
     struct Cb;
-    impl
-      CallbackWithContextOnce<(
-        QueryId,
-        BTreeSet<TQueryPath>,
-        (Vec<Option<ColName>>, Vec<TableView>),
-      )> for Cb
-    {
+    impl CallbackWithContextOnce<(QueryId, BTreeSet<TQueryPath>, Vec<TableView>)> for Cb {
       fn call<IOCtx: CoreIOCtx, TPEST: TPESBase>(
         ctx: &mut TabletContext,
         io_ctx: &mut IOCtx,
         es: &mut TPEST,
         es_ctx: &mut TPEST::ESContext,
-        (subquery_id, subquery_new_rms, result): (
-          QueryId,
-          BTreeSet<TQueryPath>,
-          (Vec<Option<ColName>>, Vec<TableView>),
-        ),
+        (subquery_id, subquery_new_rms, result): (QueryId, BTreeSet<TQueryPath>, Vec<TableView>),
       ) -> TabletAction {
         es.remove_subquery(&subquery_id);
         TabletAction::TPESAction(es.handle_subquery_done(
@@ -3133,7 +3123,7 @@ impl TabletContext {
           gr_query.es.orig_p,
           gr_query.es.query_id,
           res.new_rms,
-          (res.schema, res.result),
+          res.result,
         );
       }
       GRQueryAction::QueryError(query_error) => {

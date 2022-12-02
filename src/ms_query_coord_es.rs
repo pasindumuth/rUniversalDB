@@ -63,7 +63,7 @@ pub struct MSCoordES {
 
   // The dynamically evolving fields.
   pub all_rms: BTreeSet<TQueryPath>,
-  pub trans_table_views: Vec<(TransTableName, (Vec<Option<ColName>>, TableView))>,
+  pub trans_table_views: Vec<(TransTableName, TableView)>,
   pub state: CoordState,
 
   /// Recall that since we remove a `TQueryPath` when its Leadership changes, that means that
@@ -75,13 +75,11 @@ pub struct MSCoordES {
 impl TransTableSource for MSCoordES {
   fn get_instance(&self, trans_table_name: &TransTableName, idx: usize) -> &TableView {
     assert_eq!(idx, 0);
-    let (_, instance) = lookup(&self.trans_table_views, trans_table_name).unwrap();
-    instance
+    lookup(&self.trans_table_views, trans_table_name).unwrap()
   }
 
-  fn get_schema(&self, trans_table_name: &TransTableName) -> Vec<Option<ColName>> {
-    let (schema, _) = lookup(&self.trans_table_views, trans_table_name).unwrap();
-    schema.clone()
+  fn get_schema(&self, trans_table_name: &TransTableName) -> &Vec<Option<ColName>> {
+    lookup(&self.ms_query.trans_tables, trans_table_name).unwrap().schema()
   }
 }
 
@@ -192,7 +190,7 @@ impl FullMSCoordES {
     io_ctx: &mut IO,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    results: Vec<Vec<TableView>>,
+    pre_agg_table_views: Vec<TableView>,
   ) -> MSQueryCoordAction {
     match self {
       FullMSCoordES::Executing(es) => {
@@ -201,7 +199,6 @@ impl FullMSCoordES {
             // Combine the results into a single one
             let (trans_table_name, stage) =
               es.ms_query.trans_tables.get(coord_stage.stage_idx).unwrap();
-            let pre_agg_table_views = merge_table_views(results);
             let table_views = match match stage {
               proc::MSQueryStage::TableSelect(sql_query) => {
                 perform_aggregation(sql_query, pre_agg_table_views)
@@ -235,8 +232,7 @@ impl FullMSCoordES {
 
             // Then, the results to the `trans_table_views`
             let table_view = table_views.into_iter().next().unwrap();
-            let schema = stage.schema().clone();
-            es.trans_table_views.push((trans_table_name.clone(), (schema, table_view)));
+            es.trans_table_views.push((trans_table_name.clone(), table_view));
             es.all_rms.extend(new_rms);
             self.advance(ctx, io_ctx)
           }
@@ -416,7 +412,8 @@ impl FullMSCoordES {
       }
 
       // Finally, we go to Done and return the appropriate TableView.
-      let (_, (schema, data)) = es
+      let schema = es.get_schema(&es.ms_query.returning).clone();
+      let (_, data) = es
         .trans_table_views
         .iter()
         .find(|(trans_table_name, _)| trans_table_name == &es.ms_query.returning)
@@ -731,7 +728,7 @@ impl QueryPlanningES {
   ///
   /// Preconditions:
   ///   1. The `Gen`s must be present in the local `GossipData` (which might not be the case if
-  ///      `table_location_map` was sent from the Master.
+  ///      `table_location_map` was sent from the Master).
   fn compute_query_leader_map(
     &mut self,
     ctx: &mut CoordContext,

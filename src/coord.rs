@@ -608,7 +608,7 @@ impl CoordContext {
     orig_p: OrigP,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    results: Vec<Vec<TableView>>,
+    results: Vec<TableView>,
   ) {
     let query_id = orig_p.query_id;
     // Route TM results to MSQueryES
@@ -674,7 +674,7 @@ impl CoordContext {
     orig_p: OrigP,
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
-    result: (Vec<Option<ColName>>, Vec<TableView>),
+    result: Vec<TableView>,
   ) {
     let query_id = orig_p.query_id;
     let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
@@ -985,7 +985,7 @@ impl CoordContext {
           gr_query.es.orig_p,
           gr_query.es.query_id,
           res.new_rms,
-          (res.schema, res.result),
+          res.result,
         );
       }
       GRQueryAction::QueryError(query_error) => {

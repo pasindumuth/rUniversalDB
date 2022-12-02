@@ -31,7 +31,6 @@ pub enum InternalError {
 
 pub struct GRQueryResult {
   pub new_rms: BTreeSet<TQueryPath>,
-  pub schema: Vec<Option<ColName>>,
   pub result: Vec<TableView>,
 }
 
@@ -53,7 +52,7 @@ pub enum GRQueryAction {
 pub struct ReadStage {
   pub stage_idx: usize,
   /// This fields maps the indices of the GRQueryES Context to that of the Context
-  /// in this SubqueryStatus. We cache this here since it's computed when the child
+  /// in this SubqueryStatus. We cache this here since it is computed when the child
   /// context is computed.
   pub parent_context_map: Vec<usize>,
   pub stage_query_id: QueryId,
@@ -64,16 +63,6 @@ pub enum GRExecutionS {
   Start,
   ReadStage(ReadStage),
   Done,
-}
-
-// Recall that the elements don't need to preserve the order of the TransTables, since the
-// sql_query does that for us (thus, we can use BTreeMaps).
-#[derive(Debug)]
-pub struct GRQueryPlan {
-  pub tier_map: TierMap,
-  pub query_leader_map: BTreeMap<SlaveGroupId, LeadershipId>,
-  pub table_location_map: BTreeMap<TablePath, FullGen>,
-  pub col_presence_req: BTreeMap<TablePath, ColPresenceReq>,
 }
 
 #[derive(Debug)]
@@ -95,11 +84,11 @@ pub struct GRQueryES {
 
   // Query-related fields.
   pub sql_query: proc::GRQuery,
-  pub query_plan: GRQueryPlan,
+  pub query_plan: QueryPlan,
 
   // The dynamically evolving fields.
   pub new_rms: BTreeSet<TQueryPath>,
-  pub trans_table_views: Vec<(TransTableName, (Vec<Option<ColName>>, Vec<TableView>))>,
+  pub trans_table_views: Vec<(TransTableName, Vec<TableView>)>,
   pub state: GRExecutionS,
 
   /// This holds the path to the parent ES.
@@ -111,13 +100,11 @@ pub struct GRQueryES {
 /// here at the Server level, so we avoid doing this for now.
 impl TransTableSource for GRQueryES {
   fn get_instance(&self, trans_table_name: &TransTableName, idx: usize) -> &TableView {
-    let (_, instances) = lookup(&self.trans_table_views, trans_table_name).unwrap();
-    instances.get(idx).unwrap()
+    lookup(&self.trans_table_views, trans_table_name).unwrap().get(idx).unwrap()
   }
 
-  fn get_schema(&self, trans_table_name: &TransTableName) -> Vec<Option<ColName>> {
-    let (schema, _) = lookup(&self.trans_table_views, trans_table_name).unwrap();
-    schema.clone()
+  fn get_schema(&self, trans_table_name: &TransTableName) -> &Vec<Option<ColName>> {
+    lookup(&self.sql_query.trans_tables, trans_table_name).unwrap().schema()
   }
 }
 
@@ -198,12 +185,7 @@ impl<'a, SqlQueryT: SubqueryComputableSql> GRQueryConstructorView<'a, SqlQueryT>
       new_trans_table_context,
       query_id: gr_query_id,
       sql_query: self.sql_query.collect_subqueries().remove(subquery_idx),
-      query_plan: GRQueryPlan {
-        tier_map: self.query_plan.tier_map.clone(),
-        query_leader_map: self.query_plan.query_leader_map.clone(),
-        table_location_map: self.query_plan.table_location_map.clone(),
-        col_presence_req: self.query_plan.col_presence_req.clone(),
-      },
+      query_plan: self.query_plan.clone(),
       new_rms: Default::default(),
       trans_table_views: vec![],
       state: GRExecutionS::Start,
@@ -238,14 +220,13 @@ impl GRQueryES {
     io_ctx: &mut IO,
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
-    results: Vec<Vec<TableView>>,
+    pre_agg_table_views: Vec<TableView>,
   ) -> GRQueryAction {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
     assert_eq!(&read_stage.stage_query_id, &tm_qid);
 
     // Combine the results into a single one
     let (trans_table_name, stage) = self.sql_query.trans_tables.get(read_stage.stage_idx).unwrap();
-    let pre_agg_table_views = merge_table_views(results);
     let table_views = match match stage {
       proc::GRQueryStage::TableSelect(sql_query) => {
         perform_aggregation(sql_query, pre_agg_table_views)
@@ -276,8 +257,7 @@ impl GRQueryES {
     self.new_rms.extend(new_rms);
 
     // Add the `table_views` to the GRQueryES and advance it.
-    let schema = stage.schema().clone();
-    self.trans_table_views.push((trans_table_name.clone(), (schema, table_views)));
+    self.trans_table_views.push((trans_table_name.clone(), table_views));
     self.advance(ctx, io_ctx)
   }
 
@@ -335,7 +315,7 @@ impl GRQueryES {
       // back to the originator.
       let return_trans_table_pos =
         lookup_pos(&self.trans_table_views, &self.sql_query.returning).unwrap();
-      let (_, (schema, table_views)) = self.trans_table_views.get(return_trans_table_pos).unwrap();
+      let (_, table_views) = self.trans_table_views.get(return_trans_table_pos).unwrap();
 
       // To compute the result, recall that we need to associate the Context to each TableView.
       let mut result = Vec::<TableView>::new();
@@ -346,11 +326,7 @@ impl GRQueryES {
 
       // Finally, we signal that the GRQueryES is done and send back the results.
       self.state = GRExecutionS::Done;
-      GRQueryAction::Success(GRQueryResult {
-        new_rms: self.new_rms.clone(),
-        schema: schema.clone(),
-        result,
-      })
+      GRQueryAction::Success(GRQueryResult { new_rms: self.new_rms.clone(), result })
     }
   }
 
@@ -424,11 +400,7 @@ impl GRQueryES {
         trans_table_name_indicies.push(TransTableIdx::External(idx));
       } else {
         trans_table_name_indicies.push(TransTableIdx::Local(
-          self
-            .trans_table_views
-            .iter()
-            .position(|(name, (_, _))| name == &trans_table_name)
-            .unwrap(),
+          self.trans_table_views.iter().position(|(name, _)| name == &trans_table_name).unwrap(),
         ));
       }
     }
@@ -546,6 +518,7 @@ impl GRQueryES {
       }
       proc::GRQueryStage::JoinSelect(_) => {
         // TODO: do properly.
+        // when it comes back, then what?
         unimplemented!()
       }
     };

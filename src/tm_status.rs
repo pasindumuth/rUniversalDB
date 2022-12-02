@@ -1,4 +1,4 @@
-use crate::common::{mk_qid, CoreIOCtx, OrigP};
+use crate::common::{merge_table_views, mk_qid, CoreIOCtx, OrigP};
 use crate::common::{
   CQueryPath, CTNodePath, ColName, LeadershipId, PaxosGroupIdTrait, QueryId, SlaveGroupId,
   TQueryPath, TableView, TabletGroupId, TransTableLocationPrefix,
@@ -154,13 +154,13 @@ impl TMStatus {
 
   /// Merge there `TableView`s together. Note that this should be only called when
   /// all child queries have responded.
-  pub fn get_results(self) -> (OrigP, Vec<Vec<TableView>>, BTreeSet<TQueryPath>) {
+  pub fn get_results(self) -> (OrigP, Vec<TableView>, BTreeSet<TQueryPath>) {
     debug_assert!(self.is_complete());
     let mut results = Vec::<Vec<TableView>>::new();
     for (_, rm_result) in self.tm_state {
       results.push(rm_result.unwrap());
     }
-    (self.orig_p, results, self.new_rms)
+    (self.orig_p, merge_table_views(results), self.new_rms)
   }
 
   pub fn is_complete(&self) -> bool {

@@ -541,7 +541,7 @@ impl TPESBase for TableReadES {
     _: &mut (),
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
-    (_, table_views): (Vec<Option<ColName>>, Vec<TableView>),
+    table_views: Vec<TableView>,
   ) -> TPESAction {
     // Add the subquery results into the TableReadES.
     self.new_rms.extend(subquery_new_rms);
