@@ -398,8 +398,8 @@ pub fn evaluate_super_simple_select<SqlQueryT: SelectQuery>(
       ExtraColumnRef::Named(col_name) => {
         named_col_map.insert(col_name.clone(), col_val);
       }
-      ExtraColumnRef::Unnamed(index) => {
-        index_col_map.insert(*index, col_val);
+      ExtraColumnRef::Unnamed(unnamed_col) => {
+        index_col_map.insert(unnamed_col.index, col_val);
       }
     }
   }
@@ -715,19 +715,26 @@ impl ContextConverter {
 //  Context Construction
 // -----------------------------------------------------------------------------------------------
 
+/// References a column in a JoinLeaf of Table/TransTableSource by its position.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnnamedColumnRef {
+  pub table_name: String,
+  pub index: usize,
+}
+
 /// This is an extension to `ColumnRef` that allows the user of `ContextConstructor` to
 /// reference columns in the `LocalTable` that do not have name using its position in the schema.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExtraColumnRef {
   Named(proc::ColumnRef),
-  Unnamed(usize),
+  Unnamed(UnnamedColumnRef),
 }
 
 impl ExtraColumnRef {
   pub fn into_local(self) -> LocalColumnRef {
     match self {
       ExtraColumnRef::Named(col_name) => LocalColumnRef::Named(col_name.col_name),
-      ExtraColumnRef::Unnamed(index) => LocalColumnRef::Unnamed(index),
+      ExtraColumnRef::Unnamed(unnamed_col) => LocalColumnRef::Unnamed(unnamed_col.index),
     }
   }
 }
@@ -782,7 +789,7 @@ pub trait LocalTable {
   fn contains_extra_col_ref(&self, col: &ExtraColumnRef) -> bool {
     match col {
       ExtraColumnRef::Named(col_ref) => self.contains_col_ref(col_ref),
-      ExtraColumnRef::Unnamed(index) => index < &self.schema().len(),
+      ExtraColumnRef::Unnamed(unnamed_col) => unnamed_col.index < self.schema().len(),
     }
   }
 

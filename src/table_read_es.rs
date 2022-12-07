@@ -16,7 +16,7 @@ use crate::master_query_planning_es::ColPresenceReq;
 use crate::message as msg;
 use crate::server::{
   contains_val_col, evaluate_super_simple_select, mk_eval_error, ContextConstructor,
-  ExtraColumnRef, LocalColumnRef,
+  ExtraColumnRef, LocalColumnRef, UnnamedColumnRef,
 };
 use crate::server::{LocalTable, ServerContextBase};
 
@@ -678,7 +678,10 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable, SelectQueryT: SelectQuery>
               col_name: col_name.clone(),
             }));
           } else {
-            top_level_extra_cols_set.insert(ExtraColumnRef::Unnamed(index));
+            top_level_extra_cols_set.insert(ExtraColumnRef::Unnamed(UnnamedColumnRef {
+              table_name: sql_query.name().clone(),
+              index,
+            }));
           }
         }
 
