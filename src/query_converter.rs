@@ -155,18 +155,26 @@ fn validate_join_tree<ErrorT: ErrorTrait>(join_node: &iast::JoinNode) -> Result<
 /// digging into the subqueries.
 fn validate_lateral<ErrorT: ErrorTrait>(join_node: &iast::JoinNode) -> Result<(), ErrorT> {
   fn validate_lateral_r<ErrorT: ErrorTrait>(
+    parent_join_type: &iast::JoinType,
     is_left: bool,
     join_node: &iast::JoinNode,
   ) -> Result<(), ErrorT> {
     match join_node {
       iast::JoinNode::JoinInnerNode(inner) => {
-        validate_lateral_r(true, &inner.left)?;
-        validate_lateral_r(false, &inner.right)
+        validate_lateral_r(&inner.join_type, true, &inner.left)?;
+        validate_lateral_r(&inner.join_type, false, &inner.right)
       }
       iast::JoinNode::JoinLeaf(leaf) => {
         if let iast::JoinNodeSource::DerivedTable { lateral, .. } = &leaf.source {
-          if !(*lateral && is_left) {
-            return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidLateralJoin));
+          if *lateral {
+            // If a leaf is LATERAL, the it cannot be a left child and the parent's
+            // join type cannot be a RIGHT Join; that is illegal SQL.
+            // TODO: technically, we *can* have RIGHT JOIN LATERAL as long as the right side
+            //  does not actually any column references to the left, allowing us to handle it
+            //  as a regular RIGHT JOIN. But we ignore this inconvenience for now.
+            if is_left || parent_join_type == &iast::JoinType::Right {
+              return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidLateralJoin));
+            }
           }
         }
         Ok(())
@@ -174,9 +182,21 @@ fn validate_lateral<ErrorT: ErrorTrait>(join_node: &iast::JoinNode) -> Result<()
     }
   }
 
-  // We pass in `true` for the case that `from` is just a `JoinLeaf`. This checks
-  // to make sure that `lateral` is `false` in this case.
-  validate_lateral_r(true, join_node)
+  match join_node {
+    iast::JoinNode::JoinInnerNode(inner) => {
+      validate_lateral_r(&inner.join_type, true, &inner.left)?;
+      validate_lateral_r(&inner.join_type, false, &inner.right)
+    }
+    iast::JoinNode::JoinLeaf(leaf) => {
+      if let iast::JoinNodeSource::DerivedTable { lateral, .. } = &leaf.source {
+        if *lateral {
+          // If the root JoinNode is a JoinLeaf, it is not allowed to be have LATERAL.
+          return Err(ErrorT::mk_error(msg::QueryPlanningError::InvalidLateralJoin));
+        }
+      }
+      Ok(())
+    }
+  }
 }
 
 /// Ensure that every JoinLeaf has a JoinLeaf Name (JLN) by making sure ever Derived
@@ -1910,8 +1930,8 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
       let right_path = cur_path.clone() + "R";
 
       // Collect the JLNs from both sides.
-      let left_jlns = Self::collect_jlns(inner.left.deref());
-      let right_jlns = Self::collect_jlns(inner.right.deref());
+      let left_jlns = collect_jlns(inner.left.deref());
+      let right_jlns = collect_jlns(inner.right.deref());
 
       // Create a helper function that pushes a conjunction down to the left or right side
       // of `inner`, making sure to add a dependency if necessary.
@@ -1924,61 +1944,84 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
       let right = &mut inner.right.deref_mut();
       let left = &mut inner.left.deref_mut();
 
-      let mut push_expr = |conjunction: &proc::ValExpr, is_strong: bool, side: JoinSide| match side
-      {
-        // Try pushing the conjunction to the Right side.
-        JoinSide::Right => {
-          // If the conjunction is Weak, then we need to check that the JOIN is not a RIGHT JOIN.
-          if is_strong || join_type.non_right() {
-            // Next, check whether a right-to-left dependency would need to be added.
-            if Self::does_expr_use_any_jlns(conjunction, &left_jlns) {
-              // If so, we make sure that there is not already a left-to-right dependency.
-              if !graph.contains_key(&left_path) {
-                // Now, we are clear to push the conjunction and update the dependency.
+      // This function perfoms every necessary check to gaurantee that if the given `conjunction`
+      // is pushed to the given `side`, then none of the rules are violdated.
+      // TODO: we should actually MOVE the conjunctions, just just copy them. This is important
+      //  for the case that the conjunctions have subqueries. Alternatively, we can make sure to only
+      //  copy down the conjunction if it does not have a subquery.
+      let mut try_push_expr =
+        |conjunction: &proc::ValExpr, is_strong: bool, side: JoinSide| match side {
+          // Try pushing the conjunction to the Right side.
+          JoinSide::Right => {
+            // If the conjunction is Weak, then we need to check that the JOIN is not a RIGHT JOIN.
+            if !is_strong && join_type.non_right() {
+              // Next, check whether a right-to-left dependency would need to be added.
+              if Self::does_expr_use_any_jlns(conjunction, &left_jlns) {
+                // If so, we make sure that there is not already a left-to-right dependency.
+                if !graph.contains_key(&left_path) {
+                  // Now, we are clear to push the conjunction and update the dependency.
+                  Self::push_expr(conjunction.clone(), right.deref_mut());
+                  graph.insert(right_path.clone(), left_path.clone());
+                  did_anything_change = true;
+                }
+              } else {
+                // Otherwise, we can simply push the conjunction unconditionally.
                 Self::push_expr(conjunction.clone(), right.deref_mut());
-                graph.insert(right_path.clone(), left_path.clone());
                 did_anything_change = true;
               }
-            } else {
-              // Otherwise, we can simply push the conjunction unconditionally.
+            }
+
+            // If the conjunction is Strong, then we need to check that the JOIN is not a LEFT JOIN.
+            if is_strong && join_type.non_left() {
+              // If so, we can simply push the conjunction unconditionally.
               Self::push_expr(conjunction.clone(), right.deref_mut());
               did_anything_change = true;
             }
           }
-        }
-        // Try pushing the conjunction to the Left side.
-        JoinSide::Left => {
-          // If the conjunction is Weak, then we need to check that the JOIN is not a LEFT JOIN.
-          if is_strong || join_type.non_left() {
-            // Next, check whether a left-to-right dependency would need to be added.
-            if Self::does_expr_use_any_jlns(conjunction, &right_jlns) {
-              // If so, we make sure that there is not already a right-to-left dependency.
-              if !graph.contains_key(&right_path) {
-                // Now, we are clear to push the conjunction and update the dependency.
+          // Try pushing the conjunction to the Left side.
+          JoinSide::Left => {
+            // If the conjunction is Weak, then we need to check that the JOIN is not a LEFT JOIN.
+            if !is_strong && join_type.non_left() {
+              // Next, check whether a left-to-right dependency would need to be added.
+              if Self::does_expr_use_any_jlns(conjunction, &right_jlns) {
+                // If so, we make sure that there is not already a right-to-left dependency.
+                if !graph.contains_key(&right_path) {
+                  // Now, we are clear to push the conjunction and update the dependency.
+                  Self::push_expr(conjunction.clone(), left.deref_mut());
+                  graph.insert(left_path.clone(), right_path.clone());
+                  did_anything_change = true;
+                }
+              } else {
+                // Otherwise, we can simply push the conjunction unconditionally.
                 Self::push_expr(conjunction.clone(), left.deref_mut());
-                graph.insert(left_path.clone(), right_path.clone());
                 did_anything_change = true;
               }
-            } else {
-              // Otherwise, we can simply push the conjunction unconditionally.
+            }
+
+            // If the conjunction is Strong, then we need to check that the JOIN is not a RIGHT JOIN.
+            if is_strong && join_type.non_right() {
+              // If so, we can simply push the conjunction unconditionally.
               Self::push_expr(conjunction.clone(), left.deref_mut());
               did_anything_change = true;
             }
           }
-        }
-      };
+        };
 
-      // Define function that iteratores through Conjunctions and applies Rule 1.
+      // Define function that iterates through Conjunctions and tries to push down
+      // conjunctions to a side only if it does not use columns from the other side. Since
+      // this would not introduce any dependencies, we can simply try to push down as many
+      // conjunctions as possible. (Recall that introducing a dependency can result in a
+      // very expensive query if not done judiciously.)
       let mut apply_rule_1 = |conjunctions: &Vec<proc::ValExpr>, is_strong: bool| {
         for conjunction in conjunctions {
           if !Self::does_expr_use_any_jlns(conjunction, &left_jlns) {
             // Here, pushing down the conjunction to the right would not
             // produce a dependency, so we do it.
-            push_expr(conjunction, is_strong, JoinSide::Right);
+            try_push_expr(conjunction, is_strong, JoinSide::Right);
           } else if !Self::does_expr_use_any_jlns(conjunction, &right_jlns) {
             // Here, pushing down the conjunction to the left would not
             // produce a dependency, so we do it.
-            push_expr(conjunction, is_strong, JoinSide::Left);
+            try_push_expr(conjunction, is_strong, JoinSide::Left);
           }
         }
       };
@@ -1987,7 +2030,9 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
       apply_rule_1(&inner.strong_conjunctions, true);
       apply_rule_1(&inner.weak_conjunctions, false);
 
-      // Define function that iteratores through Conjunctions and applies Rule 2.
+      // Define function that iterates through Conjunctions and tries to push down conjunctions
+      // that *would* introduce a dependency. We do this judiciously so that overall, the
+      // dependecy would increase performance, not decrease it.
       let mut apply_rule_2 = |conjunctions: &Vec<proc::ValExpr>, is_strong: bool| {
         // Iterate through the Conjunctions and apply Rule 2.
         for conjunction in conjunctions {
@@ -2006,11 +2051,11 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
                       if left_jlns.contains(&col_ref.table_name) {
                         // If the real Table is on the left side, we
                         // push the conjunction to the left.
-                        push_expr(conjunction, is_strong, JoinSide::Left);
+                        try_push_expr(conjunction, is_strong, JoinSide::Left);
                       } else if right_jlns.contains(&col_ref.table_name) {
                         // If the real Table is on the right side, we
                         // push the conjunction to the right.
-                        push_expr(conjunction, is_strong, JoinSide::Right);
+                        try_push_expr(conjunction, is_strong, JoinSide::Right);
                       }
 
                       // Note that the real Table might not be on any side of this JoinInnerNode,
@@ -2034,22 +2079,6 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
     }
 
     did_anything_change
-  }
-
-  /// Collect the Join Leaf Names (i.e. aliases) under `node`.
-  fn collect_jlns(node: &proc::JoinNode) -> Vec<String> {
-    fn collect_jlns_r(node: &proc::JoinNode, jlns: &mut Vec<String>) {
-      match node {
-        proc::JoinNode::JoinInnerNode(inner) => {
-          collect_jlns_r(&inner.left, jlns);
-          collect_jlns_r(&inner.right, jlns);
-        }
-        proc::JoinNode::JoinLeaf(leaf) => jlns.push(leaf.alias.clone()),
-      }
-    }
-    let mut jlns = Vec::<String>::new();
-    collect_jlns_r(node, &mut jlns);
-    return jlns;
   }
 
   /// Checks whether `expr` has any `ColumnRef`s with `table_name` in `jlns`.
@@ -2119,4 +2148,24 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
       right: Box::new(cur_selection),
     };
   }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  General Join Utilities
+// -----------------------------------------------------------------------------------------------
+
+/// Collect the Join Leaf Names (i.e. aliases) under `node`.
+pub fn collect_jlns(node: &proc::JoinNode) -> Vec<String> {
+  fn collect_jlns_r(node: &proc::JoinNode, jlns: &mut Vec<String>) {
+    match node {
+      proc::JoinNode::JoinInnerNode(inner) => {
+        collect_jlns_r(&inner.left, jlns);
+        collect_jlns_r(&inner.right, jlns);
+      }
+      proc::JoinNode::JoinLeaf(leaf) => jlns.push(leaf.alias.clone()),
+    }
+  }
+  let mut jlns = Vec::<String>::new();
+  collect_jlns_r(node, &mut jlns);
+  return jlns;
 }

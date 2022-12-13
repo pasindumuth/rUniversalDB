@@ -5,7 +5,7 @@ use crate::common::{
 };
 use crate::common::{CTQueryPath, Context, QueryId, TransTableLocationPrefix};
 use crate::expression::{is_true, EvalError};
-use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
+use crate::gr_query_es::{GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
 use crate::message as msg;
 use crate::server::{
   mk_eval_error, CTServerContext, ContextConstructor, LocalColumnRef, LocalTable, ServerContextBase,
@@ -218,7 +218,7 @@ impl TransTableReadES {
     // ContextConstructor, and then we construct GRQueryESs.
 
     // Compute children.
-    let children = compute_children(&self.sql_query);
+    let children = compute_children(&self.sql_query.collect_subqueries());
 
     // Create the child context.
     let child_contexts = compute_contexts(

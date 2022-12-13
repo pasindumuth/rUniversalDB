@@ -19,6 +19,7 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
       }
       QueryElement::TransTableSelect(_) => {}
       QueryElement::JoinSelect(_) => {}
+      QueryElement::JoinNode(_) => {}
       QueryElement::JoinLeaf(_) => {}
       QueryElement::TableSelect(query) => {
         table_paths.insert(query.from.table_path.clone());
@@ -35,6 +36,7 @@ pub fn collect_table_paths(query: &proc::MSQuery) -> BTreeSet<TablePath> {
       QueryElement::ValExpr(_) => {}
       QueryElement::MSQuery(_) => {}
       QueryElement::GRQuery(_) => {}
+      QueryElement::GRQueryStage(_) => {}
     },
     query,
   );

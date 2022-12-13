@@ -4,7 +4,7 @@ use crate::alter_table_rm_es::{
 use crate::alter_table_tm_es::AlterTableTMPayloadTypes;
 use crate::col_usage::{
   alias_collecting_cb, external_col_collecting_cb, external_trans_table_collecting_cb,
-  trans_table_collecting_cb, QueryIterator,
+  trans_table_collecting_cb, QueryElement, QueryIterator,
 };
 use crate::common::{
   btree_multimap_insert, lookup, map_insert, mk_qid, mk_t, remove_item, update_leader_map,
@@ -31,6 +31,7 @@ use crate::expression::{
 use crate::finish_query_rm_es::{FinishQueryRMES, FinishQueryRMInner};
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
+use crate::join_util::compute_children_general;
 use crate::message as msg;
 use crate::ms_table_delete_es::{DeleteInner, MSTableDeleteES};
 use crate::ms_table_es::{GeneralQueryES, MSTableES, MSTableExecutionS, SqlQueryInner};
@@ -3136,6 +3137,9 @@ impl TabletContext {
           query_error,
         );
       }
+      _ => {
+        // TODO: do
+      }
     }
   }
 
@@ -3291,42 +3295,13 @@ pub fn compute_contexts<LocalTableT: LocalTable>(
 }
 
 /// Compute children for the given query
-pub fn compute_children<SqlQueryT: SubqueryComputableSql>(
-  sql_query: &SqlQueryT,
+pub fn compute_children(
+  subqueries: &Vec<proc::GRQuery>,
 ) -> Vec<(Vec<proc::ColumnRef>, Vec<TransTableName>)> {
   let mut children = Vec::<(Vec<proc::ColumnRef>, Vec<TransTableName>)>::new();
-  for subquery in sql_query.collect_subqueries() {
-    // Collect the external `ColumnRef`s
-    let mut col_names = Vec::<proc::ColumnRef>::new();
-    {
-      let it = QueryIterator::new();
-      let mut alias_container = BTreeSet::<String>::new();
-      it.iterate_gr_query(&mut alias_collecting_cb(&mut alias_container), &subquery);
-      let mut external_cols_set = BTreeSet::<proc::ColumnRef>::new();
-      it.iterate_gr_query(
-        &mut external_col_collecting_cb(&alias_container, &mut external_cols_set),
-        &subquery,
-      );
-      col_names.extend(external_cols_set.into_iter());
-    }
-
-    // Collect the external `TransTableName`s
-    let mut trans_table_names = Vec::<TransTableName>::new();
-    {
-      let it = QueryIterator::new();
-      let mut trans_table_container = BTreeSet::<TransTableName>::new();
-      it.iterate_gr_query(&mut trans_table_collecting_cb(&mut trans_table_container), &subquery);
-      let mut external_trans_table = BTreeSet::<TransTableName>::new();
-      it.iterate_gr_query(
-        &mut external_trans_table_collecting_cb(&trans_table_container, &mut external_trans_table),
-        &subquery,
-      );
-      trans_table_names.extend(external_trans_table.into_iter());
-    }
-
-    children.push((col_names, trans_table_names))
+  for subquery in subqueries {
+    children.push(compute_children_general(QueryElement::GRQuery(subquery)))
   }
-
   children
 }
 
@@ -3344,7 +3319,7 @@ pub fn compute_subqueries<
   // ContextConstructor, and then we construct GRQueryESs.
 
   // Compute children.
-  let children = compute_children(subquery_view.sql_query);
+  let children = compute_children(&subquery_view.sql_query.collect_subqueries());
 
   // Create the child context.
   let child_contexts = compute_contexts(subquery_view.context, local_table, children);

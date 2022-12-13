@@ -998,6 +998,9 @@ impl CoordContext {
           query_error,
         );
       }
+      _ => {
+        // TODO: do
+      }
     }
   }
 

@@ -13,12 +13,15 @@ use std::ops::Deref;
 //  Query Element Iteration
 // -----------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub enum QueryElement<'a> {
   MSQuery(&'a proc::MSQuery),
   GRQuery(&'a proc::GRQuery),
+  GRQueryStage(&'a proc::GRQueryStage),
   TableSelect(&'a proc::TableSelect),
   TransTableSelect(&'a proc::TransTableSelect),
   JoinSelect(&'a proc::JoinSelect),
+  JoinNode(&'a proc::JoinNode),
   JoinLeaf(&'a proc::JoinLeaf),
   Update(&'a proc::Update),
   Insert(&'a proc::Insert),
@@ -82,11 +85,21 @@ impl QueryIterator {
     }
   }
 
+  pub fn iterate_join_leaf<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    leaf: &'a proc::JoinLeaf,
+  ) {
+    cb(QueryElement::JoinLeaf(leaf));
+    self.iterate_gr_query(cb, &leaf.query);
+  }
+
   pub fn iterate_join_node<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
     &self,
     cb: &mut CbT,
     node: &'a proc::JoinNode,
   ) {
+    cb(QueryElement::JoinNode(node));
     match node {
       proc::JoinNode::JoinInnerNode(inner) => {
         self.iterate_join_node(cb, &inner.left);
@@ -99,8 +112,7 @@ impl QueryIterator {
         }
       }
       proc::JoinNode::JoinLeaf(leaf) => {
-        cb(QueryElement::JoinLeaf(leaf));
-        self.iterate_gr_query(cb, &leaf.query);
+        self.iterate_join_leaf(cb, leaf);
       }
     }
   }
@@ -131,8 +143,8 @@ impl QueryIterator {
     query: &'a proc::JoinSelect,
   ) {
     cb(QueryElement::JoinSelect(query));
-    self.iterate_join_node(cb, &query.from);
     self.iterate_select_items(cb, &query.projection);
+    self.iterate_join_node(cb, &query.from);
   }
 
   pub fn iterate_update<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
@@ -212,6 +224,7 @@ impl QueryIterator {
     cb: &mut CbT,
     stage: &'a proc::GRQueryStage,
   ) {
+    cb(QueryElement::GRQueryStage(stage));
     match stage {
       proc::GRQueryStage::TableSelect(query) => {
         self.iterate_table_select(cb, query);
@@ -233,6 +246,52 @@ impl QueryIterator {
     cb(QueryElement::GRQuery(query));
     for (_, stage) in &query.trans_tables {
       self.iterate_gr_query_stage(cb, stage);
+    }
+  }
+
+  pub fn iterate_general<'a, CbT: FnMut(QueryElement<'a>) -> ()>(
+    &self,
+    cb: &mut CbT,
+    query_elem: QueryElement<'a>,
+  ) {
+    cb(query_elem.clone());
+    match query_elem {
+      QueryElement::MSQuery(ms_query) => {
+        self.iterate_ms_query(cb, ms_query);
+      }
+      QueryElement::GRQuery(gr_query) => {
+        self.iterate_gr_query(cb, gr_query);
+      }
+      QueryElement::GRQueryStage(gr_query_stage) => {
+        self.iterate_gr_query_stage(cb, gr_query_stage);
+      }
+      QueryElement::TableSelect(table_select) => {
+        self.iterate_table_select(cb, table_select);
+      }
+      QueryElement::TransTableSelect(trans_table_select) => {
+        self.iterate_trans_table_select(cb, trans_table_select);
+      }
+      QueryElement::JoinSelect(join_select) => {
+        self.iterate_join_select(cb, join_select);
+      }
+      QueryElement::JoinNode(join_node) => {
+        self.iterate_join_node(cb, join_node);
+      }
+      QueryElement::JoinLeaf(join_leaf) => {
+        self.iterate_join_leaf(cb, join_leaf);
+      }
+      QueryElement::Update(update) => {
+        self.iterate_update(cb, update);
+      }
+      QueryElement::Insert(insert) => {
+        self.iterate_insert(cb, insert);
+      }
+      QueryElement::Delete(delete) => {
+        self.iterate_delete(cb, delete);
+      }
+      QueryElement::ValExpr(expr) => {
+        self.iterate_expr(cb, expr);
+      }
     }
   }
 }

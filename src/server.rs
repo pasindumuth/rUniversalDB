@@ -384,7 +384,7 @@ pub struct EvaluatedSuperSimpleSelect {
 pub fn evaluate_super_simple_select<SqlQueryT: SelectQuery>(
   select: &SqlQueryT,
   table_schema: &Vec<Option<ColName>>,
-  col_refs: &Vec<ExtraColumnRef>,
+  col_refs: &Vec<GeneralColumnRef>,
   col_vals: &Vec<ColValN>,
   raw_subquery_vals: &Vec<TableView>,
 ) -> Result<EvaluatedSuperSimpleSelect, EvalError> {
@@ -395,10 +395,10 @@ pub fn evaluate_super_simple_select<SqlQueryT: SelectQuery>(
   for (i, col_ref) in col_refs.iter().enumerate() {
     let col_val = col_vals.get(i).unwrap().clone();
     match col_ref {
-      ExtraColumnRef::Named(col_name) => {
+      GeneralColumnRef::Named(col_name) => {
         named_col_map.insert(col_name.clone(), col_val);
       }
-      ExtraColumnRef::Unnamed(unnamed_col) => {
+      GeneralColumnRef::Unnamed(unnamed_col) => {
         index_col_map.insert(unnamed_col.index, col_val);
       }
     }
@@ -725,16 +725,23 @@ pub struct UnnamedColumnRef {
 /// This is an extension to `ColumnRef` that allows the user of `ContextConstructor` to
 /// reference columns in the `LocalTable` that do not have name using its position in the schema.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ExtraColumnRef {
+pub enum GeneralColumnRef {
   Named(proc::ColumnRef),
   Unnamed(UnnamedColumnRef),
 }
 
-impl ExtraColumnRef {
+impl GeneralColumnRef {
   pub fn into_local(self) -> LocalColumnRef {
     match self {
-      ExtraColumnRef::Named(col_name) => LocalColumnRef::Named(col_name.col_name),
-      ExtraColumnRef::Unnamed(unnamed_col) => LocalColumnRef::Unnamed(unnamed_col.index),
+      GeneralColumnRef::Named(col_name) => LocalColumnRef::Named(col_name.col_name),
+      GeneralColumnRef::Unnamed(unnamed_col) => LocalColumnRef::Unnamed(unnamed_col.index),
+    }
+  }
+
+  pub fn table_name(&self) -> &String {
+    match self {
+      GeneralColumnRef::Named(col_ref) => &col_ref.table_name,
+      GeneralColumnRef::Unnamed(unnamed_col) => &unnamed_col.table_name,
     }
   }
 }
@@ -766,14 +773,6 @@ pub trait LocalTable {
     false
   }
 
-  /// Checks if the given `local_col_ref` is in the schema of the LocalTable.
-  fn contains_local_col_ref(&self, local_col_ref: &LocalColumnRef) -> bool {
-    match local_col_ref {
-      LocalColumnRef::Named(col_name) => self.contains_col(col_name),
-      LocalColumnRef::Unnamed(index) => index < &self.schema().len(),
-    }
-  }
-
   /// Checks whether this `ColumnRef` refers to a column in this `LocalTable`, taking the alias
   /// in the `source` into account.
   fn contains_col_ref(&self, col: &proc::ColumnRef) -> bool {
@@ -786,10 +785,10 @@ pub trait LocalTable {
   }
 
   /// Checks whether this `ExtraColumnRef` refers to a column in this `LocalTable`.
-  fn contains_extra_col_ref(&self, col: &ExtraColumnRef) -> bool {
+  fn contains_extra_col_ref(&self, col: &GeneralColumnRef) -> bool {
     match col {
-      ExtraColumnRef::Named(col_ref) => self.contains_col_ref(col_ref),
-      ExtraColumnRef::Unnamed(unnamed_col) => unnamed_col.index < self.schema().len(),
+      GeneralColumnRef::Named(col_ref) => self.contains_col_ref(col_ref),
+      GeneralColumnRef::Unnamed(unnamed_col) => unnamed_col.index < self.schema().len(),
     }
   }
 
@@ -903,7 +902,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
   >(
     &self,
     parent_context_rows: &Vec<ContextRow>,
-    extra_cols: Vec<ExtraColumnRef>,
+    extra_cols: Vec<GeneralColumnRef>,
     callback: &mut CbT,
   ) -> Result<(), EvalError> {
     // Compute the set of all columns that we have to read from the LocalTable. First,
@@ -957,7 +956,7 @@ impl<LocalTableT: LocalTable> ContextConstructor<LocalTableT> {
               .parent_context_schema
               .column_context_schema
               .iter()
-              .position(|parent_col| cast!(ExtraColumnRef::Named, col).unwrap() == parent_col)
+              .position(|parent_col| cast!(GeneralColumnRef::Named, col).unwrap() == parent_col)
               .unwrap();
             extra_col_vals.push(parent_context_row.column_context_row.get(pos).unwrap().clone());
           }

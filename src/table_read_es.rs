@@ -16,7 +16,7 @@ use crate::master_query_planning_es::ColPresenceReq;
 use crate::message as msg;
 use crate::server::{
   contains_val_col, evaluate_super_simple_select, mk_eval_error, ContextConstructor,
-  ExtraColumnRef, LocalColumnRef, UnnamedColumnRef,
+  GeneralColumnRef, LocalColumnRef, UnnamedColumnRef,
 };
 use crate::server::{LocalTable, ServerContextBase};
 
@@ -659,7 +659,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable, SelectQueryT: SelectQuery>
   sql_query
     .iterate(QueryIterator::new_top_level(), &mut col_ref_collecting_cb(&mut top_level_cols_set));
   let mut top_level_extra_cols_set: BTreeSet<_> =
-    top_level_cols_set.into_iter().map(|c| ExtraColumnRef::Named(c)).collect();
+    top_level_cols_set.into_iter().map(|c| GeneralColumnRef::Named(c)).collect();
 
   // Get the current schema of the LocalTable.
   let table_schema = context_constructor.local_table.schema().clone();
@@ -673,12 +673,12 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable, SelectQueryT: SelectQuery>
         // Otherwise, read the index.
         for (index, maybe_col_name) in table_schema.iter().enumerate() {
           if let Some(col_name) = maybe_col_name {
-            top_level_extra_cols_set.insert(ExtraColumnRef::Named(proc::ColumnRef {
+            top_level_extra_cols_set.insert(GeneralColumnRef::Named(proc::ColumnRef {
               table_name: sql_query.name().clone(),
               col_name: col_name.clone(),
             }));
           } else {
-            top_level_extra_cols_set.insert(ExtraColumnRef::Unnamed(UnnamedColumnRef {
+            top_level_extra_cols_set.insert(GeneralColumnRef::Unnamed(UnnamedColumnRef {
               table_name: sql_query.name().clone(),
               index,
             }));

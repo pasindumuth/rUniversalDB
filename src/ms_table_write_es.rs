@@ -7,7 +7,7 @@ use crate::expression::{does_types_match, is_true, EvalError};
 use crate::gr_query_es::{GRQueryConstructorView, GRQueryES};
 use crate::message as msg;
 use crate::ms_table_es::{GeneralQueryES, MSTableES, SqlQueryInner};
-use crate::server::{evaluate_update, mk_eval_error, ContextConstructor, ExtraColumnRef};
+use crate::server::{evaluate_update, mk_eval_error, ContextConstructor, GeneralColumnRef};
 use crate::sql_ast::proc;
 use crate::storage::{GenericTable, MSStorageView};
 use crate::table_read_es::compute_read_region;
@@ -166,7 +166,7 @@ impl SqlQueryInner for UpdateInner {
       .iterate_update(&mut col_ref_collecting_cb(&mut top_level_cols_set), &self.sql_query);
     let top_level_col_names = Vec::from_iter(top_level_cols_set.into_iter());
     let top_level_extra_col_refs =
-      Vec::from_iter(top_level_col_names.iter().map(|c| ExtraColumnRef::Named(c.clone())));
+      Vec::from_iter(top_level_col_names.iter().map(|c| GeneralColumnRef::Named(c.clone())));
 
     // Setup the TableView that we are going to return and the UpdateView that we're going
     // to hold in the MSQueryES.
