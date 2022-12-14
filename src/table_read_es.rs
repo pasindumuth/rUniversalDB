@@ -571,10 +571,13 @@ impl TPESBase for TableReadES {
 //  Top-Level Select Query Common
 // -----------------------------------------------------------------------------------------------
 
-/// Adaptor Trait for `TableSelect` and `TransTableSelect`
-pub trait SelectQuery {
+pub trait BasicSelectQuery {
   fn distinct(&self) -> bool;
   fn projection(&self) -> &Vec<proc::SelectItem>;
+}
+
+/// Adaptor Trait for `TableSelect` and `TransTableSelect`
+pub trait SingleTableSelectQuery: BasicSelectQuery {
   fn name(&self) -> &String;
   fn selection(&self) -> &proc::ValExpr;
   fn schema(&self) -> &Vec<Option<ColName>>;
@@ -587,7 +590,7 @@ pub trait SelectQuery {
   );
 }
 
-impl SelectQuery for proc::TableSelect {
+impl BasicSelectQuery for proc::TableSelect {
   fn distinct(&self) -> bool {
     self.distinct
   }
@@ -595,7 +598,9 @@ impl SelectQuery for proc::TableSelect {
   fn projection(&self) -> &Vec<proc::SelectItem> {
     &self.projection
   }
+}
 
+impl SingleTableSelectQuery for proc::TableSelect {
   fn name(&self) -> &String {
     &self.from.alias
   }
@@ -617,7 +622,7 @@ impl SelectQuery for proc::TableSelect {
   }
 }
 
-impl SelectQuery for proc::TransTableSelect {
+impl BasicSelectQuery for proc::TransTableSelect {
   fn distinct(&self) -> bool {
     self.distinct
   }
@@ -625,7 +630,9 @@ impl SelectQuery for proc::TransTableSelect {
   fn projection(&self) -> &Vec<proc::SelectItem> {
     &self.projection
   }
+}
 
+impl SingleTableSelectQuery for proc::TransTableSelect {
   fn name(&self) -> &String {
     &self.from.alias
   }
@@ -647,8 +654,18 @@ impl SelectQuery for proc::TransTableSelect {
   }
 }
 
+impl BasicSelectQuery for proc::JoinSelect {
+  fn distinct(&self) -> bool {
+    self.distinct
+  }
+
+  fn projection(&self) -> &Vec<proc::SelectItem> {
+    &self.projection
+  }
+}
+
 /// Fully evaluate a `Select` query, including aggregation.
-pub fn fully_evaluate_select<LocalTableT: LocalTable, SelectQueryT: SelectQuery>(
+pub fn fully_evaluate_select<LocalTableT: LocalTable, SelectQueryT: SingleTableSelectQuery>(
   context_constructor: ContextConstructor<LocalTableT>,
   context: &Context,
   subquery_results: Vec<Vec<TableView>>,
@@ -694,9 +711,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable, SelectQueryT: SelectQuery>
 
   // Finally, iterate over the Context Rows of the subqueries and compute the final values.
   let mut pre_agg_table_views = Vec::<TableView>::new();
-  for _ in 0..context.context_rows.len() {
-    pre_agg_table_views.push(TableView::new());
-  }
+  pre_agg_table_views.resize(context.context_rows.len(), TableView::new());
 
   context_constructor.run(
     &context.context_rows,
@@ -732,7 +747,7 @@ pub fn fully_evaluate_select<LocalTableT: LocalTable, SelectQueryT: SelectQuery>
   Ok(pre_agg_table_views)
 }
 
-pub fn perform_aggregation<SelectQueryT: SelectQuery>(
+pub fn perform_aggregation<SelectQueryT: BasicSelectQuery>(
   sql_query: &SelectQueryT,
   pre_agg_table_views: Vec<TableView>,
 ) -> Result<Vec<TableView>, EvalError> {
@@ -852,7 +867,7 @@ pub fn perform_aggregation<SelectQueryT: SelectQuery>(
 /// Checks if the `SuperSimpleSelect` has aggregates in its projection.
 /// NOTE: Recall that in this case, all elements in the projection are aggregates
 /// for now for simplicity.
-pub fn is_agg<SelectQueryT: SelectQuery>(sql_query: &SelectQueryT) -> bool {
+pub fn is_agg<SelectQueryT: BasicSelectQuery>(sql_query: &SelectQueryT) -> bool {
   for item in sql_query.projection() {
     match item {
       proc::SelectItem::ExprWithAlias { item, .. } => match item {

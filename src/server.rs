@@ -11,7 +11,7 @@ use crate::expression::{compute_key_region, construct_cexpr, evaluate_c_expr, Ev
 use crate::message as msg;
 use crate::sql_ast::proc;
 
-use crate::table_read_es::SelectQuery;
+use crate::table_read_es::SingleTableSelectQuery;
 use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FromIterator;
@@ -381,7 +381,7 @@ pub struct EvaluatedSuperSimpleSelect {
 /// `subquery_vals` and substite it in for evaluation.
 ///
 /// Note that `schema` is the Schema of the `LocalTable` that this SELECT is reading.
-pub fn evaluate_super_simple_select<SqlQueryT: SelectQuery>(
+pub fn evaluate_super_simple_select<SqlQueryT: SingleTableSelectQuery>(
   select: &SqlQueryT,
   table_schema: &Vec<Option<ColName>>,
   col_refs: &Vec<GeneralColumnRef>,
