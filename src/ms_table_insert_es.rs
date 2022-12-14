@@ -216,7 +216,7 @@ impl SqlQueryInner for InsertInner {
     es: &GeneralQueryES,
     _: (Vec<(Vec<proc::ColumnRef>, Vec<TransTableName>)>, Vec<Vec<TableView>>),
     ms_query_es: &mut MSQueryES,
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     // Verify that the keys are not in the storage. We create a PresenceSnapshot only
     // consisting of keys and verify that the Insert does not write to these keys.
     let storage_view = MSStorageView::new(
@@ -236,9 +236,9 @@ impl SqlQueryInner for InsertInner {
       if ci == &None {
         if snapshot.contains_key(pkey) {
           // This already key exists, so we must respond with an abort.
-          return TPESAction::QueryError(msg::QueryError::RuntimeError {
+          return Some(TPESAction::QueryError(msg::QueryError::RuntimeError {
             msg: "Inserting a row that already exists.".to_string(),
-          });
+          }));
         }
       }
     }
@@ -248,9 +248,9 @@ impl SqlQueryInner for InsertInner {
 
     // Signal Success and return the data.
     let res_table_view = pending.res_table_view.clone();
-    TPESAction::Success(QueryESResult {
+    Some(TPESAction::Success(QueryESResult {
       result: vec![res_table_view],
       new_rms: es.new_rms.iter().cloned().collect(),
-    })
+    }))
   }
 }

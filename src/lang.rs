@@ -17,9 +17,23 @@ macro_rules! collection {
 macro_rules! cast {
   ($enum:path, $expr:expr) => {{
     if let $enum(item) = $expr {
-      Ok(item)
+      Some(item)
     } else {
-      Err("Could not cast the value to the desired Variant.")
+      debug_assert!(false);
+      None
+    }
+  }};
+}
+
+/// A version of the above that is designed not to assert in any way,
+/// not even in development builds.
+#[macro_export]
+macro_rules! cast_safe {
+  ($enum:path, $expr:expr) => {{
+    if let $enum(item) = $expr {
+      Some(item)
+    } else {
+      None
     }
   }};
 }

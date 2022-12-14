@@ -273,8 +273,8 @@ pub trait TPESBase {
     _ctx: &mut TabletContext,
     _io_ctx: &mut IO,
     _es_ctx: &mut Self::ESContext,
-  ) -> TPESAction {
-    TPESAction::Wait
+  ) -> Option<TPESAction> {
+    None
   }
 
   fn local_locked_cols<IO: CoreIOCtx>(
@@ -282,8 +282,8 @@ pub trait TPESBase {
     _ctx: &mut TabletContext,
     _io_ctx: &mut IO,
     _locked_cols_qid: QueryId,
-  ) -> TPESAction {
-    TPESAction::Wait
+  ) -> Option<TPESAction> {
+    None
   }
 
   fn global_locked_cols<IO: CoreIOCtx>(
@@ -291,12 +291,12 @@ pub trait TPESBase {
     _ctx: &mut TabletContext,
     _io_ctx: &mut IO,
     _locked_cols_qid: QueryId,
-  ) -> TPESAction {
-    TPESAction::Wait
+  ) -> Option<TPESAction> {
+    None
   }
 
-  fn table_dropped(&mut self, _ctx: &mut TabletContext) -> TPESAction {
-    TPESAction::Wait
+  fn table_dropped(&mut self, _ctx: &mut TabletContext) -> Option<TPESAction> {
+    None
   }
 
   fn gossip_data_changed<IO: CoreIOCtx>(
@@ -304,8 +304,8 @@ pub trait TPESBase {
     _ctx: &mut TabletContext,
     _io_ctx: &mut IO,
     _es_ctx: &mut Self::ESContext,
-  ) -> TPESAction {
-    TPESAction::Wait
+  ) -> Option<TPESAction> {
+    None
   }
 
   fn m_local_read_protected<IO: CoreIOCtx>(
@@ -314,8 +314,8 @@ pub trait TPESBase {
     _io_ctx: &mut IO,
     _es_ctx: &mut Self::ESContext,
     _protect_qid: QueryId,
-  ) -> TPESAction {
-    TPESAction::Wait
+  ) -> Option<TPESAction> {
+    None
   }
 
   fn local_read_protected<IO: CoreIOCtx>(
@@ -324,8 +324,8 @@ pub trait TPESBase {
     _io_ctx: &mut IO,
     _es_ctx: &mut Self::ESContext,
     _protect_qid: QueryId,
-  ) -> TPESAction {
-    TPESAction::Wait
+  ) -> Option<TPESAction> {
+    None
   }
 
   fn global_read_protected<IO: CoreIOCtx>(
@@ -333,8 +333,8 @@ pub trait TPESBase {
     _ctx: &mut TabletContext,
     _io_ctx: &mut IO,
     _protect_qid: QueryId,
-  ) -> TPESAction {
-    TPESAction::Wait
+  ) -> Option<TPESAction> {
+    None
   }
 
   fn handle_internal_query_error<IO: CoreIOCtx>(
@@ -342,8 +342,8 @@ pub trait TPESBase {
     _ctx: &mut TabletContext,
     _io_ctx: &mut IO,
     _query_error: msg::QueryError,
-  ) -> TPESAction {
-    TPESAction::Wait
+  ) -> Option<TPESAction> {
+    None
   }
 
   fn handle_subquery_done<IO: CoreIOCtx>(
@@ -354,8 +354,8 @@ pub trait TPESBase {
     _subquery_id: QueryId,
     _subquery_new_rms: BTreeSet<TQueryPath>,
     _results: Vec<TableView>,
-  ) -> TPESAction {
-    TPESAction::Wait
+  ) -> Option<TPESAction> {
+    None
   }
 
   fn exit_and_clean_up<IO: CoreIOCtx>(&mut self, _ctx: &mut TabletContext, _io_ctx: &mut IO) {}
@@ -363,12 +363,10 @@ pub trait TPESBase {
   // TODO: see if we can merge this with exit_and_clean_up
   fn deregister(self, _es_ctx: &mut Self::ESContext) -> (QueryId, CTQueryPath, Vec<QueryId>);
 
-  fn remove_subquery(&mut self, _subquery_id: &QueryId) {}
+  fn remove_subquery(&mut self, _subquery_id: &QueryId);
 }
 
 pub enum TPESAction {
-  /// This tells the parent Server to wait.
-  Wait,
   /// This tells the parent Server to perform subqueries.
   SendSubqueries(Vec<GRQueryES>),
   /// Indicates the ES succeeded with the given result.
@@ -433,7 +431,7 @@ trait CallbackWithContextRemove<ExtraDataT> {
 /// `TabletContext` can do more than just `TPESAction`s.
 pub enum TabletAction {
   Wait,
-  TPESAction(TPESAction),
+  TPESAction(Option<TPESAction>),
   ExitAll(Vec<QueryId>),
   ExitAndCleanUp(QueryId),
 }
@@ -2922,7 +2920,7 @@ impl TabletContext {
                 io_ctx,
                 statuses,
                 qid,
-                TPESAction::QueryError(msg::QueryError::InvalidQueryPlan),
+                Some(TPESAction::QueryError(msg::QueryError::InvalidQueryPlan)),
               );
             }
           }
@@ -2995,7 +2993,7 @@ impl TabletContext {
         io_ctx,
         statuses,
         query_id,
-        TPESAction::QueryError(query_error.clone()),
+        Some(TPESAction::QueryError(query_error.clone())),
       );
     }
 
@@ -3035,14 +3033,14 @@ impl TabletContext {
     io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: TPESAction,
+    action: Option<TPESAction>,
   ) {
     match action {
-      TPESAction::Wait => {}
-      TPESAction::SendSubqueries(gr_query_ess) => {
+      None => {}
+      Some(TPESAction::SendSubqueries(gr_query_ess)) => {
         self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
-      TPESAction::Success(success) => {
+      Some(TPESAction::Success(success)) => {
         struct Cb;
         impl CallbackWithContextRemove<QueryESResult> for Cb {
           fn call<IOCtx: CoreIOCtx, TPEST: TPESBase>(
@@ -3071,7 +3069,7 @@ impl TabletContext {
 
         statuses.execute_remove_ctx::<_, _, Cb>(self, io_ctx, query_id, success);
       }
-      TPESAction::QueryError(query_error) => {
+      Some(TPESAction::QueryError(query_error)) => {
         struct Cb;
         impl CallbackWithContextRemove<msg::QueryError> for Cb {
           fn call<IOCtx: CoreIOCtx, TPEST: TPESBase>(
@@ -3137,9 +3135,10 @@ impl TabletContext {
           query_error,
         );
       }
-      _ => {
-        // TODO: do
+      GRQueryAction::SendSubqueries(gr_query_ess) => {
+        self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
+      GRQueryAction::Wait => {}
     }
   }
 

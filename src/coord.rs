@@ -919,14 +919,14 @@ impl CoordContext {
     io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: TPESAction,
+    action: Option<TPESAction>,
   ) {
     match action {
-      TPESAction::Wait => {}
-      TPESAction::SendSubqueries(gr_query_ess) => {
+      None => {}
+      Some(TPESAction::SendSubqueries(gr_query_ess)) => {
         self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
-      TPESAction::Success(success) => {
+      Some(TPESAction::Success(success)) => {
         // Remove the TableReadESWrapper and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;
@@ -943,7 +943,7 @@ impl CoordContext {
           }),
         )
       }
-      TPESAction::QueryError(query_error) => {
+      Some(TPESAction::QueryError(query_error)) => {
         // Remove the TableReadESWrapper, abort subqueries, and respond.
         let trans_read = statuses.trans_table_read_ess.remove(&query_id).unwrap();
         let sender_path = trans_read.sender_path;

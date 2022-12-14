@@ -1,7 +1,7 @@
 use crate::col_usage::{col_collecting_cb, col_ref_collecting_cb, QueryElement, QueryIterator};
 use crate::common::{
-  btree_multimap_insert, lookup, mk_qid, CoreIOCtx, GossipData, GossipDataView, KeyBound, OrigP,
-  QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
+  btree_multimap_insert, lookup, mk_qid, remove_item, CoreIOCtx, GossipData, GossipDataView,
+  KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
 };
 use crate::common::{
   CQueryPath, CTQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow, PaxosGroupId,
@@ -209,7 +209,7 @@ impl TableReadES {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     // If the GossipData is valid, then act accordingly.
     if check_gossip(&ctx.gossip.get(), &self.query_plan) {
       // We start locking the regions.
@@ -225,7 +225,7 @@ impl TableReadES {
         msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest { sender_path }),
       );
 
-      return TPESAction::Wait;
+      return None;
     }
   }
 
@@ -233,11 +233,11 @@ impl TableReadES {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     // Now, we check whether the TableSchema aligns with the QueryPlan.
     if !does_query_plan_align(ctx, &self.timestamp, &self.query_plan) {
       self.state = ExecutionS::Done;
-      TPESAction::QueryError(msg::QueryError::InvalidQueryPlan)
+      Some(TPESAction::QueryError(msg::QueryError::InvalidQueryPlan))
     } else {
       // If it aligns, we verify is GossipData is recent enough.
       self.check_gossip_data(ctx, io_ctx)
@@ -249,19 +249,19 @@ impl TableReadES {
     _: &mut TabletContext,
     _: &mut IO,
     query_id: &QueryId,
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     self.waiting_global_locks.remove(query_id);
     if self.waiting_global_locks.is_empty() {
       if let ExecutionS::WaitingGlobalLockedCols(res) = &self.state {
         // Signal Success and return the data.
         let res = res.clone();
         self.state = ExecutionS::Done;
-        TPESAction::Success(res)
+        Some(TPESAction::Success(res))
       } else {
-        TPESAction::Wait
+        None
       }
     } else {
-      TPESAction::Wait
+      None
     }
   }
 
@@ -270,7 +270,7 @@ impl TableReadES {
     &mut self,
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     // Get extra columns that must be in the region due to SELECT * .
     let mut extra_cols = Vec::<ColName>::new();
     for item in &self.sql_query.projection {
@@ -318,7 +318,7 @@ impl TableReadES {
       },
     );
 
-    TPESAction::Wait
+    None
   }
 
   /// Handles a ES finishing with all subqueries results in.
@@ -326,8 +326,8 @@ impl TableReadES {
     &mut self,
     ctx: &mut TabletContext,
     _: &mut IO,
-  ) -> TPESAction {
-    let exec = cast!(ExecutionS::Executing, &mut self.state).unwrap();
+  ) -> Option<TPESAction> {
+    let exec = cast!(ExecutionS::Executing, &mut self.state)?;
 
     // Compute children.
     let (children, subquery_results) = std::mem::take(exec).get_results();
@@ -364,15 +364,15 @@ impl TableReadES {
         if self.waiting_global_locks.is_empty() {
           // Signal Success and return the data.
           self.state = ExecutionS::Done;
-          TPESAction::Success(res)
+          Some(TPESAction::Success(res))
         } else {
           self.state = ExecutionS::WaitingGlobalLockedCols(res);
-          TPESAction::Wait
+          None
         }
       }
       Err(eval_error) => {
         self.state = ExecutionS::Done;
-        TPESAction::QueryError(mk_eval_error(eval_error))
+        Some(TPESAction::QueryError(mk_eval_error(eval_error)))
       }
     }
   }
@@ -396,13 +396,13 @@ impl TPESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     _: &mut (),
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     // First, we lock the columns that the QueryPlan requires certain properties of.
-    assert!(matches!(self.state, ExecutionS::Start));
+    debug_assert!(matches!(self.state, ExecutionS::Start));
     let qid = request_lock_columns(ctx, io_ctx, &self.query_id, &self.timestamp, &self.query_plan);
     self.state = ExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid: qid });
 
-    TPESAction::Wait
+    None
   }
 
   /// Handle Columns being locked
@@ -411,9 +411,9 @@ impl TPESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     locked_cols_qid: QueryId,
-  ) -> TPESAction {
-    let locking = cast!(ExecutionS::ColumnsLocking, &self.state).unwrap();
-    assert_eq!(locking.locked_cols_qid, locked_cols_qid);
+  ) -> Option<TPESAction> {
+    let locking = cast!(ExecutionS::ColumnsLocking, &self.state)?;
+    debug_assert_eq!(locking.locked_cols_qid, locked_cols_qid);
 
     // Since this is only a LockedLockedCols, we amend `waiting_global_locks`.
     self.waiting_global_locks.insert(locked_cols_qid);
@@ -426,9 +426,9 @@ impl TPESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     locked_cols_qid: QueryId,
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     if let ExecutionS::ColumnsLocking(locking) = &self.state {
-      assert_eq!(locking.locked_cols_qid, locked_cols_qid);
+      debug_assert_eq!(locking.locked_cols_qid, locked_cols_qid);
       self.common_locked_cols(ctx, io_ctx)
     } else {
       // Here, note that LocalLockedCols must have previously been provided because
@@ -438,10 +438,10 @@ impl TPESBase for TableReadES {
   }
 
   /// Here, the column locking request results in us realizing the table has been dropped.
-  fn table_dropped(&mut self, _: &mut TabletContext) -> TPESAction {
-    assert!(cast!(ExecutionS::ColumnsLocking, &self.state).is_ok());
+  fn table_dropped(&mut self, _: &mut TabletContext) -> Option<TPESAction> {
+    cast!(ExecutionS::ColumnsLocking, &self.state)?;
     self.state = ExecutionS::Done;
-    TPESAction::QueryError(msg::QueryError::InvalidQueryPlan)
+    Some(TPESAction::QueryError(msg::QueryError::InvalidQueryPlan))
   }
 
   /// Here, we GossipData gets delivered.
@@ -450,13 +450,13 @@ impl TPESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     _: &mut (),
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     if let ExecutionS::GossipDataWaiting = self.state {
       // Verify is GossipData is now recent enough.
       self.check_gossip_data(ctx, io_ctx)
     } else {
       // Do nothing
-      TPESAction::Wait
+      None
     }
   }
 
@@ -467,46 +467,41 @@ impl TPESBase for TableReadES {
     io_ctx: &mut IO,
     _: &mut (),
     protect_qid: QueryId,
-  ) -> TPESAction {
-    match &self.state {
-      ExecutionS::Pending(pending) if protect_qid == pending.query_id => {
-        self.waiting_global_locks.insert(protect_qid);
-        let gr_query_ess = compute_subqueries(
-          GRQueryConstructorView {
-            root_query_path: &self.root_query_path,
-            timestamp: &self.timestamp,
-            sql_query: &self.sql_query,
-            query_plan: &self.query_plan,
-            query_id: &self.query_id,
-            context: &self.context,
-          },
-          io_ctx.rand(),
-          StorageLocalTable::new(
-            &ctx.table_schema,
-            &self.timestamp,
-            &self.sql_query.from,
-            &ctx.this_tablet_key_range,
-            &self.sql_query.selection,
-            SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
-          ),
-        );
+  ) -> Option<TPESAction> {
+    let pending = cast!(ExecutionS::Pending, &self.state)?;
+    debug_assert_eq!(pending.query_id, protect_qid);
 
-        // Move the ES to the Executing state.
-        self.state = ExecutionS::Executing(Executing::create(&gr_query_ess));
-        let exec = cast!(ExecutionS::Executing, &mut self.state).unwrap();
+    self.waiting_global_locks.insert(protect_qid);
+    let gr_query_ess = compute_subqueries(
+      GRQueryConstructorView {
+        root_query_path: &self.root_query_path,
+        timestamp: &self.timestamp,
+        sql_query: &self.sql_query,
+        query_plan: &self.query_plan,
+        query_id: &self.query_id,
+        context: &self.context,
+      },
+      io_ctx.rand(),
+      StorageLocalTable::new(
+        &ctx.table_schema,
+        &self.timestamp,
+        &self.sql_query.from,
+        &ctx.this_tablet_key_range,
+        &self.sql_query.selection,
+        SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
+      ),
+    );
 
-        // See if we are already finished (due to having no subqueries).
-        if exec.is_complete() {
-          self.finish_table_read_es(ctx, io_ctx)
-        } else {
-          // Otherwise, return the subqueries.
-          TPESAction::SendSubqueries(gr_query_ess)
-        }
-      }
-      _ => {
-        debug_assert!(false);
-        TPESAction::Wait
-      }
+    // Move the ES to the Executing state.
+    self.state = ExecutionS::Executing(Executing::create(&gr_query_ess));
+    let exec = cast!(ExecutionS::Executing, &mut self.state)?;
+
+    // See if we are already finished (due to having no subqueries).
+    if exec.is_complete() {
+      self.finish_table_read_es(ctx, io_ctx)
+    } else {
+      // Otherwise, return the subqueries.
+      Some(TPESAction::SendSubqueries(gr_query_ess))
     }
   }
 
@@ -516,7 +511,7 @@ impl TPESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     query_id: QueryId,
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     self.remove_waiting_global_lock(ctx, io_ctx, &query_id)
   }
 
@@ -528,9 +523,9 @@ impl TPESBase for TableReadES {
     ctx: &mut TabletContext,
     io_ctx: &mut IO,
     query_error: msg::QueryError,
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     self.exit_and_clean_up(ctx, io_ctx);
-    TPESAction::QueryError(query_error)
+    Some(TPESAction::QueryError(query_error))
   }
 
   /// Handles a Subquery completing
@@ -542,10 +537,10 @@ impl TPESBase for TableReadES {
     subquery_id: QueryId,
     subquery_new_rms: BTreeSet<TQueryPath>,
     table_views: Vec<TableView>,
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     // Add the subquery results into the TableReadES.
     self.new_rms.extend(subquery_new_rms);
-    let exec = cast!(ExecutionS::Executing, &mut self.state).unwrap();
+    let exec = cast!(ExecutionS::Executing, &mut self.state)?;
     exec.add_subquery_result(subquery_id, table_views);
 
     // See if we are finished (due to computing all subqueries).
@@ -553,7 +548,7 @@ impl TPESBase for TableReadES {
       self.finish_table_read_es(ctx, io_ctx)
     } else {
       // Otherwise, we wait.
-      TPESAction::Wait
+      None
     }
   }
 
@@ -564,6 +559,10 @@ impl TPESBase for TableReadES {
 
   fn deregister(self, _: &mut ()) -> (QueryId, CTQueryPath, Vec<QueryId>) {
     (self.query_id, self.sender_path, self.child_queries)
+  }
+
+  fn remove_subquery(&mut self, subquery_id: &QueryId) {
+    remove_item(&mut self.child_queries, subquery_id)
   }
 }
 

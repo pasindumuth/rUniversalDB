@@ -138,7 +138,7 @@ impl SqlQueryInner for SelectInner {
       Vec<Vec<TableView>>,
     ),
     ms_query_es: &mut MSQueryES,
-  ) -> TPESAction {
+  ) -> Option<TPESAction> {
     // Create the ContextConstructor.
     let context_constructor = ContextConstructor::new(
       es.context.context_schema.clone(),
@@ -169,12 +169,12 @@ impl SqlQueryInner for SelectInner {
     match eval_res {
       Ok(res_table_views) => {
         // Signal Success and return the data.
-        TPESAction::Success(QueryESResult {
+        Some(TPESAction::Success(QueryESResult {
           result: res_table_views,
           new_rms: es.new_rms.iter().cloned().collect(),
-        })
+        }))
       }
-      Err(eval_error) => TPESAction::QueryError(mk_eval_error(eval_error)),
+      Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
     }
   }
 }

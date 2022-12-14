@@ -2006,7 +2006,23 @@ impl GRQueryES {
     }
   }
 
-  fn handle_gr_query_success<IO: CoreIOCtx, Ctx: CTServerContext>(
+  pub fn handle_gr_query_success<IO: CoreIOCtx, Ctx: CTServerContext>(
+    &mut self,
+    ctx: &mut Ctx,
+    io_ctx: &mut IO,
+    qid: QueryId,
+    result: Vec<TableView>,
+    rms: BTreeSet<TQueryPath>,
+  ) -> GRQueryAction {
+    match self.handle_gr_query_success_internal(ctx, io_ctx, qid, result, rms) {
+      Ok(action) => action,
+      Err(eval_error) => GRQueryAction::QueryError(msg::QueryError::RuntimeError {
+        msg: format!("{:?}", eval_error),
+      }),
+    }
+  }
+
+  fn handle_gr_query_success_internal<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
     ctx: &mut Ctx,
     io_ctx: &mut IO,
