@@ -25,8 +25,8 @@ macro_rules! cast {
   }};
 }
 
-/// A version of the above that is designed not to assert in any way,
-/// not even in development builds.
+/// Same as the above, but the expected branch might be the `None`
+/// branch, so we do not debug assert.
 #[macro_export]
 macro_rules! cast_safe {
   ($enum:path, $expr:expr) => {{
@@ -35,6 +35,22 @@ macro_rules! cast_safe {
     } else {
       None
     }
+  }};
+}
+
+/// A macro that makes it easy to check that an expression is true,
+/// and then exit the current function if it is false (in production,
+/// but assert in development).
+#[macro_export]
+macro_rules! check {
+  ($expr:expr) => {{
+    if $expr {
+      Some(())
+    } else {
+      debug_assert!(false);
+      None
+    }? // We place the `?` here, since it is easy to forget
+       // when using this macro (since it does not return anything).
   }};
 }
 

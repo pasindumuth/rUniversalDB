@@ -147,7 +147,7 @@ impl<SqlQueryInnerT: SqlQueryInner> TPESBase for MSTableES<SqlQueryInnerT> {
     _: &mut MSQueryES,
   ) -> Option<TPESAction> {
     // First, we lock the columns that the QueryPlan requires certain properties of.
-    debug_assert!(matches!(self.state, MSTableExecutionS::Start));
+    check!(matches!(self.state, MSTableExecutionS::Start));
     let locked_cols_qid = request_lock_columns(
       ctx,
       io_ctx,
@@ -156,7 +156,6 @@ impl<SqlQueryInnerT: SqlQueryInner> TPESBase for MSTableES<SqlQueryInnerT> {
       &self.general.query_plan,
     );
     self.state = MSTableExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid });
-
     None
   }
 
@@ -167,19 +166,15 @@ impl<SqlQueryInnerT: SqlQueryInner> TPESBase for MSTableES<SqlQueryInnerT> {
     io_ctx: &mut IO,
     locked_cols_qid: QueryId,
   ) -> Option<TPESAction> {
-    match &self.state {
-      MSTableExecutionS::ColumnsLocking(locking) => {
-        debug_assert_eq!(locking.locked_cols_qid, locked_cols_qid);
-        // Now, we check whether the TableSchema aligns with the QueryPlan.
-        if !does_query_plan_align(ctx, &self.general.timestamp, &self.general.query_plan) {
-          self.state = MSTableExecutionS::Done;
-          Some(TPESAction::QueryError(msg::QueryError::InvalidQueryPlan))
-        } else {
-          // If it aligns, we verify is GossipData is recent enough.
-          self.check_gossip_data(ctx, io_ctx)
-        }
-      }
-      _ => None,
+    let locking = cast_safe!(MSTableExecutionS::ColumnsLocking, &self.state)?;
+    check!(locking.locked_cols_qid == locked_cols_qid);
+    // Now, we check whether the TableSchema aligns with the QueryPlan.
+    if !does_query_plan_align(ctx, &self.general.timestamp, &self.general.query_plan) {
+      self.state = MSTableExecutionS::Done;
+      Some(TPESAction::QueryError(msg::QueryError::InvalidQueryPlan))
+    } else {
+      // If it aligns, we verify is GossipData is recent enough.
+      self.check_gossip_data(ctx, io_ctx)
     }
   }
 
@@ -195,7 +190,7 @@ impl<SqlQueryInnerT: SqlQueryInner> TPESBase for MSTableES<SqlQueryInnerT> {
 
   /// Here, the column locking request results in us realizing the table has been dropped.
   fn table_dropped(&mut self, _: &mut TabletContext) -> Option<TPESAction> {
-    cast!(MSTableExecutionS::ColumnsLocking, &self.state)?;
+    check!(matches!(&self.state, MSTableExecutionS::ColumnsLocking(_)));
     self.state = MSTableExecutionS::Done;
     Some(TPESAction::QueryError(msg::QueryError::InvalidQueryPlan))
   }
@@ -225,7 +220,7 @@ impl<SqlQueryInnerT: SqlQueryInner> TPESBase for MSTableES<SqlQueryInnerT> {
     protect_qid: QueryId,
   ) -> Option<TPESAction> {
     let pending = cast!(MSTableExecutionS::Pending, &self.state)?;
-    debug_assert_eq!(pending.query_id, protect_qid);
+    check!(pending.query_id == protect_qid);
 
     let gr_query_ess = self.inner.compute_subqueries(ctx, io_ctx, &self.general, ms_query_es);
 

@@ -2,7 +2,8 @@ use crate::col_usage::{
   external_trans_table_collecting_cb, trans_table_collecting_cb, QueryElement, QueryIterator,
 };
 use crate::common::{
-  lookup, merge_table_views, mk_qid, FullGen, OrigP, QueryPlan, QueryResult, Timestamp,
+  lookup, merge_table_views, mk_qid, unexpected_branch, FullGen, OrigP, QueryPlan, QueryResult,
+  Timestamp,
 };
 use crate::common::{
   ColName, Context, ContextRow, Gen, LeadershipId, PaxosGroupId, PaxosGroupIdTrait, QueryId,
@@ -90,8 +91,6 @@ pub enum FullMSCoordES {
 }
 
 pub enum MSQueryCoordAction {
-  /// This tells the parent Server to wait.
-  Wait,
   /// This tells the parent Server to execute the given TMStatus.
   ExecuteTMStatus(TMStatus),
   /// Indicates that a valid MSCoordES was successful, and was ECU.
@@ -117,17 +116,14 @@ impl FullMSCoordES {
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
     start_with_master_query_planning: bool,
-  ) -> MSQueryCoordAction {
-    if let FullMSCoordES::QueryPlanning(plan_es) = self {
-      let action = if start_with_master_query_planning {
-        plan_es.perform_master_query_planning(ctx, io_ctx)
-      } else {
-        plan_es.start(ctx, io_ctx)
-      };
-      self.handle_planning_action(ctx, io_ctx, action)
+  ) -> Option<MSQueryCoordAction> {
+    let plan_es = cast!(FullMSCoordES::QueryPlanning, self)?;
+    let action = if start_with_master_query_planning {
+      plan_es.perform_master_query_planning(ctx, io_ctx)
     } else {
-      Self::unexpected_branch()
-    }
+      plan_es.start(ctx, io_ctx)
+    };
+    self.handle_planning_action(ctx, io_ctx, action)
   }
 
   /// Handle Master Response, routing it to the QueryPlanning.
@@ -137,13 +133,10 @@ impl FullMSCoordES {
     io_ctx: &mut IO,
     master_qid: QueryId,
     result: msg::MasteryQueryPlanningResult,
-  ) -> MSQueryCoordAction {
-    if let FullMSCoordES::QueryPlanning(plan_es) = self {
-      let action = plan_es.handle_master_query_plan(ctx, io_ctx, master_qid, result);
-      self.handle_planning_action(ctx, io_ctx, action)
-    } else {
-      Self::unexpected_branch()
-    }
+  ) -> Option<MSQueryCoordAction> {
+    let plan_es = cast!(FullMSCoordES::QueryPlanning, self)?;
+    let action = plan_es.handle_master_query_plan(ctx, io_ctx, master_qid, result);
+    self.handle_planning_action(ctx, io_ctx, action)
   }
 
   /// Handle the `action` sent back by the `MSQueryCoordPlanningES`.
@@ -151,35 +144,32 @@ impl FullMSCoordES {
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
-    action: QueryPlanningAction,
-  ) -> MSQueryCoordAction {
-    if let FullMSCoordES::QueryPlanning(plan_es) = self {
-      match action {
-        QueryPlanningAction::Wait => MSQueryCoordAction::Wait,
-        QueryPlanningAction::Success(ms_query, query_plan) => {
-          *self = FullMSCoordES::Executing(MSCoordES {
-            timestamp: plan_es.timestamp.clone(),
-            query_id: plan_es.query_id.clone(),
-            sql_query: plan_es.sql_query.clone(),
-            ms_query,
-            query_plan: query_plan.clone(),
-            all_rms: Default::default(),
-            trans_table_views: vec![],
-            state: CoordState::Start,
-            registered_queries: Default::default(),
-          });
+    action: Option<QueryPlanningAction>,
+  ) -> Option<MSQueryCoordAction> {
+    let plan_es = cast!(FullMSCoordES::QueryPlanning, self)?;
+    match action {
+      None => None,
+      Some(QueryPlanningAction::Success(ms_query, query_plan)) => {
+        *self = FullMSCoordES::Executing(MSCoordES {
+          timestamp: plan_es.timestamp.clone(),
+          query_id: plan_es.query_id.clone(),
+          sql_query: plan_es.sql_query.clone(),
+          ms_query,
+          query_plan: query_plan.clone(),
+          all_rms: Default::default(),
+          trans_table_views: vec![],
+          state: CoordState::Start,
+          registered_queries: Default::default(),
+        });
 
-          // Move the ES onto the next stage.
-          self.advance(ctx, io_ctx)
-        }
-        QueryPlanningAction::Failed(error) => {
-          // Here, the QueryPlanning had failed. We do not need to ECU because
-          // QueryPlanning will be in Done.
-          MSQueryCoordAction::FatalFailure(error)
-        }
+        // Move the ES onto the next stage.
+        self.advance(ctx, io_ctx)
       }
-    } else {
-      Self::unexpected_branch()
+      Some(QueryPlanningAction::Failed(error)) => {
+        // Here, the QueryPlanning had failed. We do not need to ECU because
+        // QueryPlanning will be in Done.
+        Some(MSQueryCoordAction::FatalFailure(error))
+      }
     }
   }
 
@@ -191,56 +181,47 @@ impl FullMSCoordES {
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
     pre_agg_table_views: Vec<TableView>,
-  ) -> MSQueryCoordAction {
-    match self {
-      FullMSCoordES::Executing(es) => {
-        match &es.state {
-          CoordState::Stage(coord_stage) if tm_qid == coord_stage.stage_query_id => {
-            // Combine the results into a single one
-            let (trans_table_name, stage) =
-              es.ms_query.trans_tables.get(coord_stage.stage_idx).unwrap();
-            let table_views = match match stage {
-              proc::MSQueryStage::TableSelect(sql_query) => {
-                perform_aggregation(sql_query, pre_agg_table_views)
-              }
-              proc::MSQueryStage::TransTableSelect(sql_query) => {
-                perform_aggregation(sql_query, pre_agg_table_views)
-              }
-              proc::MSQueryStage::JoinSelect(_) => {
-                // TODO: do properly
-                unimplemented!()
-              }
-              proc::MSQueryStage::Update(_) => Ok(pre_agg_table_views),
-              proc::MSQueryStage::Insert(_) => Ok(pre_agg_table_views),
-              proc::MSQueryStage::Delete(_) => Ok(pre_agg_table_views),
-            } {
-              Ok(result) => result,
-              Err(eval_error) => {
-                self.exit_and_clean_up(ctx, io_ctx);
-                return MSQueryCoordAction::FatalFailure(
-                  msg::ExternalAbortedData::QueryExecutionError(
-                    msg::ExternalQueryError::RuntimeError {
-                      msg: format!("Aggregation of MSQueryES failed with error {:?}", eval_error),
-                    },
-                  ),
-                );
-              }
-            };
+  ) -> Option<MSQueryCoordAction> {
+    let es = cast!(FullMSCoordES::Executing, self)?;
+    let coord_stage = cast!(CoordState::Stage, &es.state)?;
+    check!(coord_stage.stage_query_id == tm_qid);
 
-            // Recall that since we only send out one ContextRow, there should only be one TableView.
-            assert_eq!(table_views.len(), 1);
-
-            // Then, the results to the `trans_table_views`
-            let table_view = table_views.into_iter().next().unwrap();
-            es.trans_table_views.push((trans_table_name.clone(), table_view));
-            es.all_rms.extend(new_rms);
-            self.advance(ctx, io_ctx)
-          }
-          _ => Self::unexpected_branch(),
-        }
+    // Combine the results into a single one
+    let (trans_table_name, stage) = es.ms_query.trans_tables.get(coord_stage.stage_idx).unwrap();
+    let table_views = match match stage {
+      proc::MSQueryStage::TableSelect(sql_query) => {
+        perform_aggregation(sql_query, pre_agg_table_views)
       }
-      _ => Self::unexpected_branch(),
-    }
+      proc::MSQueryStage::TransTableSelect(sql_query) => {
+        perform_aggregation(sql_query, pre_agg_table_views)
+      }
+      proc::MSQueryStage::JoinSelect(_) => {
+        // TODO: do properly
+        unimplemented!()
+      }
+      proc::MSQueryStage::Update(_) => Ok(pre_agg_table_views),
+      proc::MSQueryStage::Insert(_) => Ok(pre_agg_table_views),
+      proc::MSQueryStage::Delete(_) => Ok(pre_agg_table_views),
+    } {
+      Ok(result) => result,
+      Err(eval_error) => {
+        self.exit_and_clean_up(ctx, io_ctx);
+        return Some(MSQueryCoordAction::FatalFailure(
+          msg::ExternalAbortedData::QueryExecutionError(msg::ExternalQueryError::RuntimeError {
+            msg: format!("Aggregation of MSQueryES failed with error {:?}", eval_error),
+          }),
+        ));
+      }
+    };
+
+    // Recall that since we only send out one ContextRow, there should only be one TableView.
+    debug_assert_eq!(table_views.len(), 1);
+
+    // Then, the results to the `trans_table_views`
+    let table_view = table_views.into_iter().next().unwrap();
+    es.trans_table_views.push((trans_table_name.clone(), table_view));
+    es.all_rms.extend(new_rms);
+    self.advance(ctx, io_ctx)
   }
 
   /// This is called when the TMStatus has aborted.
@@ -249,25 +230,25 @@ impl FullMSCoordES {
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
     aborted_data: msg::AbortedData,
-  ) -> MSQueryCoordAction {
+  ) -> Option<MSQueryCoordAction> {
     // Interpret the `aborted_data`.
     match aborted_data {
       // `TypeError` and `RuntimeError` both imply an unrecoverable error, since trying again at
       // a higher timestamp will not generally fix the issue. Thus we ECU and return accordingly.
       msg::AbortedData::QueryError(msg::QueryError::TypeError { msg: err_msg }) => {
         self.exit_and_clean_up(ctx, io_ctx);
-        MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError(
+        Some(MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError(
           msg::ExternalQueryError::TypeError { msg: err_msg },
-        ))
+        )))
       }
       // TODO: do not return the query error unless this run of MSCoordES had used
       //  the MasterQueryPlan. (Later on, we don't need to rely on the Master for checking
       //  metadata matches.
       msg::AbortedData::QueryError(msg::QueryError::RuntimeError { msg: err_msg }) => {
         self.exit_and_clean_up(ctx, io_ctx);
-        MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError(
+        Some(MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError(
           msg::ExternalQueryError::RuntimeError { msg: err_msg },
-        ))
+        )))
       }
       msg::AbortedData::QueryError(msg::QueryError::WriteRegionConflictWithSubsequentRead)
       | msg::AbortedData::QueryError(msg::QueryError::DeadlockSafetyAbortion)
@@ -276,15 +257,15 @@ impl FullMSCoordES {
       | msg::AbortedData::QueryError(msg::QueryError::InvalidLeadershipId)=> {
         // This implies a recoverable failure, so we ECU and return accordingly.
         self.exit_and_clean_up(ctx, io_ctx);
-        MSQueryCoordAction::NonFatalFailure(false)
+        Some(MSQueryCoordAction::NonFatalFailure(false))
       }
       | msg::AbortedData::QueryError(msg::QueryError::InvalidQueryPlan) => {
         // Unlike the above, we want to forcefully do a MasterQueryPlanning
         self.exit_and_clean_up(ctx, io_ctx);
-        MSQueryCoordAction::NonFatalFailure(true)
+        Some(MSQueryCoordAction::NonFatalFailure(true))
       }
       // Recall that LateralErrors should never make it back to the MSCoordES.
-      msg::AbortedData::QueryError(msg::QueryError::LateralError) => panic!(),
+      msg::AbortedData::QueryError(msg::QueryError::LateralError) => unexpected_branch(),
     }
   }
 
@@ -294,17 +275,11 @@ impl FullMSCoordES {
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
-  ) -> MSQueryCoordAction {
-    match self {
-      FullMSCoordES::Executing(es) => match &es.state {
-        CoordState::Stage(stage) => {
-          let stage_idx = stage.stage_idx.clone();
-          self.process_ms_query_stage(ctx, io_ctx, stage_idx)
-        }
-        _ => MSQueryCoordAction::Wait,
-      },
-      _ => MSQueryCoordAction::Wait,
-    }
+  ) -> Option<MSQueryCoordAction> {
+    let es = cast_safe!(FullMSCoordES::Executing, self)?;
+    let stage = cast_safe!(CoordState::Stage, &es.state)?;
+    let stage_idx = stage.stage_idx.clone();
+    self.process_ms_query_stage(ctx, io_ctx, stage_idx)
   }
 
   // Handle a RegisterQuery sent by an MSQuery to an MSCoordES.
@@ -323,14 +298,14 @@ impl FullMSCoordES {
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
     remote_leader_changed: RemoteLeaderChangedPLm,
-  ) -> MSQueryCoordAction {
+  ) -> Option<MSQueryCoordAction> {
     match self {
       FullMSCoordES::QueryPlanning(es) => {
         if remote_leader_changed.gid == PaxosGroupId::Master {
           let action = es.master_leader_changed(ctx, io_ctx);
           self.handle_planning_action(ctx, io_ctx, action)
         } else {
-          MSQueryCoordAction::Wait
+          None
         }
       }
       FullMSCoordES::Executing(es) => {
@@ -345,7 +320,7 @@ impl FullMSCoordES {
         for registered_query in to_remove {
           es.registered_queries.remove(&registered_query);
         }
-        MSQueryCoordAction::Wait
+        None
       }
     }
   }
@@ -355,14 +330,10 @@ impl FullMSCoordES {
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
-  ) -> MSQueryCoordAction {
-    match self {
-      FullMSCoordES::QueryPlanning(es) => {
-        let action = es.gossip_data_changed(ctx, io_ctx);
-        self.handle_planning_action(ctx, io_ctx, action)
-      }
-      FullMSCoordES::Executing(_) => MSQueryCoordAction::Wait,
-    }
+  ) -> Option<MSQueryCoordAction> {
+    let es = cast_safe!(FullMSCoordES::QueryPlanning, self)?;
+    let action = es.gossip_data_changed(ctx, io_ctx);
+    self.handle_planning_action(ctx, io_ctx, action)
   }
 
   /// This function accepts the results for the subquery, and then decides either
@@ -371,13 +342,13 @@ impl FullMSCoordES {
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
-  ) -> MSQueryCoordAction {
+  ) -> Option<MSQueryCoordAction> {
     // Compute the next stage
-    let es = cast!(FullMSCoordES::Executing, self).unwrap();
+    let es = cast!(FullMSCoordES::Executing, self)?;
     let next_stage_idx = match &es.state {
       CoordState::Start => 0,
       CoordState::Stage(stage) => stage.stage_idx + 1,
-      _ => panic!(),
+      _ => return unexpected_branch(),
     };
 
     if next_stage_idx < es.ms_query.trans_tables.len() {
@@ -390,7 +361,7 @@ impl FullMSCoordES {
         if orig_lid != cur_lid {
           // If a Leadership has changed, we abort and retry this MSCoordES.
           self.exit_and_clean_up(ctx, io_ctx);
-          return MSQueryCoordAction::NonFatalFailure(false);
+          return Some(MSQueryCoordAction::NonFatalFailure(false));
         }
       }
 
@@ -420,12 +391,12 @@ impl FullMSCoordES {
         .unwrap()
         .clone();
       es.state = CoordState::Done;
-      MSQueryCoordAction::Success(
+      Some(MSQueryCoordAction::Success(
         es.all_rms.iter().cloned().collect(),
         es.sql_query.clone(),
         QueryResult { schema, data },
         es.timestamp.clone(),
-      )
+      ))
     }
   }
 
@@ -436,8 +407,8 @@ impl FullMSCoordES {
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
     stage_idx: usize,
-  ) -> MSQueryCoordAction {
-    let es = cast!(FullMSCoordES::Executing, self).unwrap();
+  ) -> Option<MSQueryCoordAction> {
+    let es = cast!(FullMSCoordES::Executing, self)?;
 
     // Get the corresponding MSQueryStage and ColUsageNode.
     let (trans_table_name, stage) = es.ms_query.trans_tables.get(stage_idx).unwrap();
@@ -562,12 +533,12 @@ impl FullMSCoordES {
 
     if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
       self.exit_and_clean_up(ctx, io_ctx);
-      return MSQueryCoordAction::NonFatalFailure(false);
+      return Some(MSQueryCoordAction::NonFatalFailure(false));
     }
 
     // Populate the TMStatus accordingly.
     es.state = CoordState::Stage(Stage { stage_idx, stage_query_id: tm_status.query_id().clone() });
-    MSQueryCoordAction::ExecuteTMStatus(tm_status)
+    Some(MSQueryCoordAction::ExecuteTMStatus(tm_status))
   }
 
   /// Cleans up all currently owned resources, and goes to Done.
@@ -600,11 +571,6 @@ impl FullMSCoordES {
   /// Case the FullMSCoordES to the Executing state.
   pub fn to_exec(&self) -> &MSCoordES {
     cast!(FullMSCoordES::Executing, self).unwrap()
-  }
-
-  fn unexpected_branch() -> MSQueryCoordAction {
-    debug_assert!(false);
-    MSQueryCoordAction::Wait
   }
 }
 
@@ -642,8 +608,6 @@ pub struct QueryPlanningES {
 }
 
 pub enum QueryPlanningAction {
-  /// Indicates the parent needs to wait, making sure to fowards MasterQueryPlanning responses.
-  Wait,
   /// Indicates the that QueryPlanningES has computed a valid query, and it is stored
   /// in the `query_plan` field.
   Success(proc::MSQuery, CoordQueryPlan),
@@ -657,22 +621,19 @@ impl QueryPlanningES {
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
-  ) -> QueryPlanningAction {
-    if let QueryPlanningS::Start = &self.state {
-      let gossip = ctx.gossip.get();
-      let mut view = StaticDBSchemaView {
-        db_schema: gossip.db_schema,
-        table_generation: gossip.table_generation,
-        timestamp: self.timestamp.clone(),
-        col_presence_req: Default::default(),
-      };
+  ) -> Option<QueryPlanningAction> {
+    check!(matches!(&self.state, QueryPlanningS::Start));
+    let gossip = ctx.gossip.get();
+    let mut view = StaticDBSchemaView {
+      db_schema: gossip.db_schema,
+      table_generation: gossip.table_generation,
+      timestamp: self.timestamp.clone(),
+      col_presence_req: Default::default(),
+    };
 
-      match master_query_planning(view, &self.sql_query) {
-        Ok(master_query_plan) => self.finish_master_query_plan(ctx, master_query_plan),
-        Err(_) => return self.perform_master_query_planning(ctx, io_ctx),
-      }
-    } else {
-      Self::unexpected_branch()
+    match master_query_planning(view, &self.sql_query) {
+      Ok(master_query_plan) => self.finish_master_query_plan(ctx, master_query_plan),
+      Err(_) => return self.perform_master_query_planning(ctx, io_ctx),
     }
   }
 
@@ -681,7 +642,7 @@ impl QueryPlanningES {
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
-  ) -> QueryPlanningAction {
+  ) -> Option<QueryPlanningAction> {
     let master_query_id = mk_qid(io_ctx.rand());
     let sender_path = ctx.mk_query_path(self.query_id.clone());
     ctx.send_to_master(
@@ -698,7 +659,7 @@ impl QueryPlanningES {
 
     // Advance Planning State.
     self.state = QueryPlanningS::MasterQueryPlanning(MasterQueryPlanning { master_query_id });
-    QueryPlanningAction::Wait
+    None
   }
 
   /// Here, we have verified all `TablePath`s are present in the GossipData.
@@ -706,9 +667,9 @@ impl QueryPlanningES {
     &mut self,
     ctx: &mut CoordContext,
     master_query_plan: msg::MasterQueryPlan,
-  ) -> QueryPlanningAction {
+  ) -> Option<QueryPlanningAction> {
     self.state = QueryPlanningS::Done;
-    QueryPlanningAction::Success(
+    Some(QueryPlanningAction::Success(
       master_query_plan.ms_query,
       CoordQueryPlan {
         all_tier_maps: master_query_plan.all_tier_maps,
@@ -716,7 +677,7 @@ impl QueryPlanningES {
         table_location_map: master_query_plan.table_location_map,
         col_presence_req: master_query_plan.col_presence_req,
       },
-    )
+    ))
   }
 
   /// Computes the Leaderships of `SlaveGroupId`s whose LeadershipChanges would require us to
@@ -775,38 +736,32 @@ impl QueryPlanningES {
     io_ctx: &mut IO,
     master_qid: QueryId,
     result: msg::MasteryQueryPlanningResult,
-  ) -> QueryPlanningAction {
-    match &self.state {
-      QueryPlanningS::MasterQueryPlanning(state) if state.master_query_id == master_qid => {
-        match result {
-          msg::MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
-            // By now, we know the QueryPlanning can succeed. However, we need to make sure
-            // the local GossipData is recent enough so we can communicate with the shards.
-            if self.check_local_gossip(ctx, &master_query_plan) {
-              self.finish_master_query_plan(ctx, master_query_plan)
-            } else {
-              // Otherwise, this node's GossipData is too far out-of-date. We send
-              // a MasterGossipRequest and go to GossipDataWaiting.
-              let sender_path = ctx.this_sid.clone();
-              ctx.send_to_master(
-                io_ctx,
-                msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest {
-                  sender_path,
-                }),
-              );
+  ) -> Option<QueryPlanningAction> {
+    let state = cast!(QueryPlanningS::MasterQueryPlanning, &self.state)?;
+    check!(state.master_query_id == master_qid);
+    match result {
+      msg::MasteryQueryPlanningResult::MasterQueryPlan(master_query_plan) => {
+        // By now, we know the QueryPlanning can succeed. However, we need to make sure
+        // the local GossipData is recent enough so we can communicate with the shards.
+        if self.check_local_gossip(ctx, &master_query_plan) {
+          self.finish_master_query_plan(ctx, master_query_plan)
+        } else {
+          // Otherwise, this node's GossipData is too far out-of-date. We send
+          // a MasterGossipRequest and go to GossipDataWaiting.
+          let sender_path = ctx.this_sid.clone();
+          ctx.send_to_master(
+            io_ctx,
+            msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest { sender_path }),
+          );
 
-              self.state =
-                QueryPlanningS::GossipDataWaiting(GossipDataWaiting { master_query_plan });
-              QueryPlanningAction::Wait
-            }
-          }
-          msg::MasteryQueryPlanningResult::QueryPlanningError(error) => {
-            self.state = QueryPlanningS::Done;
-            QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryPlanningError(error))
-          }
+          self.state = QueryPlanningS::GossipDataWaiting(GossipDataWaiting { master_query_plan });
+          None
         }
       }
-      _ => Self::unexpected_branch(),
+      msg::MasteryQueryPlanningResult::QueryPlanningError(error) => {
+        self.state = QueryPlanningS::Done;
+        Some(QueryPlanningAction::Failed(msg::ExternalAbortedData::QueryPlanningError(error)))
+      }
     }
   }
 
@@ -815,19 +770,16 @@ impl QueryPlanningES {
     &mut self,
     ctx: &mut CoordContext,
     _: &mut IO,
-  ) -> QueryPlanningAction {
-    if let QueryPlanningS::GossipDataWaiting(last_state) = &self.state {
-      // We must check again whether the GossipData is new enough, since this is called
-      // for any GossipData update whatsoever (not just the one resulting from the
-      // MasterGossipRequest we sent out above).
-      if self.check_local_gossip(ctx, &last_state.master_query_plan) {
-        self.finish_master_query_plan(ctx, last_state.master_query_plan.clone())
-      } else {
-        // Otherwise, are still out-of-date, so we stay in GossipDataWaiting.
-        QueryPlanningAction::Wait
-      }
+  ) -> Option<QueryPlanningAction> {
+    let last_state = cast_safe!(QueryPlanningS::GossipDataWaiting, &self.state)?;
+    // We must check again whether the GossipData is new enough, since this is called
+    // for any GossipData update whatsoever (not just the one resulting from the
+    // MasterGossipRequest we sent out above).
+    if self.check_local_gossip(ctx, &last_state.master_query_plan) {
+      self.finish_master_query_plan(ctx, last_state.master_query_plan.clone())
     } else {
-      QueryPlanningAction::Wait
+      // Otherwise, are still out-of-date, so we stay in GossipDataWaiting.
+      None
     }
   }
 
@@ -836,12 +788,12 @@ impl QueryPlanningES {
     &mut self,
     ctx: &mut CoordContext,
     io_ctx: &mut IO,
-  ) -> QueryPlanningAction {
+  ) -> Option<QueryPlanningAction> {
     if let QueryPlanningS::MasterQueryPlanning(_) = &self.state {
       // This means we have to resend the PerformMasterQueryPlanning to the new Leader.
       self.perform_master_query_planning(ctx, io_ctx)
     } else {
-      QueryPlanningAction::Wait
+      None
     }
   }
 
@@ -861,10 +813,5 @@ impl QueryPlanningES {
       QueryPlanningS::Done => {}
     }
     self.state = QueryPlanningS::Done;
-  }
-
-  fn unexpected_branch() -> QueryPlanningAction {
-    debug_assert!(false);
-    QueryPlanningAction::Wait
   }
 }

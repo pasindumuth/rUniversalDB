@@ -754,16 +754,16 @@ impl CoordContext {
     io_ctx: &mut IO,
     statuses: &mut Statuses,
     query_id: QueryId,
-    action: MSQueryCoordAction,
+    action: Option<MSQueryCoordAction>,
   ) {
     match action {
-      MSQueryCoordAction::Wait => {}
-      MSQueryCoordAction::ExecuteTMStatus(tm_status) => {
+      None => {}
+      Some(MSQueryCoordAction::ExecuteTMStatus(tm_status)) => {
         let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
         ms_coord.child_queries.push(tm_status.query_id.clone());
         statuses.tm_statuss.insert(tm_status.query_id.clone(), tm_status);
       }
-      MSQueryCoordAction::Success(all_rms, sql_query, result, timestamp) => {
+      Some(MSQueryCoordAction::Success(all_rms, sql_query, result, timestamp)) => {
         let ms_coord = statuses.ms_coord_ess.remove(&query_id).unwrap();
 
         if all_rms.is_empty() {
@@ -802,7 +802,7 @@ impl CoordContext {
           statuses.finish_query_tm_ess.insert(query_id, outer);
         }
       }
-      MSQueryCoordAction::FatalFailure(payload) => {
+      Some(MSQueryCoordAction::FatalFailure(payload)) => {
         let ms_coord = statuses.ms_coord_ess.get(&query_id).unwrap();
         io_ctx.send(
           &ms_coord.sender_eid,
@@ -812,7 +812,7 @@ impl CoordContext {
         );
         self.exit_and_clean_up(io_ctx, statuses, query_id);
       }
-      MSQueryCoordAction::NonFatalFailure(start_with_master_query_planning) => {
+      Some(MSQueryCoordAction::NonFatalFailure(start_with_master_query_planning)) => {
         // First ECU the MSCoordES without removing it from `statuses`.
         let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
         let child_queries = ms_coord.child_queries.clone();

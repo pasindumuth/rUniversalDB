@@ -398,10 +398,9 @@ impl TPESBase for TableReadES {
     _: &mut (),
   ) -> Option<TPESAction> {
     // First, we lock the columns that the QueryPlan requires certain properties of.
-    debug_assert!(matches!(self.state, ExecutionS::Start));
+    check!(matches!(self.state, ExecutionS::Start));
     let qid = request_lock_columns(ctx, io_ctx, &self.query_id, &self.timestamp, &self.query_plan);
     self.state = ExecutionS::ColumnsLocking(ColumnsLocking { locked_cols_qid: qid });
-
     None
   }
 
@@ -413,7 +412,7 @@ impl TPESBase for TableReadES {
     locked_cols_qid: QueryId,
   ) -> Option<TPESAction> {
     let locking = cast!(ExecutionS::ColumnsLocking, &self.state)?;
-    debug_assert_eq!(locking.locked_cols_qid, locked_cols_qid);
+    check!(locking.locked_cols_qid == locked_cols_qid);
 
     // Since this is only a LockedLockedCols, we amend `waiting_global_locks`.
     self.waiting_global_locks.insert(locked_cols_qid);
@@ -428,7 +427,7 @@ impl TPESBase for TableReadES {
     locked_cols_qid: QueryId,
   ) -> Option<TPESAction> {
     if let ExecutionS::ColumnsLocking(locking) = &self.state {
-      debug_assert_eq!(locking.locked_cols_qid, locked_cols_qid);
+      check!(locking.locked_cols_qid == locked_cols_qid);
       self.common_locked_cols(ctx, io_ctx)
     } else {
       // Here, note that LocalLockedCols must have previously been provided because
@@ -439,7 +438,7 @@ impl TPESBase for TableReadES {
 
   /// Here, the column locking request results in us realizing the table has been dropped.
   fn table_dropped(&mut self, _: &mut TabletContext) -> Option<TPESAction> {
-    cast!(ExecutionS::ColumnsLocking, &self.state)?;
+    check!(matches!(&self.state, ExecutionS::ColumnsLocking(_)));
     self.state = ExecutionS::Done;
     Some(TPESAction::QueryError(msg::QueryError::InvalidQueryPlan))
   }
@@ -469,7 +468,7 @@ impl TPESBase for TableReadES {
     protect_qid: QueryId,
   ) -> Option<TPESAction> {
     let pending = cast!(ExecutionS::Pending, &self.state)?;
-    debug_assert_eq!(pending.query_id, protect_qid);
+    check!(pending.query_id == protect_qid);
 
     self.waiting_global_locks.insert(protect_qid);
     let gr_query_ess = compute_subqueries(

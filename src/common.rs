@@ -267,6 +267,12 @@ pub fn read_index<K: Ord, V>(map: &BTreeMap<K, V>, idx: usize) -> Option<(&K, &V
   it.next()
 }
 
+/// Generic function to call when an ES reaches an expected branch.
+pub fn unexpected_branch<T>() -> Option<T> {
+  debug_assert!(false);
+  None
+}
+
 // -------------------------------------------------------------------------------------------------
 //  ReadOnlySet
 // -------------------------------------------------------------------------------------------------
