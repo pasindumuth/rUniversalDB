@@ -19,6 +19,7 @@ pub mod finish_query_rm_es;
 pub mod finish_query_tm_es;
 pub mod free_node_manager;
 pub mod gr_query_es;
+pub mod join_read_es;
 pub mod join_util;
 pub mod master;
 pub mod master_query_planning_es;

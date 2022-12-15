@@ -972,10 +972,15 @@ impl CoordContext {
     action: GRQueryAction,
   ) {
     match action {
+      GRQueryAction::Wait => {}
       GRQueryAction::ExecuteTMStatus(tm_status) => {
         let gr_query = statuses.gr_query_ess.get_mut(&query_id).unwrap();
         gr_query.child_queries.push(tm_status.query_id.clone());
         statuses.tm_statuss.insert(tm_status.query_id.clone(), tm_status);
+      }
+      GRQueryAction::ExecuteJoinReadES(join_es) => {
+        // TODO: do
+        unimplemented!()
       }
       GRQueryAction::Success(res) => {
         let gr_query = statuses.gr_query_ess.remove(&query_id).unwrap();
@@ -997,9 +1002,6 @@ impl CoordContext {
           gr_query.es.query_id,
           query_error,
         );
-      }
-      _ => {
-        // TODO: do
       }
     }
   }

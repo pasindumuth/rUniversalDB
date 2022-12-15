@@ -203,181 +203,6 @@ pub struct TableReadES {
 //  Implementation
 // -----------------------------------------------------------------------------------------------
 
-impl TableReadES {
-  /// Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
-  fn check_gossip_data<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-  ) -> Option<TPESAction> {
-    // If the GossipData is valid, then act accordingly.
-    if check_gossip(&ctx.gossip.get(), &self.query_plan) {
-      // We start locking the regions.
-      self.start_table_read_es(ctx, io_ctx)
-    } else {
-      // If not, we go to GossipDataWaiting
-      self.state = ExecutionS::GossipDataWaiting;
-
-      // Request a GossipData from the Master to help stimulate progress.
-      let sender_path = ctx.this_sid.clone();
-      ctx.send_to_master(
-        io_ctx,
-        msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest { sender_path }),
-      );
-
-      return None;
-    }
-  }
-
-  fn common_locked_cols<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-  ) -> Option<TPESAction> {
-    // Now, we check whether the TableSchema aligns with the QueryPlan.
-    if !does_query_plan_align(ctx, &self.timestamp, &self.query_plan) {
-      self.state = ExecutionS::Done;
-      Some(TPESAction::QueryError(msg::QueryError::InvalidQueryPlan))
-    } else {
-      // If it aligns, we verify is GossipData is recent enough.
-      self.check_gossip_data(ctx, io_ctx)
-    }
-  }
-
-  fn remove_waiting_global_lock<IO: CoreIOCtx>(
-    &mut self,
-    _: &mut TabletContext,
-    _: &mut IO,
-    query_id: &QueryId,
-  ) -> Option<TPESAction> {
-    self.waiting_global_locks.remove(query_id);
-    if self.waiting_global_locks.is_empty() {
-      if let ExecutionS::WaitingGlobalLockedCols(res) = &self.state {
-        // Signal Success and return the data.
-        let res = res.clone();
-        self.state = ExecutionS::Done;
-        Some(TPESAction::Success(res))
-      } else {
-        None
-      }
-    } else {
-      None
-    }
-  }
-
-  /// Processes the Start state of TableReadES.
-  fn start_table_read_es<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    io_ctx: &mut IO,
-  ) -> Option<TPESAction> {
-    // Get extra columns that must be in the region due to SELECT * .
-    let mut extra_cols = Vec::<ColName>::new();
-    for item in &self.sql_query.projection {
-      match item {
-        proc::SelectItem::ExprWithAlias { .. } => {}
-        proc::SelectItem::Wildcard { .. } => {
-          extra_cols = ctx.table_schema.get_schema_val_cols_static(&self.timestamp);
-
-          // Break out early, since there is no reason to continue.
-          break;
-        }
-      }
-    }
-
-    // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
-    let mut safe_present_cols = Vec::<ColName>::new();
-    QueryIterator::new().iterate_table_select(
-      &mut col_collecting_cb(&self.sql_query.from.alias, &mut safe_present_cols),
-      &self.sql_query,
-    );
-
-    // Compute the ReadRegion
-    let read_region = compute_read_region(
-      &ctx.table_schema.key_cols,
-      &ctx.this_tablet_key_range,
-      &self.context,
-      &self.sql_query.selection,
-      &self.sql_query.from.alias,
-      safe_present_cols,
-      extra_cols,
-    );
-
-    // Move the TableReadES to the Pending state
-    let protect_qid = mk_qid(io_ctx.rand());
-    self.state = ExecutionS::Pending(Pending { query_id: protect_qid.clone() });
-
-    // Add a read protection requested
-    btree_multimap_insert(
-      &mut ctx.waiting_read_protected,
-      &self.timestamp,
-      RequestedReadProtected {
-        orig_p: OrigP::new(self.query_id.clone()),
-        query_id: protect_qid,
-        read_region,
-      },
-    );
-
-    None
-  }
-
-  /// Handles a ES finishing with all subqueries results in.
-  fn finish_table_read_es<IO: CoreIOCtx>(
-    &mut self,
-    ctx: &mut TabletContext,
-    _: &mut IO,
-  ) -> Option<TPESAction> {
-    let exec = cast!(ExecutionS::Executing, &mut self.state)?;
-
-    // Compute children.
-    let (children, subquery_results) = std::mem::take(exec).get_results();
-
-    // Create the ContextConstructor.
-    let context_constructor = ContextConstructor::new(
-      self.context.context_schema.clone(),
-      StorageLocalTable::new(
-        &ctx.table_schema,
-        &self.timestamp,
-        &self.sql_query.from,
-        &ctx.this_tablet_key_range,
-        &self.sql_query.selection,
-        SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
-      ),
-      children,
-    );
-
-    // Evaluate
-    let eval_res = fully_evaluate_select(
-      context_constructor,
-      &self.context.deref(),
-      subquery_results,
-      &self.sql_query,
-    );
-
-    match eval_res {
-      Ok(res_table_views) => {
-        let res = QueryESResult {
-          result: res_table_views,
-          new_rms: self.new_rms.iter().cloned().collect(),
-        };
-
-        if self.waiting_global_locks.is_empty() {
-          // Signal Success and return the data.
-          self.state = ExecutionS::Done;
-          Some(TPESAction::Success(res))
-        } else {
-          self.state = ExecutionS::WaitingGlobalLockedCols(res);
-          None
-        }
-      }
-      Err(eval_error) => {
-        self.state = ExecutionS::Done;
-        Some(TPESAction::QueryError(mk_eval_error(eval_error)))
-      }
-    }
-  }
-}
-
 impl TPESBase for TableReadES {
   type ESContext = ();
 
@@ -562,6 +387,181 @@ impl TPESBase for TableReadES {
 
   fn remove_subquery(&mut self, subquery_id: &QueryId) {
     remove_item(&mut self.child_queries, subquery_id)
+  }
+}
+
+impl TableReadES {
+  /// Check if the `sharding_config` in the GossipData contains the necessary data, moving on if so.
+  fn check_gossip_data<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> Option<TPESAction> {
+    // If the GossipData is valid, then act accordingly.
+    if check_gossip(&ctx.gossip.get(), &self.query_plan) {
+      // We start locking the regions.
+      self.start_table_read_es(ctx, io_ctx)
+    } else {
+      // If not, we go to GossipDataWaiting
+      self.state = ExecutionS::GossipDataWaiting;
+
+      // Request a GossipData from the Master to help stimulate progress.
+      let sender_path = ctx.this_sid.clone();
+      ctx.send_to_master(
+        io_ctx,
+        msg::MasterRemotePayload::MasterGossipRequest(msg::MasterGossipRequest { sender_path }),
+      );
+
+      return None;
+    }
+  }
+
+  fn common_locked_cols<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> Option<TPESAction> {
+    // Now, we check whether the TableSchema aligns with the QueryPlan.
+    if !does_query_plan_align(ctx, &self.timestamp, &self.query_plan) {
+      self.state = ExecutionS::Done;
+      Some(TPESAction::QueryError(msg::QueryError::InvalidQueryPlan))
+    } else {
+      // If it aligns, we verify is GossipData is recent enough.
+      self.check_gossip_data(ctx, io_ctx)
+    }
+  }
+
+  fn remove_waiting_global_lock<IO: CoreIOCtx>(
+    &mut self,
+    _: &mut TabletContext,
+    _: &mut IO,
+    query_id: &QueryId,
+  ) -> Option<TPESAction> {
+    self.waiting_global_locks.remove(query_id);
+    if self.waiting_global_locks.is_empty() {
+      if let ExecutionS::WaitingGlobalLockedCols(res) = &self.state {
+        // Signal Success and return the data.
+        let res = res.clone();
+        self.state = ExecutionS::Done;
+        Some(TPESAction::Success(res))
+      } else {
+        None
+      }
+    } else {
+      None
+    }
+  }
+
+  /// Processes the Start state of TableReadES.
+  fn start_table_read_es<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    io_ctx: &mut IO,
+  ) -> Option<TPESAction> {
+    // Get extra columns that must be in the region due to SELECT * .
+    let mut extra_cols = Vec::<ColName>::new();
+    for item in &self.sql_query.projection {
+      match item {
+        proc::SelectItem::ExprWithAlias { .. } => {}
+        proc::SelectItem::Wildcard { .. } => {
+          extra_cols = ctx.table_schema.get_schema_val_cols_static(&self.timestamp);
+
+          // Break out early, since there is no reason to continue.
+          break;
+        }
+      }
+    }
+
+    // Collect all `ColNames` of this table that all `ColumnRefs` refer to.
+    let mut safe_present_cols = Vec::<ColName>::new();
+    QueryIterator::new().iterate_table_select(
+      &mut col_collecting_cb(&self.sql_query.from.alias, &mut safe_present_cols),
+      &self.sql_query,
+    );
+
+    // Compute the ReadRegion
+    let read_region = compute_read_region(
+      &ctx.table_schema.key_cols,
+      &ctx.this_tablet_key_range,
+      &self.context,
+      &self.sql_query.selection,
+      &self.sql_query.from.alias,
+      safe_present_cols,
+      extra_cols,
+    );
+
+    // Move the TableReadES to the Pending state
+    let protect_qid = mk_qid(io_ctx.rand());
+    self.state = ExecutionS::Pending(Pending { query_id: protect_qid.clone() });
+
+    // Add a read protection requested
+    btree_multimap_insert(
+      &mut ctx.waiting_read_protected,
+      &self.timestamp,
+      RequestedReadProtected {
+        orig_p: OrigP::new(self.query_id.clone()),
+        query_id: protect_qid,
+        read_region,
+      },
+    );
+
+    None
+  }
+
+  /// Handles a ES finishing with all subqueries results in.
+  fn finish_table_read_es<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut TabletContext,
+    _: &mut IO,
+  ) -> Option<TPESAction> {
+    let exec = cast!(ExecutionS::Executing, &mut self.state)?;
+
+    // Compute children.
+    let (children, subquery_results) = std::mem::take(exec).get_results();
+
+    // Create the ContextConstructor.
+    let context_constructor = ContextConstructor::new(
+      self.context.context_schema.clone(),
+      StorageLocalTable::new(
+        &ctx.table_schema,
+        &self.timestamp,
+        &self.sql_query.from,
+        &ctx.this_tablet_key_range,
+        &self.sql_query.selection,
+        SimpleStorageView::new(&ctx.storage, &ctx.table_schema),
+      ),
+      children,
+    );
+
+    // Evaluate
+    let eval_res = fully_evaluate_select(
+      context_constructor,
+      &self.context.deref(),
+      subquery_results,
+      &self.sql_query,
+    );
+
+    match eval_res {
+      Ok(res_table_views) => {
+        let res = QueryESResult {
+          result: res_table_views,
+          new_rms: self.new_rms.iter().cloned().collect(),
+        };
+
+        if self.waiting_global_locks.is_empty() {
+          // Signal Success and return the data.
+          self.state = ExecutionS::Done;
+          Some(TPESAction::Success(res))
+        } else {
+          self.state = ExecutionS::WaitingGlobalLockedCols(res);
+          None
+        }
+      }
+      Err(eval_error) => {
+        self.state = ExecutionS::Done;
+        Some(TPESAction::QueryError(mk_eval_error(eval_error)))
+      }
+    }
   }
 }
 
