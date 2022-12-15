@@ -13,6 +13,7 @@ use crate::common::{
 use crate::common::{CoreIOCtx, RemoteLeaderChangedPLm};
 use crate::coord::CoordContext;
 use crate::expression::EvalError;
+use crate::join_read_es::JoinReadES;
 use crate::master_query_planning_es::{master_query_planning, ColPresenceReq, StaticDBSchemaView};
 use crate::message as msg;
 use crate::server::{CTServerContext, CommonQuery, ServerContextBase};
@@ -23,6 +24,7 @@ use crate::tm_status::{SendHelper, TMStatus};
 use crate::trans_table_read_es::TransTableSource;
 use sqlparser::test_utils::table;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 // -----------------------------------------------------------------------------------------------
 //  MSCoordES
@@ -93,6 +95,8 @@ pub enum FullMSCoordES {
 pub enum MSQueryCoordAction {
   /// This tells the parent Server to execute the given TMStatus.
   ExecuteTMStatus(TMStatus),
+  /// This tells the parent Server to execute the given JoinReadES.
+  ExecuteJoinReadES(JoinReadES),
   /// Indicates that a valid MSCoordES was successful, and was ECU.
   Success(Vec<TQueryPath>, iast::Query, QueryResult, Timestamp),
   /// Indicates that a valid MSCoordES was unsuccessful and there is no
@@ -450,14 +454,12 @@ impl FullMSCoordES {
     };
 
     // Construct the TMStatus that is going to be used to coordinate this stage
-    let mut tm_status = TMStatus::new(
-      io_ctx,
-      ctx.mk_query_path(es.query_id.clone()),
-      OrigP::new(es.query_id.clone()),
-    );
+    let root_query_path = ctx.mk_query_path(es.query_id.clone());
+    let mut tm_status =
+      TMStatus::new(io_ctx, root_query_path.clone(), OrigP::new(es.query_id.clone()));
 
     // Send out the PerformQuery.
-    let helper = match stage {
+    match stage {
       proc::MSQueryStage::TableSelect(select) => {
         // Here, we must do a TableSelectQuery.
         let general_query = msg::GeneralQuery::TableSelectQuery(msg::TableSelectQuery {
@@ -468,7 +470,16 @@ impl FullMSCoordES {
         });
         let full_gen = es.query_plan.table_location_map.get(&select.from.table_path).unwrap();
         let tids = ctx.get_min_tablets(&select.from, full_gen, &select.selection);
-        SendHelper::TableQuery(general_query, tids)
+        let helper = SendHelper::TableQuery(general_query, tids);
+        if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
+          self.exit_and_clean_up(ctx, io_ctx);
+          Some(MSQueryCoordAction::NonFatalFailure(false))
+        } else {
+          // Populate the TMStatus accordingly.
+          es.state =
+            CoordState::Stage(Stage { stage_idx, stage_query_id: tm_status.query_id().clone() });
+          Some(MSQueryCoordAction::ExecuteTMStatus(tm_status))
+        }
       }
       proc::MSQueryStage::TransTableSelect(select) => {
         // Here, we must do a TransTableSelectQuery. Recall there is only one RM.
@@ -485,11 +496,34 @@ impl FullMSCoordES {
           sql_query: select.clone(),
           query_plan,
         });
-        SendHelper::TransTableQuery(general_query, location_prefix)
+        let helper = SendHelper::TransTableQuery(general_query, location_prefix);
+        if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
+          self.exit_and_clean_up(ctx, io_ctx);
+          Some(MSQueryCoordAction::NonFatalFailure(false))
+        } else {
+          // Populate the TMStatus accordingly.
+          es.state =
+            CoordState::Stage(Stage { stage_idx, stage_query_id: tm_status.query_id().clone() });
+          Some(MSQueryCoordAction::ExecuteTMStatus(tm_status))
+        }
       }
-      proc::MSQueryStage::JoinSelect(_) => {
-        // TODO: do properly.
-        unimplemented!()
+      proc::MSQueryStage::JoinSelect(select) => {
+        let child_es = JoinReadES::create(
+          io_ctx,
+          root_query_path,
+          es.timestamp.clone(),
+          Rc::new(context),
+          select.clone(),
+          query_plan.clone(),
+          OrigP::new(es.query_id.clone()),
+        );
+
+        // Move the GRQueryES to the next Stage.
+        es.state =
+          CoordState::Stage(Stage { stage_idx, stage_query_id: child_es.query_id().clone() });
+
+        // Return the subqueries for the parent server to execute.
+        Some(MSQueryCoordAction::ExecuteJoinReadES(child_es))
       }
       proc::MSQueryStage::Update(update_query) => {
         let general_query = msg::GeneralQuery::UpdateQuery(msg::UpdateQuery {
@@ -501,7 +535,16 @@ impl FullMSCoordES {
         let table_source = &update_query.table;
         let gen = es.query_plan.table_location_map.get(&table_source.table_path).unwrap();
         let tids = ctx.get_min_tablets(table_source, gen, &update_query.selection);
-        SendHelper::TableQuery(general_query, tids)
+        let helper = SendHelper::TableQuery(general_query, tids);
+        if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
+          self.exit_and_clean_up(ctx, io_ctx);
+          Some(MSQueryCoordAction::NonFatalFailure(false))
+        } else {
+          // Populate the TMStatus accordingly.
+          es.state =
+            CoordState::Stage(Stage { stage_idx, stage_query_id: tm_status.query_id().clone() });
+          Some(MSQueryCoordAction::ExecuteTMStatus(tm_status))
+        }
       }
       proc::MSQueryStage::Insert(insert_query) => {
         let general_query = msg::GeneralQuery::InsertQuery(msg::InsertQuery {
@@ -515,7 +558,16 @@ impl FullMSCoordES {
         let table_source = &insert_query.table;
         let gen = es.query_plan.table_location_map.get(&table_source.table_path).unwrap();
         let tids = ctx.get_all_tablets(table_source, gen);
-        SendHelper::TableQuery(general_query, tids)
+        let helper = SendHelper::TableQuery(general_query, tids);
+        if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
+          self.exit_and_clean_up(ctx, io_ctx);
+          Some(MSQueryCoordAction::NonFatalFailure(false))
+        } else {
+          // Populate the TMStatus accordingly.
+          es.state =
+            CoordState::Stage(Stage { stage_idx, stage_query_id: tm_status.query_id().clone() });
+          Some(MSQueryCoordAction::ExecuteTMStatus(tm_status))
+        }
       }
       proc::MSQueryStage::Delete(delete_query) => {
         let general_query = msg::GeneralQuery::DeleteQuery(msg::DeleteQuery {
@@ -527,18 +579,18 @@ impl FullMSCoordES {
         let table_source = &delete_query.table;
         let gen = es.query_plan.table_location_map.get(&table_source.table_path).unwrap();
         let tids = ctx.get_min_tablets(table_source, gen, &delete_query.selection);
-        SendHelper::TableQuery(general_query, tids)
+        let helper = SendHelper::TableQuery(general_query, tids);
+        if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
+          self.exit_and_clean_up(ctx, io_ctx);
+          Some(MSQueryCoordAction::NonFatalFailure(false))
+        } else {
+          // Populate the TMStatus accordingly.
+          es.state =
+            CoordState::Stage(Stage { stage_idx, stage_query_id: tm_status.query_id().clone() });
+          Some(MSQueryCoordAction::ExecuteTMStatus(tm_status))
+        }
       }
-    };
-
-    if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
-      self.exit_and_clean_up(ctx, io_ctx);
-      return Some(MSQueryCoordAction::NonFatalFailure(false));
     }
-
-    // Populate the TMStatus accordingly.
-    es.state = CoordState::Stage(Stage { stage_idx, stage_query_id: tm_status.query_id().clone() });
-    Some(MSQueryCoordAction::ExecuteTMStatus(tm_status))
   }
 
   /// Cleans up all currently owned resources, and goes to Done.

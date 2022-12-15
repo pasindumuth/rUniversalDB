@@ -3,8 +3,8 @@ use crate::col_usage::{
   gr_query_collecting_cb, trans_table_collecting_cb, QueryElement, QueryIterator,
 };
 use crate::common::{
-  lookup, lookup_pos, merge_table_views, mk_qid, rand_string, CTQueryPath, ColVal, ColValN,
-  CoreIOCtx, FullGen, OrigP, QueryPlan, ReadOnlySet, Timestamp,
+  lookup, lookup_pos, merge_table_views, mk_qid, rand_string, unexpected_branch, CTQueryPath,
+  ColVal, ColValN, CoreIOCtx, FullGen, OrigP, QueryPlan, ReadOnlySet, Timestamp,
 };
 use crate::common::{
   CQueryPath, ColName, Context, ContextRow, ContextSchema, Gen, LeadershipId, PaxosGroupIdTrait,
@@ -48,8 +48,6 @@ pub struct GRQueryResult {
 }
 
 pub enum GRQueryAction {
-  /// Do Nothing
-  Wait,
   /// This tells the parent Server to execute the given TMStatus.
   ExecuteTMStatus(TMStatus),
   /// This tells the parent Server to execute the given JoinReadES.
@@ -226,7 +224,7 @@ impl GRQueryES {
     &mut self,
     ctx: &mut Ctx,
     io_ctx: &mut IO,
-  ) -> GRQueryAction {
+  ) -> Option<GRQueryAction> {
     self.advance(ctx, io_ctx)
   }
 
@@ -238,7 +236,7 @@ impl GRQueryES {
     tm_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
     pre_agg_table_views: Vec<TableView>,
-  ) -> GRQueryAction {
+  ) -> Option<GRQueryAction> {
     let read_stage = cast!(GRExecutionS::ReadStage, &mut self.state).unwrap();
     assert_eq!(&read_stage.stage_query_id, &tm_qid);
     let (trans_table_name, stage) = self.sql_query.trans_tables.get(read_stage.stage_idx).unwrap();
@@ -251,16 +249,13 @@ impl GRQueryES {
       proc::GRQueryStage::TransTableSelect(sql_query) => {
         perform_aggregation(sql_query, pre_agg_table_views)
       }
-      proc::GRQueryStage::JoinSelect(_) => {
-        debug_assert!(false);
-        return GRQueryAction::Wait;
-      }
+      proc::GRQueryStage::JoinSelect(_) => return unexpected_branch(),
     } {
       Ok(result) => result,
       Err(eval_error) => {
-        return GRQueryAction::QueryError(msg::QueryError::RuntimeError {
+        return Some(GRQueryAction::QueryError(msg::QueryError::RuntimeError {
           msg: format!("Aggregation of GRQueryES failed with error {:?}", eval_error),
-        });
+        }));
       }
     };
 
@@ -284,12 +279,12 @@ impl GRQueryES {
     _: &mut Ctx,
     _: &mut IO,
     aborted_data: msg::AbortedData,
-  ) -> GRQueryAction {
+  ) -> Option<GRQueryAction> {
     match aborted_data {
       msg::AbortedData::QueryError(query_error) => {
         // In the case of a QueryError, we just propagate it up.
         self.state = GRExecutionS::Done;
-        GRQueryAction::QueryError(query_error)
+        Some(GRQueryAction::QueryError(query_error))
       }
     }
   }
@@ -302,9 +297,9 @@ impl GRQueryES {
     child_qid: QueryId,
     new_rms: BTreeSet<TQueryPath>,
     table_views: Vec<TableView>,
-  ) -> GRQueryAction {
-    let read_stage = cast!(GRExecutionS::ReadStage, &self.state).unwrap();
-    assert_eq!(&read_stage.stage_query_id, &child_qid);
+  ) -> Option<GRQueryAction> {
+    let read_stage = cast!(GRExecutionS::ReadStage, &self.state)?;
+    check!(&read_stage.stage_query_id == &child_qid);
     let (trans_table_name, _) = self.sql_query.trans_tables.get(read_stage.stage_idx).unwrap();
 
     // Amend the `new_trans_table_context`
@@ -327,8 +322,8 @@ impl GRQueryES {
     &mut self,
     ctx: &mut Ctx,
     io_ctx: &mut IO,
-  ) -> GRQueryAction {
-    let read_stage = cast!(GRExecutionS::ReadStage, &self.state).unwrap();
+  ) -> Option<GRQueryAction> {
+    let read_stage = cast!(GRExecutionS::ReadStage, &self.state)?;
     self.process_gr_query_stage(ctx, io_ctx, read_stage.stage_idx)
   }
 
@@ -343,12 +338,12 @@ impl GRQueryES {
     &mut self,
     ctx: &mut Ctx,
     io_ctx: &mut IO,
-  ) -> GRQueryAction {
+  ) -> Option<GRQueryAction> {
     // Compute the next stage
     let next_stage_idx = match &self.state {
       GRExecutionS::Start => 0,
       GRExecutionS::ReadStage(read_stage) => read_stage.stage_idx + 1,
-      _ => panic!(),
+      _ => return unexpected_branch(),
     };
 
     if next_stage_idx < self.sql_query.trans_tables.len() {
@@ -370,7 +365,7 @@ impl GRQueryES {
 
       // Finally, we signal that the GRQueryES is done and send back the results.
       self.state = GRExecutionS::Done;
-      GRQueryAction::Success(GRQueryResult { new_rms: self.new_rms.clone(), result })
+      Some(GRQueryAction::Success(GRQueryResult { new_rms: self.new_rms.clone(), result }))
     }
   }
 
@@ -381,7 +376,7 @@ impl GRQueryES {
     ctx: &mut Ctx,
     io_ctx: &mut IO,
     stage_idx: usize,
-  ) -> GRQueryAction {
+  ) -> Option<GRQueryAction> {
     let (_, stage) = self.sql_query.trans_tables.get(stage_idx).unwrap();
 
     let context_computer = ChildContextComputer {
@@ -428,18 +423,18 @@ impl GRQueryES {
         let helper = SendHelper::TableQuery(general_query, tids);
         if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
           self.exit_and_clean_up(ctx);
-          return GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId);
+          Some(GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId))
+        } else {
+          // Move the GRQueryES to the next Stage.
+          self.state = GRExecutionS::ReadStage(ReadStage {
+            stage_idx,
+            parent_to_child_context_map,
+            stage_query_id: tm_status.query_id().clone(),
+          });
+
+          // Return the TMStatus for the parent Server to execute.
+          Some(GRQueryAction::ExecuteTMStatus(tm_status))
         }
-
-        // Move the GRQueryES to the next Stage.
-        self.state = GRExecutionS::ReadStage(ReadStage {
-          stage_idx,
-          parent_to_child_context_map,
-          stage_query_id: tm_status.query_id().clone(),
-        });
-
-        // Return the TMStatus for the parent Server to execute.
-        GRQueryAction::ExecuteTMStatus(tm_status)
       }
       proc::GRQueryStage::TransTableSelect(select) => {
         // Here, we must do a TransTableSelectQuery. Recall there is only one RM.
@@ -460,18 +455,18 @@ impl GRQueryES {
         let helper = SendHelper::TransTableQuery(general_query, location_prefix);
         if !tm_status.send_general(ctx, io_ctx, &query_leader_map, helper) {
           self.exit_and_clean_up(ctx);
-          return GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId);
+          Some(GRQueryAction::QueryError(msg::QueryError::InvalidLeadershipId))
+        } else {
+          // Move the GRQueryES to the next Stage.
+          self.state = GRExecutionS::ReadStage(ReadStage {
+            stage_idx,
+            parent_to_child_context_map,
+            stage_query_id: tm_status.query_id().clone(),
+          });
+
+          // Return the TMStatus for the parent Server to execute.
+          Some(GRQueryAction::ExecuteTMStatus(tm_status))
         }
-
-        // Move the GRQueryES to the next Stage.
-        self.state = GRExecutionS::ReadStage(ReadStage {
-          stage_idx,
-          parent_to_child_context_map,
-          stage_query_id: tm_status.query_id().clone(),
-        });
-
-        // Return the TMStatus for the parent Server to execute.
-        GRQueryAction::ExecuteTMStatus(tm_status)
       }
       proc::GRQueryStage::JoinSelect(select) => {
         let context = Rc::new(context);
@@ -479,9 +474,10 @@ impl GRQueryES {
           io_ctx,
           self.root_query_path.clone(),
           self.timestamp.clone(),
-          self.query_plan.clone(),
-          select.clone(),
           context,
+          select.clone(),
+          self.query_plan.clone(),
+          OrigP::new(self.query_id.clone()),
         );
 
         // Move the GRQueryES to the next Stage.
@@ -492,7 +488,7 @@ impl GRQueryES {
         });
 
         // Return the subqueries for the parent server to execute.
-        GRQueryAction::ExecuteJoinReadES(child_es)
+        Some(GRQueryAction::ExecuteJoinReadES(child_es))
       }
     }
   }

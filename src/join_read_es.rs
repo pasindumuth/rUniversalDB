@@ -1,7 +1,8 @@
 use crate::col_usage::{gr_query_collecting_cb, QueryElement, QueryIterator};
 use crate::common::{
-  mk_qid, rand_string, unexpected_branch, CQueryPath, ColValN, Context, ContextRow, CoreIOCtx,
-  OrigP, QueryESResult, QueryId, QueryPlan, ReadOnlySet, TQueryPath, TableView, Timestamp,
+  mk_qid, rand_string, unexpected_branch, CQueryPath, CTQueryPath, ColValN, Context, ContextRow,
+  CoreIOCtx, OrigP, QueryESResult, QueryId, QueryPlan, ReadOnlySet, TQueryPath, TableView,
+  Timestamp,
 };
 use crate::expression::{construct_cexpr, evaluate_c_expr, is_true, EvalError};
 use crate::gr_query_es::{GRExecutionS, GRQueryES};
@@ -81,25 +82,22 @@ enum ExecutionS {
 }
 
 pub struct JoinReadES {
-  /// This is only here so it can be forwarded to child queries.
   root_query_path: CQueryPath,
-  /// This is only here so it can be forwarded to child queries.
   timestamp: Timestamp,
-  /// Query plan
-  query_plan: QueryPlan,
+  context: Rc<Context>,
 
-  /// The QueryId of this `GRQueryES`.
+  // Fields needed for responding.
   query_id: QueryId,
 
-  /// SQL
+  // Query-related fields.
   sql_query: proc::JoinSelect,
+  query_plan: QueryPlan,
 
-  /// State
+  // Dynamically evolving fields.
   new_rms: BTreeSet<TQueryPath>,
   state: ExecutionS,
-
-  // Context
-  context: Rc<Context>,
+  child_queries: Vec<QueryId>,
+  orig_p: OrigP,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -111,19 +109,22 @@ impl JoinReadES {
     io_ctx: &mut IO,
     root_query_path: CQueryPath,
     timestamp: Timestamp,
-    query_plan: QueryPlan,
-    sql_query: proc::JoinSelect,
     context: Rc<Context>,
+    sql_query: proc::JoinSelect,
+    query_plan: QueryPlan,
+    orig_p: OrigP,
   ) -> JoinReadES {
     JoinReadES {
       root_query_path,
       timestamp,
-      query_plan,
+      context,
       query_id: mk_qid(io_ctx.rand()),
       sql_query,
+      query_plan,
       new_rms: BTreeSet::new(),
       state: ExecutionS::Start,
-      context,
+      child_queries: vec![],
+      orig_p,
     }
   }
 
@@ -688,11 +689,8 @@ impl JoinReadES {
                   parent_schema,
                   parent_inner,
                 ),
-                iast::JoinType::Outer => {
-                  // An OUTER JOIN should never have a dependency between its children.
-                  debug_assert!(false);
-                  return None;
-                }
+                // An OUTER JOIN should never have a dependency between its children.
+                iast::JoinType::Outer => return unexpected_branch(),
               };
 
               match result {
@@ -1043,11 +1041,8 @@ impl JoinReadES {
                     // Return that GRQueryESs.
                     Some(TPESAction::SendSubqueries(gr_query_ess))
                   }
-                  iast::JoinType::Outer => {
-                    // An OUTER JOIN should never have a dependency between its children.
-                    debug_assert!(false);
-                    None
-                  }
+                  // An OUTER JOIN should never have a dependency between its children.
+                  iast::JoinType::Outer => return unexpected_branch(),
                 }
               }
             } else {
@@ -1293,7 +1288,7 @@ impl JoinReadES {
     result: Vec<Vec<TableView>>,
   ) -> Option<TPESAction> {
     // Dig into the state and get relevant data.
-    let join_stage = cast!(ExecutionS::JoinEvaluating, &mut self.state).unwrap();
+    let join_stage = cast!(ExecutionS::JoinEvaluating, &mut self.state)?;
     let join_select = &self.sql_query;
     let parent_node = lookup_join_node(&join_select.from, parent_id.clone());
     let parent_inner = cast!(proc::JoinNode::JoinInnerNode, parent_node).unwrap();
@@ -1574,11 +1569,8 @@ impl JoinReadES {
       };
 
       match &parent_inner.join_type {
-        iast::JoinType::Inner => {
-          // Inner JOINs should never be in the `WaitingSubqueriesForWeak` state.
-          debug_assert!(false);
-          None
-        }
+        // Inner JOINs should never be in the `WaitingSubqueriesForWeak` state.
+        iast::JoinType::Inner => unexpected_branch(),
         iast::JoinType::Left => {
           // Make GRQuerESs
           match send_gr_queries_indep(
@@ -1841,11 +1833,8 @@ impl JoinReadES {
       };
 
       match &parent_inner.join_type {
-        iast::JoinType::Inner => {
-          // Inner JOINs should never be in the `WaitingSubqueriesForWeak` state.
-          debug_assert!(false);
-          None
-        }
+        // Inner JOINs should never be in the `WaitingSubqueriesForWeak` state.
+        iast::JoinType::Inner => unexpected_branch(),
         iast::JoinType::Left => {
           // Make GRQuerESs
           match send_gr_queries_dep(
@@ -1897,11 +1886,8 @@ impl JoinReadES {
             Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
           }
         }
-        iast::JoinType::Outer => {
-          // Inner JOINs should never be in the `WaitingSubqueriesForWeak` state.
-          debug_assert!(false);
-          None
-        }
+        // Inner JOINs should never be in the `WaitingSubqueriesForWeak` state.
+        iast::JoinType::Outer => unexpected_branch(),
       }
     }
   }
@@ -2656,11 +2642,8 @@ impl JoinReadES {
                   strong_gr_queries,
                   result,
                 ),
-                iast::JoinType::Outer => {
-                  // Inner JOINs should never be in the `WaitingSubqueriesFinal` state.
-                  debug_assert!(false);
-                  return None;
-                }
+                // Inner JOINs should never be in the `WaitingSubqueriesFinal` state.
+                iast::JoinType::Outer => return unexpected_branch(),
               };
 
               match result {
@@ -2700,7 +2683,7 @@ impl JoinReadES {
     result: Vec<Vec<TableView>>,
   ) -> Option<TPESAction> {
     // This should be a JoinStage if we are getting GRQueryESs results.
-    let join_stage = cast!(ExecutionS::ProjectionEvaluating, &mut self.state).unwrap();
+    let join_stage = cast!(ExecutionS::ProjectionEvaluating, &mut self.state)?;
     let schema = &join_stage.schema;
     let table_views = &join_stage.table_views;
     let join_select = &self.sql_query;
