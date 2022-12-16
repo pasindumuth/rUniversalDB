@@ -701,6 +701,9 @@ impl JoinReadES {
               }
             }
           } else {
+            // Case in `join_node_finished` where there is a subquery in either the
+            // Weak conjunctions or Strong conjunctions.
+
             // Get the EvalData of this, the sibling, and the parent. Note that we remove
             // the parent completely in order to satisfy the borrow checker.
             let left_eval_data = join_stage.result_map.get(&left_id).unwrap();
@@ -726,7 +729,7 @@ impl JoinReadES {
               let mut gr_query_ess = Vec::<GRQueryES>::new();
               for (sql_query, context) in query_and_context {
                 let context = Rc::new(context);
-                let query_id = mk_qid(io_ctx.rand());
+                let query_id = QueryId(format!("{}_{}", parent_id, rand_string(io_ctx.rand())));
 
                 // Filter the TransTables in the QueryPlan based on the TransTables
                 // available for this subquery.
@@ -1157,6 +1160,8 @@ impl JoinReadES {
         Some(TPESAction::SendSubqueries(gr_query_ess))
       }
     } else {
+      // Case in `join_node_finished` where the root `JoinNode` is finished evaluating.
+
       // Collect all subqueries for the SelectItems. Recall that JoinSelects
       // do not have a WHERE clause (since it is pushed into JoinNode).
       let mut it = QueryIterator::new_top_level();
@@ -1282,12 +1287,17 @@ impl JoinReadES {
     }
   }
 
+  /// Here, the `parent_id` will point to a `JoinInnerNode`, and we wish to
+  /// move it's EvalData to `WaitingSubqueriesFinal`. The `result` has the same
+  /// length as the number of subqueries in the Weak Conjunctions. Also importantly,
+  /// there should be at least one Strong Conjunction (otherwise, we could just call
+  /// `finish_join_node` instead).
   fn advance_to_final_subqueries<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
     _: &mut Ctx,
     io_ctx: &mut IO,
     parent_id: JoinNodeId,
-    result: Vec<Vec<TableView>>,
+    weak_results: Vec<Vec<TableView>>,
   ) -> Option<TPESAction> {
     // Dig into the state and get relevant data.
     let join_stage = cast!(ExecutionS::JoinEvaluating, &mut self.state)?;
@@ -1295,6 +1305,7 @@ impl JoinReadES {
     let parent_node = lookup_join_node(&join_select.from, parent_id.clone());
     let parent_inner = cast!(proc::JoinNode::JoinInnerNode, parent_node).unwrap();
     let (weak_gr_queries, strong_gr_queries) = extract_subqueries(&parent_inner);
+    debug_assert_eq!(weak_gr_queries.len(), weak_results.len());
 
     // Construct the stuff, let is go.
     let left_id = parent_id.clone() + "L";
@@ -1325,7 +1336,7 @@ impl JoinReadES {
       let mut gr_query_ess = Vec::<GRQueryES>::new();
       for (sql_query, context) in query_and_context {
         let context = Rc::new(context);
-        let query_id = mk_qid(io_ctx.rand());
+        let query_id = QueryId(format!("{}_{}", parent_id, rand_string(io_ctx.rand())));
 
         // Filter the TransTables in the QueryPlan based on the TransTables
         // available for this subquery.
@@ -1584,7 +1595,7 @@ impl JoinReadES {
             right_schema,
             weak_gr_queries,
             strong_gr_queries,
-            &result,
+            &weak_results,
             true,
             false,
           ) {
@@ -1592,7 +1603,7 @@ impl JoinReadES {
               // We move to `WaitingSubqueriesFinal`.
               let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
               parent_eval_data.result_state =
-                ResultState::WaitingSubqueriesFinal(result, Executing::create(&gr_query_ess));
+                ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
 
               // Return that GRQueryESs.
               Some(TPESAction::SendSubqueries(gr_query_ess))
@@ -1612,7 +1623,7 @@ impl JoinReadES {
             left_schema,
             weak_gr_queries,
             strong_gr_queries,
-            &result,
+            &weak_results,
             true,
             false,
           ) {
@@ -1620,7 +1631,7 @@ impl JoinReadES {
               // We move to `WaitingSubqueriesFinal`.
               let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
               parent_eval_data.result_state =
-                ResultState::WaitingSubqueriesFinal(result, Executing::create(&gr_query_ess));
+                ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
 
               // Return that GRQueryESs.
               Some(TPESAction::SendSubqueries(gr_query_ess))
@@ -1639,7 +1650,7 @@ impl JoinReadES {
             right_schema,
             weak_gr_queries,
             strong_gr_queries,
-            &result,
+            &weak_results,
             true,
             true,
           ) {
@@ -1647,7 +1658,7 @@ impl JoinReadES {
               // We move to `WaitingSubqueriesFinal`.
               let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
               parent_eval_data.result_state =
-                ResultState::WaitingSubqueriesFinal(result, Executing::create(&gr_query_ess));
+                ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
 
               // Return that GRQueryESs.
               Some(TPESAction::SendSubqueries(gr_query_ess))
@@ -1848,13 +1859,13 @@ impl JoinReadES {
             right_schema,
             weak_gr_queries,
             strong_gr_queries,
-            &result,
+            &weak_results,
           ) {
             Ok(gr_query_ess) => {
               // We move to `WaitingSubqueriesFinal`.
               let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
               parent_eval_data.result_state =
-                ResultState::WaitingSubqueriesFinal(result, Executing::create(&gr_query_ess));
+                ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
 
               // Return that GRQueryESs.
               Some(TPESAction::SendSubqueries(gr_query_ess))
@@ -1874,13 +1885,13 @@ impl JoinReadES {
             left_schema,
             weak_gr_queries,
             strong_gr_queries,
-            &result,
+            &weak_results,
           ) {
             Ok(gr_query_ess) => {
               // We move to `WaitingSubqueriesFinal`.
               let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
               parent_eval_data.result_state =
-                ResultState::WaitingSubqueriesFinal(result, Executing::create(&gr_query_ess));
+                ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
 
               // Return that GRQueryESs.
               Some(TPESAction::SendSubqueries(gr_query_ess))
@@ -1890,6 +1901,711 @@ impl JoinReadES {
         }
         // Inner JOINs should never be in the `WaitingSubqueriesForWeak` state.
         iast::JoinType::Outer => unexpected_branch(),
+      }
+    }
+  }
+
+  fn finish_join_node<IO: CoreIOCtx, Ctx: CTServerContext>(
+    &mut self,
+    ctx: &mut Ctx,
+    io_ctx: &mut IO,
+    parent_id: JoinNodeId,
+    result: Vec<Vec<TableView>>,
+  ) -> Option<TPESAction> {
+    // Lookup the JoinInnerNode.
+    let join_select = &self.sql_query;
+    let join_stage = cast!(ExecutionS::JoinEvaluating, &mut self.state)?;
+    let parent_node = lookup_join_node(&join_select.from, parent_id.clone());
+    let parent_inner = cast!(proc::JoinNode::JoinInnerNode, parent_node).unwrap();
+    let (weak_gr_queries, strong_gr_queries) = extract_subqueries(&parent_inner);
+
+    // Construct the stuff, let is go.
+    let left_id = parent_id.clone() + "L";
+    let right_id = parent_id.clone() + "R";
+
+    // Get the EvalData of this, the sibling, and the parent. Note that we remove
+    // the parent completely in order to satisfy the borrow checker.
+    let left_eval_data = join_stage.result_map.remove(&left_id).unwrap();
+    let right_eval_data = join_stage.result_map.remove(&right_id).unwrap();
+    let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
+
+    // Get the schemas of the children and the target schema of the parent.
+    let left_schema = join_stage.join_node_schema.get(&left_id).unwrap();
+    let right_schema = join_stage.join_node_schema.get(&right_id).unwrap();
+    let parent_schema = join_stage.join_node_schema.get(&parent_id).unwrap();
+
+    // Handle the case that there is a dependency.
+    if !join_select.dependency_graph.contains_key(&left_id)
+      && !join_select.dependency_graph.contains_key(&right_id)
+    {
+      // There is a dependency.
+
+      // Create a helper function.
+      let mut send_gr_queries_indep = |io_ctx: &mut IO,
+                                       first_eval_data: JoinNodeEvalData,
+                                       second_eval_data: JoinNodeEvalData,
+                                       parent_eval_data: &mut JoinNodeEvalData,
+                                       first_schema: &Vec<GeneralColumnRef>,
+                                       second_schema: &Vec<GeneralColumnRef>,
+                                       parent_schema: &Vec<GeneralColumnRef>,
+                                       weak_gr_queries: Vec<proc::GRQuery>,
+                                       strong_gr_queries: Vec<proc::GRQuery>,
+                                       result: Vec<Vec<TableView>>,
+                                       first_outer: bool,
+                                       second_outer: bool|
+       -> Result<(), EvalError> {
+        let make_parent_row =
+          |first_row: &Vec<ColValN>, second_row: &Vec<ColValN>| -> Vec<ColValN> {
+            make_parent_row(first_schema, first_row, second_schema, second_row, parent_schema)
+          };
+
+        // Define a function to help initialize contexts and construct locations.
+        let parent_context = &parent_eval_data.context;
+
+        // Get TableViews
+        let first_table_views = cast!(ResultState::Finished, first_eval_data.result_state).unwrap();
+        let second_table_views =
+          cast!(ResultState::Finished, second_eval_data.result_state).unwrap();
+
+        let mut finished_table_views = Vec::<TableView>::new();
+
+        // We need to construct ContextRows for both the weak conjunctions (to look
+        // up the ContextRow values, as well as
+        let all_gr_queries: Vec<_> =
+          weak_gr_queries.iter().chain(strong_gr_queries.iter()).cloned().collect();
+        let (mut contexts, all_locations) = initialize_contexts(
+          &parent_context.context_schema,
+          &first_schema,
+          &second_schema,
+          &all_gr_queries,
+        );
+
+        // Sets to keep track of `ContextRow`s constructed for every corresponding
+        // `Context` so that we do not add duplicate `ContextRow`s.
+        let mut context_row_maps = Vec::<BTreeMap<ContextRow, usize>>::new();
+        context_row_maps.resize(contexts.len(), BTreeMap::new());
+
+        // Iterate over parent context rows.
+        let parent_column_context_schema =
+          &parent_eval_data.context.context_schema.column_context_schema;
+
+        // Iterate over parent context rows, then the child rows, and build out the
+        // all GRQuery contexts.
+        for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
+          let parent_column_context_row = &parent_context_row.column_context_row;
+
+          // Get the child `TableView`s corresponding to the context_row.
+          let first_table_view = first_table_views
+            .get(*first_eval_data.parent_to_child_context_map.get(i).unwrap())
+            .unwrap();
+          let second_table_view = second_table_views
+            .get(*second_eval_data.parent_to_child_context_map.get(i).unwrap())
+            .unwrap();
+
+          // Start constructing the `col_map` (needed for evaluating the conjunctions).
+          let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
+          add_vals(&mut col_map, parent_column_context_schema, parent_column_context_row);
+
+          // Initialiate the TableView we would add to the final joined result.
+          let mut table_view = TableView::new();
+
+          // Used hold all rows on the Second Side that were unrejected by weak conjunctions.
+          let mut second_side_weak_unrejected = BTreeSet::<Vec<ColValN>>::new();
+
+          // Next, we iterate over rows of Left and Right sides, and we construct
+          // a `ContextRow` for each GRQuery.
+          for (first_row, first_count) in &first_table_view.rows {
+            let first_count = *first_count;
+            add_vals_general(&mut col_map, first_schema, first_row);
+
+            let mut all_weak_rejected = true;
+
+            'second: for (second_row, second_count) in &second_table_view.rows {
+              let second_count = *second_count;
+              add_vals_general(&mut col_map, second_schema, second_row);
+
+              let mut raw_subquery_vals = Vec::<TableView>::new();
+              for i in 0..weak_gr_queries.len() {
+                let context_row_map = context_row_maps.get_mut(i).unwrap();
+                let context_row = mk_context_row(
+                  all_locations.get(i).unwrap(),
+                  parent_context_row,
+                  first_row,
+                  second_row,
+                );
+
+                // Add in the ContextRow if it has not been added yet.
+                if !context_row_map.contains(&context_row) {
+                  let index = context_row_map.len();
+                  context_row_map.insert(context_row.clone(), index);
+                }
+
+                // Lookup the raw subquery value for this weak conjunction and
+                // add it to raw_subquery_vals
+                let index = context_row_map.get(&context_row).unwrap();
+                let cur_result = result.get(i).unwrap();
+                let table_view = cur_result.get(*index).unwrap();
+                raw_subquery_vals.push(table_view.clone());
+              }
+
+              // Evaluate the weak conjunctions. If one of them evaluates to false,
+              // we skip this pair of rows.
+              let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
+              let mut next_subquery_idx = 0;
+              for expr in &parent_inner.weak_conjunctions {
+                if !is_true(&evaluate_c_expr(&construct_cexpr(
+                  expr,
+                  &col_map,
+                  &subquery_vals,
+                  &mut next_subquery_idx,
+                )?)?)? {
+                  // This means that the weak join rejects
+                  continue 'second;
+                }
+              }
+
+              // Here, we mark that at least one Right side succeeded was not
+              // rejected due to weak conjunctions.
+              all_weak_rejected = false;
+              second_side_weak_unrejected.insert(second_row.clone());
+
+              // Here, we go ahead and construct a ContextRow for all strong
+              // conjunctions.
+              let mut raw_subquery_vals = Vec::<TableView>::new();
+              for i in weak_gr_queries.len()..all_gr_queries.len() {
+                let context_row_map = context_row_maps.get_mut(i).unwrap();
+                let context_row = mk_context_row(
+                  all_locations.get(i).unwrap(),
+                  parent_context_row,
+                  first_row,
+                  second_row,
+                );
+
+                // Add in the ContextRow if it has not been added yet.
+                if !context_row_map.contains(&context_row) {
+                  let index = context_row_map.len();
+                  context_row_map.insert(context_row.clone(), index);
+                }
+
+                // add it to raw_subquery_vals
+                let index = context_row_map.get(&context_row).unwrap();
+                let cur_result = result.get(i).unwrap();
+                let table_view = cur_result.get(*index).unwrap();
+                raw_subquery_vals.push(table_view.clone());
+              }
+
+              // Evaluate the strong conjunctions. If one of them evaluates to false,
+              // we skip this pair of rows.
+              let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
+              let mut next_subquery_idx = 0;
+              for expr in &parent_inner.strong_conjunctions {
+                if !is_true(&evaluate_c_expr(&construct_cexpr(
+                  expr,
+                  &col_map,
+                  &subquery_vals,
+                  &mut next_subquery_idx,
+                )?)?)? {
+                  // This means that the weak join rejects
+                  continue 'second;
+                }
+              }
+
+              // Add the row to the TableView.
+              let joined_row = make_parent_row(first_row, &second_row);
+              table_view.add_row_multi(joined_row, first_count * second_count);
+            }
+
+            // Here, we check whether we need to manufacture a row
+            if all_weak_rejected && first_outer {
+              // construct an artificial right row
+              let mut second_row = Vec::<ColValN>::new();
+              second_row.resize(second_schema.len(), None);
+              let mut second_count = 1;
+
+              // Most of the below is now copy-pasted from the above, except that
+              // we do not filter with weak conjunctions.
+              add_vals_general(&mut col_map, second_schema, &second_row);
+
+              // Add in the manufactuored row for every Strong Conjunction.
+              let mut raw_subquery_vals = Vec::<TableView>::new();
+              for i in weak_gr_queries.len()..all_gr_queries.len() {
+                let context_row_map = context_row_maps.get_mut(i).unwrap();
+                let context_row = mk_context_row(
+                  all_locations.get(i).unwrap(),
+                  parent_context_row,
+                  first_row,
+                  &second_row,
+                );
+
+                // Add in the ContextRow if it has not been added yet.
+                if !context_row_map.contains(&context_row) {
+                  let index = context_row_map.len();
+                  context_row_map.insert(context_row.clone(), index);
+                }
+
+                // add it to raw_subquery_vals
+                let index = context_row_map.get(&context_row).unwrap();
+                let cur_result = result.get(i).unwrap();
+                let table_view = cur_result.get(*index).unwrap();
+                raw_subquery_vals.push(table_view.clone());
+              }
+
+              // Evaluate the strong conjunctions. If one of them evaluates to false,
+              // we skip this pair of rows.
+              let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
+              let mut next_subquery_idx = 0;
+              for expr in &parent_inner.strong_conjunctions {
+                if !is_true(&evaluate_c_expr(&construct_cexpr(
+                  expr,
+                  &col_map,
+                  &subquery_vals,
+                  &mut next_subquery_idx,
+                )?)?)? {
+                  break;
+                }
+              }
+
+              // Add the row to the TableView.
+              let joined_row = make_parent_row(first_row, &second_row);
+              table_view.add_row_multi(joined_row, first_count * second_count);
+            }
+          }
+
+          // Re-add rows on the Second Side if need be
+          if second_outer {
+            // construct an artificial right row
+            let mut first_row = Vec::<ColValN>::new();
+            first_row.resize(first_schema.len(), None);
+            let first_count = 1;
+
+            add_vals_general(&mut col_map, first_schema, &first_row);
+
+            for (second_row, second_count) in &second_table_view.rows {
+              let second_count = *second_count;
+              // Check that the `second_row` was always rejected by weak conjunctions.
+              if !second_side_weak_unrejected.contains(second_row) {
+                // Most of the below is now copy-pasted from the above, except that we do
+                // not filter with weak conjunctions.
+                add_vals_general(&mut col_map, second_schema, &second_row);
+
+                // Add in the manufactuored row for every Strong Conjunction.
+                let mut raw_subquery_vals = Vec::<TableView>::new();
+                for i in weak_gr_queries.len()..all_gr_queries.len() {
+                  let context_row_map = context_row_maps.get_mut(i).unwrap();
+                  let context_row = mk_context_row(
+                    all_locations.get(i).unwrap(),
+                    parent_context_row,
+                    &first_row,
+                    second_row,
+                  );
+
+                  // Add in the ContextRow if it has not been added yet.
+                  if !context_row_map.contains(&context_row) {
+                    let index = context_row_map.len();
+                    context_row_map.insert(context_row.clone(), index);
+                  }
+
+                  // add it to raw_subquery_vals
+                  let index = context_row_map.get(&context_row).unwrap();
+                  let cur_result = result.get(i).unwrap();
+                  let table_view = cur_result.get(*index).unwrap();
+                  raw_subquery_vals.push(table_view.clone());
+                }
+
+                // Evaluate the strong conjunctions. If one of them evaluates to false,
+                // we skip this pair of rows.
+                let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
+                let mut next_subquery_idx = 0;
+                for expr in &parent_inner.strong_conjunctions {
+                  if !is_true(&evaluate_c_expr(&construct_cexpr(
+                    expr,
+                    &col_map,
+                    &subquery_vals,
+                    &mut next_subquery_idx,
+                  )?)?)? {
+                    break;
+                  }
+                }
+
+                // Add the row to the TableView.
+                let joined_row = make_parent_row(&first_row, second_row);
+                table_view.add_row_multi(joined_row, first_count * second_count);
+              }
+            }
+          }
+
+          finished_table_views.push(table_view);
+        }
+
+        // Move the parent stage to the finished stage
+        parent_eval_data.result_state = ResultState::Finished(finished_table_views);
+        Ok(())
+      };
+
+      let result = match &parent_inner.join_type {
+        iast::JoinType::Inner => send_gr_queries_indep(
+          io_ctx,
+          left_eval_data,
+          right_eval_data,
+          parent_eval_data,
+          left_schema,
+          right_schema,
+          parent_schema,
+          weak_gr_queries,
+          strong_gr_queries,
+          result,
+          false,
+          false,
+        ),
+        iast::JoinType::Left => send_gr_queries_indep(
+          io_ctx,
+          left_eval_data,
+          right_eval_data,
+          parent_eval_data,
+          left_schema,
+          right_schema,
+          parent_schema,
+          weak_gr_queries,
+          strong_gr_queries,
+          result,
+          true,
+          false,
+        ),
+        iast::JoinType::Right => send_gr_queries_indep(
+          io_ctx,
+          right_eval_data,
+          left_eval_data,
+          parent_eval_data,
+          right_schema,
+          left_schema,
+          parent_schema,
+          weak_gr_queries,
+          strong_gr_queries,
+          result,
+          true,
+          false,
+        ),
+        iast::JoinType::Outer => send_gr_queries_indep(
+          io_ctx,
+          left_eval_data,
+          right_eval_data,
+          parent_eval_data,
+          left_schema,
+          right_schema,
+          parent_schema,
+          weak_gr_queries,
+          strong_gr_queries,
+          result,
+          true,
+          true,
+        ),
+      };
+
+      match result {
+        Ok(()) => self.join_node_finished(ctx, io_ctx, parent_id),
+        Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
+      }
+    } else {
+      // Handle the case of dependencies existing.
+
+      // Create a helper function.
+      let mut send_gr_queries_dep = |io_ctx: &mut IO,
+                                     first_eval_data: JoinNodeEvalData,
+                                     second_eval_data: JoinNodeEvalData,
+                                     parent_eval_data: &mut JoinNodeEvalData,
+                                     first_schema: &Vec<GeneralColumnRef>,
+                                     second_schema: &Vec<GeneralColumnRef>,
+                                     parent_schema: &Vec<GeneralColumnRef>,
+                                     weak_gr_queries: Vec<proc::GRQuery>,
+                                     strong_gr_queries: Vec<proc::GRQuery>,
+                                     result: Vec<Vec<TableView>>|
+       -> Result<(), EvalError> {
+        let make_parent_row =
+          |first_row: &Vec<ColValN>, second_row: &Vec<ColValN>| -> Vec<ColValN> {
+            make_parent_row(first_schema, first_row, second_schema, second_row, parent_schema)
+          };
+
+        // Define a function to help initialize contexts and construct locations.
+        let parent_context = &parent_eval_data.context;
+
+        // Get TableViews
+        let first_table_views = cast!(ResultState::Finished, first_eval_data.result_state).unwrap();
+        let second_table_views =
+          cast!(ResultState::Finished, second_eval_data.result_state).unwrap();
+
+        let mut finished_table_views = Vec::<TableView>::new();
+
+        // We need to construct ContextRows for both the weak conjunctions (to look
+        // up the ContextRow values, as well as
+        let all_gr_queries: Vec<_> =
+          weak_gr_queries.iter().chain(strong_gr_queries.iter()).cloned().collect();
+        let (mut contexts, all_locations) = initialize_contexts(
+          &parent_context.context_schema,
+          &first_schema,
+          &second_schema,
+          &all_gr_queries,
+        );
+
+        // Sets to keep track of `ContextRow`s constructed for every corresponding
+        // `Context` so that we do not add duplicate `ContextRow`s.
+        let mut context_row_maps = Vec::<BTreeMap<ContextRow, usize>>::new();
+        context_row_maps.resize(contexts.len(), BTreeMap::new());
+
+        // Iterate over parent context rows.
+        let parent_column_context_schema =
+          &parent_eval_data.context.context_schema.column_context_schema;
+
+        // Iterate over parent context rows, then the child rows, and build out the
+        // all GRQuery contexts.
+        let mut second_side_count = 0;
+        for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
+          let parent_column_context_row = &parent_context_row.column_context_row;
+
+          // Get the child `TableView`s corresponding to the context_row.
+          let first_table_view = first_table_views
+            .get(*first_eval_data.parent_to_child_context_map.get(i).unwrap())
+            .unwrap();
+
+          // Start constructing the `col_map` (needed for evaluating the conjunctions).
+          let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
+          add_vals(&mut col_map, parent_column_context_schema, parent_column_context_row);
+
+          // Initialiate the TableView we would add to the final joined result.
+          let mut table_view = TableView::new();
+
+          // Next, we iterate over rows of Left and Right sides, and we construct
+          // a `ContextRow` for each GRQuery.
+          for (first_row, first_count) in &first_table_view.rows {
+            let first_count = *first_count;
+            add_vals_general(&mut col_map, first_schema, first_row);
+
+            let mut all_weak_rejected = true;
+
+            // Get the second side;
+            let second_table_view = second_table_views
+              .get(*second_eval_data.parent_to_child_context_map.get(second_side_count).unwrap())
+              .unwrap();
+            second_side_count += 1;
+
+            'second: for (second_row, second_count) in &second_table_view.rows {
+              let second_count = *second_count;
+              add_vals_general(&mut col_map, second_schema, second_row);
+
+              let mut raw_subquery_vals = Vec::<TableView>::new();
+              for i in 0..weak_gr_queries.len() {
+                let context_row_map = context_row_maps.get_mut(i).unwrap();
+                let context_row = mk_context_row(
+                  all_locations.get(i).unwrap(),
+                  parent_context_row,
+                  first_row,
+                  second_row,
+                );
+
+                // Add in the ContextRow if it has not been added yet.
+                if !context_row_map.contains(&context_row) {
+                  let index = context_row_map.len();
+                  context_row_map.insert(context_row.clone(), index);
+                }
+
+                // Lookup the raw subquery value for this weak conjunction and
+                // add it to raw_subquery_vals
+                let index = context_row_map.get(&context_row).unwrap();
+                let cur_result = result.get(i).unwrap();
+                let table_view = cur_result.get(*index).unwrap();
+                raw_subquery_vals.push(table_view.clone());
+              }
+
+              // Evaluate the weak conjunctions. If one of them evaluates to false,
+              // we skip this pair of rows.
+              let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
+              let mut next_subquery_idx = 0;
+              for expr in &parent_inner.weak_conjunctions {
+                if !is_true(&evaluate_c_expr(&construct_cexpr(
+                  expr,
+                  &col_map,
+                  &subquery_vals,
+                  &mut next_subquery_idx,
+                )?)?)? {
+                  // This means that the weak join rejects
+                  continue 'second;
+                }
+              }
+
+              // Here, we mark that at least one Right side succeeded was not
+              // rejected due to weak conjunctions.
+              all_weak_rejected = false;
+
+              // Here, we go ahead and construct a ContextRow for all strong
+              // conjunctions.
+              let mut raw_subquery_vals = Vec::<TableView>::new();
+              for i in weak_gr_queries.len()..all_gr_queries.len() {
+                let context_row_map = context_row_maps.get_mut(i).unwrap();
+                let context_row = mk_context_row(
+                  all_locations.get(i).unwrap(),
+                  parent_context_row,
+                  first_row,
+                  second_row,
+                );
+
+                // Add in the ContextRow if it has not been added yet.
+                if !context_row_map.contains(&context_row) {
+                  let index = context_row_map.len();
+                  context_row_map.insert(context_row.clone(), index);
+                }
+
+                // add it to raw_subquery_vals
+                let index = context_row_map.get(&context_row).unwrap();
+                let cur_result = result.get(i).unwrap();
+                let table_view = cur_result.get(*index).unwrap();
+                raw_subquery_vals.push(table_view.clone());
+              }
+
+              // Evaluate the strong conjunctions. If one of them evaluates to false,
+              // we skip this pair of rows.
+              let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
+              let mut next_subquery_idx = 0;
+              for expr in &parent_inner.strong_conjunctions {
+                if !is_true(&evaluate_c_expr(&construct_cexpr(
+                  expr,
+                  &col_map,
+                  &subquery_vals,
+                  &mut next_subquery_idx,
+                )?)?)? {
+                  // This means that the weak join rejects
+                  continue 'second;
+                }
+              }
+
+              // Add the row to the TableView.
+              let joined_row = make_parent_row(first_row, &second_row);
+              table_view.add_row_multi(joined_row, first_count * second_count);
+            }
+
+            // Here, we check whether we need to manufacture a row
+            if all_weak_rejected {
+              // construct an artificial right row
+              let mut second_row = Vec::<ColValN>::new();
+              second_row.resize(second_schema.len(), None);
+              let mut second_count = 1;
+
+              // Most of the below is now copy-pasted from the above, except that
+              // we do not filter with weak conjunctions.
+              add_vals_general(&mut col_map, second_schema, &second_row);
+
+              // Add in the manufactuored row for every Strong Conjunction.
+              let mut raw_subquery_vals = Vec::<TableView>::new();
+              for i in weak_gr_queries.len()..all_gr_queries.len() {
+                let context_row_map = context_row_maps.get_mut(i).unwrap();
+                let context_row = mk_context_row(
+                  all_locations.get(i).unwrap(),
+                  parent_context_row,
+                  first_row,
+                  &second_row,
+                );
+
+                // Add in the ContextRow if it has not been added yet.
+                if !context_row_map.contains(&context_row) {
+                  let index = context_row_map.len();
+                  context_row_map.insert(context_row.clone(), index);
+                }
+
+                // add it to raw_subquery_vals
+                let index = context_row_map.get(&context_row).unwrap();
+                let cur_result = result.get(i).unwrap();
+                let table_view = cur_result.get(*index).unwrap();
+                raw_subquery_vals.push(table_view.clone());
+              }
+
+              // Evaluate the strong conjunctions. If one of them evaluates to false,
+              // we skip this pair of rows.
+              let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
+              let mut next_subquery_idx = 0;
+              for expr in &parent_inner.strong_conjunctions {
+                if !is_true(&evaluate_c_expr(&construct_cexpr(
+                  expr,
+                  &col_map,
+                  &subquery_vals,
+                  &mut next_subquery_idx,
+                )?)?)? {
+                  break;
+                }
+              }
+
+              // Add the row to the TableView.
+              let joined_row = make_parent_row(first_row, &second_row);
+              table_view.add_row_multi(joined_row, first_count * second_count);
+            }
+          }
+
+          finished_table_views.push(table_view);
+        }
+
+        // Move the parent stage to the finished stage
+        parent_eval_data.result_state = ResultState::Finished(finished_table_views);
+        Ok(())
+      };
+
+      let result = match &parent_inner.join_type {
+        iast::JoinType::Inner => {
+          if join_select.dependency_graph.contains_key(&right_id) {
+            send_gr_queries_dep(
+              io_ctx,
+              left_eval_data,
+              right_eval_data,
+              parent_eval_data,
+              left_schema,
+              right_schema,
+              parent_schema,
+              weak_gr_queries,
+              strong_gr_queries,
+              result,
+            )
+          } else {
+            send_gr_queries_dep(
+              io_ctx,
+              right_eval_data,
+              left_eval_data,
+              parent_eval_data,
+              right_schema,
+              left_schema,
+              parent_schema,
+              weak_gr_queries,
+              strong_gr_queries,
+              result,
+            )
+          }
+        }
+        iast::JoinType::Left => send_gr_queries_dep(
+          io_ctx,
+          left_eval_data,
+          right_eval_data,
+          parent_eval_data,
+          left_schema,
+          right_schema,
+          parent_schema,
+          weak_gr_queries,
+          strong_gr_queries,
+          result,
+        ),
+        iast::JoinType::Right => send_gr_queries_dep(
+          io_ctx,
+          right_eval_data,
+          left_eval_data,
+          parent_eval_data,
+          right_schema,
+          left_schema,
+          parent_schema,
+          weak_gr_queries,
+          strong_gr_queries,
+          result,
+        ),
+        // Inner JOINs should never be in the `WaitingSubqueriesFinal` state.
+        iast::JoinType::Outer => return unexpected_branch(),
+      };
+
+      match result {
+        Ok(()) => self.join_node_finished(ctx, io_ctx, parent_id),
+        Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
       }
     }
   }
@@ -1923,747 +2639,61 @@ impl JoinReadES {
       }
     }
 
-    // Determine what to do based on the state of the sibling
-    let join_select = &self.sql_query;
-
     // This means the `qid` is destined for somewhere in the Join Tree
     if let Some(i) = it {
       // This should be a JoinStage if we are getting GRQueryESs results.
       let join_stage = cast!(ExecutionS::JoinEvaluating, &mut self.state)?;
-      let parent_id: String = qid_str.chars().take(i).collect();
-
-      // Lookup this JoinNode
-      let parent_node = lookup_join_node(&join_select.from, parent_id.clone());
-      let parent_inner = cast!(proc::JoinNode::JoinInnerNode, parent_node).unwrap();
-
-      // Collect all GRQuerys in the conjunctions.
-      let (weak_gr_queries, strong_gr_queries) = extract_subqueries(&parent_inner);
+      let this_id: String = qid_str.chars().take(i).collect();
 
       // Handle the case
-      let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-      match &mut parent_eval_data.result_state {
+      let eval_data = join_stage.result_map.get_mut(&this_id).unwrap();
+      match &mut eval_data.result_state {
         ResultState::Waiting => {
           // This means `parent_id` must correspond to a JoinLeaf, and we just got the
           // result of the JoinLeaf's GRQueryES.
-          parent_eval_data.result_state = ResultState::Finished(result);
-          self.join_node_finished(ctx, io_ctx, parent_id)
+          eval_data.result_state = ResultState::Finished(result);
+          self.join_node_finished(ctx, io_ctx, this_id)
         }
         ResultState::WaitingSubqueriesForWeak(executing) => {
+          // This means that `this_id` is a JoinInnerNode. Rename it to `parent_id`.
+          let parent_id = this_id;
           executing.add_subquery_result(qid, result);
+
           // If this is complete, then we continue
           if executing.is_complete() {
-            let (_, result) = std::mem::take(executing).get_results();
-            self.advance_to_final_subqueries(ctx, io_ctx, parent_id, result)
+            let (_, results) = std::mem::take(executing).get_results();
+
+            // Computer whether there are strong conjunctions here.
+            let join_select = &self.sql_query;
+            let parent_node = lookup_join_node(&join_select.from, parent_id.clone());
+            let parent_inner = cast!(proc::JoinNode::JoinInnerNode, parent_node).unwrap();
+            let (_, strong_gr_queries) = extract_subqueries(&parent_inner);
+
+            // If there are strong conjunctions then advance to `WaitingSubqueriesFinal`
+            if !strong_gr_queries.is_empty() {
+              self.advance_to_final_subqueries(ctx, io_ctx, parent_id, results)
+            } else {
+              // Otherwise, we can simply finish.
+              self.finish_join_node(ctx, io_ctx, parent_id, results)
+            }
           } else {
             // Here, we are waiting for more subquery results to come.
             None
           }
         }
         ResultState::WaitingSubqueriesFinal(results, executing) => {
+          // This means that `this_id` is a JoinInnerNode. Rename it to `parent_id`.
+          let parent_id = this_id;
           executing.add_subquery_result(qid, result);
+
+          // If this is complete, then we continue
           if executing.is_complete() {
             let (_, second_results) = std::mem::take(executing).get_results();
             results.extend(second_results.into_iter());
-            let result = std::mem::take(results);
+            let results = std::mem::take(results);
 
-            // Construct the stuff, let is go.
-            let left_id = parent_id.clone() + "L";
-            let right_id = parent_id.clone() + "R";
-
-            // Get the EvalData of this, the sibling, and the parent. Note that we remove
-            // the parent completely in order to satisfy the borrow checker.
-            let left_eval_data = join_stage.result_map.remove(&left_id).unwrap();
-            let right_eval_data = join_stage.result_map.remove(&right_id).unwrap();
-            let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-
-            // Get the schemas of the children and the target schema of the parent.
-            let left_schema = join_stage.join_node_schema.get(&left_id).unwrap();
-            let right_schema = join_stage.join_node_schema.get(&right_id).unwrap();
-            let parent_schema = join_stage.join_node_schema.get(&parent_id).unwrap();
-
-            // Handle the case that there is a dependency.
-            if !join_select.dependency_graph.contains_key(&left_id)
-              && !join_select.dependency_graph.contains_key(&right_id)
-            {
-              // There is a dependency.
-
-              // Create a helper function.
-              let mut send_gr_queries_indep = |io_ctx: &mut IO,
-                                               first_eval_data: JoinNodeEvalData,
-                                               second_eval_data: JoinNodeEvalData,
-                                               parent_eval_data: &mut JoinNodeEvalData,
-                                               first_schema: &Vec<GeneralColumnRef>,
-                                               second_schema: &Vec<GeneralColumnRef>,
-                                               parent_schema: &Vec<GeneralColumnRef>,
-                                               weak_gr_queries: Vec<proc::GRQuery>,
-                                               strong_gr_queries: Vec<proc::GRQuery>,
-                                               result: Vec<Vec<TableView>>,
-                                               first_outer: bool,
-                                               second_outer: bool|
-               -> Result<(), EvalError> {
-                let make_parent_row = |first_row: &Vec<ColValN>,
-                                       second_row: &Vec<ColValN>|
-                 -> Vec<ColValN> {
-                  make_parent_row(first_schema, first_row, second_schema, second_row, parent_schema)
-                };
-
-                // Define a function to help initialize contexts and construct locations.
-                let parent_context = &parent_eval_data.context;
-
-                // Get TableViews
-                let first_table_views =
-                  cast!(ResultState::Finished, first_eval_data.result_state).unwrap();
-                let second_table_views =
-                  cast!(ResultState::Finished, second_eval_data.result_state).unwrap();
-
-                let mut finished_table_views = Vec::<TableView>::new();
-
-                // We need to construct ContextRows for both the weak conjunctions (to look
-                // up the ContextRow values, as well as
-                let all_gr_queries: Vec<_> =
-                  weak_gr_queries.iter().chain(strong_gr_queries.iter()).cloned().collect();
-                let (mut contexts, all_locations) = initialize_contexts(
-                  &parent_context.context_schema,
-                  &first_schema,
-                  &second_schema,
-                  &all_gr_queries,
-                );
-
-                // Sets to keep track of `ContextRow`s constructed for every corresponding
-                // `Context` so that we do not add duplicate `ContextRow`s.
-                let mut context_row_maps = Vec::<BTreeMap<ContextRow, usize>>::new();
-                context_row_maps.resize(contexts.len(), BTreeMap::new());
-
-                // Iterate over parent context rows.
-                let parent_column_context_schema =
-                  &parent_eval_data.context.context_schema.column_context_schema;
-
-                // Iterate over parent context rows, then the child rows, and build out the
-                // all GRQuery contexts.
-                for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
-                  let parent_column_context_row = &parent_context_row.column_context_row;
-
-                  // Get the child `TableView`s corresponding to the context_row.
-                  let first_table_view = first_table_views
-                    .get(*first_eval_data.parent_to_child_context_map.get(i).unwrap())
-                    .unwrap();
-                  let second_table_view = second_table_views
-                    .get(*second_eval_data.parent_to_child_context_map.get(i).unwrap())
-                    .unwrap();
-
-                  // Start constructing the `col_map` (needed for evaluating the conjunctions).
-                  let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
-                  add_vals(&mut col_map, parent_column_context_schema, parent_column_context_row);
-
-                  // Initialiate the TableView we would add to the final joined result.
-                  let mut table_view = TableView::new();
-
-                  // Used hold all rows on the Second Side that were unrejected by weak conjunctions.
-                  let mut second_side_weak_unrejected = BTreeSet::<Vec<ColValN>>::new();
-
-                  // Next, we iterate over rows of Left and Right sides, and we construct
-                  // a `ContextRow` for each GRQuery.
-                  for (first_row, first_count) in &first_table_view.rows {
-                    let first_count = *first_count;
-                    add_vals_general(&mut col_map, first_schema, first_row);
-
-                    let mut all_weak_rejected = true;
-
-                    'second: for (second_row, second_count) in &second_table_view.rows {
-                      let second_count = *second_count;
-                      add_vals_general(&mut col_map, second_schema, second_row);
-
-                      let mut raw_subquery_vals = Vec::<TableView>::new();
-                      for i in 0..weak_gr_queries.len() {
-                        let context_row_map = context_row_maps.get_mut(i).unwrap();
-                        let context_row = mk_context_row(
-                          all_locations.get(i).unwrap(),
-                          parent_context_row,
-                          first_row,
-                          second_row,
-                        );
-
-                        // Add in the ContextRow if it has not been added yet.
-                        if !context_row_map.contains(&context_row) {
-                          let index = context_row_map.len();
-                          context_row_map.insert(context_row.clone(), index);
-                        }
-
-                        // Lookup the raw subquery value for this weak conjunction and
-                        // add it to raw_subquery_vals
-                        let index = context_row_map.get(&context_row).unwrap();
-                        let cur_result = result.get(i).unwrap();
-                        let table_view = cur_result.get(*index).unwrap();
-                        raw_subquery_vals.push(table_view.clone());
-                      }
-
-                      // Evaluate the weak conjunctions. If one of them evaluates to false,
-                      // we skip this pair of rows.
-                      let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
-                      let mut next_subquery_idx = 0;
-                      for expr in &parent_inner.weak_conjunctions {
-                        if !is_true(&evaluate_c_expr(&construct_cexpr(
-                          expr,
-                          &col_map,
-                          &subquery_vals,
-                          &mut next_subquery_idx,
-                        )?)?)? {
-                          // This means that the weak join rejects
-                          continue 'second;
-                        }
-                      }
-
-                      // Here, we mark that at least one Right side succeeded was not
-                      // rejected due to weak conjunctions.
-                      all_weak_rejected = false;
-                      second_side_weak_unrejected.insert(second_row.clone());
-
-                      // Here, we go ahead and construct a ContextRow for all strong
-                      // conjunctions.
-                      let mut raw_subquery_vals = Vec::<TableView>::new();
-                      for i in weak_gr_queries.len()..all_gr_queries.len() {
-                        let context_row_map = context_row_maps.get_mut(i).unwrap();
-                        let context_row = mk_context_row(
-                          all_locations.get(i).unwrap(),
-                          parent_context_row,
-                          first_row,
-                          second_row,
-                        );
-
-                        // Add in the ContextRow if it has not been added yet.
-                        if !context_row_map.contains(&context_row) {
-                          let index = context_row_map.len();
-                          context_row_map.insert(context_row.clone(), index);
-                        }
-
-                        // add it to raw_subquery_vals
-                        let index = context_row_map.get(&context_row).unwrap();
-                        let cur_result = result.get(i).unwrap();
-                        let table_view = cur_result.get(*index).unwrap();
-                        raw_subquery_vals.push(table_view.clone());
-                      }
-
-                      // Evaluate the strong conjunctions. If one of them evaluates to false,
-                      // we skip this pair of rows.
-                      let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
-                      let mut next_subquery_idx = 0;
-                      for expr in &parent_inner.strong_conjunctions {
-                        if !is_true(&evaluate_c_expr(&construct_cexpr(
-                          expr,
-                          &col_map,
-                          &subquery_vals,
-                          &mut next_subquery_idx,
-                        )?)?)? {
-                          // This means that the weak join rejects
-                          continue 'second;
-                        }
-                      }
-
-                      // Add the row to the TableView.
-                      let joined_row = make_parent_row(first_row, &second_row);
-                      table_view.add_row_multi(joined_row, first_count * second_count);
-                    }
-
-                    // Here, we check whether we need to manufacture a row
-                    if all_weak_rejected && first_outer {
-                      // construct an artificial right row
-                      let mut second_row = Vec::<ColValN>::new();
-                      second_row.resize(second_schema.len(), None);
-                      let mut second_count = 1;
-
-                      // Most of the below is now copy-pasted from the above, except that
-                      // we do not filter with weak conjunctions.
-                      add_vals_general(&mut col_map, second_schema, &second_row);
-
-                      // Add in the manufactuored row for every Strong Conjunction.
-                      let mut raw_subquery_vals = Vec::<TableView>::new();
-                      for i in weak_gr_queries.len()..all_gr_queries.len() {
-                        let context_row_map = context_row_maps.get_mut(i).unwrap();
-                        let context_row = mk_context_row(
-                          all_locations.get(i).unwrap(),
-                          parent_context_row,
-                          first_row,
-                          &second_row,
-                        );
-
-                        // Add in the ContextRow if it has not been added yet.
-                        if !context_row_map.contains(&context_row) {
-                          let index = context_row_map.len();
-                          context_row_map.insert(context_row.clone(), index);
-                        }
-
-                        // add it to raw_subquery_vals
-                        let index = context_row_map.get(&context_row).unwrap();
-                        let cur_result = result.get(i).unwrap();
-                        let table_view = cur_result.get(*index).unwrap();
-                        raw_subquery_vals.push(table_view.clone());
-                      }
-
-                      // Evaluate the strong conjunctions. If one of them evaluates to false,
-                      // we skip this pair of rows.
-                      let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
-                      let mut next_subquery_idx = 0;
-                      for expr in &parent_inner.strong_conjunctions {
-                        if !is_true(&evaluate_c_expr(&construct_cexpr(
-                          expr,
-                          &col_map,
-                          &subquery_vals,
-                          &mut next_subquery_idx,
-                        )?)?)? {
-                          break;
-                        }
-                      }
-
-                      // Add the row to the TableView.
-                      let joined_row = make_parent_row(first_row, &second_row);
-                      table_view.add_row_multi(joined_row, first_count * second_count);
-                    }
-                  }
-
-                  // Re-add rows on the Second Side if need be
-                  if second_outer {
-                    // construct an artificial right row
-                    let mut first_row = Vec::<ColValN>::new();
-                    first_row.resize(first_schema.len(), None);
-                    let first_count = 1;
-
-                    add_vals_general(&mut col_map, first_schema, &first_row);
-
-                    for (second_row, second_count) in &second_table_view.rows {
-                      let second_count = *second_count;
-                      // Check that the `second_row` was always rejected by weak conjunctions.
-                      if !second_side_weak_unrejected.contains(second_row) {
-                        // Most of the below is now copy-pasted from the above, except that we do
-                        // not filter with weak conjunctions.
-                        add_vals_general(&mut col_map, second_schema, &second_row);
-
-                        // Add in the manufactuored row for every Strong Conjunction.
-                        let mut raw_subquery_vals = Vec::<TableView>::new();
-                        for i in weak_gr_queries.len()..all_gr_queries.len() {
-                          let context_row_map = context_row_maps.get_mut(i).unwrap();
-                          let context_row = mk_context_row(
-                            all_locations.get(i).unwrap(),
-                            parent_context_row,
-                            &first_row,
-                            second_row,
-                          );
-
-                          // Add in the ContextRow if it has not been added yet.
-                          if !context_row_map.contains(&context_row) {
-                            let index = context_row_map.len();
-                            context_row_map.insert(context_row.clone(), index);
-                          }
-
-                          // add it to raw_subquery_vals
-                          let index = context_row_map.get(&context_row).unwrap();
-                          let cur_result = result.get(i).unwrap();
-                          let table_view = cur_result.get(*index).unwrap();
-                          raw_subquery_vals.push(table_view.clone());
-                        }
-
-                        // Evaluate the strong conjunctions. If one of them evaluates to false,
-                        // we skip this pair of rows.
-                        let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
-                        let mut next_subquery_idx = 0;
-                        for expr in &parent_inner.strong_conjunctions {
-                          if !is_true(&evaluate_c_expr(&construct_cexpr(
-                            expr,
-                            &col_map,
-                            &subquery_vals,
-                            &mut next_subquery_idx,
-                          )?)?)? {
-                            break;
-                          }
-                        }
-
-                        // Add the row to the TableView.
-                        let joined_row = make_parent_row(&first_row, second_row);
-                        table_view.add_row_multi(joined_row, first_count * second_count);
-                      }
-                    }
-                  }
-
-                  finished_table_views.push(table_view);
-                }
-
-                // Move the parent stage to the finished stage
-                parent_eval_data.result_state = ResultState::Finished(finished_table_views);
-                Ok(())
-              };
-
-              let result = match &parent_inner.join_type {
-                iast::JoinType::Inner => send_gr_queries_indep(
-                  io_ctx,
-                  left_eval_data,
-                  right_eval_data,
-                  parent_eval_data,
-                  left_schema,
-                  right_schema,
-                  parent_schema,
-                  weak_gr_queries,
-                  strong_gr_queries,
-                  result,
-                  false,
-                  false,
-                ),
-                iast::JoinType::Left => send_gr_queries_indep(
-                  io_ctx,
-                  left_eval_data,
-                  right_eval_data,
-                  parent_eval_data,
-                  left_schema,
-                  right_schema,
-                  parent_schema,
-                  weak_gr_queries,
-                  strong_gr_queries,
-                  result,
-                  true,
-                  false,
-                ),
-                iast::JoinType::Right => send_gr_queries_indep(
-                  io_ctx,
-                  right_eval_data,
-                  left_eval_data,
-                  parent_eval_data,
-                  right_schema,
-                  left_schema,
-                  parent_schema,
-                  weak_gr_queries,
-                  strong_gr_queries,
-                  result,
-                  true,
-                  false,
-                ),
-                iast::JoinType::Outer => send_gr_queries_indep(
-                  io_ctx,
-                  left_eval_data,
-                  right_eval_data,
-                  parent_eval_data,
-                  left_schema,
-                  right_schema,
-                  parent_schema,
-                  weak_gr_queries,
-                  strong_gr_queries,
-                  result,
-                  true,
-                  true,
-                ),
-              };
-
-              match result {
-                Ok(()) => self.join_node_finished(ctx, io_ctx, parent_id),
-                Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
-              }
-            } else {
-              // Handle the case of dependencies existing.
-
-              // Create a helper function.
-              let mut send_gr_queries_dep = |io_ctx: &mut IO,
-                                             first_eval_data: JoinNodeEvalData,
-                                             second_eval_data: JoinNodeEvalData,
-                                             parent_eval_data: &mut JoinNodeEvalData,
-                                             first_schema: &Vec<GeneralColumnRef>,
-                                             second_schema: &Vec<GeneralColumnRef>,
-                                             parent_schema: &Vec<GeneralColumnRef>,
-                                             weak_gr_queries: Vec<proc::GRQuery>,
-                                             strong_gr_queries: Vec<proc::GRQuery>,
-                                             result: Vec<Vec<TableView>>|
-               -> Result<(), EvalError> {
-                let make_parent_row = |first_row: &Vec<ColValN>,
-                                       second_row: &Vec<ColValN>|
-                 -> Vec<ColValN> {
-                  make_parent_row(first_schema, first_row, second_schema, second_row, parent_schema)
-                };
-
-                // Define a function to help initialize contexts and construct locations.
-                let parent_context = &parent_eval_data.context;
-
-                // Get TableViews
-                let first_table_views =
-                  cast!(ResultState::Finished, first_eval_data.result_state).unwrap();
-                let second_table_views =
-                  cast!(ResultState::Finished, second_eval_data.result_state).unwrap();
-
-                let mut finished_table_views = Vec::<TableView>::new();
-
-                // We need to construct ContextRows for both the weak conjunctions (to look
-                // up the ContextRow values, as well as
-                let all_gr_queries: Vec<_> =
-                  weak_gr_queries.iter().chain(strong_gr_queries.iter()).cloned().collect();
-                let (mut contexts, all_locations) = initialize_contexts(
-                  &parent_context.context_schema,
-                  &first_schema,
-                  &second_schema,
-                  &all_gr_queries,
-                );
-
-                // Sets to keep track of `ContextRow`s constructed for every corresponding
-                // `Context` so that we do not add duplicate `ContextRow`s.
-                let mut context_row_maps = Vec::<BTreeMap<ContextRow, usize>>::new();
-                context_row_maps.resize(contexts.len(), BTreeMap::new());
-
-                // Iterate over parent context rows.
-                let parent_column_context_schema =
-                  &parent_eval_data.context.context_schema.column_context_schema;
-
-                // Iterate over parent context rows, then the child rows, and build out the
-                // all GRQuery contexts.
-                let mut second_side_count = 0;
-                for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
-                  let parent_column_context_row = &parent_context_row.column_context_row;
-
-                  // Get the child `TableView`s corresponding to the context_row.
-                  let first_table_view = first_table_views
-                    .get(*first_eval_data.parent_to_child_context_map.get(i).unwrap())
-                    .unwrap();
-
-                  // Start constructing the `col_map` (needed for evaluating the conjunctions).
-                  let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
-                  add_vals(&mut col_map, parent_column_context_schema, parent_column_context_row);
-
-                  // Initialiate the TableView we would add to the final joined result.
-                  let mut table_view = TableView::new();
-
-                  // Next, we iterate over rows of Left and Right sides, and we construct
-                  // a `ContextRow` for each GRQuery.
-                  for (first_row, first_count) in &first_table_view.rows {
-                    let first_count = *first_count;
-                    add_vals_general(&mut col_map, first_schema, first_row);
-
-                    let mut all_weak_rejected = true;
-
-                    // Get the second side;
-                    let second_table_view = second_table_views
-                      .get(
-                        *second_eval_data
-                          .parent_to_child_context_map
-                          .get(second_side_count)
-                          .unwrap(),
-                      )
-                      .unwrap();
-                    second_side_count += 1;
-
-                    'second: for (second_row, second_count) in &second_table_view.rows {
-                      let second_count = *second_count;
-                      add_vals_general(&mut col_map, second_schema, second_row);
-
-                      let mut raw_subquery_vals = Vec::<TableView>::new();
-                      for i in 0..weak_gr_queries.len() {
-                        let context_row_map = context_row_maps.get_mut(i).unwrap();
-                        let context_row = mk_context_row(
-                          all_locations.get(i).unwrap(),
-                          parent_context_row,
-                          first_row,
-                          second_row,
-                        );
-
-                        // Add in the ContextRow if it has not been added yet.
-                        if !context_row_map.contains(&context_row) {
-                          let index = context_row_map.len();
-                          context_row_map.insert(context_row.clone(), index);
-                        }
-
-                        // Lookup the raw subquery value for this weak conjunction and
-                        // add it to raw_subquery_vals
-                        let index = context_row_map.get(&context_row).unwrap();
-                        let cur_result = result.get(i).unwrap();
-                        let table_view = cur_result.get(*index).unwrap();
-                        raw_subquery_vals.push(table_view.clone());
-                      }
-
-                      // Evaluate the weak conjunctions. If one of them evaluates to false,
-                      // we skip this pair of rows.
-                      let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
-                      let mut next_subquery_idx = 0;
-                      for expr in &parent_inner.weak_conjunctions {
-                        if !is_true(&evaluate_c_expr(&construct_cexpr(
-                          expr,
-                          &col_map,
-                          &subquery_vals,
-                          &mut next_subquery_idx,
-                        )?)?)? {
-                          // This means that the weak join rejects
-                          continue 'second;
-                        }
-                      }
-
-                      // Here, we mark that at least one Right side succeeded was not
-                      // rejected due to weak conjunctions.
-                      all_weak_rejected = false;
-
-                      // Here, we go ahead and construct a ContextRow for all strong
-                      // conjunctions.
-                      let mut raw_subquery_vals = Vec::<TableView>::new();
-                      for i in weak_gr_queries.len()..all_gr_queries.len() {
-                        let context_row_map = context_row_maps.get_mut(i).unwrap();
-                        let context_row = mk_context_row(
-                          all_locations.get(i).unwrap(),
-                          parent_context_row,
-                          first_row,
-                          second_row,
-                        );
-
-                        // Add in the ContextRow if it has not been added yet.
-                        if !context_row_map.contains(&context_row) {
-                          let index = context_row_map.len();
-                          context_row_map.insert(context_row.clone(), index);
-                        }
-
-                        // add it to raw_subquery_vals
-                        let index = context_row_map.get(&context_row).unwrap();
-                        let cur_result = result.get(i).unwrap();
-                        let table_view = cur_result.get(*index).unwrap();
-                        raw_subquery_vals.push(table_view.clone());
-                      }
-
-                      // Evaluate the strong conjunctions. If one of them evaluates to false,
-                      // we skip this pair of rows.
-                      let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
-                      let mut next_subquery_idx = 0;
-                      for expr in &parent_inner.strong_conjunctions {
-                        if !is_true(&evaluate_c_expr(&construct_cexpr(
-                          expr,
-                          &col_map,
-                          &subquery_vals,
-                          &mut next_subquery_idx,
-                        )?)?)? {
-                          // This means that the weak join rejects
-                          continue 'second;
-                        }
-                      }
-
-                      // Add the row to the TableView.
-                      let joined_row = make_parent_row(first_row, &second_row);
-                      table_view.add_row_multi(joined_row, first_count * second_count);
-                    }
-
-                    // Here, we check whether we need to manufacture a row
-                    if all_weak_rejected {
-                      // construct an artificial right row
-                      let mut second_row = Vec::<ColValN>::new();
-                      second_row.resize(second_schema.len(), None);
-                      let mut second_count = 1;
-
-                      // Most of the below is now copy-pasted from the above, except that
-                      // we do not filter with weak conjunctions.
-                      add_vals_general(&mut col_map, second_schema, &second_row);
-
-                      // Add in the manufactuored row for every Strong Conjunction.
-                      let mut raw_subquery_vals = Vec::<TableView>::new();
-                      for i in weak_gr_queries.len()..all_gr_queries.len() {
-                        let context_row_map = context_row_maps.get_mut(i).unwrap();
-                        let context_row = mk_context_row(
-                          all_locations.get(i).unwrap(),
-                          parent_context_row,
-                          first_row,
-                          &second_row,
-                        );
-
-                        // Add in the ContextRow if it has not been added yet.
-                        if !context_row_map.contains(&context_row) {
-                          let index = context_row_map.len();
-                          context_row_map.insert(context_row.clone(), index);
-                        }
-
-                        // add it to raw_subquery_vals
-                        let index = context_row_map.get(&context_row).unwrap();
-                        let cur_result = result.get(i).unwrap();
-                        let table_view = cur_result.get(*index).unwrap();
-                        raw_subquery_vals.push(table_view.clone());
-                      }
-
-                      // Evaluate the strong conjunctions. If one of them evaluates to false,
-                      // we skip this pair of rows.
-                      let subquery_vals = extract_subquery_vals(&raw_subquery_vals)?;
-                      let mut next_subquery_idx = 0;
-                      for expr in &parent_inner.strong_conjunctions {
-                        if !is_true(&evaluate_c_expr(&construct_cexpr(
-                          expr,
-                          &col_map,
-                          &subquery_vals,
-                          &mut next_subquery_idx,
-                        )?)?)? {
-                          break;
-                        }
-                      }
-
-                      // Add the row to the TableView.
-                      let joined_row = make_parent_row(first_row, &second_row);
-                      table_view.add_row_multi(joined_row, first_count * second_count);
-                    }
-                  }
-
-                  finished_table_views.push(table_view);
-                }
-
-                // Move the parent stage to the finished stage
-                parent_eval_data.result_state = ResultState::Finished(finished_table_views);
-                Ok(())
-              };
-
-              let result = match &parent_inner.join_type {
-                iast::JoinType::Inner => {
-                  if join_select.dependency_graph.contains_key(&right_id) {
-                    send_gr_queries_dep(
-                      io_ctx,
-                      left_eval_data,
-                      right_eval_data,
-                      parent_eval_data,
-                      left_schema,
-                      right_schema,
-                      parent_schema,
-                      weak_gr_queries,
-                      strong_gr_queries,
-                      result,
-                    )
-                  } else {
-                    send_gr_queries_dep(
-                      io_ctx,
-                      right_eval_data,
-                      left_eval_data,
-                      parent_eval_data,
-                      right_schema,
-                      left_schema,
-                      parent_schema,
-                      weak_gr_queries,
-                      strong_gr_queries,
-                      result,
-                    )
-                  }
-                }
-                iast::JoinType::Left => send_gr_queries_dep(
-                  io_ctx,
-                  left_eval_data,
-                  right_eval_data,
-                  parent_eval_data,
-                  left_schema,
-                  right_schema,
-                  parent_schema,
-                  weak_gr_queries,
-                  strong_gr_queries,
-                  result,
-                ),
-                iast::JoinType::Right => send_gr_queries_dep(
-                  io_ctx,
-                  right_eval_data,
-                  left_eval_data,
-                  parent_eval_data,
-                  right_schema,
-                  left_schema,
-                  parent_schema,
-                  weak_gr_queries,
-                  strong_gr_queries,
-                  result,
-                ),
-                // Inner JOINs should never be in the `WaitingSubqueriesFinal` state.
-                iast::JoinType::Outer => return unexpected_branch(),
-              };
-
-              match result {
-                Ok(()) => self.join_node_finished(ctx, io_ctx, parent_id),
-                Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
-              }
-            }
+            // Finish the JoinNode
+            self.finish_join_node(ctx, io_ctx, parent_id, results)
           } else {
             // Here, we are waiting for more subquery results to come.
             None
@@ -2689,11 +2719,13 @@ impl JoinReadES {
     }
   }
 
+  /// This is the last function to be called. Here, the `results` corresponds to the
+  /// results of any subqueries in the `SelectItem`s of the `JoinSelect`
   fn finish_join_select<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
     _: &mut Ctx,
     _: &mut IO,
-    result: Vec<Vec<TableView>>,
+    results: Vec<Vec<TableView>>,
   ) -> Option<TPESAction> {
     // This should be a JoinStage if we are getting GRQueryESs results.
     let join_stage = cast!(ExecutionS::ProjectionEvaluating, &mut self.state)?;
@@ -2760,7 +2792,7 @@ impl JoinReadES {
           // Lookup the raw subquery value for this weak conjunction and
           // add it to raw_subquery_vals
           let index = context_row_map.get(&context_row).unwrap();
-          let cur_result = result.get(i).unwrap();
+          let cur_result = results.get(i).unwrap();
           let table_view = cur_result.get(*index).unwrap();
           raw_subquery_vals.push(table_view.clone());
         }

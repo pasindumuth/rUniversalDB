@@ -273,6 +273,15 @@ pub fn unexpected_branch<T>() -> Option<T> {
   None
 }
 
+pub fn remove_indices<T>(vec: &mut Vec<T>, indices_to_remove: BTreeSet<usize>) {
+  let mut old_vec = std::mem::take(vec);
+  for (i, val) in old_vec.into_iter().enumerate() {
+    if !indices_to_remove.contains(&i) {
+      vec.push(val);
+    }
+  }
+}
+
 // -------------------------------------------------------------------------------------------------
 //  ReadOnlySet
 // -------------------------------------------------------------------------------------------------

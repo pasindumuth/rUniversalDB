@@ -1,5 +1,5 @@
 use crate::col_usage::{QueryElement, QueryElementMut, QueryIterator, QueryIteratorMut};
-use crate::common::{lookup, ColName, ReadOnlySet, TablePath, TransTableName};
+use crate::common::{lookup, remove_indices, ColName, ReadOnlySet, TablePath, TransTableName};
 use crate::master_query_planning_es::{DBSchemaView, ErrorTrait};
 use crate::message as msg;
 use crate::sql_ast::{iast, proc};
@@ -1946,65 +1946,68 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
 
       // This function perfoms every necessary check to gaurantee that if the given `conjunction`
       // is pushed to the given `side`, then none of the rules are violdated.
-      // TODO: we should actually MOVE the conjunctions, just just copy them. This is important
-      //  for the case that the conjunctions have subqueries. Alternatively, we can make sure to only
-      //  copy down the conjunction if it does not have a subquery.
       let mut try_push_expr =
-        |conjunction: &proc::ValExpr, is_strong: bool, side: JoinSide| match side {
-          // Try pushing the conjunction to the Right side.
-          JoinSide::Right => {
-            // If the conjunction is Weak, then we need to check that the JOIN is not a RIGHT JOIN.
-            if !is_strong && join_type.non_right() {
-              // Next, check whether a right-to-left dependency would need to be added.
-              if Self::does_expr_use_any_jlns(conjunction, &left_jlns) {
-                // If so, we make sure that there is not already a left-to-right dependency.
-                if !graph.contains_key(&left_path) {
-                  // Now, we are clear to push the conjunction and update the dependency.
+        |conjunction: &proc::ValExpr, is_strong: bool, side: JoinSide| -> bool {
+          let mut did_push_succeed = false;
+          match side {
+            // Try pushing the conjunction to the Right side.
+            JoinSide::Right => {
+              // If the conjunction is Weak, then we need to check that the JOIN is not a RIGHT JOIN.
+              if !is_strong && join_type.non_right() {
+                // Next, check whether a right-to-left dependency would need to be added.
+                if Self::does_expr_use_any_jlns(conjunction, &left_jlns) {
+                  // If so, we make sure that there is not already a left-to-right dependency.
+                  if !graph.contains_key(&left_path) {
+                    // Now, we are clear to push the conjunction and update the dependency.
+                    Self::push_expr(conjunction.clone(), right.deref_mut());
+                    graph.insert(right_path.clone(), left_path.clone());
+                    did_push_succeed = true;
+                  }
+                } else {
+                  // Otherwise, we can simply push the conjunction unconditionally.
                   Self::push_expr(conjunction.clone(), right.deref_mut());
-                  graph.insert(right_path.clone(), left_path.clone());
-                  did_anything_change = true;
+                  did_push_succeed = true;
                 }
-              } else {
-                // Otherwise, we can simply push the conjunction unconditionally.
+              }
+
+              // If the conjunction is Strong, then we need to check that the JOIN is not a LEFT JOIN.
+              if is_strong && join_type.non_left() {
+                // If so, we can simply push the conjunction unconditionally.
                 Self::push_expr(conjunction.clone(), right.deref_mut());
-                did_anything_change = true;
+                did_push_succeed = true;
               }
             }
-
-            // If the conjunction is Strong, then we need to check that the JOIN is not a LEFT JOIN.
-            if is_strong && join_type.non_left() {
-              // If so, we can simply push the conjunction unconditionally.
-              Self::push_expr(conjunction.clone(), right.deref_mut());
-              did_anything_change = true;
-            }
-          }
-          // Try pushing the conjunction to the Left side.
-          JoinSide::Left => {
-            // If the conjunction is Weak, then we need to check that the JOIN is not a LEFT JOIN.
-            if !is_strong && join_type.non_left() {
-              // Next, check whether a left-to-right dependency would need to be added.
-              if Self::does_expr_use_any_jlns(conjunction, &right_jlns) {
-                // If so, we make sure that there is not already a right-to-left dependency.
-                if !graph.contains_key(&right_path) {
-                  // Now, we are clear to push the conjunction and update the dependency.
+            // Try pushing the conjunction to the Left side.
+            JoinSide::Left => {
+              // If the conjunction is Weak, then we need to check that the JOIN is not a LEFT JOIN.
+              if !is_strong && join_type.non_left() {
+                // Next, check whether a left-to-right dependency would need to be added.
+                if Self::does_expr_use_any_jlns(conjunction, &right_jlns) {
+                  // If so, we make sure that there is not already a right-to-left dependency.
+                  if !graph.contains_key(&right_path) {
+                    // Now, we are clear to push the conjunction and update the dependency.
+                    Self::push_expr(conjunction.clone(), left.deref_mut());
+                    graph.insert(left_path.clone(), right_path.clone());
+                    did_push_succeed = true;
+                  }
+                } else {
+                  // Otherwise, we can simply push the conjunction unconditionally.
                   Self::push_expr(conjunction.clone(), left.deref_mut());
-                  graph.insert(left_path.clone(), right_path.clone());
-                  did_anything_change = true;
+                  did_push_succeed = true;
                 }
-              } else {
-                // Otherwise, we can simply push the conjunction unconditionally.
+              }
+
+              // If the conjunction is Strong, then we need to check that the JOIN is not a RIGHT JOIN.
+              if is_strong && join_type.non_right() {
+                // If so, we can simply push the conjunction unconditionally.
                 Self::push_expr(conjunction.clone(), left.deref_mut());
-                did_anything_change = true;
+                did_push_succeed = true;
               }
             }
+          };
 
-            // If the conjunction is Strong, then we need to check that the JOIN is not a RIGHT JOIN.
-            if is_strong && join_type.non_right() {
-              // If so, we can simply push the conjunction unconditionally.
-              Self::push_expr(conjunction.clone(), left.deref_mut());
-              did_anything_change = true;
-            }
-          }
+          did_anything_change |= did_push_succeed;
+          did_push_succeed
         };
 
       // Define function that iterates through Conjunctions and tries to push down
@@ -2012,30 +2015,37 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
       // this would not introduce any dependencies, we can simply try to push down as many
       // conjunctions as possible. (Recall that introducing a dependency can result in a
       // very expensive query if not done judiciously.)
-      let mut apply_rule_1 = |conjunctions: &Vec<proc::ValExpr>, is_strong: bool| {
-        for conjunction in conjunctions {
+      let mut apply_rule_1 = |conjunctions: &mut Vec<proc::ValExpr>, is_strong: bool| {
+        let mut removed_indices = BTreeSet::<usize>::new();
+        for (i, conjunction) in conjunctions.iter().enumerate() {
           if !Self::does_expr_use_any_jlns(conjunction, &left_jlns) {
             // Here, pushing down the conjunction to the right would not
             // produce a dependency, so we do it.
-            try_push_expr(conjunction, is_strong, JoinSide::Right);
+            if try_push_expr(conjunction, is_strong, JoinSide::Right) {
+              removed_indices.insert(i);
+            }
           } else if !Self::does_expr_use_any_jlns(conjunction, &right_jlns) {
             // Here, pushing down the conjunction to the left would not
             // produce a dependency, so we do it.
-            try_push_expr(conjunction, is_strong, JoinSide::Left);
+            if try_push_expr(conjunction, is_strong, JoinSide::Left) {
+              removed_indices.insert(i);
+            }
           }
         }
+        remove_indices(conjunctions, removed_indices);
       };
 
       // Apply Rule 1
-      apply_rule_1(&inner.strong_conjunctions, true);
-      apply_rule_1(&inner.weak_conjunctions, false);
+      apply_rule_1(&mut inner.strong_conjunctions, true);
+      apply_rule_1(&mut inner.weak_conjunctions, false);
 
       // Define function that iterates through Conjunctions and tries to push down conjunctions
       // that *would* introduce a dependency. We do this judiciously so that overall, the
       // dependecy would increase performance, not decrease it.
-      let mut apply_rule_2 = |conjunctions: &Vec<proc::ValExpr>, is_strong: bool| {
+      let mut apply_rule_2 = |conjunctions: &mut Vec<proc::ValExpr>, is_strong: bool| {
+        let mut removed_indices = BTreeSet::<usize>::new();
         // Iterate through the Conjunctions and apply Rule 2.
-        for conjunction in conjunctions {
+        for (i, conjunction) in conjunctions.iter().enumerate() {
           // Check that the conjunction is an equality check.
           if let proc::ValExpr::BinaryExpr { op: iast::BinaryOp::Eq, left, right } = conjunction {
             // Define function to check each of the left and right side separately.
@@ -2051,11 +2061,15 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
                       if left_jlns.contains(&col_ref.table_name) {
                         // If the real Table is on the left side, we
                         // push the conjunction to the left.
-                        try_push_expr(conjunction, is_strong, JoinSide::Left);
+                        if try_push_expr(conjunction, is_strong, JoinSide::Left) {
+                          removed_indices.insert(i);
+                        }
                       } else if right_jlns.contains(&col_ref.table_name) {
                         // If the real Table is on the right side, we
                         // push the conjunction to the right.
-                        try_push_expr(conjunction, is_strong, JoinSide::Right);
+                        if try_push_expr(conjunction, is_strong, JoinSide::Right) {
+                          removed_indices.insert(i);
+                        }
                       }
 
                       // Note that the real Table might not be on any side of this JoinInnerNode,
@@ -2071,11 +2085,12 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
             process_expr_side(right.deref());
           }
         }
+        remove_indices(conjunctions, removed_indices);
       };
 
       // Apply Rule 2
-      apply_rule_2(&inner.strong_conjunctions, true);
-      apply_rule_2(&inner.weak_conjunctions, false);
+      apply_rule_2(&mut inner.strong_conjunctions, true);
+      apply_rule_2(&mut inner.weak_conjunctions, false);
     }
 
     did_anything_change
@@ -2118,12 +2133,16 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
   fn push_expr_leaf(mut expr: proc::ValExpr, leaf: &mut proc::JoinLeaf) {
     // Get the final stage,
     let final_gr_query_stage = &mut leaf.query.trans_tables.last_mut().unwrap().1;
-    let final_stage = cast!(proc::GRQueryStage::TransTableSelect, final_gr_query_stage).unwrap();
+    let (alias, selection) = match final_gr_query_stage {
+      proc::GRQueryStage::TableSelect(select) => (&select.from.alias, &mut select.selection),
+      proc::GRQueryStage::TransTableSelect(select) => (&select.from.alias, &mut select.selection),
+      proc::GRQueryStage::JoinSelect(_) => panic!(),
+    };
 
     // Convert `ColumnRef`s in `expr` that refer to `leaf` (which will be prefixed with
     // `old_alias`) to now use the `new_alias`.
     let old_alias = leaf.alias.clone();
-    let new_alias = final_stage.from.alias.clone();
+    let new_alias = alias.clone();
     let query_iterator = QueryIteratorMut::new();
     query_iterator.iterate_expr(
       &mut |elem| {
@@ -2139,10 +2158,10 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
     // Finally, push the modified `expr` into the WHERE clause of the `final_stage` by
     // AND-ing it with the current WHERE clause.
     let cur_selection = std::mem::replace(
-      &mut final_stage.selection,
+      selection,
       proc::ValExpr::Value { val: iast::Value::Boolean(false) }, // Some temporary sentinal.
     );
-    final_stage.selection = proc::ValExpr::BinaryExpr {
+    *selection = proc::ValExpr::BinaryExpr {
       op: iast::BinaryOp::And,
       left: Box::new(expr),
       right: Box::new(cur_selection),
