@@ -24,8 +24,8 @@ use crate::server::{CTServerContext, CommonQuery, ServerContextBase};
 use crate::sql_ast::iast;
 use crate::sql_ast::proc;
 use crate::sql_parser::convert_ast;
-use crate::tablet::TPESAction;
 use crate::tablet::{GRQueryESWrapper, TransTableReadESWrapper};
+use crate::tablet::{JoinReadESWrapper, TPESAction};
 use crate::tm_status::TMStatus;
 use crate::trans_table_read_es::{TransExecutionS, TransTableReadES};
 use rand::RngCore;
@@ -77,6 +77,7 @@ pub struct Statuses {
   // TP
   ms_coord_ess: BTreeMap<QueryId, MSCoordESWrapper>,
   gr_query_ess: BTreeMap<QueryId, GRQueryESWrapper>,
+  join_query_ess: BTreeMap<QueryId, JoinReadESWrapper>,
   trans_table_read_ess: BTreeMap<QueryId, TransTableReadESWrapper>,
   tm_statuss: BTreeMap<QueryId, TMStatus>,
 }
@@ -677,31 +678,40 @@ impl CoordContext {
     result: Vec<TableView>,
   ) {
     let query_id = orig_p.query_id;
-    let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
-    remove_item(&mut trans_read.child_queries, &subquery_id);
-    let prefix = trans_read.es.location_prefix();
-    let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id) {
-      trans_read.es.handle_subquery_done(
-        self,
-        io_ctx,
-        &gr_query.es,
-        subquery_id,
-        subquery_new_rms,
-        result,
-      )
-    } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.source.query_id) {
-      trans_read.es.handle_subquery_done(
-        self,
-        io_ctx,
-        ms_coord.es.to_exec(),
-        subquery_id,
-        subquery_new_rms,
-        result,
-      )
-    } else {
-      trans_read.es.handle_internal_query_error(self, io_ctx, msg::QueryError::LateralError)
-    };
-    self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
+    // JoinReadES
+    if let Some(join_select) = statuses.join_query_ess.get_mut(&query_id) {
+      remove_item(&mut join_select.child_queries, &subquery_id);
+      let action =
+        join_select.es.handle_subquery_done(self, io_ctx, subquery_id, subquery_new_rms, result);
+      self.handle_join_read_action(io_ctx, statuses, query_id, action);
+    }
+    // TransTableReadES
+    else if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
+      remove_item(&mut trans_read.child_queries, &subquery_id);
+      let prefix = trans_read.es.location_prefix();
+      let action = if let Some(gr_query) = statuses.gr_query_ess.get(&prefix.source.query_id) {
+        trans_read.es.handle_subquery_done(
+          self,
+          io_ctx,
+          &gr_query.es,
+          subquery_id,
+          subquery_new_rms,
+          result,
+        )
+      } else if let Some(ms_coord) = statuses.ms_coord_ess.get(&prefix.source.query_id) {
+        trans_read.es.handle_subquery_done(
+          self,
+          io_ctx,
+          ms_coord.es.to_exec(),
+          subquery_id,
+          subquery_new_rms,
+          result,
+        )
+      } else {
+        trans_read.es.handle_internal_query_error(self, io_ctx, msg::QueryError::LateralError)
+      };
+      self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
+    }
   }
 
   /// Handles a `query_error` propagated up from a GRQueryES. Recall that the originator
@@ -715,10 +725,18 @@ impl CoordContext {
     query_error: msg::QueryError,
   ) {
     let query_id = orig_p.query_id;
-    let trans_read = statuses.trans_table_read_ess.get_mut(&query_id).unwrap();
-    remove_item(&mut trans_read.child_queries, &subquery_id);
-    let action = trans_read.es.handle_internal_query_error(self, io_ctx, query_error);
-    self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
+    // JoinReadES
+    if let Some(join_select) = statuses.join_query_ess.get_mut(&query_id) {
+      remove_item(&mut join_select.child_queries, &subquery_id);
+      let action = join_select.es.handle_internal_query_error(self, io_ctx, query_error);
+      self.handle_join_read_action(io_ctx, statuses, query_id, action);
+    }
+    // TransTableReadES
+    else if let Some(trans_read) = statuses.trans_table_read_ess.get_mut(&query_id) {
+      remove_item(&mut trans_read.child_queries, &subquery_id);
+      let action = trans_read.es.handle_internal_query_error(self, io_ctx, query_error);
+      self.handle_trans_read_es_action(io_ctx, statuses, query_id, action);
+    }
   }
 
   /// Adds the given `gr_query_ess` to `statuses`, executing them one at a time.
@@ -748,6 +766,51 @@ impl CoordContext {
     }
   }
 
+  /// Handles the actions produced by a JoinReadES.
+  fn handle_join_read_action<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: Option<TPESAction>,
+  ) {
+    match action {
+      None => {}
+      Some(TPESAction::SendSubqueries(gr_query_ess)) => {
+        if let Some(wrapper) = statuses.join_query_ess.get_mut(&query_id) {
+          for gr_query_es in &gr_query_ess {
+            wrapper.child_queries.push(gr_query_es.query_id.clone());
+          }
+          self.launch_subqueries(io_ctx, statuses, gr_query_ess);
+        }
+      }
+      Some(TPESAction::Success(success)) => {
+        if let Some(mut wrapper) = statuses.gr_query_ess.remove(&query_id) {
+          let action = wrapper.es.handle_join_select_done(
+            self,
+            io_ctx,
+            query_id,
+            success.new_rms,
+            success.result,
+          );
+          self.handle_gr_query_es_action(io_ctx, statuses, wrapper.es.query_id.clone(), action);
+        }
+      }
+      // make sure to ECU this joinread
+      Some(TPESAction::QueryError(query_error)) => {
+        if let Some(mut wrapper) = statuses.gr_query_ess.remove(&query_id) {
+          let action = wrapper.es.handle_join_select_aborted(
+            self,
+            io_ctx,
+            msg::AbortedData::QueryError(query_error),
+          );
+          self.exit_all(io_ctx, statuses, wrapper.child_queries);
+          self.handle_gr_query_es_action(io_ctx, statuses, wrapper.es.query_id.clone(), action);
+        }
+      }
+    }
+  }
+
   /// Handles the actions specified by a GRQueryES.
   fn handle_ms_coord_es_action<IO: CoreIOCtx>(
     &mut self,
@@ -764,8 +827,16 @@ impl CoordContext {
         statuses.tm_statuss.insert(tm_status.query_id.clone(), tm_status);
       }
       Some(MSQueryCoordAction::ExecuteJoinReadES(join_es)) => {
-        // TODO: do
-        unimplemented!()
+        let join_qid = join_es.query_id().clone();
+        let ms_coord = statuses.ms_coord_ess.get_mut(&query_id).unwrap();
+        ms_coord.child_queries.push(join_qid.clone());
+        let wrapper = map_insert(
+          &mut statuses.join_query_ess,
+          &join_qid,
+          JoinReadESWrapper { child_queries: vec![], es: join_es },
+        );
+        let action = wrapper.es.start(self, io_ctx);
+        self.handle_join_read_action(io_ctx, statuses, join_qid, action);
       }
       Some(MSQueryCoordAction::Success(all_rms, sql_query, result, timestamp)) => {
         let ms_coord = statuses.ms_coord_ess.remove(&query_id).unwrap();
@@ -983,8 +1054,16 @@ impl CoordContext {
         statuses.tm_statuss.insert(tm_status.query_id.clone(), tm_status);
       }
       Some(GRQueryAction::ExecuteJoinReadES(join_es)) => {
-        // TODO: do
-        unimplemented!()
+        let join_qid = join_es.query_id().clone();
+        let gr_query = statuses.gr_query_ess.get_mut(&query_id).unwrap();
+        gr_query.child_queries.push(join_qid.clone());
+        let wrapper = map_insert(
+          &mut statuses.join_query_ess,
+          &join_qid,
+          JoinReadESWrapper { child_queries: vec![], es: join_es },
+        );
+        let action = wrapper.es.start(self, io_ctx);
+        self.handle_join_read_action(io_ctx, statuses, join_qid, action);
       }
       Some(GRQueryAction::Success(res)) => {
         let gr_query = statuses.gr_query_ess.remove(&query_id).unwrap();
@@ -1066,6 +1145,11 @@ impl CoordContext {
     else if let Some(mut gr_query) = statuses.gr_query_ess.remove(&query_id) {
       gr_query.es.exit_and_clean_up(self);
       self.exit_all(io_ctx, statuses, gr_query.child_queries);
+    }
+    // JoinReadES
+    else if let Some(mut join_query) = statuses.join_query_ess.remove(&query_id) {
+      join_query.es.exit_and_clean_up(self, io_ctx);
+      self.exit_all(io_ctx, statuses, join_query.child_queries);
     }
     // TransTableReadES
     else if let Some(mut trans_read) = statuses.trans_table_read_ess.remove(&query_id) {

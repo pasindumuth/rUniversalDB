@@ -31,6 +31,7 @@ use crate::expression::{
 use crate::finish_query_rm_es::{FinishQueryRMES, FinishQueryRMInner};
 use crate::finish_query_tm_es::FinishQueryPayloadTypes;
 use crate::gr_query_es::{GRQueryAction, GRQueryConstructorView, GRQueryES, SubqueryComputableSql};
+use crate::join_read_es::JoinReadES;
 use crate::join_util::compute_children_general;
 use crate::message as msg;
 use crate::ms_table_delete_es::{DeleteInner, MSTableDeleteES};
@@ -187,6 +188,12 @@ impl TransTableReadESWrapper {
 pub struct GRQueryESWrapper {
   pub child_queries: Vec<QueryId>,
   pub es: GRQueryES,
+}
+
+#[derive(Debug)]
+pub struct JoinReadESWrapper {
+  pub child_queries: Vec<QueryId>,
+  pub es: JoinReadES,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -463,6 +470,7 @@ pub struct Statuses {
   /// This contains `PerformQuery`s with a `root_query_path`
   perform_query_buffer: BTreeMap<QueryId, msg::PerformQuery>,
   gr_query_ess: BTreeMap<QueryId, GRQueryESWrapper>,
+  join_query_ess: BTreeMap<QueryId, JoinReadESWrapper>,
   tm_statuss: BTreeMap<QueryId, TMStatus>,
   ms_query_ess: BTreeMap<QueryId, MSQueryES>,
   top: TopLevelStatuses,
@@ -2780,12 +2788,22 @@ impl TabletContext {
       }
     }
 
-    statuses.execute_once_ctx::<_, _, Cb>(
-      self,
-      io_ctx,
-      orig_p.query_id,
-      (subquery_id, subquery_new_rms, result),
-    );
+    // JoinReadES
+    if let Some(join_select) = statuses.join_query_ess.get_mut(&orig_p.query_id) {
+      remove_item(&mut join_select.child_queries, &subquery_id);
+      let action =
+        join_select.es.handle_subquery_done(self, io_ctx, subquery_id, subquery_new_rms, result);
+      self.handle_join_read_action(io_ctx, statuses, orig_p.query_id, action);
+    }
+    // TPESBase
+    else {
+      statuses.execute_once_ctx::<_, _, Cb>(
+        self,
+        io_ctx,
+        orig_p.query_id,
+        (subquery_id, subquery_new_rms, result),
+      );
+    }
   }
 
   /// This routes the QueryError propagated by a GRQueryES up to the appropriate top-level ES.
@@ -2810,7 +2828,16 @@ impl TabletContext {
       }
     }
 
-    statuses.execute_once::<_, _, Cb>(self, io_ctx, orig_p.query_id, (subquery_id, query_error));
+    // JoinReadES
+    if let Some(join_select) = statuses.join_query_ess.get_mut(&orig_p.query_id) {
+      remove_item(&mut join_select.child_queries, &subquery_id);
+      let action = join_select.es.handle_internal_query_error(self, io_ctx, query_error);
+      self.handle_join_read_action(io_ctx, statuses, orig_p.query_id, action);
+    }
+    // TPESBase
+    else {
+      statuses.execute_once::<_, _, Cb>(self, io_ctx, orig_p.query_id, (subquery_id, query_error));
+    }
   }
 
   /// Adds the given `gr_query_ess` to `statuses`, executing them one at a time.
@@ -3038,6 +3065,7 @@ impl TabletContext {
     match action {
       None => {}
       Some(TPESAction::SendSubqueries(gr_query_ess)) => {
+        // TODO: add these as child queries?
         self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
       Some(TPESAction::Success(success)) => {
@@ -3100,6 +3128,52 @@ impl TabletContext {
     }
   }
 
+  /// Handles the actions produced by a JoinReadES.
+  fn handle_join_read_action<IO: CoreIOCtx>(
+    &mut self,
+    io_ctx: &mut IO,
+    statuses: &mut Statuses,
+    query_id: QueryId,
+    action: Option<TPESAction>,
+  ) {
+    match action {
+      None => {}
+      Some(TPESAction::SendSubqueries(gr_query_ess)) => {
+        // TODO: the TP ES does nto do this... wtf. these need to be here.
+        if let Some(wrapper) = statuses.join_query_ess.get_mut(&query_id) {
+          for gr_query_es in &gr_query_ess {
+            wrapper.child_queries.push(gr_query_es.query_id.clone());
+          }
+          self.launch_subqueries(io_ctx, statuses, gr_query_ess);
+        }
+      }
+      Some(TPESAction::Success(success)) => {
+        if let Some(mut wrapper) = statuses.gr_query_ess.remove(&query_id) {
+          let action = wrapper.es.handle_join_select_done(
+            self,
+            io_ctx,
+            query_id,
+            success.new_rms,
+            success.result,
+          );
+          self.handle_gr_query_es_action(io_ctx, statuses, wrapper.es.query_id.clone(), action);
+        }
+      }
+      // make sure to ECU this joinread
+      Some(TPESAction::QueryError(query_error)) => {
+        if let Some(mut wrapper) = statuses.gr_query_ess.remove(&query_id) {
+          let action = wrapper.es.handle_join_select_aborted(
+            self,
+            io_ctx,
+            msg::AbortedData::QueryError(query_error),
+          );
+          self.exit_all(io_ctx, statuses, wrapper.child_queries);
+          self.handle_gr_query_es_action(io_ctx, statuses, wrapper.es.query_id.clone(), action);
+        }
+      }
+    }
+  }
+
   /// Handles the actions produced by a GRQueryES.
   fn handle_gr_query_es_action<IO: CoreIOCtx>(
     &mut self,
@@ -3116,8 +3190,16 @@ impl TabletContext {
         statuses.tm_statuss.insert(tm_status.query_id.clone(), tm_status);
       }
       Some(GRQueryAction::ExecuteJoinReadES(join_es)) => {
-        // TODO: do
-        unimplemented!()
+        let join_qid = join_es.query_id().clone();
+        let gr_query = statuses.gr_query_ess.get_mut(&query_id).unwrap();
+        gr_query.child_queries.push(join_qid.clone());
+        let wrapper = map_insert(
+          &mut statuses.join_query_ess,
+          &join_qid,
+          JoinReadESWrapper { child_queries: vec![], es: join_es },
+        );
+        let action = wrapper.es.start(self, io_ctx);
+        self.handle_join_read_action(io_ctx, statuses, join_qid, action);
       }
       Some(GRQueryAction::Success(res)) => {
         let gr_query = statuses.gr_query_ess.remove(&query_id).unwrap();
@@ -3176,6 +3258,11 @@ impl TabletContext {
     else if let Some(mut gr_query) = statuses.gr_query_ess.remove(&query_id) {
       gr_query.es.exit_and_clean_up(self);
       self.exit_all(io_ctx, statuses, gr_query.child_queries);
+    }
+    // JoinReadES
+    else if let Some(mut join_query) = statuses.join_query_ess.remove(&query_id) {
+      join_query.es.exit_and_clean_up(self, io_ctx);
+      self.exit_all(io_ctx, statuses, join_query.child_queries);
     }
     // TMStatus
     else if let Some(mut tm_status) = statuses.tm_statuss.remove(&query_id) {

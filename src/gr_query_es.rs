@@ -295,7 +295,7 @@ impl GRQueryES {
     ctx: &mut Ctx,
     io_ctx: &mut IO,
     child_qid: QueryId,
-    new_rms: BTreeSet<TQueryPath>,
+    new_rms: Vec<TQueryPath>,
     table_views: Vec<TableView>,
   ) -> Option<GRQueryAction> {
     let read_stage = cast!(GRExecutionS::ReadStage, &self.state)?;
@@ -314,6 +314,21 @@ impl GRQueryES {
     // Add the `table_views` to the GRQueryES and advance it.
     self.trans_table_views.push((trans_table_name.clone(), table_views));
     self.advance(ctx, io_ctx)
+  }
+
+  pub fn handle_join_select_aborted<IO: CoreIOCtx, Ctx: CTServerContext>(
+    &mut self,
+    _: &mut Ctx,
+    _: &mut IO,
+    aborted_data: msg::AbortedData,
+  ) -> Option<GRQueryAction> {
+    match aborted_data {
+      msg::AbortedData::QueryError(query_error) => {
+        // In the case of a QueryError, we just propagate it up.
+        self.state = GRExecutionS::Done;
+        Some(GRQueryAction::QueryError(query_error))
+      }
+    }
   }
 
   /// This is called when one of the remote node's Leadership changes beyond the

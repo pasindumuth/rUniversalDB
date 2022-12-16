@@ -57,12 +57,13 @@ struct JoinNodeEvalData {
   result_state: ResultState,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct JoinEvaluating {
   result_map: BTreeMap<JoinNodeId, JoinNodeEvalData>,
   join_node_schema: BTreeMap<JoinNodeId, Vec<GeneralColumnRef>>,
 }
 
+#[derive(Debug)]
 struct ProjectionEvaluating {
   /// Copied from the root JoinNodeEvalData
   parent_to_child_context_map: Vec<usize>,
@@ -75,12 +76,15 @@ struct ProjectionEvaluating {
   schema: Vec<GeneralColumnRef>,
 }
 
+#[derive(Debug)]
 enum ExecutionS {
   Start,
   JoinEvaluating(JoinEvaluating),
   ProjectionEvaluating(ProjectionEvaluating),
+  Done,
 }
 
+#[derive(Debug)]
 pub struct JoinReadES {
   root_query_path: CQueryPath,
   timestamp: Timestamp,
@@ -96,7 +100,6 @@ pub struct JoinReadES {
   // Dynamically evolving fields.
   new_rms: BTreeSet<TQueryPath>,
   state: ExecutionS,
-  child_queries: Vec<QueryId>,
   orig_p: OrigP,
 }
 
@@ -123,7 +126,6 @@ impl JoinReadES {
       query_plan,
       new_rms: BTreeSet::new(),
       state: ExecutionS::Start,
-      child_queries: vec![],
       orig_p,
     }
   }
@@ -1892,13 +1894,24 @@ impl JoinReadES {
     }
   }
 
-  pub fn handle_gr_query_success<IO: CoreIOCtx, Ctx: CTServerContext>(
+  /// This is called if a subquery fails.
+  pub fn handle_internal_query_error<IO: CoreIOCtx, Ctx: CTServerContext>(
+    &mut self,
+    ctx: &mut Ctx,
+    io_ctx: &mut IO,
+    query_error: msg::QueryError,
+  ) -> Option<TPESAction> {
+    self.exit_and_clean_up(ctx, io_ctx);
+    Some(TPESAction::QueryError(query_error))
+  }
+
+  pub fn handle_subquery_done<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
     ctx: &mut Ctx,
     io_ctx: &mut IO,
     qid: QueryId,
-    result: Vec<TableView>,
     rms: BTreeSet<TQueryPath>,
+    result: Vec<TableView>,
   ) -> Option<TPESAction> {
     self.new_rms.extend(rms);
 
@@ -2805,6 +2818,15 @@ impl JoinReadES {
       })),
       Err(eval_error) => return Some(TPESAction::QueryError(mk_eval_error(eval_error))),
     }
+  }
+
+  /// This Exits and Cleans up this GRQueryES.
+  pub fn exit_and_clean_up<IO: CoreIOCtx, Ctx: CTServerContext>(
+    &mut self,
+    _: &mut Ctx,
+    _: &mut IO,
+  ) {
+    self.state = ExecutionS::Done;
   }
 }
 
