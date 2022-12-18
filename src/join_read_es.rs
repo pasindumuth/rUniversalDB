@@ -126,7 +126,7 @@ pub struct JoinReadES {
   // Dynamically evolving fields.
   new_rms: BTreeSet<TQueryPath>,
   state: ExecutionS,
-  orig_p: OrigP,
+  pub orig_p: OrigP,
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -313,8 +313,8 @@ impl JoinReadES {
         // Iterate over parent context rows, then the child rows, and build out context.
         for (i, parent_context_row) in parent_eval_data.context.context_rows.iter().enumerate() {
           for (this_row, _) in &this_finished.get_for_parent_context_row(i).rows {
-            simple.add_row(parent_context_row, this_row, &vec![]);
-            parent_to_child_context_map.push(simple.context.context_rows.len());
+            let index = simple.add_row(parent_context_row, this_row, &vec![]);
+            parent_to_child_context_map.push(index);
           }
         }
 
@@ -937,7 +937,7 @@ impl JoinReadES {
       let joined_table_view = finished.get_for_parent_context_row(i);
 
       // Iterate over rows.
-      for (row, _) in &joined_table_view.rows {
+      for (row, count) in &joined_table_view.rows {
         add_vals_general(&mut col_map, schema, row);
 
         let vals = simple.get_results(parent_context_row, row, &vec![]);
@@ -981,7 +981,7 @@ impl JoinReadES {
           Err(eval_error) => return Some(TPESAction::QueryError(mk_eval_error(eval_error))),
         };
 
-        finished_table_view.add_row(projection);
+        finished_table_view.add_row_multi(projection, *count);
       }
 
       pre_agg_table_views.push(finished_table_view);
@@ -1091,8 +1091,8 @@ fn build_join_node_context(
 
   // Iterate over parent context rows and build out the context for the root JoinNode.
   for (_, parent_context_row) in parent_context.context_rows.iter().enumerate() {
-    simple.add_row(parent_context_row, &vec![], &vec![]);
-    parent_to_child_context_map.push(simple.context.context_rows.len());
+    let index = simple.add_row(parent_context_row, &vec![], &vec![]);
+    parent_to_child_context_map.push(index);
   }
 
   (simple.context, parent_to_child_context_map)
@@ -1263,7 +1263,7 @@ fn make_empty_row(length: usize) -> (Vec<ColValN>, u64) {
 struct ContextConstructorSimpleOnce {
   context: Context,
   locations: Locations,
-  context_row_set: BTreeSet<ContextRow>,
+  context_row_map: BTreeMap<ContextRow, usize>,
 }
 
 impl ContextConstructorSimpleOnce {
@@ -1279,8 +1279,8 @@ impl ContextConstructorSimpleOnce {
       &second_schema,
       elem.clone(),
     );
-    let mut context_row_set = BTreeSet::<ContextRow>::new();
-    ContextConstructorSimpleOnce { context, locations, context_row_set }
+    let context_row_map = BTreeMap::<ContextRow, usize>::new();
+    ContextConstructorSimpleOnce { context, locations, context_row_map }
   }
 
   fn add_row(
@@ -1288,13 +1288,17 @@ impl ContextConstructorSimpleOnce {
     parent_context_row: &ContextRow,
     first_row: &Vec<ColValN>,
     second_row: &Vec<ColValN>,
-  ) {
+  ) -> usize {
     let context_row = mk_context_row(&self.locations, parent_context_row, first_row, second_row);
 
     // Add in the ContextRow if it has not been added yet.
-    if !self.context_row_set.contains(&context_row) {
-      self.context_row_set.insert(context_row.clone());
+    if let Some(index) = self.context_row_map.get(&context_row) {
+      *index
+    } else {
+      let index = self.context_row_map.len();
+      self.context_row_map.insert(context_row.clone(), index);
       self.context.context_rows.push(context_row);
+      index
     }
   }
 }
@@ -1530,7 +1534,7 @@ fn final_join_subqueries_independent<IO: CoreIOCtx>(
 
         // Evaluate the weak conjunctions.
         let vals = weak_simple.get_results(parent_context_row, first_row, second_row);
-        if evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
+        if !evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
           continue;
         }
 
@@ -1654,7 +1658,7 @@ fn finish_join_independent(
 
         // Evaluate the weak conjunctions.
         let vals = weak_simple.get_results(parent_context_row, first_row, second_row);
-        if evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
+        if !evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
           continue;
         }
 
@@ -1664,7 +1668,7 @@ fn finish_join_independent(
 
         // Evaluate the strong conjunctions.
         let vals = strong_simple.get_results(parent_context_row, first_row, second_row);
-        if evaluate_conjunctions(&parent_inner.strong_conjunctions, &col_map, &vals)? {
+        if !evaluate_conjunctions(&parent_inner.strong_conjunctions, &col_map, &vals)? {
           continue;
         }
 
@@ -1838,7 +1842,7 @@ fn final_join_subqueries_dependent<IO: CoreIOCtx>(
 
         // Evaluate the weak conjunctions.
         let vals = weak_simple.get_results(parent_context_row, first_row, second_row);
-        if evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
+        if !evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
           continue;
         }
 
@@ -1943,7 +1947,7 @@ fn finish_join_dependent(
 
         // Evaluate the weak conjunctions.
         let vals = weak_simple.get_results(parent_context_row, first_row, second_row);
-        if evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
+        if !evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
           continue;
         }
 
@@ -1952,7 +1956,7 @@ fn finish_join_dependent(
 
         // Evaluate the strong conjunctions.
         let vals = strong_simple.get_results(parent_context_row, first_row, second_row);
-        if evaluate_conjunctions(&parent_inner.strong_conjunctions, &col_map, &vals)? {
+        if !evaluate_conjunctions(&parent_inner.strong_conjunctions, &col_map, &vals)? {
           continue;
         }
 

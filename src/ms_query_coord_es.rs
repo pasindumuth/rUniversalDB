@@ -58,8 +58,8 @@ pub struct MSCoordES {
   pub timestamp: Timestamp,
 
   pub query_id: QueryId,
-  pub sql_query: iast::Query,
-  pub ms_query: proc::MSQuery,
+  pub iast_query: iast::Query,
+  pub sql_query: proc::MSQuery,
 
   // Results of the query planning.
   pub query_plan: CoordQueryPlan,
@@ -82,7 +82,7 @@ impl TransTableSource for MSCoordES {
   }
 
   fn get_schema(&self, trans_table_name: &TransTableName) -> &Vec<Option<ColName>> {
-    lookup(&self.ms_query.trans_tables, trans_table_name).unwrap().schema()
+    lookup(&self.sql_query.trans_tables, trans_table_name).unwrap().schema()
   }
 }
 
@@ -157,8 +157,8 @@ impl FullMSCoordES {
         *self = FullMSCoordES::Executing(MSCoordES {
           timestamp: plan_es.timestamp.clone(),
           query_id: plan_es.query_id.clone(),
-          sql_query: plan_es.sql_query.clone(),
-          ms_query,
+          iast_query: plan_es.iast_query.clone(),
+          sql_query: ms_query,
           query_plan: query_plan.clone(),
           all_rms: Default::default(),
           trans_table_views: vec![],
@@ -191,7 +191,7 @@ impl FullMSCoordES {
     check!(coord_stage.stage_query_id == tm_qid);
 
     // Combine the results into a single one
-    let (trans_table_name, stage) = es.ms_query.trans_tables.get(coord_stage.stage_idx).unwrap();
+    let (trans_table_name, stage) = es.sql_query.trans_tables.get(coord_stage.stage_idx).unwrap();
     let table_views = match match stage {
       proc::MSQueryStage::TableSelect(sql_query) => {
         perform_aggregation(sql_query, pre_agg_table_views)
@@ -270,6 +270,49 @@ impl FullMSCoordES {
       }
       // Recall that LateralErrors should never make it back to the MSCoordES.
       msg::AbortedData::QueryError(msg::QueryError::LateralError) => unexpected_branch(),
+    }
+  }
+
+  /// This is called when the `JoinReadES` has completed successfully.
+  pub fn handle_join_select_done<IO: CoreIOCtx>(
+    &mut self,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
+    child_qid: QueryId,
+    new_rms: Vec<TQueryPath>,
+    table_views: Vec<TableView>,
+  ) -> Option<MSQueryCoordAction> {
+    let es = cast_safe!(FullMSCoordES::Executing, self)?;
+    let stage = cast!(CoordState::Stage, &es.state)?;
+    check!(&stage.stage_query_id == &child_qid);
+    let (trans_table_name, _) = es.sql_query.trans_tables.get(stage.stage_idx).unwrap();
+
+    // Recall that since we only send out one ContextRow, there should only be one TableView.
+    debug_assert_eq!(table_views.len(), 1);
+
+    // Then, the results to the `trans_table_views`
+    let table_view = table_views.into_iter().next().unwrap();
+    es.trans_table_views.push((trans_table_name.clone(), table_view));
+    es.all_rms.extend(new_rms);
+    self.advance(ctx, io_ctx)
+  }
+
+  /// This is called when the JoinReadES has aborted.
+  pub fn handle_join_select_aborted<IO: CoreIOCtx>(
+    &mut self,
+    _: &mut CoordContext,
+    _: &mut IO,
+    aborted_data: msg::AbortedData,
+  ) -> Option<MSQueryCoordAction> {
+    let es = cast_safe!(FullMSCoordES::Executing, self)?;
+    match aborted_data {
+      msg::AbortedData::QueryError(query_error) => {
+        // In the case of a QueryError, we just propagate it up.
+        es.state = CoordState::Done;
+        Some(MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError(
+          msg::ExternalQueryError::RuntimeError { msg: format!("Join failed {:?}", query_error) },
+        )))
+      }
     }
   }
 
@@ -355,7 +398,7 @@ impl FullMSCoordES {
       _ => return unexpected_branch(),
     };
 
-    if next_stage_idx < es.ms_query.trans_tables.len() {
+    if next_stage_idx < es.sql_query.trans_tables.len() {
       self.process_ms_query_stage(ctx, io_ctx, next_stage_idx)
     } else {
       // Check that none of the Leaderships in `all_rms` have changed.
@@ -387,17 +430,17 @@ impl FullMSCoordES {
       }
 
       // Finally, we go to Done and return the appropriate TableView.
-      let schema = es.get_schema(&es.ms_query.returning).clone();
+      let schema = es.get_schema(&es.sql_query.returning).clone();
       let (_, data) = es
         .trans_table_views
         .iter()
-        .find(|(trans_table_name, _)| trans_table_name == &es.ms_query.returning)
+        .find(|(trans_table_name, _)| trans_table_name == &es.sql_query.returning)
         .unwrap()
         .clone();
       es.state = CoordState::Done;
       Some(MSQueryCoordAction::Success(
         es.all_rms.iter().cloned().collect(),
-        es.sql_query.clone(),
+        es.iast_query.clone(),
         QueryResult { schema, data },
         es.timestamp.clone(),
       ))
@@ -415,7 +458,7 @@ impl FullMSCoordES {
     let es = cast!(FullMSCoordES::Executing, self)?;
 
     // Get the corresponding MSQueryStage and ColUsageNode.
-    let (trans_table_name, stage) = es.ms_query.trans_tables.get(stage_idx).unwrap();
+    let (trans_table_name, stage) = es.sql_query.trans_tables.get(stage_idx).unwrap();
 
     // Compute the Context for this stage. Recall there must be exactly one row.
     let mut trans_table_names = Vec::<TransTableName>::new();
@@ -652,7 +695,7 @@ pub enum QueryPlanningS {
 pub struct QueryPlanningES {
   pub timestamp: Timestamp,
   /// The query to do the planning with.
-  pub sql_query: iast::Query,
+  pub iast_query: iast::Query,
   /// The OrigP of the Task holding this MSQueryCoordPlanningES
   pub query_id: QueryId,
   /// Used for managing MasterQueryPlanning
@@ -683,7 +726,7 @@ impl QueryPlanningES {
       col_presence_req: Default::default(),
     };
 
-    match master_query_planning(view, &self.sql_query) {
+    match master_query_planning(view, &self.iast_query) {
       Ok(master_query_plan) => self.finish_master_query_plan(ctx, master_query_plan),
       Err(_) => return self.perform_master_query_planning(ctx, io_ctx),
     }
@@ -704,7 +747,7 @@ impl QueryPlanningES {
           sender_path,
           query_id: master_query_id.clone(),
           timestamp: self.timestamp.clone(),
-          sql_query: self.sql_query.clone(),
+          sql_query: self.iast_query.clone(),
         },
       )),
     );

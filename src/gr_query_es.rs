@@ -13,11 +13,7 @@ use crate::common::{
 };
 use crate::expression::{construct_cexpr, evaluate_c_expr, is_true, EvalError};
 use crate::join_read_es::JoinReadES;
-use crate::join_util::{
-  add_vals, add_vals_general, compute_children_general, extract_subqueries, initialize_contexts,
-  initialize_contexts_general, initialize_contexts_general_once, make_parent_row, mk_context_row,
-  Location, Locations,
-};
+use crate::join_util::compute_children_general;
 use crate::master_query_planning_es::{ColPresenceReq, ErrorTrait};
 use crate::message as msg;
 use crate::query_converter::collect_jlns;
@@ -316,6 +312,7 @@ impl GRQueryES {
     self.advance(ctx, io_ctx)
   }
 
+  /// This is called when the JoinReadES has aborted.
   pub fn handle_join_select_aborted<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
     _: &mut Ctx,

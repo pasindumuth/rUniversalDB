@@ -3148,27 +3148,37 @@ impl TabletContext {
         }
       }
       Some(TPESAction::Success(success)) => {
-        if let Some(mut wrapper) = statuses.gr_query_ess.remove(&query_id) {
-          let action = wrapper.es.handle_join_select_done(
-            self,
-            io_ctx,
-            query_id,
-            success.new_rms,
-            success.result,
-          );
-          self.handle_gr_query_es_action(io_ctx, statuses, wrapper.es.query_id.clone(), action);
+        if let Some(wrapper) = statuses.join_query_ess.remove(&query_id) {
+          let orig_qid = wrapper.es.orig_p.query_id.clone();
+
+          // Send the success up to the parent.
+          if let Some(wrapper) = statuses.gr_query_ess.get_mut(&orig_qid) {
+            let action = wrapper.es.handle_join_select_done(
+              self,
+              io_ctx,
+              query_id,
+              success.new_rms,
+              success.result,
+            );
+            self.handle_gr_query_es_action(io_ctx, statuses, orig_qid, action);
+          }
         }
       }
       // make sure to ECU this joinread
       Some(TPESAction::QueryError(query_error)) => {
-        if let Some(mut wrapper) = statuses.gr_query_ess.remove(&query_id) {
-          let action = wrapper.es.handle_join_select_aborted(
-            self,
-            io_ctx,
-            msg::AbortedData::QueryError(query_error),
-          );
+        if let Some(wrapper) = statuses.join_query_ess.remove(&query_id) {
+          let orig_qid = wrapper.es.orig_p.query_id.clone();
           self.exit_all(io_ctx, statuses, wrapper.child_queries);
-          self.handle_gr_query_es_action(io_ctx, statuses, wrapper.es.query_id.clone(), action);
+
+          // Propagate the error up to the parent.
+          if let Some(wrapper) = statuses.gr_query_ess.get_mut(&orig_qid) {
+            let action = wrapper.es.handle_join_select_aborted(
+              self,
+              io_ctx,
+              msg::AbortedData::QueryError(query_error),
+            );
+            self.handle_gr_query_es_action(io_ctx, statuses, orig_qid, action);
+          }
         }
       }
     }

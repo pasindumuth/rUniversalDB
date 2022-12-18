@@ -753,6 +753,7 @@ fn alias_rename_under_query<ErrorT: ErrorTrait>(
 // This is where most of the heavy lifting happens, were columns are resolved and
 // where `DBSchemaView` is constructed (which, recall, forms the core of the QueryPlanning).
 
+#[derive(Debug)]
 enum SchemaSource {
   /// This is used for `JoinLeaf`s that are Derived Tables and TransTables.
   StaticSchema(Vec<Option<String>>),
@@ -760,6 +761,7 @@ enum SchemaSource {
   TablePath(TablePath),
 }
 
+#[derive(Debug)]
 enum ColUsageCols {
   /// Indicates that only the listed columns for the table are used.
   Cols(Vec<String>),
@@ -1278,6 +1280,8 @@ fn get_jln(leaf: &iast::JoinLeaf) -> String {
 //  Query to MSQuery
 // -----------------------------------------------------------------------------------------------
 
+const EMPTY_COLS: &ColUsageCols = &ColUsageCols::Cols(vec![]);
+
 enum SelectEnum {
   TableSelect(proc::TableSelect),
   TransTableSelect(proc::TransTableSelect),
@@ -1688,7 +1692,8 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
     let (select, mut trans_tables, lateral) = match &leaf.source {
       iast::JoinNodeSource::Table(table_name) => {
         // Get the columns that are used by the JoinLeaf.
-        let col_usage_cols = self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap();
+        let col_usage_cols =
+          self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap_or(EMPTY_COLS);
 
         // In this case, we construct a single `GRQueryStage` that simply reads from
         // `table_name`, extracting out only the columns requested in `col_usage_cols`.

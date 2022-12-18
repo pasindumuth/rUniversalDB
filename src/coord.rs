@@ -261,7 +261,7 @@ impl CoordContext {
                     child_queries: vec![],
                     es: FullMSCoordES::QueryPlanning(QueryPlanningES {
                       timestamp: cur_timestamp(io_ctx, self.coord_config.timestamp_suffix_divisor),
-                      sql_query: query,
+                      iast_query: query,
                       query_id: query_id.clone(),
                       state: QueryPlanningS::Start,
                     }),
@@ -785,27 +785,53 @@ impl CoordContext {
         }
       }
       Some(TPESAction::Success(success)) => {
-        if let Some(mut wrapper) = statuses.gr_query_ess.remove(&query_id) {
-          let action = wrapper.es.handle_join_select_done(
-            self,
-            io_ctx,
-            query_id,
-            success.new_rms,
-            success.result,
-          );
-          self.handle_gr_query_es_action(io_ctx, statuses, wrapper.es.query_id.clone(), action);
+        if let Some(join_read) = statuses.join_query_ess.remove(&query_id) {
+          let orig_qid = join_read.es.orig_p.query_id.clone();
+
+          // Send the success up to the parent.
+          if let Some(gr_query) = statuses.gr_query_ess.get_mut(&orig_qid) {
+            let action = gr_query.es.handle_join_select_done(
+              self,
+              io_ctx,
+              query_id,
+              success.new_rms,
+              success.result,
+            );
+            self.handle_gr_query_es_action(io_ctx, statuses, orig_qid, action);
+          } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&orig_qid) {
+            let action = ms_coord.es.handle_join_select_done(
+              self,
+              io_ctx,
+              query_id,
+              success.new_rms,
+              success.result,
+            );
+            self.handle_ms_coord_es_action(io_ctx, statuses, orig_qid, action);
+          }
         }
       }
       // make sure to ECU this joinread
       Some(TPESAction::QueryError(query_error)) => {
-        if let Some(mut wrapper) = statuses.gr_query_ess.remove(&query_id) {
-          let action = wrapper.es.handle_join_select_aborted(
-            self,
-            io_ctx,
-            msg::AbortedData::QueryError(query_error),
-          );
-          self.exit_all(io_ctx, statuses, wrapper.child_queries);
-          self.handle_gr_query_es_action(io_ctx, statuses, wrapper.es.query_id.clone(), action);
+        if let Some(join_read) = statuses.join_query_ess.remove(&query_id) {
+          let orig_qid = join_read.es.orig_p.query_id.clone();
+          self.exit_all(io_ctx, statuses, join_read.child_queries);
+
+          // Propagate the error up to the parent.
+          if let Some(gr_query) = statuses.gr_query_ess.get_mut(&orig_qid) {
+            let action = gr_query.es.handle_join_select_aborted(
+              self,
+              io_ctx,
+              msg::AbortedData::QueryError(query_error),
+            );
+            self.handle_gr_query_es_action(io_ctx, statuses, orig_qid, action);
+          } else if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&orig_qid) {
+            let action = ms_coord.es.handle_join_select_aborted(
+              self,
+              io_ctx,
+              msg::AbortedData::QueryError(query_error),
+            );
+            self.handle_ms_coord_es_action(io_ctx, statuses, orig_qid, action);
+          }
         }
       }
     }
@@ -902,7 +928,7 @@ impl CoordContext {
             cur_timestamp(io_ctx, self.coord_config.timestamp_suffix_divisor),
             exec.timestamp.add(mk_t(1)),
           ),
-          sql_query: exec.sql_query.clone(),
+          iast_query: exec.iast_query.clone(),
           query_id: query_id.clone(),
           state: QueryPlanningS::Start,
         });
@@ -965,7 +991,7 @@ impl CoordContext {
                     cur_timestamp(io_ctx, self.coord_config.timestamp_suffix_divisor),
                     response_data.timestamp.add(mk_t(1)),
                   ),
-                  sql_query: response_data.sql_query,
+                  iast_query: response_data.sql_query,
                   query_id: query_id.clone(),
                   state: QueryPlanningS::Start,
                 }),
