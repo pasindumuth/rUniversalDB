@@ -32,11 +32,10 @@ type JoinNodeId = String;
 #[derive(Debug)]
 enum ResultState {
   Waiting,
-  // We only get here if there are weak conjunctions whose subqueries we are evaluating,
-  // and there are strong conjunctions that we will have to evaluate next.
-  WaitingSubqueriesForWeak(Executing),
-  /// Here, the `Executing` could contain either weak conjunctions, or strong conjunctions
-  /// (if the JoinType is not Inner and there were only Strong Conjunctions present).
+  /// Used to wait on evaluating subqueries used in the Weak conjunctions.
+  WaitingSubqueriesInitial(Executing),
+  /// Used to wait on evaluating subqueries used in in the Strong conjunctions. Here
+  /// the first element holds the results of `WaitingSubqueriesInitial`
   WaitingSubqueriesFinal(Vec<Vec<TableView>>, Executing),
   Finished(Vec<TableView>),
 }
@@ -166,13 +165,14 @@ impl JoinReadES {
     ctx: &mut Ctx,
     io_ctx: &mut IO,
   ) -> Option<TPESAction> {
-    // Build children
+    // Build context for the root JoinNode.
     let (context, parent_to_child_context_map) =
       build_join_node_context(&self.context, &self.sql_query.from);
 
     let mut state =
       JoinEvaluating { result_map: Default::default(), join_node_schema: Default::default() };
 
+    // Compute the schemas that every JoinNode needs to propagate upward (after the conjunctions).
     let col_refs = add_col_refs_for_projection(&self.sql_query);
     let mut join_node_schema = BTreeMap::<JoinNodeId, BTreeSet<GeneralColumnRef>>::new();
     build_join_node_schema(String::new(), col_refs, &self.sql_query.from, &mut join_node_schema);
@@ -180,6 +180,7 @@ impl JoinReadES {
       state.join_node_schema.insert(join_node_id, col_refs.into_iter().collect());
     }
 
+    // Start evaluating as many JoinLeafs as possible.
     let mut queries = Vec::<(QueryId, Rc<Context>, proc::GRQuery)>::new();
     start_evaluating_join(
       ctx,
@@ -196,12 +197,24 @@ impl JoinReadES {
       },
     );
 
+    // Move the to the evaluating state.
+    self.state = ExecutionS::JoinEvaluating(state);
+
+    // Return subqueries.
+    Some(TPESAction::SendSubqueries(self.mk_gr_queries(queries)))
+  }
+
+  /// Construct subqueries using `child_query_data`.
+  fn mk_gr_queries(
+    &self,
+    child_query_data: Vec<(QueryId, Rc<Context>, proc::GRQuery)>,
+  ) -> Vec<GRQueryES> {
     let mut gr_query_ess = Vec::<GRQueryES>::new();
-    for (query_id, context, sql_query) in queries {
-      // Filter the TransTables in the QueryPlan based on the TransTables
-      // available for this subquery.
-      let new_trans_table_context = (0..context.context_rows.len()).map(|_| Vec::new()).collect();
-      // Finally, construct the GRQueryES.
+    for (query_id, context, sql_query) in child_query_data {
+      let mut new_trans_table_context = Vec::<Vec<usize>>::new();
+      new_trans_table_context.resize(context.context_rows.len(), Vec::new());
+
+      // Append GRQueryES
       gr_query_ess.push(GRQueryES {
         root_query_path: self.root_query_path.clone(),
         timestamp: self.timestamp.clone(),
@@ -217,11 +230,7 @@ impl JoinReadES {
       });
     }
 
-    // Move the GRQueryES to the next Stage.
-    self.state = ExecutionS::JoinEvaluating(state);
-
-    // Return subqueries.
-    Some(TPESAction::SendSubqueries(gr_query_ess))
+    gr_query_ess
   }
 
   /// We call this when a JoinNode enters the `Finished` stage.
@@ -263,316 +272,36 @@ impl JoinReadES {
           let (weak_gr_queries, strong_gr_queries) = extract_subqueries(&parent_inner);
 
           if weak_gr_queries.is_empty() && strong_gr_queries.is_empty() {
-            // Here, we may finish the JoinNode immediately.
+            // Finish evaluating the join since there are no subqueries.
             self.finish_join_node(ctx, io_ctx, parent_id, vec![], vec![])
+          } else if weak_gr_queries.is_empty() {
+            // Send out subqueries for the Strong conjunctions.
+            self.advance_to_final_subqueries(ctx, io_ctx, parent_id, vec![])
           } else {
-            // Case in `join_node_finished` where there is a subquery in either the
-            // Weak conjunctions or Strong conjunctions.
-
-            let left_id = parent_id.clone() + "L";
-            let right_id = parent_id.clone() + "R";
-
-            // Get the EvalData of this, the sibling, and the parent. Note that we remove
-            // the parent completely in order to satisfy the borrow checker.
-            let left_eval_data = join_stage.result_map.get(&left_id).unwrap();
-            let right_eval_data = join_stage.result_map.get(&right_id).unwrap();
-            let parent_eval_data = join_stage.result_map.get(&parent_id).unwrap();
-
-            // Get the schemas of the children and the target schema of the parent.
-            let left_schema = join_stage.join_node_schema.get(&left_id).unwrap();
-            let right_schema = join_stage.join_node_schema.get(&right_id).unwrap();
-
-            // Define a function to help initialize contexts and construct locations.
-            let parent_context = &parent_eval_data.context;
-
-            // Copy some variables to help make GRQueryES construction easier.
-            let root_query_path = self.root_query_path.clone();
-            let timestamp = self.timestamp.clone();
-            let query_plan = self.query_plan.clone();
-            let orig_p = OrigP::new(self.query_id.clone());
-            let mk_gr_query_ess = |io_ctx: &mut IO,
-                                   query_and_context: Vec<(proc::GRQuery, Context)>|
-             -> Vec<GRQueryES> {
-              // Construct the GRQueryESs.
-              let mut gr_query_ess = Vec::<GRQueryES>::new();
-              for (sql_query, context) in query_and_context {
-                let context = Rc::new(context);
-                let query_id = QueryId(format!("{}_{}", parent_id, rand_string(io_ctx.rand())));
-
-                // Filter the TransTables in the QueryPlan based on the TransTables
-                // available for this subquery.
-                let new_trans_table_context =
-                  (0..context.context_rows.len()).map(|_| Vec::new()).collect();
-                // Finally, construct the GRQueryES.
-                gr_query_ess.push(GRQueryES {
-                  root_query_path: root_query_path.clone(),
-                  timestamp: timestamp.clone(),
-                  context,
-                  new_trans_table_context,
-                  query_id,
-                  sql_query,
-                  query_plan: query_plan.clone(),
-                  new_rms: Default::default(),
-                  trans_table_views: vec![],
-                  state: GRExecutionS::Start,
-                  orig_p: orig_p.clone(),
-                });
-              }
-
-              // Return that GRQueryESs.
-              gr_query_ess
-            };
-
-            // Create a helper function.
-            let mut send_gr_queries_indep = |io_ctx: &mut IO,
-                                             first_eval_data: &JoinNodeEvalData,
-                                             second_eval_data: &JoinNodeEvalData,
-                                             parent_eval_data: &JoinNodeEvalData,
-                                             first_schema: &Vec<GeneralColumnRef>,
-                                             second_schema: &Vec<GeneralColumnRef>,
-                                             gr_queries: Vec<proc::GRQuery>|
-             -> Vec<GRQueryES> {
-              let mut simple = ContextConstructorSimple::new(
-                &parent_context.context_schema,
-                &first_schema,
-                &second_schema,
-                &gr_queries,
-              );
-
-              // Get TableViews
-              let first_finished = first_eval_data.cast_finished();
-              let second_finished = second_eval_data.cast_finished();
-
-              // Iterate over the Parent rows.
-              for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
-                // Get both Sides.
-                let first_table_view = first_finished.get_for_parent_context_row(i);
-                let second_table_view = second_finished.get_for_parent_context_row(i);
-
-                // Iterate over First Side rows.
-                for (first_row, _) in &first_table_view.rows {
-                  // Iterate over Second Side rows.
-                  for (second_row, _) in &second_table_view.rows {
-                    simple.add_row(parent_context_row, first_row, second_row);
-                  }
-                }
-              }
-
-              // Construct the GRQueryESs.
-              mk_gr_query_ess(
-                io_ctx,
-                gr_queries.into_iter().zip(simple.to_contexts().into_iter()).collect(),
-              )
-            };
-
-            // Handle dependencies.
-            let mut send_gr_queries_dep = |io_ctx: &mut IO,
-                                           first_eval_data: &JoinNodeEvalData,
-                                           second_eval_data: &JoinNodeEvalData,
-                                           parent_eval_data: &JoinNodeEvalData,
-                                           first_schema: &Vec<GeneralColumnRef>,
-                                           second_schema: &Vec<GeneralColumnRef>,
-                                           gr_queries: Vec<proc::GRQuery>|
-             -> Vec<GRQueryES> {
-              let mut simple = ContextConstructorSimple::new(
-                &parent_context.context_schema,
-                &first_schema,
-                &second_schema,
-                &gr_queries,
-              );
-
-              // Get TableViews
-              let first_finished = first_eval_data.cast_finished();
-              let second_finished = second_eval_data.cast_finished();
-
-              // Iterate over the Parent rows.
-              let mut second_side_count = 0;
-              for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
-                // Get the First Side
-                let first_table_view = first_finished.get_for_parent_context_row(i);
-
-                // Iterate over First Side rows.
-                for (first_row, _) in &first_table_view.rows {
-                  // Get the Second Side.
-                  let second_table_view =
-                    second_finished.get_for_parent_context_row(second_side_count);
-                  second_side_count += 1;
-
-                  // Iterate over Second Side rows.
-                  for (second_row, _) in &second_table_view.rows {
-                    simple.add_row(parent_context_row, first_row, second_row);
-                  }
-                }
-              }
-
-              // Construct the GRQueryESs.
-              mk_gr_query_ess(
-                io_ctx,
-                gr_queries.into_iter().zip(simple.to_contexts().into_iter()).collect(),
-              )
-            };
-
-            if !weak_gr_queries.is_empty() {
-              // Here there are some weak conjunctions. Consider the case
-              // where there are no dependencies.
-              if !join_select.dependency_graph.contains_key(&left_id)
-                && !join_select.dependency_graph.contains_key(&right_id)
-              {
-                // Here, there are no dependencies.
-                match parent_inner.join_type {
-                  iast::JoinType::Inner => {
-                    // For INNER Joins, we can start both weak and strong conjunctions immediately.
-                    let gr_query_ess = send_gr_queries_indep(
-                      io_ctx,
-                      left_eval_data,
-                      right_eval_data,
-                      parent_eval_data,
-                      left_schema,
-                      right_schema,
-                      weak_gr_queries.iter().chain(strong_gr_queries.iter()).cloned().collect(),
-                    );
-
-                    // Since both Weak conjunctions and Strong conjunctions are handled, we
-                    // update the state to `WaitingSubqueriesFinal`.
-                    let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-                    parent_eval_data.result_state = ResultState::WaitingSubqueriesFinal(
-                      Vec::new(),
-                      Executing::create(&gr_query_ess),
-                    );
-
-                    // Return that GRQueryESs.
-                    Some(TPESAction::SendSubqueries(gr_query_ess))
-                  }
-                  iast::JoinType::Left | iast::JoinType::Right | iast::JoinType::Outer => {
-                    // For other types of Joins, we can start both weak and strong conjunctions
-                    // we need to evaluate the weak conjunctions first.
-                    let gr_query_ess = send_gr_queries_indep(
-                      io_ctx,
-                      left_eval_data,
-                      right_eval_data,
-                      parent_eval_data,
-                      left_schema,
-                      right_schema,
-                      weak_gr_queries,
-                    );
-
-                    let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-                    // We move to `WaitingSubqueriesForWeak`.
-                    parent_eval_data.result_state =
-                      ResultState::WaitingSubqueriesForWeak(Executing::create(&gr_query_ess));
-
-                    // Return that GRQueryESs.
-                    Some(TPESAction::SendSubqueries(gr_query_ess))
-                  }
-                }
-              } else {
-                // Here, there are dependencies.
-                match parent_inner.join_type {
-                  iast::JoinType::Inner => {
-                    let gr_query_ess = if join_select.dependency_graph.contains_key(&right_id) {
-                      send_gr_queries_dep(
-                        io_ctx,
-                        left_eval_data,
-                        right_eval_data,
-                        parent_eval_data,
-                        left_schema,
-                        right_schema,
-                        weak_gr_queries.iter().chain(strong_gr_queries.iter()).cloned().collect(),
-                      )
-                    } else {
-                      send_gr_queries_dep(
-                        io_ctx,
-                        right_eval_data,
-                        left_eval_data,
-                        parent_eval_data,
-                        right_schema,
-                        left_schema,
-                        weak_gr_queries.iter().chain(strong_gr_queries.iter()).cloned().collect(),
-                      )
-                    };
-
-                    // Since both Weak conjunctions and Strong conjunctions are handled, we
-                    // update the state to `WaitingSubqueriesFinal`.
-                    let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-                    parent_eval_data.result_state = ResultState::WaitingSubqueriesFinal(
-                      Vec::new(),
-                      Executing::create(&gr_query_ess),
-                    );
-
-                    // Return that GRQueryESs.
-                    Some(TPESAction::SendSubqueries(gr_query_ess))
-                  }
-                  iast::JoinType::Left => {
-                    let gr_query_ess = send_gr_queries_dep(
-                      io_ctx,
-                      left_eval_data,
-                      right_eval_data,
-                      parent_eval_data,
-                      left_schema,
-                      right_schema,
-                      weak_gr_queries,
-                    );
-
-                    let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-                    // We move to `WaitingSubqueriesForWeak`.
-                    parent_eval_data.result_state =
-                      ResultState::WaitingSubqueriesForWeak(Executing::create(&gr_query_ess));
-
-                    // Return that GRQueryESs.
-                    Some(TPESAction::SendSubqueries(gr_query_ess))
-                  }
-                  iast::JoinType::Right => {
-                    let gr_query_ess = send_gr_queries_dep(
-                      io_ctx,
-                      right_eval_data,
-                      left_eval_data,
-                      parent_eval_data,
-                      right_schema,
-                      left_schema,
-                      weak_gr_queries,
-                    );
-
-                    let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-                    // We move to `WaitingSubqueriesForWeak`.
-                    parent_eval_data.result_state =
-                      ResultState::WaitingSubqueriesForWeak(Executing::create(&gr_query_ess));
-
-                    // Return that GRQueryESs.
-                    Some(TPESAction::SendSubqueries(gr_query_ess))
-                  }
-                  // An OUTER JOIN should never have a dependency between its children.
-                  iast::JoinType::Outer => return unexpected_branch(),
-                }
-              }
-            } else {
-              // If there are no weak conjunctions, then we can act as if they
-              // fully evaluated and move forward from there.
-              self.advance_to_final_subqueries(ctx, io_ctx, parent_id, vec![])
-            }
+            // Send out subqueries for the Weak conjunctions.
+            self.advance_to_initial_subqueries(ctx, io_ctx, parent_id)
           }
         } else {
           // If the sibling is not finished, then we do nothing.
           None
         }
       } else {
-        // Here, the JoinNode corresponding to the `sibling_id` was waiting to for
-        // `this_id` to finish because the former depends on the latter. Here, we
-        // construct the context for the latter and then start evaluating.
+        // If the EvalData does not exist, then there must have been a dependency.
+        // Thus, we start executing the `sibling_id` side of the Join.
+        debug_assert!(join_select.dependency_graph.contains_key(&sibling_id));
 
-        // Get the EvalData of this, the sibling, and the parent. Note that we remove
-        // the parent completely in order to satisfy the borrow checker.
+        // Get the EvalData.
         let this_eval_data = join_stage.result_map.get(&this_id).unwrap();
         let parent_eval_data = join_stage.result_map.get(&parent_id).unwrap();
 
-        // Get the schemas of the children and the target schema of the parent.
+        // Get the schemas.
         let this_schema = join_stage.join_node_schema.get(&this_id).unwrap();
 
         // Get TableViews
         let this_finished = this_eval_data.cast_finished();
 
-        // Construct stuff to use to compute context.
+        // Construct Context construction utilities.
         let join_node = lookup_join_node(&join_select.from, sibling_id.clone());
-
         let mut parent_to_child_context_map = Vec::<usize>::new();
         let mut simple = ContextConstructorSimpleOnce::new(
           &parent_eval_data.context.context_schema,
@@ -596,6 +325,7 @@ impl JoinReadES {
           result_state: ResultState::Waiting,
         };
 
+        // Start evaluating as many JoinLeafs as possible.
         let mut queries = Vec::<(QueryId, Rc<Context>, proc::GRQuery)>::new();
         start_evaluating_join(
           ctx,
@@ -607,40 +337,15 @@ impl JoinReadES {
           &join_select.from,
           sibling_eval_data,
         );
-
-        let mut gr_query_ess = Vec::<GRQueryES>::new();
-        for (query_id, context, sql_query) in queries {
-          // Filter the TransTables in the QueryPlan based on the TransTables
-          // available for this subquery.
-          let new_trans_table_context =
-            (0..context.context_rows.len()).map(|_| Vec::new()).collect();
-          // Finally, construct the GRQueryES.
-          gr_query_ess.push(GRQueryES {
-            root_query_path: self.root_query_path.clone(),
-            timestamp: self.timestamp.clone(),
-            context,
-            new_trans_table_context,
-            query_id,
-            sql_query,
-            query_plan: self.query_plan.clone(),
-            new_rms: Default::default(),
-            trans_table_views: vec![],
-            state: GRExecutionS::Start,
-            orig_p: OrigP::new(self.query_id.clone()),
-          });
-        }
-
-        // This will not be empty because the leafs under `sibling_id`
-        // will definitely produce GRQueryESs.
+        let gr_query_ess = self.mk_gr_queries(queries);
         debug_assert!(!gr_query_ess.is_empty());
 
         Some(TPESAction::SendSubqueries(gr_query_ess))
       }
     } else {
-      // Case in `join_node_finished` where the root `JoinNode` is finished evaluating.
+      // Here, the `JoinNode` has finished evaluating.
 
-      // Collect all subqueries for the SelectItems. Recall that JoinSelects
-      // do not have a WHERE clause (since it is pushed into JoinNode).
+      // Collect all subqueries in the JoinSelect.
       let mut it = QueryIterator::new_top_level();
       let mut gr_queries = Vec::<proc::GRQuery>::new();
       it.iterate_select_items(
@@ -648,6 +353,8 @@ impl JoinReadES {
         &join_select.projection,
       );
 
+      // Here, the root EvalData should be the only one left,
+      // containing the ultimate Joined Table
       let mut join_stage = std::mem::take(join_stage);
       debug_assert!(join_stage.result_map.len() == 1);
       let (_, mut eval_data) = join_stage.result_map.into_iter().next().unwrap();
@@ -657,8 +364,8 @@ impl JoinReadES {
       let table_views =
         cast!(ResultState::Finished, std::mem::take(&mut eval_data.result_state)).unwrap();
 
+      // Handle the case where there are no subqueries.
       if gr_queries.is_empty() {
-        // Update state
         self.state = ExecutionS::ProjectionEvaluating(ProjectionEvaluating {
           parent_to_child_context_map: eval_data.parent_to_child_context_map,
           context: eval_data.context,
@@ -670,12 +377,10 @@ impl JoinReadES {
         // Here, there are no subqueries to evaluate, so we can finish.
         self.finish_join_select(ctx, io_ctx, vec![])
       } else {
-        // When the root is EvalData is finished, it should be the only element
-        // in the `result_map`.
-
-        // Get TableViews
+        // Here, there are subqueries
         let finished = eval_data.cast_finished();
 
+        // Construct Context construction utilities.
         let mut simple = ContextConstructorSimple::new(
           &self.context.context_schema,
           &schema,
@@ -683,61 +388,19 @@ impl JoinReadES {
           &gr_queries,
         );
 
-        // Iterate over the Parent rows.
         for (i, parent_context_row) in self.context.context_rows.iter().enumerate() {
-          // Get the joined table.
-          let joined_table_view = finished.get_for_parent_context_row(i);
-
-          // Iterate over rows.
-          for (row, _) in &joined_table_view.rows {
+          for (row, _) in &finished.get_for_parent_context_row(i).rows {
             simple.add_row(parent_context_row, row, &vec![]);
           }
         }
 
-        // Build subqueries.
-
-        // Copy some variables to help make GRQueryES construction easier.
-        let root_query_path = self.root_query_path.clone();
-        let timestamp = self.timestamp.clone();
-        let query_plan = self.query_plan.clone();
-        let orig_p = OrigP::new(self.query_id.clone());
-        let mk_gr_query_ess =
-          |io_ctx: &mut IO, query_and_context: Vec<(proc::GRQuery, Context)>| -> Vec<GRQueryES> {
-            // Construct the GRQueryESs.
-            let mut gr_query_ess = Vec::<GRQueryES>::new();
-            for (sql_query, context) in query_and_context {
-              let context = Rc::new(context);
-              let query_id = mk_qid(io_ctx.rand());
-
-              // Filter the TransTables in the QueryPlan based on the TransTables
-              // available for this subquery.
-              let new_trans_table_context =
-                (0..context.context_rows.len()).map(|_| Vec::new()).collect();
-              // Finally, construct the GRQueryES.
-              gr_query_ess.push(GRQueryES {
-                root_query_path: root_query_path.clone(),
-                timestamp: timestamp.clone(),
-                context,
-                new_trans_table_context,
-                query_id,
-                sql_query,
-                query_plan: query_plan.clone(),
-                new_rms: Default::default(),
-                trans_table_views: vec![],
-                state: GRExecutionS::Start,
-                orig_p: orig_p.clone(),
-              });
-            }
-
-            // Return that GRQueryESs.
-            gr_query_ess
-          };
-
         // Build GRQueryESs
-        let gr_query_ess = mk_gr_query_ess(
-          io_ctx,
-          gr_queries.into_iter().zip(simple.to_contexts().into_iter()).collect(),
-        );
+        let queries = gr_queries
+          .into_iter()
+          .zip(simple.to_contexts().into_iter())
+          .map(|(query, context)| (mk_qid(io_ctx.rand()), Rc::new(context), query))
+          .collect();
+        let gr_query_ess = self.mk_gr_queries(queries);
 
         // Update state
         self.state = ExecutionS::ProjectionEvaluating(ProjectionEvaluating {
@@ -752,6 +415,102 @@ impl JoinReadES {
         Some(TPESAction::SendSubqueries(gr_query_ess))
       }
     }
+  }
+
+  /// Moves the `JoinInnerNode` at `parent_id` to the
+  fn advance_to_initial_subqueries<IO: CoreIOCtx, Ctx: CTServerContext>(
+    &mut self,
+    _: &mut Ctx,
+    io_ctx: &mut IO,
+    parent_id: JoinNodeId,
+  ) -> Option<TPESAction> {
+    let join_stage = cast!(ExecutionS::JoinEvaluating, &mut self.state)?;
+    let join_select = &self.sql_query;
+    let parent_node = lookup_join_node(&join_select.from, parent_id.clone());
+    let parent_inner = cast!(proc::JoinNode::JoinInnerNode, parent_node).unwrap();
+    let (weak_gr_queries, _) = extract_subqueries(&parent_inner);
+
+    // Construct Left and Right JNIs.
+    let left_id = parent_id.clone() + "L";
+    let right_id = parent_id.clone() + "R";
+
+    // Get the EvalData of this, the sibling, and the parent.
+    let left_eval_data = join_stage.result_map.get(&left_id).unwrap();
+    let right_eval_data = join_stage.result_map.get(&right_id).unwrap();
+    let parent_eval_data = join_stage.result_map.get(&parent_id).unwrap();
+
+    // Get the schemas of the children and the target schema of the parent.
+    let left_schema = join_stage.join_node_schema.get(&left_id).unwrap();
+    let right_schema = join_stage.join_node_schema.get(&right_id).unwrap();
+
+    // Here there are some weak conjunctions. Consider the case
+    // where there are no dependencies.
+    let subquery_data = if !join_select.dependency_graph.contains_key(&left_id)
+      && !join_select.dependency_graph.contains_key(&right_id)
+    {
+      // There is no dependency.
+      initial_join_subqueries_independent(
+        io_ctx,
+        left_eval_data,
+        right_eval_data,
+        parent_eval_data,
+        left_schema,
+        right_schema,
+        weak_gr_queries,
+        &parent_id,
+      )
+    } else {
+      // There is a dependency.
+      let left_first = match &parent_inner.join_type {
+        iast::JoinType::Inner => join_select.dependency_graph.contains_key(&right_id),
+        iast::JoinType::Left => true,
+        iast::JoinType::Right => false,
+        // An OUTER JOIN should never have a dependency between its children.
+        iast::JoinType::Outer => return unexpected_branch(),
+      };
+
+      if left_first {
+        initial_join_subqueries_dependent(
+          io_ctx,
+          left_eval_data,
+          right_eval_data,
+          parent_eval_data,
+          left_schema,
+          right_schema,
+          weak_gr_queries,
+          &parent_id,
+        )
+      } else {
+        initial_join_subqueries_dependent(
+          io_ctx,
+          right_eval_data,
+          left_eval_data,
+          parent_eval_data,
+          right_schema,
+          left_schema,
+          weak_gr_queries,
+          &parent_id,
+        )
+      }
+    };
+    self.move_to_initial(&parent_id, subquery_data)
+  }
+
+  /// Move the `JoinEvalData` at `parent_id` to the Initial stage.
+  fn move_to_initial(
+    &mut self,
+    parent_id: &JoinNodeId,
+    subquery_data: Vec<(QueryId, Rc<Context>, proc::GRQuery)>,
+  ) -> Option<TPESAction> {
+    let gr_query_ess = self.mk_gr_queries(subquery_data);
+    // We move to `WaitingSubqueriesInitial()`.
+    let join_stage = cast!(ExecutionS::JoinEvaluating, &mut self.state)?;
+    let parent_eval_data = join_stage.result_map.get_mut(parent_id).unwrap();
+    parent_eval_data.result_state =
+      ResultState::WaitingSubqueriesInitial(Executing::create(&gr_query_ess));
+
+    // Return that GRQueryESs.
+    Some(TPESAction::SendSubqueries(gr_query_ess))
   }
 
   /// Here, the `parent_id` will point to a `JoinInnerNode`, and we wish to
@@ -774,12 +533,11 @@ impl JoinReadES {
     let (weak_gr_queries, strong_gr_queries) = extract_subqueries(&parent_inner);
     debug_assert_eq!(weak_gr_queries.len(), weak_results.len());
 
-    // Construct the stuff, let is go.
+    // Construct Left and Right JNIs.
     let left_id = parent_id.clone() + "L";
     let right_id = parent_id.clone() + "R";
 
-    // Get the EvalData of this, the sibling, and the parent. Note that we remove
-    // the parent completely in order to satisfy the borrow checker.
+    // Get the EvalData of this, the sibling, and the parent.
     let left_eval_data = join_stage.result_map.get(&left_id).unwrap();
     let right_eval_data = join_stage.result_map.get(&right_id).unwrap();
     let parent_eval_data = join_stage.result_map.get(&parent_id).unwrap();
@@ -788,398 +546,116 @@ impl JoinReadES {
     let left_schema = join_stage.join_node_schema.get(&left_id).unwrap();
     let right_schema = join_stage.join_node_schema.get(&right_id).unwrap();
 
-    // Define a function to help initialize contexts and construct locations.
-    let parent_context = &parent_eval_data.context;
-
-    // Copy some variables to help make GRQueryES construction easier.
-    let root_query_path = self.root_query_path.clone();
-    let timestamp = self.timestamp.clone();
-    let query_plan = self.query_plan.clone();
-    let orig_p = OrigP::new(self.query_id.clone());
-    let mk_gr_query_ess = |io_ctx: &mut IO,
-                           query_and_context: Vec<(proc::GRQuery, Context)>|
-     -> Vec<GRQueryES> {
-      // Construct the GRQueryESs.
-      let mut gr_query_ess = Vec::<GRQueryES>::new();
-      for (sql_query, context) in query_and_context {
-        let context = Rc::new(context);
-        let query_id = QueryId(format!("{}_{}", parent_id, rand_string(io_ctx.rand())));
-
-        // Filter the TransTables in the QueryPlan based on the TransTables
-        // available for this subquery.
-        let new_trans_table_context = (0..context.context_rows.len()).map(|_| Vec::new()).collect();
-        // Finally, construct the GRQueryES.
-        gr_query_ess.push(GRQueryES {
-          root_query_path: root_query_path.clone(),
-          timestamp: timestamp.clone(),
-          context,
-          new_trans_table_context,
-          query_id,
-          sql_query,
-          query_plan: query_plan.clone(),
-          new_rms: Default::default(),
-          trans_table_views: vec![],
-          state: GRExecutionS::Start,
-          orig_p: orig_p.clone(),
-        });
-      }
-
-      // Return that GRQueryESs.
-      gr_query_ess
-    };
-
     // Handle the case that there is a dependency.
-    if !join_select.dependency_graph.contains_key(&left_id)
+    let result = if !join_select.dependency_graph.contains_key(&left_id)
       && !join_select.dependency_graph.contains_key(&right_id)
     {
-      // There is a dependency.
-
-      // Create a helper function.
-      let mut send_gr_queries_indep = |io_ctx: &mut IO,
-                                       first_eval_data: &JoinNodeEvalData,
-                                       second_eval_data: &JoinNodeEvalData,
-                                       parent_eval_data: &JoinNodeEvalData,
-                                       first_schema: &Vec<GeneralColumnRef>,
-                                       second_schema: &Vec<GeneralColumnRef>,
-                                       weak_gr_queries: Vec<proc::GRQuery>,
-                                       strong_gr_queries: Vec<proc::GRQuery>,
-                                       result: &Vec<Vec<TableView>>,
-                                       first_outer: bool,
-                                       second_outer: bool|
-       -> Result<Vec<GRQueryES>, EvalError> {
-        // Get TableViews
-        let first_finished = first_eval_data.cast_finished();
-        let second_finished = second_eval_data.cast_finished();
-
-        let mut weak_simple = SubqueryExtractorSimple::new(
-          &parent_context.context_schema,
-          &first_schema,
-          &second_schema,
-          &weak_gr_queries,
-          result,
-        );
-
-        let mut strong_simple = ContextConstructorSimple::new(
-          &parent_context.context_schema,
-          &first_schema,
-          &second_schema,
-          &strong_gr_queries,
-        );
-
-        // Iterate over the Parent rows.
-        for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
-          // Start constructing the `col_map` (needed for evaluating the conjunctions).
-          let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
-          add_vals(
-            &mut col_map,
-            &parent_eval_data.context.context_schema.column_context_schema,
-            &parent_context_row.column_context_row,
-          );
-
-          // Get both Sides.
-          let first_table_view = first_finished.get_for_parent_context_row(i);
-          let second_table_view = second_finished.get_for_parent_context_row(i);
-
-          // Holds all rows on the Second Side that were unrejected by weak conjunctions.
-          let mut second_side_weak_unrejected = BTreeSet::<Vec<ColValN>>::new();
-
-          // Iterate over First Side rows.
-          for (first_row, _) in &first_table_view.rows {
-            add_vals_general(&mut col_map, first_schema, first_row);
-
-            let mut all_weak_rejected = true;
-
-            // Iterate over Second Side rows.
-            for (second_row, _) in &second_table_view.rows {
-              add_vals_general(&mut col_map, second_schema, second_row);
-
-              // Evaluate the weak conjunctions.
-              let vals = weak_simple.get_results(parent_context_row, first_row, second_row);
-              if evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
-                continue;
-              }
-
-              // Mark that at least one pair of `first_row` and `second_row` was not rejected.
-              all_weak_rejected = false;
-              second_side_weak_unrejected.insert(second_row.clone());
-
-              // Add in the artificial row to the Strong Conjunctions' context.
-              strong_simple.add_row(parent_context_row, first_row, second_row);
-            }
-
-            // Here, we check whether we need to manufacture a row
-            if all_weak_rejected && first_outer {
-              // Construct an artificial row
-              let (second_row, _) = make_empty_row(second_schema.len());
-              add_vals_general(&mut col_map, second_schema, &second_row);
-
-              // Add in the artificial row to the Strong Conjunctions' context.
-              strong_simple.add_row(parent_context_row, first_row, &second_row);
-            }
-          }
-
-          // Perform row-readdition on the Second Side if need be.
-          if second_outer {
-            // Construct an artificial row
-            let (first_row, _) = make_empty_row(first_schema.len());
-            add_vals_general(&mut col_map, first_schema, &first_row);
-
-            for (second_row, _) in &second_table_view.rows {
-              // Check that the `second_row` was always rejected by weak conjunctions.
-              if !second_side_weak_unrejected.contains(second_row) {
-                add_vals_general(&mut col_map, second_schema, &second_row);
-
-                // Add in the artificial row to the Strong Conjunctions' context.
-                strong_simple.add_row(parent_context_row, &first_row, &second_row);
-              }
-            }
-          }
-        }
-
-        // Construct the GRQueryESs.
-        Ok(mk_gr_query_ess(
-          io_ctx,
-          strong_gr_queries.into_iter().zip(strong_simple.to_contexts().into_iter()).collect(),
-        ))
+      // There is no dependency.
+      let (left_first, first_outer, second_outer) = match &parent_inner.join_type {
+        iast::JoinType::Inner => (true, false, false),
+        iast::JoinType::Left => (true, true, false),
+        iast::JoinType::Right => (false, true, false),
+        iast::JoinType::Outer => (true, true, true),
       };
 
-      match &parent_inner.join_type {
-        // Inner JOINs should never be in the `WaitingSubqueriesForWeak` state.
-        iast::JoinType::Inner => unexpected_branch(),
-        iast::JoinType::Left => {
-          // Make GRQueryESs
-          match send_gr_queries_indep(
-            io_ctx,
-            left_eval_data,
-            right_eval_data,
-            parent_eval_data,
-            left_schema,
-            right_schema,
-            weak_gr_queries,
-            strong_gr_queries,
-            &weak_results,
-            true,
-            false,
-          ) {
-            Ok(gr_query_ess) => {
-              // We move to `WaitingSubqueriesFinal`.
-              let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-              parent_eval_data.result_state =
-                ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
-
-              // Return that GRQueryESs.
-              Some(TPESAction::SendSubqueries(gr_query_ess))
-            }
-            Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
-          }
-        }
-        iast::JoinType::Right => {
-          // Make GRQueryESs. We make the Right side to be the first, since this
-          // is needed for row re-addition.
-          match send_gr_queries_indep(
-            io_ctx,
-            right_eval_data,
-            left_eval_data,
-            parent_eval_data,
-            right_schema,
-            left_schema,
-            weak_gr_queries,
-            strong_gr_queries,
-            &weak_results,
-            true,
-            false,
-          ) {
-            Ok(gr_query_ess) => {
-              // We move to `WaitingSubqueriesFinal`.
-              let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-              parent_eval_data.result_state =
-                ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
-
-              // Return that GRQueryESs.
-              Some(TPESAction::SendSubqueries(gr_query_ess))
-            }
-            Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
-          }
-        }
-        iast::JoinType::Outer => {
-          // Make GRQueryESs
-          match send_gr_queries_indep(
-            io_ctx,
-            left_eval_data,
-            right_eval_data,
-            parent_eval_data,
-            left_schema,
-            right_schema,
-            weak_gr_queries,
-            strong_gr_queries,
-            &weak_results,
-            true,
-            true,
-          ) {
-            Ok(gr_query_ess) => {
-              // We move to `WaitingSubqueriesFinal`.
-              let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-              parent_eval_data.result_state =
-                ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
-
-              // Return that GRQueryESs.
-              Some(TPESAction::SendSubqueries(gr_query_ess))
-            }
-            Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
-          }
-        }
+      if left_first {
+        final_join_subqueries_independent(
+          io_ctx,
+          left_eval_data,
+          right_eval_data,
+          parent_eval_data,
+          left_schema,
+          right_schema,
+          parent_inner,
+          weak_gr_queries,
+          strong_gr_queries,
+          &weak_results,
+          &parent_id,
+          first_outer,
+          second_outer,
+        )
+      } else {
+        final_join_subqueries_independent(
+          io_ctx,
+          right_eval_data,
+          left_eval_data,
+          parent_eval_data,
+          right_schema,
+          left_schema,
+          parent_inner,
+          weak_gr_queries,
+          strong_gr_queries,
+          &weak_results,
+          &parent_id,
+          first_outer,
+          second_outer,
+        )
       }
     } else {
-      // Handle the case of dependencies existing.
-
-      // Create a helper function.
-      let mut send_gr_queries_dep = |io_ctx: &mut IO,
-                                     first_eval_data: &JoinNodeEvalData,
-                                     second_eval_data: &JoinNodeEvalData,
-                                     parent_eval_data: &JoinNodeEvalData,
-                                     first_schema: &Vec<GeneralColumnRef>,
-                                     second_schema: &Vec<GeneralColumnRef>,
-                                     weak_gr_queries: Vec<proc::GRQuery>,
-                                     strong_gr_queries: Vec<proc::GRQuery>,
-                                     result: &Vec<Vec<TableView>>|
-       -> Result<Vec<GRQueryES>, EvalError> {
-        // Get TableViews
-        let first_finished = first_eval_data.cast_finished();
-        let second_finished = second_eval_data.cast_finished();
-
-        let mut weak_simple = SubqueryExtractorSimple::new(
-          &parent_context.context_schema,
-          &first_schema,
-          &second_schema,
-          &weak_gr_queries,
-          result,
-        );
-
-        let mut strong_simple = ContextConstructorSimple::new(
-          &parent_context.context_schema,
-          &first_schema,
-          &second_schema,
-          &strong_gr_queries,
-        );
-
-        // Iterate over the Parent rows.
-        let mut second_side_count = 0;
-        for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
-          // Start constructing the `col_map` (needed for evaluating the conjunctions).
-          let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
-          add_vals(
-            &mut col_map,
-            &parent_eval_data.context.context_schema.column_context_schema,
-            &parent_context_row.column_context_row,
-          );
-
-          // Get the First Side
-          let first_table_view = first_finished.get_for_parent_context_row(i);
-
-          // Iterate over First Side rows.
-          for (first_row, _) in &first_table_view.rows {
-            add_vals_general(&mut col_map, first_schema, first_row);
-
-            let mut all_weak_rejected = true;
-
-            // Get the second side
-            let second_table_view = second_finished.get_for_parent_context_row(i);
-            second_side_count += 1;
-
-            // Iterate over Second Side rows.
-            for (second_row, _) in &second_table_view.rows {
-              add_vals_general(&mut col_map, second_schema, second_row);
-
-              // Evaluate the weak conjunctions.
-              let vals = weak_simple.get_results(parent_context_row, first_row, second_row);
-              if evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
-                continue;
-              }
-
-              // Mark that at least one pair of `first_row` and `second_row` was not rejected.
-              all_weak_rejected = false;
-
-              // Add in the artificial row to the Strong Conjunctions' context.
-              strong_simple.add_row(parent_context_row, first_row, second_row);
-            }
-
-            // Here, we check whether we need to manufacture a row
-            if all_weak_rejected {
-              // Construct an artificial row.
-              let (second_row, _) = make_empty_row(second_schema.len());
-              add_vals_general(&mut col_map, second_schema, &second_row);
-
-              // Add in the artificial row to the Strong Conjunctions' context.
-              strong_simple.add_row(parent_context_row, first_row, &second_row);
-            }
-          }
-        }
-
-        // Construct the GRQueryESs.
-        Ok(mk_gr_query_ess(
-          io_ctx,
-          strong_gr_queries.into_iter().zip(strong_simple.to_contexts().into_iter()).collect(),
-        ))
+      // There is a dependency.
+      let (left_first, first_outer) = match &parent_inner.join_type {
+        iast::JoinType::Inner => (join_select.dependency_graph.contains_key(&right_id), false),
+        iast::JoinType::Left => (true, true),
+        iast::JoinType::Right => (false, true),
+        // An OUTER JOIN should never have a dependency between its children.
+        iast::JoinType::Outer => return unexpected_branch(),
       };
 
-      match &parent_inner.join_type {
-        // Inner JOINs should never be in the `WaitingSubqueriesForWeak` state.
-        iast::JoinType::Inner => unexpected_branch(),
-        iast::JoinType::Left => {
-          // Make GRQueryESs
-          match send_gr_queries_dep(
-            io_ctx,
-            left_eval_data,
-            right_eval_data,
-            parent_eval_data,
-            left_schema,
-            right_schema,
-            weak_gr_queries,
-            strong_gr_queries,
-            &weak_results,
-          ) {
-            Ok(gr_query_ess) => {
-              // We move to `WaitingSubqueriesFinal`.
-              let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-              parent_eval_data.result_state =
-                ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
-
-              // Return that GRQueryESs.
-              Some(TPESAction::SendSubqueries(gr_query_ess))
-            }
-            Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
-          }
-        }
-        iast::JoinType::Right => {
-          // Make GRQueryESs. We make the Right side to be the first, since this
-          // is needed for row re-addition.
-          match send_gr_queries_dep(
-            io_ctx,
-            right_eval_data,
-            left_eval_data,
-            parent_eval_data,
-            right_schema,
-            left_schema,
-            weak_gr_queries,
-            strong_gr_queries,
-            &weak_results,
-          ) {
-            Ok(gr_query_ess) => {
-              // We move to `WaitingSubqueriesFinal`.
-              let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
-              parent_eval_data.result_state =
-                ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
-
-              // Return that GRQueryESs.
-              Some(TPESAction::SendSubqueries(gr_query_ess))
-            }
-            Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
-          }
-        }
-        // Inner JOINs should never be in the `WaitingSubqueriesForWeak` state.
-        iast::JoinType::Outer => unexpected_branch(),
+      if left_first {
+        final_join_subqueries_dependent(
+          io_ctx,
+          left_eval_data,
+          right_eval_data,
+          parent_eval_data,
+          left_schema,
+          right_schema,
+          parent_inner,
+          weak_gr_queries,
+          strong_gr_queries,
+          &weak_results,
+          &parent_id,
+          first_outer,
+        )
+      } else {
+        final_join_subqueries_dependent(
+          io_ctx,
+          right_eval_data,
+          left_eval_data,
+          parent_eval_data,
+          right_schema,
+          left_schema,
+          parent_inner,
+          weak_gr_queries,
+          strong_gr_queries,
+          &weak_results,
+          &parent_id,
+          first_outer,
+        )
       }
+    };
+
+    match result {
+      Ok(subquery_data) => self.move_to_final(&parent_id, weak_results, subquery_data),
+      Err(eval_error) => Some(TPESAction::QueryError(mk_eval_error(eval_error))),
     }
+  }
+
+  /// Move the `JoinEvalData` at `parent_id` to the Final stage.
+  fn move_to_final(
+    &mut self,
+    parent_id: &JoinNodeId,
+    weak_results: Vec<Vec<TableView>>,
+    subquery_data: Vec<(QueryId, Rc<Context>, proc::GRQuery)>,
+  ) -> Option<TPESAction> {
+    let gr_query_ess = self.mk_gr_queries(subquery_data);
+    // We move to `WaitingSubqueriesFinal`.
+    let join_stage = cast!(ExecutionS::JoinEvaluating, &mut self.state)?;
+    let parent_eval_data = join_stage.result_map.get_mut(parent_id).unwrap();
+    parent_eval_data.result_state =
+      ResultState::WaitingSubqueriesFinal(weak_results, Executing::create(&gr_query_ess));
+
+    // Return that GRQueryESs.
+    Some(TPESAction::SendSubqueries(gr_query_ess))
   }
 
   fn finish_join_node<IO: CoreIOCtx, Ctx: CTServerContext>(
@@ -1197,12 +673,11 @@ impl JoinReadES {
     let parent_inner = cast!(proc::JoinNode::JoinInnerNode, parent_node).unwrap();
     let (weak_gr_queries, strong_gr_queries) = extract_subqueries(&parent_inner);
 
-    // Construct the stuff, let is go.
+    // Construct Left and Right JNIs.
     let left_id = parent_id.clone() + "L";
     let right_id = parent_id.clone() + "R";
 
-    // Get the EvalData of this, the sibling, and the parent. Note that we remove
-    // the parent completely in order to satisfy the borrow checker.
+    // Get the EvalData of this, the sibling, and the parent.
     let left_eval_data = join_stage.result_map.remove(&left_id).unwrap();
     let right_eval_data = join_stage.result_map.remove(&right_id).unwrap();
     let parent_eval_data = join_stage.result_map.get_mut(&parent_id).unwrap();
@@ -1216,9 +691,16 @@ impl JoinReadES {
     let result = if !join_select.dependency_graph.contains_key(&left_id)
       && !join_select.dependency_graph.contains_key(&right_id)
     {
-      // There is a dependency.
-      match &parent_inner.join_type {
-        iast::JoinType::Inner => finish_independent_join(
+      // There is no dependency.
+      let (left_first, first_outer, second_outer) = match &parent_inner.join_type {
+        iast::JoinType::Inner => (true, false, false),
+        iast::JoinType::Left => (true, true, false),
+        iast::JoinType::Right => (false, true, false),
+        iast::JoinType::Outer => (true, true, true),
+      };
+
+      if left_first {
+        finish_join_independent(
           left_eval_data,
           right_eval_data,
           parent_eval_data,
@@ -1230,25 +712,11 @@ impl JoinReadES {
           strong_gr_queries,
           weak_result,
           strong_result,
-          false,
-          false,
-        ),
-        iast::JoinType::Left => finish_independent_join(
-          left_eval_data,
-          right_eval_data,
-          parent_eval_data,
-          left_schema,
-          right_schema,
-          parent_schema,
-          parent_inner,
-          weak_gr_queries,
-          strong_gr_queries,
-          weak_result,
-          strong_result,
-          true,
-          false,
-        ),
-        iast::JoinType::Right => finish_independent_join(
+          first_outer,
+          second_outer,
+        )
+      } else {
+        finish_join_independent(
           right_eval_data,
           left_eval_data,
           parent_eval_data,
@@ -1260,87 +728,50 @@ impl JoinReadES {
           strong_gr_queries,
           weak_result,
           strong_result,
-          true,
-          false,
-        ),
-        iast::JoinType::Outer => finish_independent_join(
-          left_eval_data,
-          right_eval_data,
-          parent_eval_data,
-          left_schema,
-          right_schema,
-          parent_schema,
-          parent_inner,
-          weak_gr_queries,
-          strong_gr_queries,
-          weak_result,
-          strong_result,
-          true,
-          true,
-        ),
+          first_outer,
+          second_outer,
+        )
       }
     } else {
-      // Handle the case of dependencies existing.
-      match &parent_inner.join_type {
-        iast::JoinType::Inner => {
-          if join_select.dependency_graph.contains_key(&right_id) {
-            finish_dependent_join(
-              left_eval_data,
-              right_eval_data,
-              parent_eval_data,
-              left_schema,
-              right_schema,
-              parent_schema,
-              parent_inner,
-              weak_gr_queries,
-              strong_gr_queries,
-              weak_result,
-              strong_result,
-            )
-          } else {
-            finish_dependent_join(
-              right_eval_data,
-              left_eval_data,
-              parent_eval_data,
-              right_schema,
-              left_schema,
-              parent_schema,
-              parent_inner,
-              weak_gr_queries,
-              strong_gr_queries,
-              weak_result,
-              strong_result,
-            )
-          }
-        }
-        iast::JoinType::Left => finish_dependent_join(
-          left_eval_data,
-          right_eval_data,
-          parent_eval_data,
-          left_schema,
-          right_schema,
-          parent_schema,
-          parent_inner,
-          weak_gr_queries,
-          strong_gr_queries,
-          weak_result,
-          strong_result,
-        ),
-        iast::JoinType::Right => finish_dependent_join(
-          right_eval_data,
-          left_eval_data,
-          parent_eval_data,
-          right_schema,
-          left_schema,
-          parent_schema,
-          parent_inner,
-          weak_gr_queries,
-          strong_gr_queries,
-          weak_result,
-          strong_result,
-        ),
-        // Inner JOINs should never be in the `WaitingSubqueriesFinal` state.
+      // There is a dependency.
+      let (left_first, first_outer) = match &parent_inner.join_type {
+        iast::JoinType::Inner => (join_select.dependency_graph.contains_key(&right_id), false),
+        iast::JoinType::Left => (true, true),
+        iast::JoinType::Right => (false, true),
+        // An OUTER JOIN should never have a dependency between its children.
         iast::JoinType::Outer => return unexpected_branch(),
+      };
+
+      if left_first {
+        finish_join_dependent(
+          left_eval_data,
+          right_eval_data,
+          parent_eval_data,
+          left_schema,
+          right_schema,
+          parent_schema,
+          parent_inner,
+          weak_gr_queries,
+          strong_gr_queries,
+          weak_result,
+          strong_result,
+          first_outer,
+        )
+      } else {
+        finish_join_dependent(
+          right_eval_data,
+          left_eval_data,
+          parent_eval_data,
+          right_schema,
+          left_schema,
+          parent_schema,
+          parent_inner,
+          weak_gr_queries,
+          strong_gr_queries,
+          weak_result,
+          strong_result,
+          first_outer,
+        )
       }
     };
 
@@ -1394,7 +825,7 @@ impl JoinReadES {
           eval_data.result_state = ResultState::Finished(result);
           self.join_node_finished(ctx, io_ctx, this_id)
         }
-        ResultState::WaitingSubqueriesForWeak(executing) => {
+        ResultState::WaitingSubqueriesInitial(executing) => {
           // This means that `this_id` is a JoinInnerNode. Rename it to `parent_id`.
           let parent_id = this_id;
           executing.add_subquery_result(qid, result);
@@ -1665,6 +1096,22 @@ fn build_join_node_context(
   }
 
   (simple.context, parent_to_child_context_map)
+}
+
+/// Make metadata necessary for launching subqueries, given the inputs.
+fn mk_subquery_data<IO: CoreIOCtx>(
+  io_ctx: &mut IO,
+  gr_queries: Vec<proc::GRQuery>,
+  contexts: Vec<Context>,
+  parent_id: &JoinNodeId,
+) -> Vec<(QueryId, Rc<Context>, proc::GRQuery)> {
+  gr_queries
+    .into_iter()
+    .zip(contexts.into_iter())
+    .map(|(query, context)| {
+      (QueryId(format!("{}_{}", parent_id, rand_string(io_ctx.rand()))), Rc::new(context), query)
+    })
+    .collect()
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -1972,8 +1419,163 @@ fn evaluate_conjunctions(
   Ok(true)
 }
 
+// -----------------------------------------------------------------------------------------------
+//  Independent Evaluation
+// -----------------------------------------------------------------------------------------------
+fn initial_join_subqueries_independent<IO: CoreIOCtx>(
+  io_ctx: &mut IO,
+  first_eval_data: &JoinNodeEvalData,
+  second_eval_data: &JoinNodeEvalData,
+  parent_eval_data: &JoinNodeEvalData,
+  first_schema: &Vec<GeneralColumnRef>,
+  second_schema: &Vec<GeneralColumnRef>,
+  gr_queries: Vec<proc::GRQuery>,
+  parent_id: &JoinNodeId,
+) -> Vec<(QueryId, Rc<Context>, proc::GRQuery)> {
+  // Construct Context construction utilities.
+  let parent_context = &parent_eval_data.context;
+
+  let mut simple = ContextConstructorSimple::new(
+    &parent_context.context_schema,
+    &first_schema,
+    &second_schema,
+    &gr_queries,
+  );
+
+  // Get TableViews
+  let first_finished = first_eval_data.cast_finished();
+  let second_finished = second_eval_data.cast_finished();
+
+  // Iterate over the Parent rows.
+  for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
+    // Get both Sides.
+    let first_table_view = first_finished.get_for_parent_context_row(i);
+    let second_table_view = second_finished.get_for_parent_context_row(i);
+
+    // Iterate over First Side rows.
+    for (first_row, _) in &first_table_view.rows {
+      // Iterate over Second Side rows.
+      for (second_row, _) in &second_table_view.rows {
+        simple.add_row(parent_context_row, first_row, second_row);
+      }
+    }
+  }
+
+  mk_subquery_data(io_ctx, gr_queries, simple.to_contexts(), &parent_id)
+}
+
+fn final_join_subqueries_independent<IO: CoreIOCtx>(
+  io_ctx: &mut IO,
+  first_eval_data: &JoinNodeEvalData,
+  second_eval_data: &JoinNodeEvalData,
+  parent_eval_data: &JoinNodeEvalData,
+  first_schema: &Vec<GeneralColumnRef>,
+  second_schema: &Vec<GeneralColumnRef>,
+  parent_inner: &proc::JoinInnerNode,
+  weak_gr_queries: Vec<proc::GRQuery>,
+  strong_gr_queries: Vec<proc::GRQuery>,
+  result: &Vec<Vec<TableView>>,
+  parent_id: &JoinNodeId,
+  first_outer: bool,
+  second_outer: bool,
+) -> Result<Vec<(QueryId, Rc<Context>, proc::GRQuery)>, EvalError> {
+  // Get TableViews
+  let first_finished = first_eval_data.cast_finished();
+  let second_finished = second_eval_data.cast_finished();
+
+  // Construct Context construction utilities.
+  let parent_context = &parent_eval_data.context;
+
+  let mut weak_simple = SubqueryExtractorSimple::new(
+    &parent_context.context_schema,
+    &first_schema,
+    &second_schema,
+    &weak_gr_queries,
+    result,
+  );
+
+  let mut strong_simple = ContextConstructorSimple::new(
+    &parent_context.context_schema,
+    &first_schema,
+    &second_schema,
+    &strong_gr_queries,
+  );
+
+  // Iterate over the Parent rows.
+  for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
+    // Start constructing the `col_map` (needed for evaluating the conjunctions).
+    let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
+    add_vals(
+      &mut col_map,
+      &parent_eval_data.context.context_schema.column_context_schema,
+      &parent_context_row.column_context_row,
+    );
+
+    // Get both Sides.
+    let first_table_view = first_finished.get_for_parent_context_row(i);
+    let second_table_view = second_finished.get_for_parent_context_row(i);
+
+    // Holds all rows on the Second Side that were unrejected by weak conjunctions.
+    let mut second_side_weak_unrejected = BTreeSet::<Vec<ColValN>>::new();
+
+    // Iterate over First Side rows.
+    for (first_row, _) in &first_table_view.rows {
+      add_vals_general(&mut col_map, first_schema, first_row);
+
+      let mut all_weak_rejected = true;
+
+      // Iterate over Second Side rows.
+      for (second_row, _) in &second_table_view.rows {
+        add_vals_general(&mut col_map, second_schema, second_row);
+
+        // Evaluate the weak conjunctions.
+        let vals = weak_simple.get_results(parent_context_row, first_row, second_row);
+        if evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
+          continue;
+        }
+
+        // Mark that at least one pair of `first_row` and `second_row` was not rejected.
+        all_weak_rejected = false;
+        second_side_weak_unrejected.insert(second_row.clone());
+
+        // Add in the artificial row to the Strong Conjunctions' context.
+        strong_simple.add_row(parent_context_row, first_row, second_row);
+      }
+
+      // Here, we check whether we need to manufacture a row
+      if all_weak_rejected && first_outer {
+        // Construct an artificial row
+        let (second_row, _) = make_empty_row(second_schema.len());
+        add_vals_general(&mut col_map, second_schema, &second_row);
+
+        // Add in the artificial row to the Strong Conjunctions' context.
+        strong_simple.add_row(parent_context_row, first_row, &second_row);
+      }
+    }
+
+    // Perform row-readdition on the Second Side if need be.
+    if second_outer {
+      // Construct an artificial row
+      let (first_row, _) = make_empty_row(first_schema.len());
+      add_vals_general(&mut col_map, first_schema, &first_row);
+
+      for (second_row, _) in &second_table_view.rows {
+        // Check that the `second_row` was always rejected by weak conjunctions.
+        if !second_side_weak_unrejected.contains(second_row) {
+          add_vals_general(&mut col_map, second_schema, &second_row);
+
+          // Add in the artificial row to the Strong Conjunctions' context.
+          strong_simple.add_row(parent_context_row, &first_row, &second_row);
+        }
+      }
+    }
+  }
+
+  Ok(mk_subquery_data(io_ctx, strong_gr_queries, strong_simple.to_contexts(), &parent_id))
+}
+
 // Create a helper function.
-fn finish_independent_join(
+fn finish_join_independent(
   first_eval_data: JoinNodeEvalData,
   second_eval_data: JoinNodeEvalData,
   parent_eval_data: &mut JoinNodeEvalData,
@@ -1996,7 +1598,7 @@ fn finish_independent_join(
   let first_finished = first_eval_data.cast_finished();
   let second_finished = second_eval_data.cast_finished();
 
-  // Construct Contextu construction utilities.
+  // Construct Context construction utilities.
   let parent_context = &parent_eval_data.context;
 
   let mut weak_simple = SubqueryExtractorSimple::new(
@@ -2120,8 +1722,150 @@ fn finish_independent_join(
   Ok(())
 }
 
+// -----------------------------------------------------------------------------------------------
+//  Dependent Evaluation
+// -----------------------------------------------------------------------------------------------
+
+fn initial_join_subqueries_dependent<IO: CoreIOCtx>(
+  io_ctx: &mut IO,
+  first_eval_data: &JoinNodeEvalData,
+  second_eval_data: &JoinNodeEvalData,
+  parent_eval_data: &JoinNodeEvalData,
+  first_schema: &Vec<GeneralColumnRef>,
+  second_schema: &Vec<GeneralColumnRef>,
+  gr_queries: Vec<proc::GRQuery>,
+  parent_id: &JoinNodeId,
+) -> Vec<(QueryId, Rc<Context>, proc::GRQuery)> {
+  // Construct Context construction utilities.
+  let parent_context = &parent_eval_data.context;
+
+  let mut simple = ContextConstructorSimple::new(
+    &parent_context.context_schema,
+    &first_schema,
+    &second_schema,
+    &gr_queries,
+  );
+
+  // Get TableViews
+  let first_finished = first_eval_data.cast_finished();
+  let second_finished = second_eval_data.cast_finished();
+
+  // Iterate over the Parent rows.
+  let mut second_side_count = 0;
+  for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
+    // Get the First Side
+    let first_table_view = first_finished.get_for_parent_context_row(i);
+
+    // Iterate over First Side rows.
+    for (first_row, _) in &first_table_view.rows {
+      // Get the Second Side.
+      let second_table_view = second_finished.get_for_parent_context_row(second_side_count);
+      second_side_count += 1;
+
+      // Iterate over Second Side rows.
+      for (second_row, _) in &second_table_view.rows {
+        simple.add_row(parent_context_row, first_row, second_row);
+      }
+    }
+  }
+
+  mk_subquery_data(io_ctx, gr_queries, simple.to_contexts(), &parent_id)
+}
+
+fn final_join_subqueries_dependent<IO: CoreIOCtx>(
+  io_ctx: &mut IO,
+  first_eval_data: &JoinNodeEvalData,
+  second_eval_data: &JoinNodeEvalData,
+  parent_eval_data: &JoinNodeEvalData,
+  first_schema: &Vec<GeneralColumnRef>,
+  second_schema: &Vec<GeneralColumnRef>,
+  parent_inner: &proc::JoinInnerNode,
+  weak_gr_queries: Vec<proc::GRQuery>,
+  strong_gr_queries: Vec<proc::GRQuery>,
+  result: &Vec<Vec<TableView>>,
+  parent_id: &JoinNodeId,
+  first_outer: bool,
+) -> Result<Vec<(QueryId, Rc<Context>, proc::GRQuery)>, EvalError> {
+  // Get TableViews
+  let first_finished = first_eval_data.cast_finished();
+  let second_finished = second_eval_data.cast_finished();
+
+  // Construct Context construction utilities.
+  let parent_context = &parent_eval_data.context;
+
+  let mut weak_simple = SubqueryExtractorSimple::new(
+    &parent_context.context_schema,
+    &first_schema,
+    &second_schema,
+    &weak_gr_queries,
+    result,
+  );
+
+  let mut strong_simple = ContextConstructorSimple::new(
+    &parent_context.context_schema,
+    &first_schema,
+    &second_schema,
+    &strong_gr_queries,
+  );
+
+  // Iterate over the Parent rows.
+  let mut second_side_count = 0;
+  for (i, parent_context_row) in parent_context.context_rows.iter().enumerate() {
+    // Start constructing the `col_map` (needed for evaluating the conjunctions).
+    let mut col_map = BTreeMap::<proc::ColumnRef, ColValN>::new();
+    add_vals(
+      &mut col_map,
+      &parent_eval_data.context.context_schema.column_context_schema,
+      &parent_context_row.column_context_row,
+    );
+
+    // Get the First Side
+    let first_table_view = first_finished.get_for_parent_context_row(i);
+
+    // Iterate over First Side rows.
+    for (first_row, _) in &first_table_view.rows {
+      add_vals_general(&mut col_map, first_schema, first_row);
+
+      let mut all_weak_rejected = true;
+
+      // Get the second side
+      let second_table_view = second_finished.get_for_parent_context_row(i);
+      second_side_count += 1;
+
+      // Iterate over Second Side rows.
+      for (second_row, _) in &second_table_view.rows {
+        add_vals_general(&mut col_map, second_schema, second_row);
+
+        // Evaluate the weak conjunctions.
+        let vals = weak_simple.get_results(parent_context_row, first_row, second_row);
+        if evaluate_conjunctions(&parent_inner.weak_conjunctions, &col_map, &vals)? {
+          continue;
+        }
+
+        // Mark that at least one pair of `first_row` and `second_row` was not rejected.
+        all_weak_rejected = false;
+
+        // Add in the artificial row to the Strong Conjunctions' context.
+        strong_simple.add_row(parent_context_row, first_row, second_row);
+      }
+
+      // Here, we check whether we need to manufacture a row
+      if all_weak_rejected && first_outer {
+        // Construct an artificial row.
+        let (second_row, _) = make_empty_row(second_schema.len());
+        add_vals_general(&mut col_map, second_schema, &second_row);
+
+        // Add in the artificial row to the Strong Conjunctions' context.
+        strong_simple.add_row(parent_context_row, first_row, &second_row);
+      }
+    }
+  }
+
+  Ok(mk_subquery_data(io_ctx, strong_gr_queries, strong_simple.to_contexts(), &parent_id))
+}
+
 // Create a helper function.
-fn finish_dependent_join(
+fn finish_join_dependent(
   first_eval_data: JoinNodeEvalData,
   second_eval_data: JoinNodeEvalData,
   parent_eval_data: &mut JoinNodeEvalData,
@@ -2133,6 +1877,7 @@ fn finish_dependent_join(
   strong_gr_queries: Vec<proc::GRQuery>,
   weak_result: Vec<Vec<TableView>>,
   strong_result: Vec<Vec<TableView>>,
+  first_outer: bool,
 ) -> Result<(), EvalError> {
   let make_parent_row = |first_row: &Vec<ColValN>, second_row: &Vec<ColValN>| -> Vec<ColValN> {
     make_parent_row(first_schema, first_row, second_schema, second_row, parent_schema)
@@ -2142,7 +1887,7 @@ fn finish_dependent_join(
   let first_finished = first_eval_data.cast_finished();
   let second_finished = second_eval_data.cast_finished();
 
-  // Construct Contextu construction utilities.
+  // Construct Context construction utilities.
   let parent_context = &parent_eval_data.context;
 
   let mut weak_simple = SubqueryExtractorSimple::new(
@@ -2217,7 +1962,7 @@ fn finish_dependent_join(
       }
 
       // Here, we check whether we need to manufacture a row
-      if all_weak_rejected {
+      if all_weak_rejected && first_outer {
         // Construct an artificial row.
         let (second_row, second_count) = make_empty_row(second_schema.len());
         add_vals_general(&mut col_map, second_schema, &second_row);
