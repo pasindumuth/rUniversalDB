@@ -43,6 +43,7 @@ pub fn test_all_basic_serial(rand: &mut XorShiftRng) {
   ghost_deleted_row_test(mk_seed(rand));
   drop_table_test(mk_seed(rand));
   simple_join_test(mk_seed(rand));
+  advanced_join_test(mk_seed(rand));
   cancellation_test(mk_seed(rand));
   paxos_leader_change_test(mk_seed(rand));
   paxos_basic_serial_test(mk_seed(rand));
@@ -1668,7 +1669,7 @@ fn simple_join_test(seed: [u8; 16]) {
     exp_result.add_row(vec![None, None, Some(cvi(70))]);
     ctx.execute_query(
       &mut sim,
-      " SELECT product_id, count, U.email, balance
+      " SELECT product_id, count, balance
         FROM inventory AS I FULL OUTER JOIN user AS U
           ON U.email = 'my_email_0' AND I.email = 'my_email_0';
       ",
@@ -1695,6 +1696,69 @@ fn simple_join_test(seed: [u8; 16]) {
   }
 
   println!("Test 'simple_join_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
+}
+
+fn advanced_join_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup(seed);
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
+  setup_user_table(&mut sim, &mut ctx);
+  populate_user_table_basic(&mut sim, &mut ctx);
+
+  // Select with a derived table in the FROM clause.
+  {
+    let mut exp_result = QueryResult::new(vec![cno("double_count")]);
+    exp_result.add_row(vec![Some(cvi(30))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT D.double_count
+        FROM (SELECT I.count * 2 AS double_count
+              FROM inventory AS I
+              WHERE email = 'my_email_0') as D;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Select with a derived table on one side of a JOIN in the FROM clause
+  {
+    let mut exp_result = QueryResult::new(vec![cno("balance"), cno("double_count")]);
+    exp_result.add_row(vec![Some(cvi(50)), Some(cvi(30))]);
+    exp_result.add_row(vec![Some(cvi(60)), Some(cvi(30))]);
+    exp_result.add_row(vec![Some(cvi(70)), Some(cvi(30))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT balance, double_count
+        FROM user AS U JOIN (SELECT I.count * 2 AS double_count
+                             FROM inventory AS I
+                             WHERE email = 'my_email_0') as D;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Select with simple triple Join.
+  {
+    let mut exp_result = QueryResult::new(vec![cno("count")]);
+    exp_result.add_row(vec![Some(cvi(15))]);
+    exp_result.add_row(vec![Some(cvi(25))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT I3.count
+        FROM (inventory AS I1 JOIN
+              inventory AS I2 ON I1.product_id = 0) JOIN
+              inventory as I3 ON I2.product_id = 1
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  println!("Test 'advanced_join_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------

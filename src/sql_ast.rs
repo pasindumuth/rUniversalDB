@@ -281,9 +281,11 @@ pub mod iast {
     Value {
       val: Value,
     },
-    /// The `trans_table_name` is a convenience field we populate in the `query_converter`.
     Subquery {
       query: Box<Query>,
+      /// The `trans_table_name` is a convenience field we populate in the `query_converter`.
+      /// It is supposed to be the be `TransTableName` that is returned by the `GRQuery` that
+      /// this Subquery gets converted to later.
       trans_table_name: Option<String>,
     },
   }
@@ -367,7 +369,14 @@ pub mod iast {
   #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
   pub enum JoinNodeSource {
     Table(String),
-    DerivedTable { query: Box<Query>, lateral: bool },
+    DerivedTable {
+      query: Box<Query>,
+      lateral: bool,
+      /// The `trans_table_name` is a convenience field we populate in the `query_converter`.
+      /// It is supposed to be the be `TransTableName` that is returned by the `GRQuery` that
+      /// this Subquery gets converted to later.
+      trans_table_name: Option<String>,
+    },
   }
 
   // Query

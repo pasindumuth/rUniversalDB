@@ -271,6 +271,7 @@ fn convert_table_factor(factor: ast::TableFactor) -> Result<iast::JoinNode, Stri
         source: iast::JoinNodeSource::DerivedTable {
           query: Box::new(convert_query(*subquery)?),
           lateral,
+          trans_table_name: None,
         },
       }))
     }

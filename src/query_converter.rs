@@ -827,11 +827,11 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
   /// refer to. In the process, this function populates `col_usage_map` for every single JLN
   /// that appears under `query`, and also, recalling that by this point, every JLN is globally
   /// unique. It also computes the schema for all TransTables under `query` and then populates
-  /// `trans_table_map` with it. These maps are important productcs of this algorithm.
+  /// `trans_table_map` with it. These maps are important products of this algorithm.
   ///
   /// Recall that by this point, all JLNs are unique, all TransTableNames are unique, and all
   /// qualified `ColumnRef`'s qualification (i.e. JLNs) exist. However, the resolution
-  /// may still fail for qualified `ColumnRef`s if it is ambiguous (i.e. the `col_name` appears
+  /// may still fail for unqualified `ColumnRef`s if it is ambiguous (i.e. the `col_name` appears
   /// multiple times in the `table_name` (which could happen if for TransTables created
   /// by SELECT *, * , for instance)). We handle this here.
   ///
@@ -858,9 +858,9 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
     }
   }
 
-  /// Same as `resolve_cols`, except we don't expect all `ColumnRef`s to be resolved
+  /// Same as `resolve_cols`, except we do not expect all `ColumnRef`s to be resolved
   /// yet, and so we return them as `UnresolvedColRefs`. We also return the schema
-  /// implies by the `query`.
+  /// implied by the `query`.
   fn resolve_cols_under_query<'a>(
     &mut self,
     query: &'a mut iast::Query,
@@ -1071,8 +1071,14 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
             }
             false
           }
-          iast::JoinNodeSource::DerivedTable { query, lateral } => {
+          iast::JoinNodeSource::DerivedTable { query, lateral, trans_table_name } => {
             let (schema, cur_unresolved) = self.resolve_cols_under_query(query)?;
+
+            // Add the top-level schema as a TransTable as well using an auxiliary TransTable name.
+            let aux_table_name = unique_tt_name(&mut self.counter, &"".to_string());
+            self.trans_table_map.insert(aux_table_name.clone(), schema.clone());
+            *trans_table_name = Some(aux_table_name);
+
             join_node_cols.insert(jln.clone(), SchemaSource::StaticSchema(schema));
             unresolved.merge(cur_unresolved);
             *lateral
@@ -1740,15 +1746,14 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
 
         (select, vec![], false)
       }
-      iast::JoinNodeSource::DerivedTable { query, lateral } => {
+      iast::JoinNodeSource::DerivedTable { query, lateral, trans_table_name } => {
         // In this case, we expand out the CTEs in the `query` into stages for the
         // `GRQueryES` we are constructing.
 
         let mut trans_tables = Vec::<(TransTableName, proc::GRQueryStage)>::new();
 
-        let aux_table_name = unique_tt_name(&mut self.counter, &"".to_string());
-        self.flatten_sub_query_r(&aux_table_name, &query, &mut trans_tables)?;
-        let aux_table_name = TransTableName(aux_table_name.clone());
+        self.flatten_sub_query_r(trans_table_name.as_ref().unwrap(), &query, &mut trans_tables)?;
+        let aux_table_name = TransTableName(trans_table_name.clone().unwrap());
 
         // Get the columns that are used by the JoinLeaf.
         let col_usage_cols = self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap();
