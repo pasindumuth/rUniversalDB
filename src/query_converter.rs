@@ -1636,9 +1636,11 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
         split_into_conjunctions_r(*left, conjunctions);
         split_into_conjunctions_r(*right, conjunctions);
       } else {
-        // Otherwise, `expr` itself is an leaf of the conjunction tree, and so
-        // we add it to `conjunctions.
-        conjunctions.push(expr);
+        // Otherwise, `expr` itself is an leaf of the conjunction tree, and so we add it
+        // to `conjunctions. We only add it if it not just a trivial value of `true`.
+        if expr != (proc::ValExpr::Value { val: iast::Value::Boolean(true) }) {
+          conjunctions.push(expr);
+        }
       }
     }
 
@@ -2046,14 +2048,15 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
 
       // Define function that iterates through Conjunctions and tries to push down conjunctions
       // that *would* introduce a dependency. We do this judiciously so that overall, the
-      // dependecy would increase performance, not decrease it.
+      // dependency would increase performance, not decrease it.
       let mut apply_rule_2 = |conjunctions: &mut Vec<proc::ValExpr>, is_strong: bool| {
         let mut removed_indices = BTreeSet::<usize>::new();
         // Iterate through the Conjunctions and apply Rule 2.
         for (i, conjunction) in conjunctions.iter().enumerate() {
           // Check that the conjunction is an equality check.
           if let proc::ValExpr::BinaryExpr { op: iast::BinaryOp::Eq, left, right } = conjunction {
-            // Define function to check each of the left and right side separately.
+            // Define function to check separately check whether left/right side is a ColumnRef
+            // that points to a JoinLeaf on one side of the JOIN.
             let mut process_expr_side = |expr_side: &proc::ValExpr| {
               // Check that the `expr_side` is a single ColumnRef
               if let proc::ValExpr::ColumnRef(col_ref) = expr_side {
@@ -2161,16 +2164,20 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
     );
 
     // Finally, push the modified `expr` into the WHERE clause of the `final_stage` by
-    // AND-ing it with the current WHERE clause.
-    let cur_selection = std::mem::replace(
-      selection,
-      proc::ValExpr::Value { val: iast::Value::Boolean(false) }, // Some temporary sentinal.
-    );
-    *selection = proc::ValExpr::BinaryExpr {
-      op: iast::BinaryOp::And,
-      left: Box::new(expr),
-      right: Box::new(cur_selection),
-    };
+    // AND-ing it with the current WHERE clause (if the WHERE clause is not trivially `true`).
+    if *selection == (proc::ValExpr::Value { val: iast::Value::Boolean(true) }) {
+      *selection = expr;
+    } else {
+      let cur_selection = std::mem::replace(
+        selection,
+        proc::ValExpr::Value { val: iast::Value::Boolean(false) }, // Some temporary sentinal.
+      );
+      *selection = proc::ValExpr::BinaryExpr {
+        op: iast::BinaryOp::And,
+        left: Box::new(expr),
+        right: Box::new(cur_selection),
+      };
+    }
   }
 }
 

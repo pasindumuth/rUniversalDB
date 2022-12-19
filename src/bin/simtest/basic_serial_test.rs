@@ -42,6 +42,7 @@ pub fn test_all_basic_serial(rand: &mut XorShiftRng) {
   insert_delete_insert_test(mk_seed(rand));
   ghost_deleted_row_test(mk_seed(rand));
   drop_table_test(mk_seed(rand));
+  simple_join_test(mk_seed(rand));
   cancellation_test(mk_seed(rand));
   paxos_leader_change_test(mk_seed(rand));
   paxos_basic_serial_test(mk_seed(rand));
@@ -1561,6 +1562,139 @@ fn drop_table_test(seed: [u8; 16]) {
   }
 
   println!("Test 'drop_table_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Joins
+// -----------------------------------------------------------------------------------------------
+
+fn simple_join_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup(seed);
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
+  setup_user_table(&mut sim, &mut ctx);
+  populate_user_table_basic(&mut sim, &mut ctx);
+
+  // Select one column from one side of a JOIN.
+  {
+    let mut exp_result = QueryResult::new(vec![cno("product_id")]);
+    exp_result.add_row(vec![Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvi(1))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT product_id
+        FROM inventory JOIN user ON true
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Select with aliases and a simple ON clause
+  {
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("balance")]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(70))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT I.product_id, balance
+        FROM inventory AS I JOIN user AS U ON U.balance = 70 AND I.product_id = 1;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Select with a dependency between the two sides of a Join.
+  {
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("count"), cno("balance")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(15)), Some(cvi(50))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(25)), Some(cvi(60))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT product_id, count, balance
+        FROM inventory AS I JOIN user AS U ON I.email = U.email;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Select with a LEFT JOIN
+  {
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("count"), cno("balance")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(15)), Some(cvi(50))]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(15)), Some(cvi(60))]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(15)), Some(cvi(70))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(25)), None]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT product_id, count, balance
+        FROM inventory AS I LEFT JOIN user AS U ON I.email = 'my_email_0';
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Select with a RIGHT JOIN
+  {
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("count"), cno("balance")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(15)), Some(cvi(50))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(25)), Some(cvi(50))]);
+    exp_result.add_row(vec![None, None, Some(cvi(60))]);
+    exp_result.add_row(vec![None, None, Some(cvi(70))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT product_id, count, balance
+        FROM inventory AS I RIGHT JOIN user AS U ON U.email = 'my_email_0';
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Select with a OUTER JOIN
+  {
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("count"), cno("balance")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(15)), Some(cvi(50))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(25)), None]);
+    exp_result.add_row(vec![None, None, Some(cvi(60))]);
+    exp_result.add_row(vec![None, None, Some(cvi(70))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT product_id, count, U.email, balance
+        FROM inventory AS I FULL OUTER JOIN user AS U
+          ON U.email = 'my_email_0' AND I.email = 'my_email_0';
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Select with a RIGHT JOIN with an ON clause that would otherwise
+  // produce a right-to-left dependency.
+  {
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("count"), cno("balance")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(15)), Some(cvi(50))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(25)), Some(cvi(60))]);
+    exp_result.add_row(vec![None, None, Some(cvi(70))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT product_id, count, balance
+        FROM inventory AS I RIGHT JOIN user AS U ON I.email = U.email;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  println!("Test 'simple_join_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------

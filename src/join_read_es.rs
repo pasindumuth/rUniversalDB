@@ -77,6 +77,12 @@ impl<'a> FinishedEvalData<'a> {
 #[derive(Debug, Default)]
 struct JoinEvaluating {
   result_map: BTreeMap<JoinNodeId, JoinNodeEvalData>,
+  /// This indices which set of `GeneralColumnRef`s need to be returned by a `JoinNode`.
+  /// This will include columns used by an conjunctions in the `JoinInnerNode` containing
+  /// the `JoinNode`, the conjunctions in all ancestral `JoinInnerNode`s, as well as
+  /// the `SelectItems` in the projection. In addition, if there is a dependency between two
+  /// `JoinNode`s, the side that is dependend upon may have to expose some `GeneralColumnRef`s
+  /// needed by the other side.
   join_node_schema: BTreeMap<JoinNodeId, Vec<GeneralColumnRef>>,
 }
 
@@ -174,11 +180,21 @@ impl JoinReadES {
 
     // Compute the schemas that every JoinNode needs to propagate upward (after the conjunctions).
     let col_refs = add_col_refs_for_projection(&self.sql_query);
-    let mut join_node_schema = BTreeMap::<JoinNodeId, BTreeSet<GeneralColumnRef>>::new();
-    build_join_node_schema(String::new(), col_refs, &self.sql_query.from, &mut join_node_schema);
-    for (join_node_id, col_refs) in join_node_schema {
-      state.join_node_schema.insert(join_node_id, col_refs.into_iter().collect());
-    }
+    let mut join_node_schema_set = BTreeMap::<JoinNodeId, BTreeSet<GeneralColumnRef>>::new();
+    build_join_node_schema(
+      String::new(),
+      col_refs,
+      &self.sql_query.from,
+      &self.sql_query.dependency_graph,
+      &mut join_node_schema_set,
+    );
+
+    convert_schema_to_vec(
+      String::new(),
+      &self.sql_query.from,
+      &mut join_node_schema_set,
+      &mut state.join_node_schema,
+    );
 
     // Start evaluating as many JoinLeafs as possible.
     let mut queries = Vec::<(QueryId, Rc<Context>, proc::GRQuery)>::new();
@@ -334,7 +350,7 @@ impl JoinReadES {
           &mut queries,
           &join_select.dependency_graph,
           sibling_id,
-          &join_select.from,
+          join_node,
           sibling_eval_data,
         );
         let gr_query_ess = self.mk_gr_queries(queries);
@@ -1118,24 +1134,26 @@ fn mk_subquery_data<IO: CoreIOCtx>(
 //  Utils
 // -----------------------------------------------------------------------------------------------
 
+/// This is used to figure out which `GeneralColumnRef`s that each `JoinInnerNode` needs to
+/// return so that all expressions above (and laterally, in the case of conjunctions and
+/// dependencies) have the columns they need.
+///
+/// Here, `col_refs` are the columns that were determined to be needed to be read out from the
+/// the `join_node`. The `path` corresponds to this `JoinNode`. The `join_node_schema` is the
+/// container we build out over time.
 fn build_join_node_schema(
   path: JoinNodeId,
   mut col_refs: BTreeSet<GeneralColumnRef>,
   join_node: &proc::JoinNode,
+  dependency_graph: &proc::DependencyGraph,
   join_node_schema: &mut BTreeMap<JoinNodeId, BTreeSet<GeneralColumnRef>>,
 ) {
   join_node_schema.insert(path.clone(), col_refs.clone());
   if let proc::JoinNode::JoinInnerNode(inner) = join_node {
-    // Add the column references in the conjunctions to col_refs
-    let jlns = collect_jlns(join_node);
-    for expr in &inner.weak_conjunctions {
-      add_col_refs_with_expr(&jlns, expr, &mut col_refs);
-    }
-    for expr in &inner.strong_conjunctions {
-      add_col_refs_with_expr(&jlns, expr, &mut col_refs);
-    }
+    let left_path = path.clone() + "L";
+    let right_path = path + "R";
 
-    // Split the `ColumnRef`s into the left and right sides.
+    // Split the `col_refs`s into the left and right sides.
     let left_jlns = collect_jlns(&inner.left);
     let right_jlns = collect_jlns(&inner.right);
     let mut left_col_refs = BTreeSet::<GeneralColumnRef>::new();
@@ -1149,11 +1167,99 @@ fn build_join_node_schema(
       }
     }
 
+    // Add the column references in the conjunctions to col_refs
+    for expr in &inner.weak_conjunctions {
+      add_col_refs_with_expr(&left_jlns, expr, &mut left_col_refs);
+      add_col_refs_with_expr(&right_jlns, expr, &mut right_col_refs);
+    }
+    for expr in &inner.strong_conjunctions {
+      add_col_refs_with_expr(&left_jlns, expr, &mut left_col_refs);
+      add_col_refs_with_expr(&right_jlns, expr, &mut right_col_refs);
+    }
+
+    // If there is a dependency between the children, then make sure to add any columns
+    // that are demanded from the child that is depended upon.
+    if dependency_graph.contains_key(&left_path) {
+      add_col_refs_with_query_elem(
+        &right_jlns,
+        QueryElement::JoinNode(&inner.left),
+        &mut right_col_refs,
+      );
+    } else {
+      add_col_refs_with_query_elem(
+        &left_jlns,
+        QueryElement::JoinNode(&inner.right),
+        &mut left_col_refs,
+      );
+    }
+
     // Recurse.
-    let left_path = path.clone() + "L";
-    let right_path = path + "R";
-    build_join_node_schema(left_path, left_col_refs, &inner.left, join_node_schema);
-    build_join_node_schema(right_path, right_col_refs, &inner.right, join_node_schema);
+    build_join_node_schema(
+      left_path,
+      left_col_refs,
+      &inner.left,
+      dependency_graph,
+      join_node_schema,
+    );
+
+    build_join_node_schema(
+      right_path,
+      right_col_refs,
+      &inner.right,
+      dependency_graph,
+      join_node_schema,
+    );
+  }
+}
+
+/// Converts the `join_node_schema_set` into a similar container that uses `Vec`s
+/// to represent the schema. This is not trivial; the order of the elements for the
+/// `JoinLeaf`s matter, since this will be the order that the `JoinSelect` will
+/// interpret the results of the subqueries constituting the `JoinLeaf`s.
+fn convert_schema_to_vec(
+  path: String,
+  join_node: &proc::JoinNode,
+  join_node_schema_set: &mut BTreeMap<JoinNodeId, BTreeSet<GeneralColumnRef>>,
+  join_node_schema: &mut BTreeMap<JoinNodeId, Vec<GeneralColumnRef>>,
+) {
+  let schema_set = join_node_schema_set.remove(&path).unwrap();
+  match join_node {
+    proc::JoinNode::JoinInnerNode(inner) => {
+      // Here, the order `GeneralColumnRef`s do not matter; any order will work.
+      join_node_schema.insert(path.clone(), schema_set.into_iter().collect());
+      convert_schema_to_vec(
+        path.clone() + "L",
+        &inner.left,
+        join_node_schema_set,
+        join_node_schema,
+      );
+      convert_schema_to_vec(
+        path.clone() + "R",
+        &inner.right,
+        join_node_schema_set,
+        join_node_schema,
+      );
+    }
+    proc::JoinNode::JoinLeaf(leaf) => {
+      // For JoinLeafs, it is important for the `GeneralColumnRef`s to be the same
+      // as the projection in the ifnal stage of the GRQuery.
+      let final_gr_query_stage = &leaf.query.trans_tables.last().unwrap().1;
+      let mut general_cols = Vec::<GeneralColumnRef>::new();
+      for (i, maybe_col) in final_gr_query_stage.schema().iter().enumerate() {
+        let general_col_ref = if let Some(col) = maybe_col {
+          GeneralColumnRef::Named(proc::ColumnRef {
+            table_name: leaf.alias.clone(),
+            col_name: col.clone(),
+          })
+        } else {
+          GeneralColumnRef::Unnamed(UnnamedColumnRef { table_name: leaf.alias.clone(), index: i })
+        };
+
+        general_cols.push(general_col_ref);
+      }
+
+      join_node_schema.insert(path.clone(), general_cols);
+    }
   }
 }
 
@@ -1162,7 +1268,17 @@ fn add_col_refs_with_expr(
   expr: &proc::ValExpr,
   col_refs: &mut BTreeSet<GeneralColumnRef>,
 ) {
-  QueryIterator::new().iterate_expr(
+  add_col_refs_with_query_elem(jlns, QueryElement::ValExpr(expr), col_refs);
+}
+
+/// Add every `ColumnRef` that appears under the `elem` to `col_refs` whose
+/// `table_name` is contained in `jlns`.
+fn add_col_refs_with_query_elem(
+  jlns: &Vec<String>,
+  elem: QueryElement,
+  col_refs: &mut BTreeSet<GeneralColumnRef>,
+) {
+  QueryIterator::new().iterate_general(
     &mut |elem| {
       if let QueryElement::ValExpr(proc::ValExpr::ColumnRef(col_ref)) = elem {
         if jlns.contains(&col_ref.table_name) {
@@ -1170,7 +1286,7 @@ fn add_col_refs_with_expr(
         }
       }
     },
-    expr,
+    elem,
   )
 }
 

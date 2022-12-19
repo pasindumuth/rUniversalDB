@@ -13,7 +13,7 @@ use std::ops::Deref;
 //  Query Element Iteration
 // -----------------------------------------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum QueryElement<'a> {
   MSQuery(&'a proc::MSQuery),
   GRQuery(&'a proc::GRQuery),
