@@ -1192,43 +1192,42 @@ impl<'b, ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>> ColResolver<'
     let mut resolved_free_cols = Vec::<String>::new();
     for (col_name, table_name_refs) in &mut unresolved.free_cols {
       // Search `join_node_cols` for the `col_name`, resolving it if present.
+      let mut maybe_jln = Option::<&String>::None;
+      let mut num_matches = 0;
       for (jln, schema_source) in join_node_cols {
         // See if this `schema_source` contains `col_name`.
-        let does_contain_col = match schema_source {
+        match schema_source {
           SchemaSource::StaticSchema(schema) => {
-            let mut num_matches = 0;
             for maybe_col in schema {
               if maybe_col.as_ref() == Some(col_name) {
+                maybe_jln = Some(jln);
                 num_matches += 1;
               }
             }
-
-            // If more than one element of `schema` matches `jln`, this is an
-            // "ambiguous column" error.
-            if num_matches > 1 {
-              return Err(ErrorT::mk_error(msg::QueryPlanningError::AmbiguousColumnRef));
-            } else {
-              num_matches == 1
-            }
           }
           SchemaSource::TablePath(table_name) => {
-            self.view.contains_col(table_name, &ColName(col_name.clone()))?
+            if self.view.contains_col(table_name, &ColName(col_name.clone()))? {
+              maybe_jln = Some(jln);
+              num_matches += 1;
+            }
           }
         };
+      }
 
-        // Check if we have successfully resolved `col_name`.
-        if does_contain_col {
-          for table_name_ref in table_name_refs {
-            table_name_ref.replace(jln.clone());
-          }
-
-          // Amend the col_usage_map
-          self.amend_col_usage(jln, col_name.clone());
-
-          // Mark resolved.
-          resolved_free_cols.push(col_name.clone());
-          break;
+      // If more than one element of `schema` matches `jln`, this is an
+      // "ambiguous column" error.
+      if num_matches > 1 {
+        return Err(ErrorT::mk_error(msg::QueryPlanningError::AmbiguousColumnRef));
+      } else if let Some(jln) = maybe_jln {
+        for table_name_ref in table_name_refs {
+          table_name_ref.replace(jln.clone());
         }
+
+        // Amend the col_usage_map
+        self.amend_col_usage(jln, col_name.clone());
+
+        // Mark as resolved.
+        resolved_free_cols.push(col_name.clone());
       }
     }
 
@@ -1859,7 +1858,7 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
       // If the RHS is a JoinLeaf and the Join is a LATERAL Join, then we
       // add a dependency immediately. Notice that this would not result in cycles.
       if let proc::JoinNode::JoinLeaf(proc::JoinLeaf { lateral: true, .. }) = inner.right.deref() {
-        graph.insert(left_path.clone(), right_path.clone());
+        graph.insert(right_path.clone(), left_path.clone());
       }
 
       // Recurse.

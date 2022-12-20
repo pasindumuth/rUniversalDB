@@ -11,6 +11,7 @@ use runiversal::common::{
   RequestId, SlaveGroupId, TablePath, TabletGroupId, TabletKeyRange,
 };
 use runiversal::message as msg;
+use runiversal::message::ExternalQueryError;
 use runiversal::paxos::PaxosConfig;
 use runiversal::test_utils::{cno, cvi, cvs, mk_seed, mk_sid, mk_tab, mk_tid};
 use std::collections::BTreeMap;
@@ -44,6 +45,7 @@ pub fn test_all_basic_serial(rand: &mut XorShiftRng) {
   drop_table_test(mk_seed(rand));
   simple_join_test(mk_seed(rand));
   advanced_join_test(mk_seed(rand));
+  join_errors_test(mk_seed(rand));
   cancellation_test(mk_seed(rand));
   paxos_leader_change_test(mk_seed(rand));
   paxos_basic_serial_test(mk_seed(rand));
@@ -1740,6 +1742,23 @@ fn advanced_join_test(seed: [u8; 16]) {
       exp_result,
     );
   }
+  //
+  // // Select with a LATERAL JOIN.
+  // {
+  //   let mut exp_result = QueryResult::new(vec![cno("balance"), cno("double_count")]);
+  //   exp_result.add_row(vec![Some(cvi(50)), Some(cvi(30))]);
+  //   exp_result.add_row(vec![Some(cvi(60)), Some(cvi(50))]);
+  //   ctx.execute_query(
+  //     &mut sim,
+  //     " SELECT balance, D.*
+  //       FROM user AS U JOIN LATERAL (SELECT I.count * 2 AS double_count
+  //                                    FROM inventory AS I
+  //                                    WHERE I.email = U.email) AS D;
+  //     ",
+  //     10000,
+  //     exp_result,
+  //   );
+  // }
 
   // Select with simple triple Join.
   {
@@ -1759,6 +1778,169 @@ fn advanced_join_test(seed: [u8; 16]) {
   }
 
   println!("Test 'advanced_join_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
+}
+
+fn join_errors_test(seed: [u8; 16]) {
+  let (mut sim, mut ctx) = setup(seed);
+
+  // Setup Tables
+  setup_inventory_table(&mut sim, &mut ctx);
+  populate_inventory_table_basic(&mut sim, &mut ctx);
+  setup_user_table(&mut sim, &mut ctx);
+  populate_user_table_basic(&mut sim, &mut ctx);
+
+  // Select with a RIGHT LATERAL JOIN
+  {
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT U1.balance
+        FROM user AS U1 RIGHT JOIN LATERAL (SELECT * FROM user);
+      ",
+      10000,
+      |abort_data| match abort_data {
+        msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::InvalidLateralJoin,
+        ) => true,
+        _ => false,
+      },
+    );
+  }
+
+  // Select with a Derived Table that does not have an alias
+  {
+    // Without LATERAL
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT U1.balance
+        FROM user AS U1 JOIN LATERAL (SELECT * FROM user);
+      ",
+      10000,
+      |abort_data| match abort_data {
+        msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::NonAliasedDerivedTable,
+        ) => true,
+        _ => false,
+      },
+    );
+
+    // With LATERAL
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT U1.balance
+        FROM user AS U1 JOIN (SELECT * FROM user);
+      ",
+      10000,
+      |abort_data| match abort_data {
+        msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::NonAliasedDerivedTable,
+        ) => true,
+        _ => false,
+      },
+    );
+  }
+
+  // Select with two JOIN Leafs with the same alias.
+  {
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT U1.balance
+        FROM user AS U1 JOIN user AS U1;
+      ",
+      10000,
+      |abort_data| match abort_data {
+        msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::NonUniqueJoinLeafName,
+        ) => true,
+        _ => false,
+      },
+    );
+  }
+
+  // Select where the wrong name was used for the alias in a `ColumnRef`.
+  {
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT U1.balance
+        FROM user AS U1 JOIN inventory AS I ON user.email = 'my_email_0';
+      ",
+      10000,
+      |abort_data| match abort_data {
+        msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::NonExistentTableQualification,
+        ) => true,
+        _ => false,
+      },
+    );
+  }
+
+  // Select where the wildcard contains a qualification that does not exist.
+  {
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT U2.*
+        FROM user AS U1;
+      ",
+      10000,
+      |abort_data| match abort_data {
+        msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::InvalidWildcardQualification,
+        ) => true,
+        _ => false,
+      },
+    );
+  }
+
+  // Select containing a `ColumnRef` that does not exist.
+  {
+    // Without qualification.
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT U1.balance
+        FROM user AS U1 JOIN inventory AS I ON bad_column = 2;
+      ",
+      10000,
+      |abort_data| match abort_data {
+        msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::NonExistentColumn(_),
+        ) => true,
+        _ => false,
+      },
+    );
+
+    // With qualification.
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT U1.balance
+        FROM user AS U1 JOIN inventory AS I ON U1.bad_column = 2;
+      ",
+      10000,
+      |abort_data| match abort_data {
+        msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::NonExistentColumn(_),
+        ) => true,
+        _ => false,
+      },
+    );
+  }
+
+  // Select with ambiguous column reference in ON clause
+  {
+    ctx.execute_query_failure(
+      &mut sim,
+      " SELECT U1.balance
+        FROM user AS U1 JOIN inventory AS I ON email = 'my_email_0';
+      ",
+      10000,
+      |abort_data| match abort_data {
+        msg::ExternalAbortedData::QueryPlanningError(
+          msg::QueryPlanningError::AmbiguousColumnRef,
+        ) => true,
+        _ => false,
+      },
+    );
+  }
+
+  println!("Test 'join_errors_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
 // -----------------------------------------------------------------------------------------------
