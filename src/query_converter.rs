@@ -28,7 +28,7 @@ pub fn convert_to_msquery<ErrorT: ErrorTrait + Debug, ViewT: DBSchemaView<ErrorT
 
   // Rename Aliases
   let mut ctx = AliasRenameContext { orig_to_new_map: BTreeMap::new(), counter: ctx.counter };
-  ctx.alias_rename_under_query(&mut query)?;
+  ctx.rename_aliases_under_query(&mut query)?;
 
   // Resolve Columns
   let mut ctx = ColResolver {
@@ -512,6 +512,11 @@ fn rename_under_query(ctx: &mut RenameContext, query: &mut iast::Query) {
 
 struct AliasRenameContext {
   /// This maps the old alias of a JoinLeaf to what it should be renamed to.
+  /// For many functions, like `rename_refs_and_recurse_subqueries`, the keys in
+  /// this `orig_to_new_map` should consist of only the aliases that are allowed
+  /// to be used (e.g. by a `ColumnRef`). We constantly add/remove elements from this
+  /// map in order to achieve this goal.
+  ///
   /// The value is a `Vec` due to shadowing; at any given `ColumnRef` in the query,
   /// the new name should be the last element in the stack.
   ///
@@ -534,7 +539,7 @@ impl AliasRenameContext {
   /// counter the increments by 1 for every TransTable.
   ///
   /// Note: this function leaves the `ctx.orig_to_new_map` that is passed in unmodified.
-  fn alias_rename_under_query<ErrorT: ErrorTrait>(
+  fn rename_aliases_under_query<ErrorT: ErrorTrait>(
     &mut self,
     query: &mut iast::Query,
   ) -> Result<(), ErrorT> {
@@ -542,17 +547,17 @@ impl AliasRenameContext {
 
     // Start the function
     for (_, cte_query) in &mut query.ctes {
-      self.alias_rename_under_query(cte_query)?
+      self.rename_aliases_under_query(cte_query)?
     }
 
     match &mut query.body {
-      iast::QueryBody::Query(child_query) => self.alias_rename_under_query(child_query),
+      iast::QueryBody::Query(child_query) => self.rename_aliases_under_query(child_query),
       iast::QueryBody::Select(select) => {
         // First, rename all `JoinLeaf` aliases without renaming ColumnRefs
-        let new_to_orig_map = self.alias_rename_generation(&mut select.from);
+        let new_to_orig_map = self.rename_aliases_of_join_leafs(&mut select.from);
 
-        // Rename the `ColumnRef`s in the JoinTree.
-        self.alias_rename_under_join_tree(&new_to_orig_map, &mut select.from)?;
+        // Rename the `ColumnRef`s in the `ValExprs` in the JoinTree, and recurse.
+        self.rename_refs_and_recurse_subqueries(&new_to_orig_map, &mut select.from)?;
 
         // Before processing the `ValExpr`s in the query, we add all renames introduced by the
         // `from` clause since they will be in scope. We also make sure to remove these afterwards.
@@ -562,17 +567,23 @@ impl AliasRenameContext {
         for item in &mut select.projection {
           match item {
             iast::SelectItem::ExprWithAlias { item, .. } => {
-              self.alias_rename_under_expr(match item {
+              self.rename_aliases_under_expr(match item {
                 iast::SelectExprItem::ValExpr(expr) => expr,
                 iast::SelectExprItem::UnaryAggregate(unary_agg) => &mut unary_agg.expr,
               })?;
             }
-            iast::SelectItem::Wildcard { .. } => {}
+            iast::SelectItem::Wildcard { table_name } => {
+              // Make sure to rename the qualification when we have a qualification.
+              if let Some(table_name) = table_name {
+                let rename_stack = self.orig_to_new_map.get(table_name).unwrap();
+                *table_name = rename_stack.last().unwrap().clone();
+              }
+            }
           }
         }
 
         // Proces Where Clause
-        self.alias_rename_under_expr(&mut select.selection)?;
+        self.rename_aliases_under_expr(&mut select.selection)?;
 
         self.remove_renames_in_node(&new_to_orig_map, &select.from);
         Ok(())
@@ -582,11 +593,11 @@ impl AliasRenameContext {
 
         // Process Assignment
         for (_, expr) in &mut update.assignments {
-          self.alias_rename_under_expr(expr)?;
+          self.rename_aliases_under_expr(expr)?;
         }
 
         // Proces Where Clause
-        self.alias_rename_under_expr(&mut update.selection)?;
+        self.rename_aliases_under_expr(&mut update.selection)?;
 
         pop_rename(&mut self.orig_to_new_map, &old_name);
         Ok(())
@@ -597,7 +608,7 @@ impl AliasRenameContext {
         // Process Inset Values
         for row in &mut insert.values {
           for val in row {
-            self.alias_rename_under_expr(val)?;
+            self.rename_aliases_under_expr(val)?;
           }
         }
 
@@ -608,7 +619,7 @@ impl AliasRenameContext {
         let old_name = self.rename_table_ref(&mut delete.table);
 
         // Process Inset Values
-        self.alias_rename_under_expr(&mut delete.selection)?;
+        self.rename_aliases_under_expr(&mut delete.selection)?;
 
         pop_rename(&mut self.orig_to_new_map, &old_name);
         Ok(())
@@ -616,9 +627,10 @@ impl AliasRenameContext {
     }
   }
 
-  /// Renames the alias in all `JoinLeaf`s and creates a map that maps back to
-  /// the old name.
-  fn alias_rename_generation(
+  /// Renames the alias in all `JoinLeaf`s in the current Join Tree (but not
+  /// recurse down any subqueries or Derived Tables), and creates a map that
+  /// maps back to the old name.
+  fn rename_aliases_of_join_leafs(
     &mut self,
     join_node: &mut iast::JoinNode,
   ) -> BTreeMap<String, String> {
@@ -646,8 +658,9 @@ impl AliasRenameContext {
     new_to_orig_map
   }
 
-  /// Given a `JoinNode` that was (potentially transitively) renamed with
-  /// the above, this adds the set of renames under this `JoinNode` to `ctx`.
+  /// Given a `JoinNode` that was renamed from the above, this adds the
+  /// set of all (orig_name, new_name) pairs under this `JoinNode` to the
+  /// `orig_to_new_map`.
   fn add_renames_in_node(
     &mut self,
     new_to_orig_map: &BTreeMap<String, String>,
@@ -666,6 +679,9 @@ impl AliasRenameContext {
     }
   }
 
+  /// Given a `JoinNode` that was renamed from the above, this removes the
+  /// set of all (orig_name, new_name) pairs under this `JoinNode` from the
+  /// `orig_to_new_map`.
   fn remove_renames_in_node(
     &mut self,
     new_to_orig_map: &BTreeMap<String, String>,
@@ -694,7 +710,7 @@ impl AliasRenameContext {
   }
 
   /// Rename columsn unde helper.
-  fn alias_rename_under_expr<ErrorT: ErrorTrait>(
+  fn rename_aliases_under_expr<ErrorT: ErrorTrait>(
     &mut self,
     expr: &mut iast::ValExpr,
   ) -> Result<(), ErrorT> {
@@ -711,50 +727,60 @@ impl AliasRenameContext {
           Ok(())
         }
       }
-      iast::ValExpr::UnaryExpr { expr, .. } => self.alias_rename_under_expr(expr),
+      iast::ValExpr::UnaryExpr { expr, .. } => self.rename_aliases_under_expr(expr),
       iast::ValExpr::BinaryExpr { left, right, .. } => {
-        self.alias_rename_under_expr(left)?;
-        self.alias_rename_under_expr(right)
+        self.rename_aliases_under_expr(left)?;
+        self.rename_aliases_under_expr(right)
       }
       iast::ValExpr::Value { .. } => Ok(()),
-      iast::ValExpr::Subquery { query, .. } => self.alias_rename_under_query(query),
+      iast::ValExpr::Subquery { query, .. } => self.rename_aliases_under_query(query),
     }
   }
 
-  /// This function renames all `ColumnRef`s that appears underneath the `join_node`.
-  /// Note: This function leaves `ctx.orig_to_new_map` unmodified.
-  fn alias_rename_under_join_tree<ErrorT: ErrorTrait>(
+  /// Rename the `ColumnRef`s in the `ValExprs` in the JoinTree, and recurse down
+  /// any subqueries including Derived Tables.
+  ///
+  /// At any point, the keyset of `self.orig_to_new_map` will
+  /// contain the set of permissible aliases that can be used in a `ColumnRef`.
+  ///
+  /// Note: This function always ultimately `self.orig_to_new_map` unmodified.
+  fn rename_refs_and_recurse_subqueries<ErrorT: ErrorTrait>(
     &mut self,
     new_to_orig_map: &BTreeMap<String, String>,
     join_node: &mut iast::JoinNode,
   ) -> Result<(), ErrorT> {
     match join_node {
       iast::JoinNode::JoinInnerNode(inner) => {
-        self.alias_rename_under_join_tree(new_to_orig_map, &mut inner.left)?;
+        // Recurse left
+        self.rename_refs_and_recurse_subqueries(new_to_orig_map, &mut inner.left)?;
 
-        // If the right child is a Lateral Derived Table, we need to add the renames
-        // from the left child.
+        // Recurse right
         if let iast::JoinNode::JoinLeaf(iast::JoinLeaf {
           source: iast::JoinNodeSource::DerivedTable { lateral: true, .. },
           ..
         }) = inner.right.as_ref()
         {
+          // If the right child is a Lateral Derived Table, we need to add the renames
+          // from the left child before recursing.
           self.add_renames_in_node(new_to_orig_map, &inner.left);
-          self.alias_rename_under_join_tree(new_to_orig_map, &mut inner.right)?;
+          self.rename_refs_and_recurse_subqueries(new_to_orig_map, &mut inner.right)?;
           self.remove_renames_in_node(new_to_orig_map, &inner.left);
-        };
+        } else {
+          // Otherwise, just recurse.
+          self.rename_refs_and_recurse_subqueries(new_to_orig_map, &mut inner.right)?;
+        }
 
         // For the ON clause, renames from both sides must be added.
         self.add_renames_in_node(new_to_orig_map, &inner.left);
         self.add_renames_in_node(new_to_orig_map, &inner.right);
-        self.alias_rename_under_expr(&mut inner.on)?;
+        self.rename_aliases_under_expr(&mut inner.on)?;
         self.remove_renames_in_node(new_to_orig_map, &inner.left);
         self.remove_renames_in_node(new_to_orig_map, &inner.right);
         Ok(())
       }
       iast::JoinNode::JoinLeaf(leaf) => {
         if let iast::JoinNodeSource::DerivedTable { query, .. } = &mut leaf.source {
-          self.alias_rename_under_query(query)
+          self.rename_aliases_under_query(query)
         } else {
           Ok(())
         }

@@ -1662,6 +1662,22 @@ fn simple_join_test(seed: [u8; 16]) {
     );
   }
 
+  // Select with a RIGHT JOIN and WHERE clause. We make sure that the WHERE clause
+  // is clearly executed after row re-addition.
+  {
+    let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("count"), cno("balance")]);
+    exp_result.add_row(vec![None, None, Some(cvi(60))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT product_id, count, balance
+        FROM inventory AS I RIGHT JOIN user AS U ON U.email = 'my_email_0'
+        WHERE U.email = 'my_email_1';
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
   // Select with a OUTER JOIN
   {
     let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("count"), cno("balance")]);
@@ -1725,7 +1741,7 @@ fn advanced_join_test(seed: [u8; 16]) {
     );
   }
 
-  // Select with a derived table on one side of a JOIN in the FROM clause
+  // Select with a derived table on one side of a JOIN.
   {
     let mut exp_result = QueryResult::new(vec![cno("balance"), cno("double_count")]);
     exp_result.add_row(vec![Some(cvi(50)), Some(cvi(30))]);
@@ -1742,23 +1758,23 @@ fn advanced_join_test(seed: [u8; 16]) {
       exp_result,
     );
   }
-  //
-  // // Select with a LATERAL JOIN.
-  // {
-  //   let mut exp_result = QueryResult::new(vec![cno("balance"), cno("double_count")]);
-  //   exp_result.add_row(vec![Some(cvi(50)), Some(cvi(30))]);
-  //   exp_result.add_row(vec![Some(cvi(60)), Some(cvi(50))]);
-  //   ctx.execute_query(
-  //     &mut sim,
-  //     " SELECT balance, D.*
-  //       FROM user AS U JOIN LATERAL (SELECT I.count * 2 AS double_count
-  //                                    FROM inventory AS I
-  //                                    WHERE I.email = U.email) AS D;
-  //     ",
-  //     10000,
-  //     exp_result,
-  //   );
-  // }
+
+  // Select with a LATERAL JOIN.
+  {
+    let mut exp_result = QueryResult::new(vec![cno("balance"), cno("double_count")]);
+    exp_result.add_row(vec![Some(cvi(50)), Some(cvi(30))]);
+    exp_result.add_row(vec![Some(cvi(60)), Some(cvi(50))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT balance, D.*
+        FROM user AS U JOIN LATERAL (SELECT I.count * 2 AS double_count
+                                     FROM inventory AS I
+                                     WHERE I.email = U.email) AS D;
+      ",
+      10000,
+      exp_result,
+    );
+  }
 
   // Select with simple triple Join.
   {
@@ -1770,7 +1786,7 @@ fn advanced_join_test(seed: [u8; 16]) {
       " SELECT I3.count
         FROM (inventory AS I1 JOIN
               inventory AS I2 ON I1.product_id = 0) JOIN
-              inventory as I3 ON I2.product_id = 1
+              inventory AS I3 ON I2.product_id = 1
       ",
       10000,
       exp_result,
