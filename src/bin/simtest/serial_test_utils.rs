@@ -251,7 +251,7 @@ pub fn setup(seed: [u8; 16]) -> (Simulation, TestContext) {
   (sim, context)
 }
 
-pub fn setup_inventory_table(sim: &mut Simulation, context: &mut TestContext) {
+pub fn deprecated_setup_inventory_table(sim: &mut Simulation, context: &mut TestContext) {
   {
     context.send_ddl_query(
       sim,
@@ -266,7 +266,7 @@ pub fn setup_inventory_table(sim: &mut Simulation, context: &mut TestContext) {
   }
 }
 
-pub fn populate_inventory_table_basic(sim: &mut Simulation, context: &mut TestContext) {
+pub fn deprecated_populate_inventory_table_basic(sim: &mut Simulation, context: &mut TestContext) {
   {
     let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
     exp_result.add_row(vec![Some(cvi(0)), Some(cvs("my_email_0")), Some(cvi(15))]);
@@ -309,6 +309,39 @@ pub fn populate_user_table_basic(sim: &mut Simulation, context: &mut TestContext
         VALUES ('my_email_0', 50),
                ('my_email_1', 60),
                ('my_email_2', 70);
+      ",
+      10000,
+      exp_result,
+    );
+  }
+}
+
+pub fn setup_product_stock_table(sim: &mut Simulation, context: &mut TestContext) {
+  {
+    context.send_ddl_query(
+      sim,
+      " CREATE TABLE product_stock (
+          id          INT PRIMARY KEY,
+          product_id  INT,
+        );
+      ",
+      10000,
+    );
+  }
+}
+
+pub fn populate_product_stock_table_basic(sim: &mut Simulation, context: &mut TestContext) {
+  {
+    let mut exp_result = QueryResult::new(vec![cno("id"), cno("product_id")]);
+    exp_result.add_row(vec![Some(cvi(0)), Some(cvi(0))]);
+    exp_result.add_row(vec![Some(cvi(1)), Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvi(2)), Some(cvi(1))]);
+    context.execute_query(
+      sim,
+      " INSERT INTO product_stock (id, product_id)
+        VALUES (0, 0),
+               (1, 1),
+               (2, 1);
       ",
       10000,
       exp_result,

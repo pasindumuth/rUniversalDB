@@ -1,6 +1,7 @@
 use crate::serial_test_utils::{
-  mk_general_sim, populate_inventory_table_basic, populate_user_table_basic, setup,
-  setup_inventory_table, setup_user_table, simulate_until_clean, TestContext,
+  deprecated_populate_inventory_table_basic, deprecated_setup_inventory_table, mk_general_sim,
+  populate_product_stock_table_basic, populate_user_table_basic, setup, setup_product_stock_table,
+  setup_user_table, simulate_until_clean, TestContext,
 };
 use crate::simulation::Simulation;
 use rand::{RngCore, SeedableRng};
@@ -61,8 +62,8 @@ fn simple_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Test Basic Queries
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
 
   // Test Simple Update-Select
 
@@ -197,7 +198,7 @@ fn subquery_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
 
   {
     let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
@@ -304,8 +305,8 @@ fn trans_table_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
   populate_user_table_basic(&mut sim, &mut ctx);
 
@@ -340,8 +341,8 @@ fn select_projection_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
   populate_user_table_basic(&mut sim, &mut ctx);
 
@@ -451,7 +452,7 @@ fn insert_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
 
   // Fully Insert with NULL
 
@@ -534,7 +535,7 @@ fn update_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
 
   // Failures cases
 
@@ -694,8 +695,8 @@ fn multi_stage_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
   populate_user_table_basic(&mut sim, &mut ctx);
 
@@ -753,8 +754,8 @@ fn aggregation_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
     let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
@@ -870,7 +871,7 @@ fn avg_aggregation_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
 
   // Test empty table
   {
@@ -953,7 +954,7 @@ fn aliased_column_resolution_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
 
   {
     let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
@@ -1049,8 +1050,8 @@ fn basic_add_column(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
 
   // Add Column and Write to it
 
@@ -1134,8 +1135,8 @@ fn drop_column(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
 
   // See if deleting a column and adding it back results in SELECTs now reading null
   // for that column (rather than a non-null value that was previously there).
@@ -1264,8 +1265,8 @@ fn basic_delete_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
     let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
@@ -1338,8 +1339,8 @@ fn insert_delete_insert_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
     let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
@@ -1394,8 +1395,8 @@ fn ghost_deleted_row_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
     let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("email"), cno("count")]);
@@ -1462,8 +1463,8 @@ fn drop_table_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Create a Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
   populate_user_table_basic(&mut sim, &mut ctx);
 
@@ -1519,7 +1520,7 @@ fn drop_table_test(seed: [u8; 16]) {
   }
 
   // Create 'inventory' again and verify it is empty
-  setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
 
   {
     let mut exp_result = QueryResult::new(vec![None]);
@@ -1549,7 +1550,7 @@ fn drop_table_test(seed: [u8; 16]) {
 
   // Add data to 'inventory'
 
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
 
   {
     let mut exp_result = QueryResult::new(vec![None]);
@@ -1575,8 +1576,8 @@ fn simple_join_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
   populate_user_table_basic(&mut sim, &mut ctx);
 
@@ -1720,10 +1721,12 @@ fn advanced_join_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
   populate_user_table_basic(&mut sim, &mut ctx);
+  setup_product_stock_table(&mut sim, &mut ctx);
+  populate_product_stock_table_basic(&mut sim, &mut ctx);
 
   // Select with a derived table in the FROM clause.
   {
@@ -1793,6 +1796,64 @@ fn advanced_join_test(seed: [u8; 16]) {
     );
   }
 
+  // Select with triple join with chain of dependencies (U depends in I, and I
+  // depends on PS). We also have subqueries as well.
+  {
+    let mut exp_result = QueryResult::new(vec![cno("user_balance")]);
+    exp_result.add_row(vec![Some(cvi(50))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT user_balance
+        FROM ((SELECT email, balance as user_balance FROM user) AS U JOIN
+              (SELECT * FROM inventory) AS I ON I.email = U.email) JOIN
+              (SELECT * FROM product_stock) AS PS ON PS.product_id = I.product_id AND PS.id = 0;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Select with subquery in ON clause, were it remains as a weak conjunction.
+  {
+    let mut exp_result = QueryResult::new(vec![cno("balance"), cno("product_id")]);
+    exp_result.add_row(vec![Some(cvi(60)), Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvi(70)), None]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT balance, product_id
+        FROM user AS U LEFT JOIN inventory AS I
+          ON ((SELECT count(id) 
+               FROM product_stock
+               WHERE product_id = I.product_id) = 2)
+          AND U.balance <= 60
+        WHERE balance > 50;
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
+  // Select with subquery in ON clause, where the subquery gets pushed down
+  // as a strong conjunction.
+  {
+    let mut exp_result = QueryResult::new(vec![cno("email"), cno("balance"), cno("product_id")]);
+    exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(50)), Some(cvi(1))]);
+    exp_result.add_row(vec![Some(cvs("my_email_0")), Some(cvi(60)), Some(cvi(1))]);
+    ctx.execute_query(
+      &mut sim,
+      " SELECT U2.email, U1.balance, product_id
+        FROM user AS U2 JOIN (user AS U1 LEFT JOIN inventory AS I)
+          ON ((SELECT count(id) 
+               FROM product_stock
+               WHERE product_id = I.product_id) = 2)
+          AND U1.balance <= 60
+        WHERE U2.email = 'my_email_0';
+      ",
+      10000,
+      exp_result,
+    );
+  }
+
   println!("Test 'advanced_join_test' Passed! Time taken: {:?}ms", sim.true_timestamp().time_ms)
 }
 
@@ -1800,8 +1861,8 @@ fn join_errors_test(seed: [u8; 16]) {
   let (mut sim, mut ctx) = setup(seed);
 
   // Setup Tables
-  setup_inventory_table(&mut sim, &mut ctx);
-  populate_inventory_table_basic(&mut sim, &mut ctx);
+  deprecated_setup_inventory_table(&mut sim, &mut ctx);
+  deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
   setup_user_table(&mut sim, &mut ctx);
   populate_user_table_basic(&mut sim, &mut ctx);
 
@@ -1974,8 +2035,8 @@ fn cancellation_test(seed: [u8; 16]) {
     let (mut sim, mut ctx) = setup(seed);
 
     // Setup Tables
-    setup_inventory_table(&mut sim, &mut ctx);
-    populate_inventory_table_basic(&mut sim, &mut ctx);
+    deprecated_setup_inventory_table(&mut sim, &mut ctx);
+    deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
     setup_user_table(&mut sim, &mut ctx);
     populate_user_table_basic(&mut sim, &mut ctx);
 
@@ -2178,8 +2239,8 @@ fn paxos_basic_serial_test(seed: [u8; 16]) {
     let mut ctx = TestContext::new(&sim);
 
     // Test Simple Update-Select
-    setup_inventory_table(&mut sim, &mut ctx);
-    populate_inventory_table_basic(&mut sim, &mut ctx);
+    deprecated_setup_inventory_table(&mut sim, &mut ctx);
+    deprecated_populate_inventory_table_basic(&mut sim, &mut ctx);
 
     // Send the query and simulate
     let query = "

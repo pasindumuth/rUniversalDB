@@ -1168,11 +1168,7 @@ fn build_join_node_schema(
     }
 
     // Add the column references in the conjunctions to col_refs
-    for expr in &inner.weak_conjunctions {
-      add_col_refs_with_expr(&left_jlns, expr, &mut left_col_refs);
-      add_col_refs_with_expr(&right_jlns, expr, &mut right_col_refs);
-    }
-    for expr in &inner.strong_conjunctions {
+    for expr in inner.weak_conjunctions.iter().chain(inner.strong_conjunctions.iter()) {
       add_col_refs_with_expr(&left_jlns, expr, &mut left_col_refs);
       add_col_refs_with_expr(&right_jlns, expr, &mut right_col_refs);
     }
