@@ -1,4 +1,4 @@
-use crate::common::{remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp};
+use crate::common::{add_item, remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp};
 use crate::common::{
   CQueryPath, CTQueryPath, ColName, Context, PaxosGroupId, PaxosGroupIdTrait, QueryId,
   SlaveGroupId, TQueryPath, TablePath, TableView, TransTableName,
@@ -284,6 +284,10 @@ impl<SqlQueryInnerT: SqlQueryInner> TPESBase for MSTableES<SqlQueryInnerT> {
   fn deregister(self, ms_query_es: &mut MSQueryES) -> (QueryId, CTQueryPath, Vec<QueryId>) {
     ms_query_es.pending_queries.remove(&self.general.query_id);
     (self.general.query_id, self.sender_path, self.child_queries)
+  }
+
+  fn add_subquery(&mut self, subquery_id: &QueryId) {
+    add_item(&mut self.child_queries, subquery_id)
   }
 
   fn remove_subquery(&mut self, subquery_id: &QueryId) {

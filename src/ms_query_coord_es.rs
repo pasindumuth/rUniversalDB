@@ -200,8 +200,8 @@ impl FullMSCoordES {
         perform_aggregation(sql_query, pre_agg_table_views)
       }
       proc::MSQueryStage::JoinSelect(_) => {
-        // TODO: do properly
-        unimplemented!()
+        debug_assert!(false);
+        return None;
       }
       proc::MSQueryStage::Update(_) => Ok(pre_agg_table_views),
       proc::MSQueryStage::Insert(_) => Ok(pre_agg_table_views),

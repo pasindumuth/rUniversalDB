@@ -105,7 +105,7 @@ pub fn compute_table_location_map<ViewT: DBSchemaView>(
 }
 
 /// Validates the `MSQuery` in various ways. In particularly, this checks whether the
-/// columnt that are written by an Insert or Update are valid and present in `view`.
+/// columns that are written by an Insert or Update are valid and present in `view`.
 pub fn perform_validations<ErrorT: ErrorTrait, ViewT: DBSchemaView<ErrorT = ErrorT>>(
   view: &mut ViewT,
   ms_query: &proc::MSQuery,

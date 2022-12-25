@@ -1,7 +1,7 @@
 use crate::col_usage::{col_collecting_cb, col_ref_collecting_cb, QueryElement, QueryIterator};
 use crate::common::{
-  btree_multimap_insert, lookup, mk_qid, remove_item, CoreIOCtx, GossipData, GossipDataView,
-  KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
+  add_item, btree_multimap_insert, lookup, mk_qid, remove_item, CoreIOCtx, GossipData,
+  GossipDataView, KeyBound, OrigP, QueryESResult, QueryPlan, ReadRegion, TabletKeyRange, Timestamp,
 };
 use crate::common::{
   CQueryPath, CTQueryPath, ColName, ColType, ColVal, ColValN, Context, ContextRow, PaxosGroupId,
@@ -383,6 +383,10 @@ impl TPESBase for TableReadES {
 
   fn deregister(self, _: &mut ()) -> (QueryId, CTQueryPath, Vec<QueryId>) {
     (self.query_id, self.sender_path, self.child_queries)
+  }
+
+  fn add_subquery(&mut self, subquery_id: &QueryId) {
+    add_item(&mut self.child_queries, subquery_id)
   }
 
   fn remove_subquery(&mut self, subquery_id: &QueryId) {

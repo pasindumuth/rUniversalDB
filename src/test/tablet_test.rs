@@ -87,25 +87,12 @@ pub fn check_tablet_clean(tablet: &TabletState, check_ctx: &mut CheckCtx) {
   let statuses = &tablet.statuses;
   let ctx = &tablet.ctx;
 
-  // Check `Tablet` clean
-
-  check_ctx.check(ctx.verifying_writes.is_empty());
-  check_ctx.check(ctx.inserting_prepared_writes.is_empty());
-  check_ctx.check(ctx.prepared_writes.is_empty());
-
-  check_ctx.check(ctx.waiting_read_protected.is_empty());
-  check_ctx.check(ctx.inserting_read_protected.is_empty());
-
-  check_ctx.check(ctx.waiting_locked_cols.is_empty());
-  check_ctx.check(ctx.inserting_locked_cols.is_empty());
-
-  check_ctx.check(ctx.ms_root_query_map.is_empty());
-
   // Check `Statuses` clean
 
   check_ctx.check(statuses.perform_query_buffer.is_empty());
 
   check_ctx.check(statuses.gr_query_ess.is_empty());
+  check_ctx.check(statuses.join_query_ess.is_empty());
   check_ctx.check(statuses.tm_statuss.is_empty());
   check_ctx.check(statuses.ms_query_ess.is_empty());
   check_ctx.check(statuses.top.table_read_ess.is_empty());
@@ -132,4 +119,18 @@ pub fn check_tablet_clean(tablet: &TabletState, check_ctx: &mut CheckCtx) {
     ShardingState::None => true,
     ShardingState::ShardingSnapshotES(_) => false,
   });
+
+  // Check `Tablet` clean
+
+  check_ctx.check(ctx.verifying_writes.is_empty());
+  check_ctx.check(ctx.inserting_prepared_writes.is_empty());
+  check_ctx.check(ctx.prepared_writes.is_empty());
+
+  check_ctx.check(ctx.waiting_read_protected.is_empty());
+  check_ctx.check(ctx.inserting_read_protected.is_empty());
+
+  check_ctx.check(ctx.waiting_locked_cols.is_empty());
+  check_ctx.check(ctx.inserting_locked_cols.is_empty());
+
+  check_ctx.check(ctx.ms_root_query_map.is_empty());
 }

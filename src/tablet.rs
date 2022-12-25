@@ -370,6 +370,7 @@ pub trait TPESBase {
   // TODO: see if we can merge this with exit_and_clean_up
   fn deregister(self, _es_ctx: &mut Self::ESContext) -> (QueryId, CTQueryPath, Vec<QueryId>);
 
+  fn add_subquery(&mut self, _subquery_id: &QueryId);
   fn remove_subquery(&mut self, _subquery_id: &QueryId);
 }
 
@@ -1664,20 +1665,23 @@ impl TabletContext {
               // Inform TMStatus
               let query_ids: Vec<QueryId> = statuses.tm_statuss.keys().cloned().collect();
               for query_id in query_ids {
-                let tm_status = statuses.tm_statuss.get_mut(&query_id).unwrap();
-                if let Some(cur_lid) = tm_status.leaderships.get(&sid) {
-                  if cur_lid < &lid {
-                    // The new Leadership of a remote slave has changed beyond what the TMStatus
-                    // had contacted, so that RM will surely not respond. Thus we abort this
-                    // whole TMStatus and inform the GRQueryES so that it can retry the stage.
-                    let gr_query_id = tm_status.orig_p.query_id.clone();
-                    self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
+                // We check again that the TMStatus exists, since it is possible that aborting
+                // one TMStatus ends up aborting others as well.
+                if let Some(tm_status) = statuses.tm_statuss.get_mut(&query_id) {
+                  if let Some(cur_lid) = tm_status.leaderships.get(&sid) {
+                    if cur_lid < &lid {
+                      // The new Leadership of a remote slave has changed beyond what the TMStatus
+                      // had contacted, so that RM will surely not respond. Thus we abort this
+                      // whole TMStatus and inform the GRQueryES so that it can retry the stage.
+                      let gr_query_id = tm_status.orig_p.query_id.clone();
+                      self.exit_and_clean_up(io_ctx, statuses, query_id.clone());
 
-                    // Inform the GRQueryES
-                    let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
-                    remove_item(&mut gr_query.child_queries, &query_id);
-                    let action = gr_query.es.handle_tm_remote_leadership_changed(self, io_ctx);
-                    self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
+                      // Inform the GRQueryES
+                      let gr_query = statuses.gr_query_ess.get_mut(&gr_query_id).unwrap();
+                      remove_item(&mut gr_query.child_queries, &query_id);
+                      let action = gr_query.es.handle_tm_remote_leadership_changed(self, io_ctx);
+                      self.handle_gr_query_es_action(io_ctx, statuses, gr_query_id, action);
+                    }
                   }
                 }
               }
@@ -1768,6 +1772,7 @@ impl TabletContext {
           // Wink away all TM ESs.
           statuses.perform_query_buffer.clear();
           statuses.gr_query_ess.clear();
+          statuses.join_query_ess.clear();
           statuses.tm_statuss.clear();
           statuses.ms_query_ess.clear();
           statuses.top.table_read_ess.clear();
@@ -3065,7 +3070,24 @@ impl TabletContext {
     match action {
       None => {}
       Some(TPESAction::SendSubqueries(gr_query_ess)) => {
-        // TODO: add these as child queries?
+        struct Cb;
+        impl CallbackOnce<&Vec<GRQueryES>> for Cb {
+          fn call<IOCtx: CoreIOCtx, TPEST: TPESBase>(
+            _: &mut TabletContext,
+            _: &mut IOCtx,
+            es: &mut TPEST,
+            gr_query_ess: &Vec<GRQueryES>,
+          ) -> TabletAction {
+            for gr_query_es in gr_query_ess {
+              es.add_subquery(&gr_query_es.query_id);
+            }
+            TabletAction::Wait
+          }
+        }
+
+        // Remember the subqueries
+        statuses.execute_once::<_, _, Cb>(self, io_ctx, query_id, &gr_query_ess);
+
         self.launch_subqueries(io_ctx, statuses, gr_query_ess);
       }
       Some(TPESAction::Success(success)) => {
@@ -3139,7 +3161,6 @@ impl TabletContext {
     match action {
       None => {}
       Some(TPESAction::SendSubqueries(gr_query_ess)) => {
-        // TODO: the TP ES does nto do this... wtf. these need to be here.
         if let Some(wrapper) = statuses.join_query_ess.get_mut(&query_id) {
           for gr_query_es in &gr_query_ess {
             wrapper.child_queries.push(gr_query_es.query_id.clone());

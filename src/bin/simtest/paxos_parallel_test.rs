@@ -417,6 +417,39 @@ impl<'a> QueryGenCtx<'a> {
     Some(query)
   }
 
+  fn mk_join_select(&mut self) -> Option<String> {
+    // Choose a random Table to Read from.
+    let (source1, mut key_cols1, mut val_cols1) = self.pick_random_table()?;
+    let (source2, mut _1, mut _2) = self.pick_random_table()?;
+    let r = &mut self.rand;
+
+    // Recall that there is only one KeyCol in all Tables
+    let key_col = key_cols1.into_iter().next().unwrap();
+    val_cols1[..].shuffle(r);
+    let mut val_col1_it = val_cols1.into_iter();
+
+    let query_type = r.next_u32() % 1;
+    let query = if query_type == 0 {
+      let proj_val_col = val_col1_it.next()?;
+      let filter_val_col = key_col;
+      format!(
+        " SELECT {proj_val_col}
+          FROM {source1} JOIN {source2}
+          WHERE {filter_val_col} >= {x1};
+        ",
+        source1 = source1,
+        source2 = source2,
+        proj_val_col = proj_val_col.0,
+        filter_val_col = filter_val_col.0,
+        x1 = mk_int(r, Self::INT_BOUND)
+      )
+    } else {
+      panic!()
+    };
+
+    Some(query)
+  }
+
   /// This create queries that touch 2 tables, containing CTEs and subqueries.
   fn mk_advanced_query(&mut self) -> Option<String> {
     let (source1, mut key_cols1, mut val_cols1) = self.pick_random_table()?;
@@ -498,12 +531,15 @@ impl<'a> QueryGenCtx<'a> {
     let num_stages = (self.rand.next_u32() % 6) + 1;
     let mut stages = Vec::<String>::new();
     for _ in 0..num_stages {
-      let stage_type = self.rand.next_u32() % 4;
+      let stage_type = self.rand.next_u32() % 5;
       let stage = match stage_type {
         0 => self.mk_insert()?,
         1 => self.mk_update()?,
         2 => self.mk_delete()?,
         3 => self.mk_select()?,
+        4 => self.mk_advanced_query()?,
+        // TODO: enable
+        // 5 => self.mk_join_select()?,
         _ => panic!(),
       };
       stages.push(stage);
@@ -1016,14 +1052,14 @@ pub fn parallel_test<WriterT: Writer>(
           // For the first few iterations, we create some tables.
           gen_ctx.mk_create_table().map(|x| GenQuery::DDLQuery(x))
         } else if iteration < NUM_WARMUP_ITERATIONS {
-          // For the next few iterations, we populate that ables.
+          // For the next few iterations, we populate that tables.
           gen_ctx.mk_insert().map(|x| GenQuery::Query(x))
         } else {
           // Otherwise, we randomly generate any type of query chosen using a hard-coded
           // distribution. We define the distribution as a constant vector that specifies
           // the relative probabilities.
-          let dist: [u32; 11] =
-            [5, 4, 5, 5, 30, 20, 5, 40, 15, 10, if do_sharding { 10 } else { 0 }];
+          let dist: [u32; 12] =
+            [5, 4, 5, 5, 30, 20, 5, 40, 15, 10, 10, if do_sharding { 10 } else { 0 }];
 
           // Select an `idx` into dist based on its probability distribution.
           let mut i: u32 = gen_ctx.rand.next_u32() % dist.iter().sum::<u32>();
@@ -1045,7 +1081,8 @@ pub fn parallel_test<WriterT: Writer>(
             7 => gen_ctx.mk_select().map(|x| GenQuery::Query(x)),
             8 => gen_ctx.mk_multi_stage().map(|x| GenQuery::Query(x)),
             9 => gen_ctx.mk_advanced_query().map(|x| GenQuery::Query(x)),
-            10 => gen_ctx.mk_sharding_query().map(|x| GenQuery::Sharding(x)),
+            10 => gen_ctx.mk_join_select().map(|x| GenQuery::Query(x)),
+            11 => gen_ctx.mk_sharding_query().map(|x| GenQuery::Sharding(x)),
             _ => panic!(),
           }
         };

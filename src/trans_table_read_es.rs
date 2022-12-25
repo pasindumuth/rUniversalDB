@@ -1,4 +1,6 @@
-use crate::common::{mk_qid, remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp};
+use crate::common::{
+  add_item, mk_qid, remove_item, CoreIOCtx, QueryESResult, QueryPlan, Timestamp,
+};
 use crate::common::{
   CQueryPath, ColName, ColValN, ContextRow, ContextSchema, PaxosGroupId, PaxosGroupIdTrait,
   SlaveGroupId, TQueryPath, TableView, TransTableName,
@@ -361,6 +363,10 @@ impl TransTableReadES {
     &self.location_prefix
   }
 
+  pub fn add_subquery(&mut self, subquery_id: &QueryId) {
+    add_item(&mut self.child_queries, subquery_id)
+  }
+
   pub fn remove_subquery(&mut self, subquery_id: &QueryId) {
     remove_item(&mut self.child_queries, subquery_id)
   }
@@ -443,6 +449,10 @@ impl TPESBase for TransTableReadES {
 
   fn deregister(self, es_ctx: &mut Self::ESContext) -> (QueryId, CTQueryPath, Vec<QueryId>) {
     TransTableReadES::deregister(self, es_ctx)
+  }
+
+  fn add_subquery(&mut self, subquery_id: &QueryId) {
+    TransTableReadES::add_subquery(self, subquery_id)
   }
 
   fn remove_subquery(&mut self, subquery_id: &QueryId) {
