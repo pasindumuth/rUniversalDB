@@ -41,25 +41,38 @@ if [ "$1" = "setup" ]; then
   docker network create --subnet=172.19.0.0/16 runiversal-net
   docker build -t runiversal -f Dockerfile.init .
   docker build -t runiversal .
+
 elif [ "$1" = "build" ]; then
   docker build -t runiversal .
+
+# Spin a client and turn the current shell into an interactive CLI.
+elif [ "$1" = "new_client" ]; then
+  docker run --cap-add=NET_ADMIN -it --name=rclient"$2" --ip 172.19.0."$2" --network=runiversal-net runiversal scripts/client -i 172.19.0."$2" -e 172.19.0."$3"
+
+# Spin up a slave in the background (starting as a FreeNode)
+elif [ "$1" = "new_node" ]; then
+  docker run --cap-add=NET_ADMIN -d --name=runiversal"$2" --ip 172.19.0."$2" --network=runiversal-net runiversal scripts/transact -i 172.19.0."$2" -t freenode -f "$3" -e 172.19.0."$4"
+
 elif [ "$1" = "masters" ]; then
   masters
+
 elif [ "$1" = "slaves" ]; then
   slaves
+
 elif [ "$1" = "client_init" ]; then
   client_init
+
 elif [ "$1" = "client" ]; then
   client
+
+# Spin up the Master Group, `NUM_SLAVES_GROUPS` number of Slave Groups, and a an interactive client.
 elif [ "$1" = "start" ]; then
   masters
   client_init
   slaves
   client
-elif [ "$1" = "new_client" ]; then
-  docker run --cap-add=NET_ADMIN -it --name=rclient"$2" --ip 172.19.0."$2" --network=runiversal-net runiversal scripts/client -i 172.19.0."$2" -e 172.19.0.10
-elif [ "$1" = "new_slave" ]; then
-  docker run --cap-add=NET_ADMIN -d --name=runiversal"$2" --ip 172.19.0."$2" --network=runiversal-net runiversal scripts/transact -i 172.19.0."$2" -t freenode -f "$3" -e 172.19.0.10
+
+# Clean only what is allocated by the `start`
 elif [ "$1" = "clean" ]; then
   CONTAINERS="rclient";
   for ((i = 10; i < $((15 + $NUM_SLAVES)); i++)); do
@@ -67,32 +80,43 @@ elif [ "$1" = "clean" ]; then
   done
   docker kill ${CONTAINERS} &> /dev/null;
   docker container rm ${CONTAINERS} &> /dev/null;
-elif [ "$1" = "mclean" ]; then
-  CONTAINERS="";
-  for ((i = 10; i < 15; i++)); do
+
+# Do a deep clean, where we just kill all `runiversal` and `rclient` nodes that we might have spun up.
+elif [ "$1" = "dclean" ]; then
+  CONTAINERS="rclient";
+  for ((i = 2; i < 10; i++)); do
+    CONTAINERS="${CONTAINERS} rclient${i}";
+  done
+  for ((i = 10; i < 45; i++)); do
     CONTAINERS="${CONTAINERS} runiversal${i}";
   done
   docker kill ${CONTAINERS} &> /dev/null;
   docker container rm ${CONTAINERS} &> /dev/null;
-elif [ "$1" = "sclean" ]; then
-  CONTAINERS="";
-  for ((i = 15; i < $((15 + $NUM_SLAVES)); i++)); do
-    CONTAINERS="${CONTAINERS} runiversal${i}";
-  done
-  docker kill ${CONTAINERS} &> /dev/null;
-  docker container rm ${CONTAINERS} &> /dev/null;
+
+# Clean up single `runiversal` node.
+elif [ "$1" = "nclean" ]; then
+  CONTAINER=runiversal"$2"
+  docker kill ${CONTAINER} &> /dev/null;
+  docker container rm ${CONTAINER} &> /dev/null;
+
+# Clean up single `rclient` node.
 elif [ "$1" = "cclean" ]; then
   CONTAINER=rclient"$2"
   docker kill ${CONTAINER} &> /dev/null;
   docker container rm ${CONTAINER} &> /dev/null;
+
 elif [ "$1" = "test" ]; then
   cargo run --release --bin simtest -- -i 8 -r 80
+
 elif [ "$1" = "test_all" ]; then
   cargo run --release --bin simtest -- -i 8 -r 80;
   cargo run --release --bin paxos;
   cargo run --release --bin paxos2pc_sim;
+
 elif [ "$1" = "bench" ]; then
   cargo run --release --bin simtest -- -i 4 -r 8
+
 else
   echo "unrecognized command: ${1}"
+
 fi
