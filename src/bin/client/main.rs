@@ -319,54 +319,62 @@ impl ClientState {
     }
     // Send a normal DQL or DQL Query (based on what the `opt_target_eid` is).
     else {
-      let request_id = mk_rid(&mut self.rand);
-      if is_ddl(&input) {
-        // Send this message as a DDL Query to the Master.
-        let network_msg = msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
-          msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
-            sender_eid: self.this_eid.clone(),
-            request_id: request_id.clone(),
-            query: input,
-          }),
-        ));
-        self.send(self.get_master()?, SendAction::new(network_msg, None));
-      } else {
-        // Otherwise, send this message as a DQL Query to the Slave.
-        let network_msg = msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
-          msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
-            sender_eid: self.this_eid.clone(),
-            request_id: request_id.clone(),
-            query: input,
-          }),
-        ));
-        self.send(self.get_slave()?, SendAction::new(network_msg, None));
-      };
+      let mut next_loop_action = LoopAction::DoNothing;
 
-      // Send and wait for a response
-      let message =
-        block_until_network_response(self.to_server_receiver.as_ref(), &request_id).message;
+      // The user can enter multiple queries in at once such that they are all
+      // executed one-at-a-time. This is convenient for quickly setting up multiple
+      // tables with some initial data.
+      for input in input.split("-- Separate") {
+        let request_id = mk_rid(&mut self.rand);
+        if is_ddl(&input) {
+          // Send this message as a DDL Query to the Master.
+          let network_msg = msg::NetworkMessage::Master(msg::MasterMessage::MasterExternalReq(
+            msg::MasterExternalReq::PerformExternalDDLQuery(msg::PerformExternalDDLQuery {
+              sender_eid: self.this_eid.clone(),
+              request_id: request_id.clone(),
+              query: input.to_string(),
+            }),
+          ));
+          self.send(self.get_master()?, SendAction::new(network_msg, None));
+        } else {
+          // Otherwise, send this message as a DQL Query to the Slave.
+          let network_msg = msg::NetworkMessage::Slave(msg::SlaveMessage::SlaveExternalReq(
+            msg::SlaveExternalReq::PerformExternalQuery(msg::PerformExternalQuery {
+              sender_eid: self.this_eid.clone(),
+              request_id: request_id.clone(),
+              query: input.to_string(),
+            }),
+          ));
+          self.send(self.get_slave()?, SendAction::new(network_msg, None));
+        };
 
-      // Display the output
-      if let Some(display) = match message {
-        msg::NetworkMessage::External(external) => match external {
-          msg::ExternalMessage::ExternalQuerySuccess(success) => {
-            Some(format!("{}", format_table(success.result)))
-          }
-          msg::ExternalMessage::ExternalQueryAborted(aborted) => {
-            Some(format!("Failed with error: {:#?}", aborted.payload))
-          }
-          msg::ExternalMessage::ExternalDDLQuerySuccess(_) => None,
-          msg::ExternalMessage::ExternalDDLQueryAborted(aborted) => {
-            Some(format!("Failed with error: {:#?}", aborted.payload))
-          }
-          _ => Some(format!("{:#?}", external)),
-        },
-        message => Some(format!("{:#?}", message)),
-      } {
-        Ok(LoopAction::Print(display))
-      } else {
-        Ok(LoopAction::DoNothing)
+        // Send and wait for a response
+        let message =
+          block_until_network_response(self.to_server_receiver.as_ref(), &request_id).message;
+
+        // Display the output
+        if let Some(display) = match message {
+          msg::NetworkMessage::External(external) => match external {
+            msg::ExternalMessage::ExternalQuerySuccess(success) => {
+              Some(format!("{}", format_table(success.result)))
+            }
+            msg::ExternalMessage::ExternalQueryAborted(aborted) => {
+              Some(format!("Failed with error: {:#?}", aborted.payload))
+            }
+            msg::ExternalMessage::ExternalDDLQuerySuccess(_) => None,
+            msg::ExternalMessage::ExternalDDLQueryAborted(aborted) => {
+              Some(format!("Failed with error: {:#?}", aborted.payload))
+            }
+            _ => Some(format!("{:#?}", external)),
+          },
+          message => Some(format!("{:#?}", message)),
+        } {
+          // We are only interested in printing the results of the final query.
+          next_loop_action = LoopAction::Print(display);
+        }
       }
+
+      Ok(next_loop_action)
     }
   }
 
@@ -497,6 +505,8 @@ fn format_table(result: QueryResult) -> String {
   for maybe_col_name in result.schema {
     if let Some(ColName(col_name)) = maybe_col_name {
       display_cols.push(col_name);
+    } else {
+      display_cols.push("<nameless>".to_string());
     }
   }
   display_cols.push("count".to_string());

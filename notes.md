@@ -32,11 +32,15 @@ docker kill runiversal10; docker container rm runiversal10;
 docker kill runiversal15; docker container rm runiversal15;
 
 ## Setup
+To build:
+
+./run build
+
 To start up the system and create an initial client, do:
 
 ./run start
 
-To create extra clients, do:
+To create extra clients and nodes, do:
 
 ./run new_client 3 10
 ./run new_node 25 reconfig 10
@@ -63,14 +67,14 @@ To clean up everything, do:
 
 ## Demo
 1. Run `./run start` in terminal pane. This will start the MasterGroup, 2 SlaveGroups, and a client.
-2. Run `./run new_client 3` to start a new client, then do `live` to start the live view.
-3. Run the "Query Examples" 
+2. Run `./run new_client 3 10` to start a new client, then do `live` to start the live view.
+3. Run the Basic/Advanced Queries.
 4. Kill one of the Slave leaders with `./run nclean 16` (or similar).
 5. Create a Slave free node so that it can replace the one that was just killed: `./run new_node 25 reconfig 10`
 6. Create 5 Slaves as newslave, e.g. `./run new_node 26 newslave 10` to show how new SlaveGroups are formed automatically.
 7. Run the `./run new_node 31 reconfig 10` commands to create lots of free nodes, then kill some more nodes to show the reconfiguration.
 
-## Query Examples
+## Basic Queries
 
 CREATE TABLE users(id INT PRIMARY KEY);
 INSERT INTO users(id) VALUES (1), (2), (3);
@@ -85,3 +89,68 @@ INSERT INTO inventory(id, name) VALUES (1, 'pasindu'), (2, 'hello');
 SELECT id, name FROM inventory;
 
 DROP TABLE inventory;
+
+## Advanced Queries
+
+### DDL
+CREATE TABLE inventory (
+  product_id INT PRIMARY KEY, email VARCHAR, 
+  count INT
+);
+-- Separate
+INSERT INTO inventory (product_id, email, count) 
+VALUES 
+  (0, 'my_email_0', 15), 
+  (1, 'my_email_1', 25);
+-- Separate
+CREATE TABLE user (
+  email VARCHAR PRIMARY KEY, balance INT, 
+);
+-- Separate
+INSERT INTO user (email, balance) 
+VALUES 
+  ('my_email_0', 50), 
+  ('my_email_1', 60), 
+  ('my_email_2', 70);
+-- Separate
+CREATE TABLE product_stock (id INT PRIMARY KEY, product_id INT,);
+-- Separate
+INSERT INTO product_stock (id, product_id) 
+VALUES 
+  (0, 0), 
+  (1, 1), 
+  (2, 1);
+
+### DQL
+
+-- Join
+SELECT U2.email, U1.balance, product_id
+FROM user AS U2 JOIN (user AS U1 LEFT JOIN inventory AS I)
+    ON ((SELECT count(id) 
+        FROM product_stock
+        WHERE product_id = I.product_id) = 2)
+    AND U1.balance <= 60
+WHERE U2.email = 'my_email_0';
+
+-- CTEs
+WITH
+    v1 AS (SELECT email AS e, balance * 2
+            FROM  user
+            WHERE email = 'my_email_0')
+SELECT *
+FROM v1;
+
+-- Multi Stage
+UPDATE user
+SET balance = balance + 20
+WHERE email = (
+    SELECT email
+    FROM inventory
+    WHERE product_id = 1);
+
+UPDATE inventory
+SET count = count + 5
+WHERE email = (
+    SELECT email
+    FROM user
+    WHERE balance >= 80);
