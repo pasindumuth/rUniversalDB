@@ -670,7 +670,7 @@ impl MasterContext {
           if self.is_leader() {
             // Only do PaxosGroup failure detection if we are not already trying to reconfigure.
             if statuses.do_reconfig.is_none() {
-              let maybe_dead_eids = self.paxos_driver.get_maybe_dead();
+              let mut maybe_dead_eids = self.paxos_driver.get_maybe_dead(&self.this_eid);
               if !maybe_dead_eids.is_empty() {
                 // Recall that the above returns only as much as we are capable of reconfiguring.
                 statuses

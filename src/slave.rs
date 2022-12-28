@@ -729,7 +729,7 @@ impl SlaveContext {
         }
         SlaveTimerInput::PaxosGroupFailureDetector => {
           if self.is_leader() {
-            let maybe_dead_eids = self.paxos_driver.get_maybe_dead();
+            let maybe_dead_eids = self.paxos_driver.get_maybe_dead(&self.this_eid);
             if !maybe_dead_eids.is_empty() {
               // Recall that the above returns only as much as we are capable of reconfiguring.
               let nodes_dead = msg::NodesDead { sid: self.this_sid.clone(), eids: maybe_dead_eids };

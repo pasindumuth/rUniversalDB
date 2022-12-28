@@ -616,7 +616,7 @@ impl CoordContext {
     results: Vec<TableView>,
   ) {
     let query_id = orig_p.query_id;
-    // Route TM results to MSQueryES
+    // Route TM results to MSCoordES
     if let Some(ms_coord) = statuses.ms_coord_ess.get_mut(&query_id) {
       remove_item(&mut ms_coord.child_queries, &tm_qid);
       let action = ms_coord.es.handle_tm_success(self, io_ctx, tm_qid, new_rms, results);

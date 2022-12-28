@@ -1212,7 +1212,7 @@ pub fn parallel_test<WriterT: Writer>(
     }
 
     // Potentially start a Leadership change in a node by randomly choosing a PaxosGroupId.
-    // Note: that we only do this if the PaxosGroups have more than 1 element.
+    // Note: that we only do this if there is more than one node per PaxosGroups.
     if num_paxos_nodes > 1 {
       if !sim.is_leadership_changing() {
         if sim.rand.next_u32() % 5 == 0 {

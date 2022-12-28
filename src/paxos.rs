@@ -302,12 +302,17 @@ impl<BundleT: Clone + Debug> PaxosDriver<BundleT> {
 
   /// This returns the set of `EndpointId`s that might be dead, based on how far
   /// back the `remote_next_index` is. We return only at most `max_reconfig_size`.
-  pub fn get_maybe_dead(&self) -> Vec<EndpointId> {
+  /// Note that this function is usually called by a node that thinks it is the leader,
+  /// so we pass in this node's `EndpointId` to avoid accidentally commiting suicide.
+  pub fn get_maybe_dead(&self, cur_eid: &EndpointId) -> Vec<EndpointId> {
     let mut maybe_dead_eids = Vec::<EndpointId>::new();
     for (eid, index) in &self.remote_next_indices {
-      if (maybe_dead_eids.len() as u32) < self.max_reconfig_size() {
-        if *index + (self.paxos_config.remote_next_index_thresh as u128) < self.next_index {
-          maybe_dead_eids.push(eid.clone())
+      // Only include in `maybe_dead_eids` if the `eid` is not `cur_eid`.
+      if eid != cur_eid {
+        if (maybe_dead_eids.len() as u32) < self.max_reconfig_size() {
+          if *index + (self.paxos_config.remote_next_index_thresh as u128) < self.next_index {
+            maybe_dead_eids.push(eid.clone())
+          }
         }
       }
     }

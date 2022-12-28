@@ -372,6 +372,19 @@ impl Debug for NodeData {
   }
 }
 
+impl NodeData {
+  /// Ensure that the node is in its steady state; no running ESs, etc.
+  fn check_clean(&self, check_ctx: &mut CheckCtx) {
+    check_node_clean(&self.node, check_ctx);
+    for (_, coord) in &self.coord_states {
+      check_coord_clean(coord, check_ctx);
+    }
+    for (_, tablet) in &self.tablet_states {
+      check_tablet_clean(tablet, check_ctx);
+    }
+  }
+}
+
 #[derive(Debug)]
 pub struct Simulation {
   pub rand: XorShiftRng,
@@ -519,24 +532,9 @@ impl Simulation {
   /// This returns the `FullDBSchema` of the current Master Leader. Note that the Master
   /// Groups needs to be instantiated for this to work.
   pub fn full_db_schema(&self) -> GossipDataView {
-    // First, try the Master Leader. This is an optimization (over iterating through all nodes).
     let lid = self.leader_map.get(&PaxosGroupId::Master).unwrap();
     let node_data = self.node_datas.get(&lid.eid).unwrap();
-    if let Some(schema) = node_data.node.full_db_schema() {
-      schema
-    } else {
-      // If the Master Leader produces nothing, we iterate through all the nodes in
-      // hopes of finding a Master node.
-      for (_, node_data) in &self.node_datas {
-        if let Some(schema) = node_data.node.full_db_schema() {
-          return schema;
-        }
-      }
-
-      // If there are no Master nodes despite the MasterGroup having been
-      // started up this is unexpected.
-      panic!()
-    }
+    node_data.node.full_db_schema().unwrap()
   }
 
   /// This returns all DDL and MS Queries that succeed in the system. Note that pure
@@ -696,7 +694,7 @@ impl Simulation {
           if cur_lid.gen < lid.gen {
             *cur_lid = lid;
 
-            // Clear blocked_leadership if at node is no longer the Leader.
+            // Clear blocked_leadership if a node is no longer the Leader.
             if let Some((blocked_gid, blocked_lid)) = &self.blocked_leadership {
               if blocked_gid == &gid {
                 if blocked_lid.gen < cur_lid.gen {
@@ -852,21 +850,21 @@ impl Simulation {
     }
   }
 
-  /// Checks that all nodes in the system are in their steady state after some
-  /// time without any new requests.
+  /// Checks that all nodes in the system (that are present in the latest
+  /// `GossipData`) are in their steady state after some time without any
+  /// new requests.
   pub fn check_resources_clean(&mut self, should_assert: bool) -> bool {
     let mut check_ctx = CheckCtx::new(should_assert);
-    for (_, node_data) in &self.node_datas {
-      // Only check nodes that have not exited yet.
-      if !node_data.node.did_exit() {
-        check_node_clean(&node_data.node, &mut check_ctx);
-        for (_, coord) in &node_data.coord_states {
-          check_coord_clean(coord, &mut check_ctx);
-        }
-        for (_, tablet) in &node_data.tablet_states {
-          check_tablet_clean(tablet, &mut check_ctx);
-        }
+    let gossip_data_view = self.full_db_schema();
+    for (_, eids) in gossip_data_view.slave_address_config {
+      for eid in eids {
+        let node_data = self.node_datas.get(eid).unwrap();
+        node_data.check_clean(&mut check_ctx);
       }
+    }
+    for eid in gossip_data_view.master_address_config {
+      let node_data = self.node_datas.get(eid).unwrap();
+      node_data.check_clean(&mut check_ctx);
     }
     check_ctx.get_result()
   }

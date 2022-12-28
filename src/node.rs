@@ -720,9 +720,7 @@ impl NodeState {
     }
   }
 
-  /// This method should ideally only be called if this node is a Master. It will
-  /// return the the GossipData underneath. If this node is not the Master (i.e. it
-  /// is in `PostExistence`), then we return `None`.
+  /// If this node is in the `NominalMasterState`, then return the `GossipData.
   pub fn full_db_schema(&self) -> Option<GossipDataView> {
     if let State::NominalMasterState(master_state, _) = &self.state {
       Some(master_state.ctx.gossip.get())
@@ -731,7 +729,7 @@ impl NodeState {
     }
   }
 
-  /// Returns `true` iff this node is beyond DNEState
+  /// Returns `true` iff this node is beyond `DNEState`
   pub fn does_exist(&self) -> bool {
     if let State::DNEState(_) = &self.state {
       false
@@ -740,7 +738,7 @@ impl NodeState {
     }
   }
 
-  /// Returns `true` iff this node is beyond DNEState
+  /// Returns `true` iff this node is `PostExistence`.
   pub fn did_exit(&self) -> bool {
     if let State::PostExistence = &self.state {
       true

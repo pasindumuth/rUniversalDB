@@ -97,7 +97,7 @@ impl MetadataMonitor {
           if let GenericInput::NetworkInput(network_input) =
             block_until_generic_response(Some(&receiver), &request_id)
           {
-            to_main_sender.send(Signal::NetworkMessage(network_input));
+            to_main_sender.send(Signal::NetworkMessage(network_input)).unwrap();
           } else {
             break receiver;
           }
@@ -116,7 +116,7 @@ impl MetadataMonitor {
             _ => false,
           };
 
-          to_main_sender.send(Signal::Event(term_event.clone()));
+          to_main_sender.send(Signal::Event(term_event.clone())).unwrap();
           if should_quit {
             break;
           }
@@ -221,7 +221,7 @@ impl MetadataMonitor {
     disable_raw_mode()?;
 
     self.user_io_thread_jh.join().unwrap(); // This thread should already have exit.
-    self.sender.send(GenericInput::None); // Signal the network background to stop.
+    self.sender.send(GenericInput::None).unwrap(); // Signal the network background to stop.
     Ok(self.network_thread_jh.join().unwrap())
   }
 }

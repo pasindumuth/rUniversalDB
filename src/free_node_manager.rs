@@ -37,6 +37,10 @@ pub enum FreeNodeAction {
   NewSlaveGroups(BTreeMap<SlaveGroupId, Vec<EndpointId>>),
 }
 
+/// This class manages FreeNodes, keeping track of their heartbeats,
+/// removing them from the MasterGroup if their heartbeat stops, handling
+/// the addition of new FreeNodes, and handling requests from the outside
+/// to use FreeNodes via the `request_new_eids` method.
 #[derive(Debug)]
 pub struct FreeNodeManager {
   free_nodes: BTreeMap<EndpointId, FreeNodeType>,

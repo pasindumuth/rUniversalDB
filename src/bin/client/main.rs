@@ -77,7 +77,7 @@ fn main() {
 
     // Wait until all messages have been sent. After this, we exit.
     for _ in 0..master_eids.len() {
-      to_server_receiver.recv();
+      to_server_receiver.recv().unwrap();
     }
   } else if let Some(master_ip) = matches.value_of("entry_mip") {
     // Otherwise, enter the read loop.
