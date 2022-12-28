@@ -300,15 +300,14 @@ impl FullMSCoordES {
   /// This is called when the JoinReadES has aborted.
   pub fn handle_join_select_aborted<IO: CoreIOCtx>(
     &mut self,
-    _: &mut CoordContext,
-    _: &mut IO,
+    ctx: &mut CoordContext,
+    io_ctx: &mut IO,
     aborted_data: msg::AbortedData,
   ) -> Option<MSQueryCoordAction> {
-    let es = cast_safe!(FullMSCoordES::Executing, self)?;
     match aborted_data {
       msg::AbortedData::QueryError(query_error) => {
         // In the case of a QueryError, we just propagate it up.
-        es.state = CoordState::Done;
+        self.exit_and_clean_up(ctx, io_ctx);
         Some(MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError(
           msg::ExternalQueryError::RuntimeError { msg: format!("Join failed {:?}", query_error) },
         )))
