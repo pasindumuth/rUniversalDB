@@ -304,15 +304,7 @@ impl FullMSCoordES {
     io_ctx: &mut IO,
     aborted_data: msg::AbortedData,
   ) -> Option<MSQueryCoordAction> {
-    match aborted_data {
-      msg::AbortedData::QueryError(query_error) => {
-        // In the case of a QueryError, we just propagate it up.
-        self.exit_and_clean_up(ctx, io_ctx);
-        Some(MSQueryCoordAction::FatalFailure(msg::ExternalAbortedData::QueryExecutionError(
-          msg::ExternalQueryError::RuntimeError { msg: format!("Join failed {:?}", query_error) },
-        )))
-      }
-    }
+    self.handle_tm_aborted(ctx, io_ctx, aborted_data)
   }
 
   /// This is called when one of the remote node's Leadership changes beyond the

@@ -315,17 +315,11 @@ impl GRQueryES {
   /// This is called when the JoinReadES has aborted.
   pub fn handle_join_select_aborted<IO: CoreIOCtx, Ctx: CTServerContext>(
     &mut self,
-    _: &mut Ctx,
-    _: &mut IO,
+    ctx: &mut Ctx,
+    io_ctx: &mut IO,
     aborted_data: msg::AbortedData,
   ) -> Option<GRQueryAction> {
-    match aborted_data {
-      msg::AbortedData::QueryError(query_error) => {
-        // In the case of a QueryError, we just propagate it up.
-        self.state = GRExecutionS::Done;
-        Some(GRQueryAction::QueryError(query_error))
-      }
-    }
+    self.handle_tm_aborted(ctx, io_ctx, aborted_data)
   }
 
   /// This is called when one of the remote node's Leadership changes beyond the

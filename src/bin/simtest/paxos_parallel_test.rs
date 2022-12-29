@@ -531,15 +531,14 @@ impl<'a> QueryGenCtx<'a> {
     let num_stages = (self.rand.next_u32() % 6) + 1;
     let mut stages = Vec::<String>::new();
     for _ in 0..num_stages {
-      let stage_type = self.rand.next_u32() % 5;
+      let stage_type = self.rand.next_u32() % 6;
       let stage = match stage_type {
         0 => self.mk_insert()?,
         1 => self.mk_update()?,
         2 => self.mk_delete()?,
         3 => self.mk_select()?,
         4 => self.mk_advanced_query()?,
-        // TODO: enable
-        // 5 => self.mk_join_select()?,
+        5 => self.mk_join_select()?,
         _ => panic!(),
       };
       stages.push(stage);
