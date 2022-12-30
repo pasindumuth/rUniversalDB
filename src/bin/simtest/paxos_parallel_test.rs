@@ -5,8 +5,8 @@ use rand::seq::SliceRandom;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use runiversal::common::{
-  mk_rid, mk_t, mk_tid, read_index, ColType, ColVal, TableSchema, TabletGroupId, TabletKeyRange,
-  Timestamp, ALPHABET,
+  default_get_mut, mk_rid, mk_t, mk_tid, read_index, ColType, ColVal, ReadOnlySet, TableSchema,
+  TabletGroupId, TabletKeyRange, Timestamp, ALPHABET,
 };
 use runiversal::common::{ColName, TablePath};
 use runiversal::common::{
@@ -24,6 +24,7 @@ use sqlparser::parser::Parser;
 use sqlparser::test_utils::table;
 use std::cmp::{max, min};
 use std::collections::BTreeMap;
+use std::os::macos::raw::stat;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // -----------------------------------------------------------------------------------------------
@@ -61,7 +62,7 @@ struct QueryGenCtx<'a> {
   tablet_address_config: &'a BTreeMap<TabletGroupId, SlaveGroupId>,
 }
 
-/// Add Tables will have one Primary Key column of `Int` type. All ValCol types will
+/// All Tables will have one Primary Key column of `Int` type. All ValCol types will
 /// also be `Int`. We limit the system to 10 tables, named "t0" ... "t9", and we limit the
 /// set of columns in a table to 10 ValCols, named "c0" ... "c9". There also only 10 KeyCols
 /// names we get to choose from: "k0" ... "k9"
@@ -70,7 +71,7 @@ impl<'a> QueryGenCtx<'a> {
   /// `x` must be `-INT_BOUND < x < INT_BOUND`.
   const INT_BOUND: u32 = 100;
 
-  fn mk_create_table(&mut self) -> Option<String> {
+  fn mk_create_table(&mut self) -> Option<(RequestStats, String)> {
     let r = &mut self.rand;
 
     // Compute all possible TablePaths and shuffle it.
@@ -115,7 +116,7 @@ impl<'a> QueryGenCtx<'a> {
           val_col_defs.join(", ")
         );
 
-        return Some(query);
+        return Some((RequestStats::default(), query));
       }
     }
 
@@ -123,7 +124,7 @@ impl<'a> QueryGenCtx<'a> {
     None
   }
 
-  fn mk_drop_table(&mut self) -> Option<String> {
+  fn mk_drop_table(&mut self) -> Option<(RequestStats, String)> {
     let r = &mut self.rand;
 
     // Find a Table to drop
@@ -132,10 +133,10 @@ impl<'a> QueryGenCtx<'a> {
 
     // Create the query
     let query = format!("DROP TABLE {};", table_path.0);
-    Some(query)
+    Some((RequestStats::default(), query))
   }
 
-  fn mk_add_col(&mut self) -> Option<String> {
+  fn mk_add_col(&mut self) -> Option<(RequestStats, String)> {
     let r = &mut self.rand;
 
     // Find a Table to add a column to
@@ -163,7 +164,7 @@ impl<'a> QueryGenCtx<'a> {
           table_path.0, col.0,
         );
 
-        return Some(query);
+        return Some((RequestStats::default(), query));
       }
     }
 
@@ -171,7 +172,7 @@ impl<'a> QueryGenCtx<'a> {
     None
   }
 
-  fn mk_drop_col(&mut self) -> Option<String> {
+  fn mk_drop_col(&mut self) -> Option<(RequestStats, String)> {
     let r = &mut self.rand;
 
     // Find a Table to drop a column from
@@ -192,10 +193,10 @@ impl<'a> QueryGenCtx<'a> {
       table_path.0, col.0,
     );
 
-    Some(query)
+    Some((RequestStats::default(), query))
   }
 
-  fn mk_insert(&mut self) -> Option<String> {
+  fn mk_insert(&mut self) -> Option<(RequestStats, String)> {
     // Choose a random Table to Insert to.
     let (source, mut key_cols, mut val_cols) = self.pick_random_table()?;
     let r = &mut self.rand;
@@ -227,17 +228,20 @@ impl<'a> QueryGenCtx<'a> {
       rows.push(format!("({})", values.join(", ")));
     }
 
-    Some(format!(
-      " INSERT INTO {} ({})
-        VALUES {};
-      ",
-      source,
-      insert_cols.join(", "),
-      rows.join(",\n")
+    Some((
+      RequestStats::default(),
+      format!(
+        " INSERT INTO {} ({})
+          VALUES {};
+        ",
+        source,
+        insert_cols.join(", "),
+        rows.join(",\n")
+      ),
     ))
   }
 
-  fn mk_update(&mut self) -> Option<String> {
+  fn mk_update(&mut self) -> Option<(RequestStats, String)> {
     // Choose a random Table to Update.
     let (source, mut key_cols, mut val_cols) = self.pick_random_table()?;
     let r = &mut self.rand;
@@ -294,10 +298,10 @@ impl<'a> QueryGenCtx<'a> {
       panic!()
     };
 
-    Some(query)
+    Some((RequestStats::default(), query))
   }
 
-  fn mk_delete(&mut self) -> Option<String> {
+  fn mk_delete(&mut self) -> Option<(RequestStats, String)> {
     // Choose a random Table to Delete from.
     let (source, mut key_cols, mut val_cols) = self.pick_random_table()?;
     let r = &mut self.rand;
@@ -346,10 +350,10 @@ impl<'a> QueryGenCtx<'a> {
       panic!()
     };
 
-    Some(query)
+    Some((RequestStats::default(), query))
   }
 
-  fn mk_select(&mut self) -> Option<String> {
+  fn mk_select(&mut self) -> Option<(RequestStats, String)> {
     // Choose a random Table to Read from.
     let (source, mut key_cols, mut val_cols) = self.pick_random_table()?;
     let r = &mut self.rand;
@@ -414,44 +418,81 @@ impl<'a> QueryGenCtx<'a> {
       panic!()
     };
 
-    Some(query)
+    Some((RequestStats::simple_single_label("Select 0CTELastStage".to_string()), query))
   }
 
-  fn mk_join_select(&mut self) -> Option<String> {
+  fn mk_join_select(&mut self) -> Option<(RequestStats, String)> {
     // Choose a random Table to Read from.
     let (source1, mut key_cols1, mut val_cols1) = self.pick_random_table()?;
-    let (source2, mut _1, mut _2) = self.pick_random_table()?;
+    let (source2, mut key_cols2, mut val_cols2) = self.pick_random_table()?;
     let r = &mut self.rand;
 
     // Recall that there is only one KeyCol in all Tables
-    let key_col = key_cols1.into_iter().next().unwrap();
+    let key_col1 = key_cols1.into_iter().next().unwrap();
     val_cols1[..].shuffle(r);
     let mut val_col1_it = val_cols1.into_iter();
 
-    let query_type = r.next_u32() % 1;
-    let query = if query_type == 0 {
-      let proj_val_col = val_col1_it.next()?;
-      let filter_val_col = key_col;
-      format!(
-        " SELECT {proj_val_col}
-          FROM {source1} JOIN {source2}
-          WHERE {filter_val_col} >= {x1};
+    let _ = key_cols2.into_iter().next().unwrap();
+    val_cols2[..].shuffle(r);
+    let mut val_col2_it = val_cols2.into_iter();
+
+    // Helper to generate a Join type.
+    fn gen_join_type(r: &mut XorShiftRng) -> &'static str {
+      match r.next_u32() % 4 {
+        0 => "INNER",
+        1 => "LEFT",
+        2 => "RIGHT",
+        3 => "FULL OUTER",
+        _ => panic!(),
+      }
+    }
+
+    let query_type = r.next_u32() % 2;
+    if query_type == 0 {
+      // Test simple join
+      let proj_val_col1 = val_col1_it.next()?;
+      let join_type = gen_join_type(r);
+      let query = format!(
+        " SELECT {proj_val_col1}
+          FROM {source1} {join_type} JOIN {source2}
+          WHERE {key_col1} >= {x1};
         ",
         source1 = source1,
         source2 = source2,
-        proj_val_col = proj_val_col.0,
-        filter_val_col = filter_val_col.0,
+        join_type = join_type,
+        proj_val_col1 = proj_val_col1.0,
+        key_col1 = key_col1.0,
         x1 = mk_int(r, Self::INT_BOUND)
-      )
+      );
+
+      Some((RequestStats::simple_single_label("Select JOIN Simple".to_string()), query))
+    } else if query_type == 1 {
+      // Test join where optimization will introduce a dependency
+      // (source1 depends on source2).
+      let proj_val_col1 = val_col1_it.next()?;
+      let proj_val_col2 = val_col2_it.next()?;
+      let join_type = gen_join_type(r);
+      let query = format!(
+        " SELECT {proj_val_col1}
+          FROM {source1} {join_type} JOIN {source2}
+          WHERE {key_col1} >= {proj_val_col2};
+        ",
+        source1 = source1,
+        source2 = source2,
+        join_type = join_type,
+        proj_val_col1 = proj_val_col1.0,
+        key_col1 = key_col1.0,
+        proj_val_col2 = proj_val_col2.0
+      );
+
+      Some((RequestStats::simple_single_label("Select JOIN Dependency".to_string()), query))
     } else {
       panic!()
-    };
-
-    Some(query)
+    }
   }
 
   /// This create queries that touch 2 tables, containing CTEs and subqueries.
-  fn mk_advanced_query(&mut self) -> Option<String> {
+  fn mk_advanced_query(&mut self) -> Option<(RequestStats, String)> {
     let (source1, mut key_cols1, mut val_cols1) = self.pick_random_table()?;
     let (source2, mut key_cols2, mut val_cols2) = self.pick_random_table()?;
     let r = &mut self.rand;
@@ -466,10 +507,10 @@ impl<'a> QueryGenCtx<'a> {
     let mut val_col_it2 = val_cols2.into_iter();
 
     let query_type = r.next_u32() % 2;
-    let query = if query_type == 0 {
+    if query_type == 0 {
       let proj_val_col11 = val_col_it1.next()?;
       let proj_val_col12 = val_col_it1.next()?;
-      format!(
+      let query = format!(
         " WITH
             tt1 AS (SELECT {proj_val_col11} AS c11, {proj_val_col12} AS c12
                     FROM {source1}
@@ -483,13 +524,15 @@ impl<'a> QueryGenCtx<'a> {
         key_col1 = key_col1.0,
         x1 = mk_int(r, Self::INT_BOUND / 2),
         x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32,
-      )
+      );
+
+      Some((RequestStats::simple_single_label("Select 1CTELastStage".to_string()), query))
     } else if query_type == 1 {
       let proj_val_col11 = val_col_it1.next()?;
       let proj_val_col12 = val_col_it1.next()?;
       let proj_val_col21 = val_col_it2.next()?;
       let proj_val_col22 = val_col_it2.next()?;
-      format!(
+      let query = format!(
         " WITH
             tt1 AS (SELECT {proj_val_col11} AS c11, {proj_val_col12} AS c12
                     FROM {source1}
@@ -516,23 +559,24 @@ impl<'a> QueryGenCtx<'a> {
         x1 = mk_int(r, Self::INT_BOUND / 2),
         x2 = mk_int(r, Self::INT_BOUND / 2) + Self::INT_BOUND as i32,
         x3 = mk_int(r, Self::INT_BOUND)
-      )
+      );
+
+      Some((RequestStats::simple_single_label("Select 2CTELastStage".to_string()), query))
     } else {
       panic!()
-    };
-
-    Some(query)
+    }
   }
 
   /// Since the different stages in a Multi-Stage Transaction do not interact with one
   /// another (e.g. prior Stages do not define a TransTable for subsequent Stages), generating
   /// one is just a matter of generating a sequence of Single-Stage Transactions.
-  fn mk_multi_stage(&mut self) -> Option<String> {
+  fn mk_multi_stage(&mut self) -> Option<(RequestStats, String)> {
     let num_stages = (self.rand.next_u32() % 6) + 1;
     let mut stages = Vec::<String>::new();
+    let mut request_stats = RequestStats::default();
     for _ in 0..num_stages {
       let stage_type = self.rand.next_u32() % 6;
-      let stage = match stage_type {
+      let (cur_request_stats, query) = match stage_type {
         0 => self.mk_insert()?,
         1 => self.mk_update()?,
         2 => self.mk_delete()?,
@@ -541,9 +585,21 @@ impl<'a> QueryGenCtx<'a> {
         5 => self.mk_join_select()?,
         _ => panic!(),
       };
-      stages.push(stage);
+
+      // Extend the request stats, but change the instruction to only count the
+      // presence of the query.
+      for stats_instruction in cur_request_stats.stats_instructions {
+        request_stats.add_count_only_label(stats_instruction.label);
+      }
+
+      stages.push(query);
     }
-    Some(stages.join("\n"))
+
+    // Append one more StatsInstruction for the multi-stage query itself
+    request_stats.add_simple_label("Multi-Stage".to_string());
+
+    // Return
+    Some((request_stats, stages.join("\n")))
   }
 
   /// Picks an existing Tablets and creates a `ShardingOp` to split it.
@@ -663,39 +719,76 @@ impl<'a> QueryGenCtx<'a> {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  Utils
+//  Statistics Collection
 // -----------------------------------------------------------------------------------------------
+// This section contains code to gather summary statistics of generated queries
+// that were actually executed. The strategy is to annotate every query with
+// a set of labels. After the parallel execution, aggregate the # of rows (among other
+// things) that were returned
 
 #[derive(Debug)]
-enum Request {
-  DDLQuery(msg::PerformExternalDDLQuery),
-  Sharding(msg::PerformExternalSharding),
-  Query(msg::PerformExternalQuery),
+enum AggregationCommand {
+  CountOnly,
+  CountAndIncludeRows,
 }
 
-/// Results of `verify_req_res`, which contains extra statistics useful for checking
-/// non-triviality of the test.
-struct VerifyResult {
-  replay_duration: Timestamp,
-  total_queries: u32,
-  successful_queries: u32,
-  num_multi_stage: u32,
-  stats_ncte_1stage: Vec<AvgCounter>,
-  queries_cancelled: u32,
-  ddl_queries_cancelled: u32,
-  sharding_success: u32,
-  sharding_aborted: u32,
+#[derive(Debug)]
+struct StatsInstruction {
+  label: String,
+  aggregation_command: AggregationCommand,
 }
 
-struct AvgCounter {
+/// Statistics that is attached to every request that is generated to use
+/// when reporting the results of a simulation.
+#[derive(Debug, Default)]
+struct RequestStats {
+  stats_instructions: Vec<StatsInstruction>,
+}
+
+impl RequestStats {
+  /// Create with only a single `StatsInstruction`.
+  fn simple_single_label(label: String) -> RequestStats {
+    RequestStats {
+      stats_instructions: vec![StatsInstruction {
+        label,
+        aggregation_command: AggregationCommand::CountAndIncludeRows,
+      }],
+    }
+  }
+
+  /// Add a single `StatsInstruction`.
+  fn add_simple_label(&mut self, label: String) {
+    self.stats_instructions.push(StatsInstruction {
+      label,
+      aggregation_command: AggregationCommand::CountAndIncludeRows,
+    })
+  }
+
+  /// Add a single `StatsInstruction` but to count only.
+  fn add_count_only_label(&mut self, label: String) {
+    self
+      .stats_instructions
+      .push(StatsInstruction { label, aggregation_command: AggregationCommand::CountOnly })
+  }
+}
+
+/// This is used to hold an aggregate of `StatsInstruction`, grouped together
+/// by the `label` according to
+#[derive(Debug, Default)]
+struct StatsAggregator {
   num_elems: u32,
   sum: i32,
+  num_elems_count_only: u32,
 }
 
-impl AvgCounter {
+impl StatsAggregator {
   fn add_entry(&mut self, val: i32) {
     self.num_elems += 1;
     self.sum += val;
+  }
+
+  fn add_count_only(&mut self) {
+    self.num_elems_count_only += 1;
   }
 
   fn avg(&self) -> Option<f32> {
@@ -705,6 +798,64 @@ impl AvgCounter {
       Some(self.sum as f32 / self.num_elems as f32)
     }
   }
+}
+
+/// Aggregate the `request_stats.stats_instructions` into `aggregated_stats`.
+fn aggregate_stats(
+  aggregated_stats: &mut BTreeMap<String, StatsAggregator>,
+  request_stats: &RequestStats,
+  num_rows: i32,
+) {
+  for stat_instructions in &request_stats.stats_instructions {
+    // If there is no StatsAggregator for the given label, then add one.
+    let aggregator = default_get_mut(aggregated_stats, &stat_instructions.label);
+
+    // Amend the StatsAggregator
+    match stat_instructions.aggregation_command {
+      AggregationCommand::CountOnly => {
+        aggregator.add_count_only();
+      }
+      AggregationCommand::CountAndIncludeRows => {
+        aggregator.add_entry(num_rows);
+      }
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+//  Utils
+// -----------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct DDLQueryReq {
+  perform: msg::PerformExternalDDLQuery,
+  request_stats: RequestStats,
+}
+
+#[derive(Debug)]
+struct QueryReq {
+  perform: msg::PerformExternalQuery,
+  request_stats: RequestStats,
+}
+
+#[derive(Debug)]
+enum Request {
+  DDLQueryReq(DDLQueryReq),
+  ShardingReq(msg::PerformExternalSharding),
+  QueryReq(QueryReq),
+}
+
+/// Results of `verify_req_res`, which contains extra statistics useful for checking
+/// non-triviality of the test.
+struct VerifyResult {
+  replay_duration: Timestamp,
+  total_queries: u32,
+  successful_queries: u32,
+  aggregated_stats: BTreeMap<String, StatsAggregator>,
+  queries_cancelled: u32,
+  ddl_queries_cancelled: u32,
+  sharding_success: u32,
+  sharding_aborted: u32,
 }
 
 /// Replay the requests that succeeded in timestamp order serially, and verify that
@@ -722,8 +873,8 @@ fn verify_req_res(
 ) -> Option<VerifyResult> {
   // Pairs up the Query and DDLQuery request-response pairs.
   enum SuccessPair {
-    Query(msg::PerformExternalQuery, Option<msg::ExternalQuerySuccess>),
-    DDLQuery(msg::PerformExternalDDLQuery, Option<msg::ExternalDDLQuerySuccess>),
+    Query(QueryReq, Option<msg::ExternalQuerySuccess>),
+    DDLQuery(DDLQueryReq, Option<msg::ExternalDDLQuerySuccess>),
   }
 
   // Setup some stats
@@ -740,7 +891,7 @@ fn verify_req_res(
     // First, handle the case we get a response.
     if let Some(res) = maybe_res {
       match (req, res) {
-        (Request::Query(_), msg::ExternalMessage::ExternalQueryAborted(abort)) => {
+        (Request::QueryReq(_), msg::ExternalMessage::ExternalQueryAborted(abort)) => {
           // For aborts, we merely ensure they did not occur trivially (i.e. ParseError).
           match abort.payload {
             msg::ExternalAbortedData::ParseError(parse_error) => {
@@ -752,7 +903,7 @@ fn verify_req_res(
             _ => {}
           }
         }
-        (Request::Query(req), msg::ExternalMessage::ExternalQuerySuccess(success)) => {
+        (Request::QueryReq(req), msg::ExternalMessage::ExternalQuerySuccess(success)) => {
           // Add in the request-response pair. Abort this test if `Timestamp` already exists.
           if !sorted_success_res
             .insert(success.timestamp.clone(), SuccessPair::Query(req, Some(success)))
@@ -761,7 +912,7 @@ fn verify_req_res(
             return None;
           }
         }
-        (Request::DDLQuery(_), msg::ExternalMessage::ExternalDDLQueryAborted(abort)) => {
+        (Request::DDLQueryReq(_), msg::ExternalMessage::ExternalDDLQueryAborted(abort)) => {
           // For aborts, we merely ensure they did not occur trivially (i.e. ParseError).
           match abort.payload {
             msg::ExternalDDLQueryAbortData::ParseError(parse_error) => {
@@ -773,7 +924,7 @@ fn verify_req_res(
             _ => {}
           }
         }
-        (Request::DDLQuery(req), msg::ExternalMessage::ExternalDDLQuerySuccess(success)) => {
+        (Request::DDLQueryReq(req), msg::ExternalMessage::ExternalDDLQuerySuccess(success)) => {
           // Add in the request-response pair. Abort this test if `Timestamp` already exists.
           if !sorted_success_res
             .insert(success.timestamp.clone(), SuccessPair::DDLQuery(req, Some(success)))
@@ -782,10 +933,10 @@ fn verify_req_res(
             return None;
           }
         }
-        (Request::Sharding(_), msg::ExternalMessage::ExternalShardingSuccess(_)) => {
+        (Request::ShardingReq(_), msg::ExternalMessage::ExternalShardingSuccess(_)) => {
           sharding_success += 1;
         }
-        (Request::Sharding(_), msg::ExternalMessage::ExternalShardingAborted(_)) => {
+        (Request::ShardingReq(_), msg::ExternalMessage::ExternalShardingAborted(_)) => {
           sharding_aborted += 1;
         }
         _ => panic!(),
@@ -795,7 +946,7 @@ fn verify_req_res(
       // This matter if the request was a write. We use `success_write_reqs` to account for it.
       if let Some(timestamp) = success_write_reqs.get(&rid) {
         match req {
-          Request::Query(req) => {
+          Request::QueryReq(req) => {
             // Add in the request with an unknown response. Abort this test if
             // `Timestamp` already exists.
             if !sorted_success_res
@@ -805,7 +956,7 @@ fn verify_req_res(
               return None;
             }
           }
-          Request::DDLQuery(req) => {
+          Request::DDLQueryReq(req) => {
             // Add in the request with an unknown response. Abort this test if
             // `Timestamp` already exists.
             if !sorted_success_res
@@ -815,7 +966,7 @@ fn verify_req_res(
               return None;
             }
           }
-          Request::Sharding(_) => {
+          Request::ShardingReq(_) => {
             // We do not replay Sharding queries during Replay.
           }
         }
@@ -823,32 +974,12 @@ fn verify_req_res(
     }
   }
 
-  // Compute various statistics
-  let mut num_multi_stage = 0;
-  let mut stats_ncte_1stage = Vec::new();
+  // Aggregate all of the `RequestStats` by each `StatsInstruction`'s label.
+  let mut aggregated_stats = BTreeMap::<String, StatsAggregator>::new();
   for (_, pair) in &sorted_success_res {
     if let SuccessPair::Query(req, Some(res)) = pair {
-      // Here, the `req` is expected to be a DML or DQL (not DDL).
-      let parsed_ast = Parser::parse_sql(&GenericDialect {}, &req.query).unwrap();
-      let num_stages = parsed_ast.len();
-
-      // See if this is a multi-stage transaction.
-      if num_stages > 1 {
-        num_multi_stage += 1;
-      } else {
-        // Otherwise, collect stats for Single-Stage queries.
-        let ast = convert_ast(parsed_ast).unwrap();
-        match ast.body {
-          iast::QueryBody::Select(_) => {
-            let i = ast.ctes.len();
-            for _ in stats_ncte_1stage.len()..(i + 1) {
-              stats_ncte_1stage.push(AvgCounter { num_elems: 0, sum: 0 });
-            }
-            stats_ncte_1stage.get_mut(i).unwrap().add_entry(res.result.data.rows.len() as i32);
-          }
-          _ => {}
-        }
-      }
+      let num_rows = res.result.data.rows.len() as i32;
+      aggregate_stats(&mut aggregated_stats, &req.request_stats, num_rows);
     }
   }
 
@@ -859,13 +990,13 @@ fn verify_req_res(
     match pair {
       SuccessPair::Query(req, res) => {
         if let Some(res) = res {
-          ctx.execute_query(&mut sim, req.query.as_str(), 10000, res.result);
+          ctx.execute_query(&mut sim, req.perform.query.as_str(), 10000, res.result);
         } else {
-          ctx.execute_query_simple(&mut sim, req.query.as_str(), 10000);
+          ctx.execute_query_simple(&mut sim, req.perform.query.as_str(), 10000);
         }
       }
       SuccessPair::DDLQuery(req, _) => {
-        ctx.send_ddl_query(&mut sim, req.query.as_str(), 10000);
+        ctx.send_ddl_query(&mut sim, req.perform.query.as_str(), 10000);
       }
     }
   }
@@ -874,8 +1005,7 @@ fn verify_req_res(
     replay_duration: sim.true_timestamp().clone(),
     total_queries,
     successful_queries,
-    num_multi_stage,
-    stats_ncte_1stage,
+    aggregated_stats,
     queries_cancelled,
     ddl_queries_cancelled,
     sharding_success,
@@ -1039,9 +1169,9 @@ pub fn parallel_test<WriterT: Writer>(
 
       // Used to wrap the Queries that `QueryGenCtx` generates.
       enum GenQuery {
-        DDLQuery(String),
+        DDLQuery((RequestStats, String)),
         Sharding(msg::ShardingOp),
-        Query(String),
+        Query((RequestStats, String)),
       }
 
       // Generate a Query. Try 5 times to generate it
@@ -1058,7 +1188,7 @@ pub fn parallel_test<WriterT: Writer>(
           // distribution. We define the distribution as a constant vector that specifies
           // the relative probabilities.
           let dist: [u32; 12] =
-            [5, 4, 5, 5, 30, 20, 5, 40, 15, 10, 10, if do_sharding { 10 } else { 0 }];
+            [5, 4, 5, 5, 20, 20, 5, 20, 15, 10, 10, if do_sharding { 10 } else { 0 }];
 
           // Select an `idx` into dist based on its probability distribution.
           let mut i: u32 = gen_ctx.rand.next_u32() % dist.iter().sum::<u32>();
@@ -1098,16 +1228,16 @@ pub fn parallel_test<WriterT: Writer>(
 
       match maybe_query_data {
         None => {}
-        Some(GenQuery::DDLQuery(query)) => {
+        Some(GenQuery::DDLQuery((request_stats, query))) => {
           let perform = msg::PerformExternalDDLQuery {
             sender_eid: client_eid.clone(),
             request_id: request_id.clone(),
             query,
           };
-          req_map
-            .get_mut(client_eid)
-            .unwrap()
-            .insert(request_id.clone(), Request::DDLQuery(perform.clone()));
+          req_map.get_mut(client_eid).unwrap().insert(
+            request_id.clone(),
+            Request::DDLQueryReq(DDLQueryReq { perform: perform.clone(), request_stats }),
+          );
 
           // Record the leadership of the Master PaxosGroup and then send the `perform` to it.
           let gid = PaxosGroupId::Master;
@@ -1130,7 +1260,7 @@ pub fn parallel_test<WriterT: Writer>(
           req_map
             .get_mut(client_eid)
             .unwrap()
-            .insert(request_id.clone(), Request::Sharding(perform.clone()));
+            .insert(request_id.clone(), Request::ShardingReq(perform.clone()));
 
           // Record the leadership of the Master PaxosGroup and then send the `perform` to it.
           let gid = PaxosGroupId::Master;
@@ -1144,16 +1274,16 @@ pub fn parallel_test<WriterT: Writer>(
             &cur_lid.eid,
           );
         }
-        Some(GenQuery::Query(query)) => {
+        Some(GenQuery::Query((request_stats, query))) => {
           let perform = msg::PerformExternalQuery {
             sender_eid: client_eid.clone(),
             request_id: request_id.clone(),
             query,
           };
-          req_map
-            .get_mut(client_eid)
-            .unwrap()
-            .insert(request_id.clone(), Request::Query(perform.clone()));
+          req_map.get_mut(client_eid).unwrap().insert(
+            request_id.clone(),
+            Request::QueryReq(QueryReq { perform: perform.clone(), request_stats }),
+          );
 
           // Choose a SlaveGroupId, record its leadership, and then send the `perform` to it.
           let slave_idx = sim.rand.next_u32() as usize % sids.len();
@@ -1320,12 +1450,13 @@ pub fn parallel_test<WriterT: Writer>(
     let (master_reconfig_count, slave_reconfig_count) = sim.get_num_reconfigs();
 
     let mut select_stats_strs = Vec::<String>::new();
-    for (i, stat) in res.stats_ncte_1stage.into_iter().enumerate() {
+    for (label, aggregate_stat) in res.aggregated_stats.into_iter() {
       select_stats_strs.push(format!(
-        "# Select {}CTE1Stage: {}, Avg. Selected Rows: {:?}",
-        i,
-        stat.num_elems,
-        stat.avg()
+        "# {}: {}, Avg. Selected Rows: {:?}, Count Only: {}",
+        label,
+        aggregate_stat.num_elems,
+        aggregate_stat.avg(),
+        aggregate_stat.num_elems_count_only,
       ));
     }
     let select_stats_str = select_stats_strs.join("\n       ");
@@ -1335,7 +1466,6 @@ pub fn parallel_test<WriterT: Writer>(
        Total Queries: {total}, Succeeded: {succeeded}, Leadership Changes: {lid_changes}, 
        # Master Reconfigs: {master_reconfig_count}, # Slave Reconfigs: {slave_reconfig_count},
        {select_stats_str}
-       # Multi-Stage: {num_multi_stage},
        # Query Cancels: {queries_cancelled}, # DDL Query Cancels: {ddl_queries_cancelled},
        # Sharding Success: {sharding_success}, # Sharding Aborted: {sharding_aborted}",
       duration = res.replay_duration.time_ms,
@@ -1345,7 +1475,6 @@ pub fn parallel_test<WriterT: Writer>(
       master_reconfig_count = master_reconfig_count,
       slave_reconfig_count = slave_reconfig_count,
       select_stats_str = select_stats_str,
-      num_multi_stage = res.num_multi_stage,
       queries_cancelled = res.queries_cancelled,
       ddl_queries_cancelled = res.ddl_queries_cancelled,
       sharding_success = res.sharding_success,

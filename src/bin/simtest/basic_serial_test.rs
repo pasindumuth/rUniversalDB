@@ -1600,14 +1600,14 @@ fn simple_join_test(seed: [u8; 16]) {
     );
   }
 
-  // Select with aliases and a simple ON clause
+  // Select with aliases and a simple ON clause. Recall that INNER JOIN is the same as JOIN.
   {
     let mut exp_result = QueryResult::new(vec![cno("product_id"), cno("balance")]);
     exp_result.add_row(vec![Some(cvi(1)), Some(cvi(70))]);
     ctx.execute_query(
       &mut sim,
       " SELECT I.product_id, balance
-        FROM inventory AS I JOIN user AS U ON U.balance = 70 AND I.product_id = 1;
+        FROM inventory AS I INNER JOIN user AS U ON U.balance = 70 AND I.product_id = 1;
       ",
       10000,
       exp_result,
