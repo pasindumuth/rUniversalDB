@@ -1797,7 +1797,8 @@ impl<'b, ErrorT: ErrorTrait + Debug, ViewT: 'b + DBSchemaView<ErrorT = ErrorT>>
         let aux_table_name = TransTableName(trans_table_name.clone().unwrap());
 
         // Get the columns that are used by the JoinLeaf.
-        let col_usage_cols = self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap();
+        let col_usage_cols =
+          self.col_usage_map.get(leaf.alias.as_ref().unwrap()).unwrap_or(EMPTY_COLS);
 
         let (schema, projection) = match col_usage_cols {
           ColUsageCols::Cols(cols) => cols_to_schema(&alias, cols),

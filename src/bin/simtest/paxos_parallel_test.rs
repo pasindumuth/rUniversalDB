@@ -447,7 +447,7 @@ impl<'a> QueryGenCtx<'a> {
       }
     }
 
-    let query_type = r.next_u32() % 2;
+    let query_type = r.next_u32() % 3;
     if query_type == 0 {
       // Test simple join
       let proj_val_col1 = val_col1_it.next()?;
@@ -486,6 +486,46 @@ impl<'a> QueryGenCtx<'a> {
       );
 
       Some((RequestStats::simple_single_label("Select JOIN Dependency".to_string()), query))
+    } else if query_type == 2 {
+      // Test join with a subquery in the ON clause, a lateral join, a triple join,
+      // and a Derived Table.
+
+      // Consider a third table.
+      let (source3, mut key_cols3, mut val_cols3) = self.pick_random_table()?;
+      let r = &mut self.rand;
+
+      let key_col3 = key_cols3.into_iter().next().unwrap();
+      val_cols3[..].shuffle(r);
+      let mut val_col3_it = val_cols3.into_iter();
+
+      let proj_val_col11 = val_col1_it.next()?;
+      let proj_val_col21 = val_col2_it.next()?;
+      let proj_val_col31 = val_col3_it.next()?;
+      let proj_val_col32 = val_col3_it.next()?;
+      let join_type1 = gen_join_type(r);
+      let query = format!(
+        " SELECT {proj_val_col11}
+          FROM {source1} {join_type1} JOIN
+              ({source2} JOIN LATERAL
+                (SELECT {proj_val_col31} + 3 AS C2
+                 FROM {source3}
+                 WHERE {proj_val_col21} <= {key_col3}) AS D)
+            ON (SELECT COUNT({key_col3})
+                FROM {source3}
+                WHERE C2 <= {proj_val_col32}) >= 1;
+        ",
+        source1 = source1,
+        source2 = source2,
+        source3 = source3,
+        join_type1 = join_type1,
+        proj_val_col11 = proj_val_col11.0,
+        proj_val_col21 = proj_val_col21.0,
+        proj_val_col31 = proj_val_col31.0,
+        proj_val_col32 = proj_val_col32.0,
+        key_col3 = key_col3.0,
+      );
+
+      Some((RequestStats::simple_single_label("Select JOIN Advanced".to_string()), query))
     } else {
       panic!()
     }
@@ -1188,7 +1228,7 @@ pub fn parallel_test<WriterT: Writer>(
           // distribution. We define the distribution as a constant vector that specifies
           // the relative probabilities.
           let dist: [u32; 12] =
-            [5, 4, 5, 5, 20, 20, 5, 20, 15, 10, 10, if do_sharding { 10 } else { 0 }];
+            [5, 4, 5, 5, 20, 20, 5, 10, 15, 20, 30, if do_sharding { 10 } else { 0 }];
 
           // Select an `idx` into dist based on its probability distribution.
           let mut i: u32 = gen_ctx.rand.next_u32() % dist.iter().sum::<u32>();
