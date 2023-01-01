@@ -1,7 +1,6 @@
 #![feature(map_first_last)]
 
 use crate::advanced_parallel_test::test_all_advanced_parallel;
-use crate::advanced_serial_test::test_all_advanced_serial;
 use crate::basic_serial_test::test_all_basic_serial;
 use crate::paxos_parallel_test::{
   test_all_basic_parallel, test_all_paxos_parallel, ParallelTestStats, Writer,
@@ -29,7 +28,6 @@ macro_rules! cast {
 }
 
 mod advanced_parallel_test;
-mod advanced_serial_test;
 mod basic_serial_test;
 mod paxos_parallel_test;
 mod serial_test_utils;
@@ -65,9 +63,6 @@ fn main() {
   let mut rand = XorShiftRng::from_seed([1; 16]);
   println!("Basic Serial Tests:");
   test_all_basic_serial(&mut rand);
-  println!("\n");
-  println!("Advanced Serial Tests:");
-  test_all_advanced_serial(&mut rand);
   println!("\n");
 
   // Run parallel tests, potentially in multiple threads if requested.

@@ -56,6 +56,7 @@ To create extra clients and nodes, do:
 ./run new_node 35 reconfig 10
 
 master_target 172.19.0.1
+slave_target 172.19.0.16
 
 To clean up everything, do:
 
@@ -64,35 +65,45 @@ To clean up everything, do:
 ./run cclean 3
 ./run nclean 25
 ./run nclean 26
+./run dclean
 
 ## Demo
-1. Run `./run start` in terminal pane. This will start the MasterGroup, 2 SlaveGroups, and a client.
-2. Run `./run new_client 3 10` to start a new client, then do `live` to start the live view.
-3. Run the Basic/Advanced Queries.
-4. Kill one of the Slave leaders with `./run nclean 16` (or similar).
-5. Create a Slave free node so that it can replace the one that was just killed: `./run new_node 25 reconfig 10`
-6. Create 5 Slaves as newslave, e.g. `./run new_node 26 newslave 10` to show how new SlaveGroups are formed automatically.
-7. Run the `./run new_node 31 reconfig 10` commands to create lots of free nodes, then kill some more nodes to show the reconfiguration.
+1. Run `./run start` in terminal pane. This will start the MasterGroup, 2 SlaveGroups, and a client. Run `live` in that view
+3. Run `./run new_client 3 10` to start a new client.
+2. Explicitly connect to `172.19.0.15` with `slave_target 172.19.0.15` (the Leadership for the first SlaveGroup). (This is useful for showcasing node deletion later.)
+4. Run the Basic/Advanced Queries.
+5. Kill `172.19.0.15` with `./run nclean 15` (or similar). (This shows reconfiguration.)
+6. Create a Slave free node so that it can replace the one that was just killed: `./run new_node 25 reconfig 10`
+7. Explicitly connect to `172.19.0.17` with `slave_target 172.19.0.17` and then fire some queries (just to show that new leaders are actually possible to use).
+8. Create 5 Slaves as newslave, e.g. `./run new_node 26 newslave 10` to show how new SlaveGroups are formed automatically.
+9. Explicitly connect to `172.19.0.26` with `slave_target 172.19.0.26` and then fire some queries (just to show that new Groups are actually used).
+10. Run the `./run new_node 31 reconfig 10` commands to create lots of free nodes.
+11. Kill `172.19.0.26` with `./run nclean 26` (or similar). (This shows reconfiguration, immediately follows by the consumption of a free node.)
+12. Explicitly connect to `172.19.0.29` with `slave_target 172.19.0.29` and then fire some queries (just to show that new Groups are actually used). 
+13. Quit the live system with `q`, and call `./run dclean` to clean up.
 
 ## Basic Queries
+```sql
+CREATE TABLE user(id INT PRIMARY KEY);
+INSERT INTO user(id) VALUES (1), (2), (3);
+SELECT * FROM user;
 
-CREATE TABLE users(id INT PRIMARY KEY);
-INSERT INTO users(id) VALUES (1), (2), (3);
-SELECT * FROM users;
-
-ALTER TABLE users ADD name STRING;
-UPDATE users SET name = 'henry' WHERE id = 2;
-SELECT * FROM users;
+ALTER TABLE user ADD name STRING;
+UPDATE user SET name = 'henry' WHERE id = 2;
+SELECT * FROM user;
 
 CREATE TABLE inventory(id INT PRIMARY KEY, name VARCHAR);
 INSERT INTO inventory(id, name) VALUES (1, 'pasindu'), (2, 'hello');
 SELECT id, name FROM inventory;
 
+DROP TABLE user;
 DROP TABLE inventory;
+```
 
 ## Advanced Queries
 
 ### DDL
+```sql
 CREATE TABLE inventory (
   product_id INT PRIMARY KEY, email VARCHAR, 
   count INT
@@ -120,9 +131,10 @@ VALUES
   (0, 0), 
   (1, 1), 
   (2, 1);
-
+```
 ### DQL
 
+```sql
 -- Join
 SELECT U2.email, U1.balance, product_id
 FROM user AS U2 JOIN (user AS U1 LEFT JOIN inventory AS I)
@@ -154,3 +166,4 @@ WHERE email = (
     SELECT email
     FROM user
     WHERE balance >= 80);
+```

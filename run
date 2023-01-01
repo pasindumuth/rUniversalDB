@@ -1,6 +1,7 @@
 #!/bin/bash
 
-readonly NUM_SLAVES_GROUPS=2 # Tune this
+# The number of Slave Groups to instantiate (e.g. from the `start` subcommand)
+readonly NUM_SLAVES_GROUPS=2
 readonly NUM_SLAVES=$((5 * $NUM_SLAVES_GROUPS))
 
 function masters() {
@@ -109,9 +110,9 @@ elif [ "$1" = "test" ]; then
   cargo run --release --bin simtest -- -i 8 -r 80
 
 elif [ "$1" = "test_all" ]; then
-  cargo run --release --bin simtest -- -i 8 -r 80;
   cargo run --release --bin paxos;
   cargo run --release --bin paxos2pc_sim;
+  cargo run --release --bin simtest -- -i 8 -r 80;
 
 elif [ "$1" = "bench" ]; then
   cargo run --release --bin simtest -- -i 4 -r 8
