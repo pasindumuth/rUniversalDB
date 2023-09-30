@@ -1,5 +1,6 @@
 # Table of Contents
 - [Table of Contents](#table-of-contents)
+- [Demo](#demo)
 - [Introduction](#introduction)
 - [Technologies Use](#technologies-use)
 - [Getting Started](#getting-started)
@@ -37,6 +38,9 @@
 - [Other Limitations](#other-limitations)
   - [Data Persistence](#data-persistence)
   - [Offline Data Cleanup](#offline-data-cleanup)
+
+# Demo
+See [here](https://www.youtube.com/watch?v=Z6PuOUdtb_Q) for a demo.
 
 # Introduction
 rUniversalDB is a Distributed Database Management System (DDBMS), similar to Google Spanner and CockroachDB. It is a SQL database, providing ACID transactions. It is distributed, meaning that data is spread across many servers, allowing for virtually limitless horizontal scalability while being fault tolerant. rUniversalDB supports online schema changes, table sharding, and automatic reconfiguration when nodes go down. All of the significant features have at least a basic implementation. However, there is still some SQL we do not support.

@@ -81,6 +81,7 @@ To clean up everything, do:
 11. Kill `172.20.0.26` with `./run nclean 26` (or similar). (This shows reconfiguration, immediately follows by the consumption of a free node.)
 12. Explicitly connect to `172.20.0.29` with `slave_target 172.20.0.29` and then fire some queries (just to show that new Groups are actually used). 
 13. Quit the live system with `q`, and call `./run dclean` to clean up.
+14. Run the simulation tests and describe that.
 
 ## Basic Queries
 ```sql

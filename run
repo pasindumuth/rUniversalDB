@@ -1,8 +1,18 @@
 #!/bin/bash
 
+# Extract 
+A1="${1:-}"
+A2="${2:-}"
+A3="${3:-}"
+A4="${4:-}"
+
 # The number of Slave Groups to instantiate (e.g. from the `start` subcommand)
 readonly NUM_SLAVES_GROUPS=2
-readonly NUM_SLAVES=$((5 * $NUM_SLAVES_GROUPS))
+readonly NUM_SLAVES=$((5 * NUM_SLAVES_GROUPS))
+
+is_help_flag() {
+  [[ "$1" = "-h" || "$1" = "--help" ]]
+}
 
 function masters() {
   # Start the image by running transact, and have it be in the background.
@@ -15,7 +25,7 @@ function masters() {
 
 function slaves() {
   # Start the image by running transact, and have it be in the background.
-  for ((i = 15; i < $((15 + $NUM_SLAVES)); i++)); do
+  for ((i = 15; i < $((15 + NUM_SLAVES)); i++)); do
     CONTAINER_NAME="runiversal${i}";
     docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.20.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.20.0."${i}" -t freenode -f newslave -e 172.20.0.10 > /dev/null &
   done
@@ -36,88 +46,203 @@ function client() {
   docker container rm rclient;
 }
 
-if [ "$1" = "setup" ]; then
+if [[ "$A1" = "setup" ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run setup
+
+Setup a bridge network and the initial Docker image."
+    exit 0
+  fi
+
   # This should be run once after installing docker to create the docker
   # network, the base image, etc.
   docker network create --subnet=172.20.0.0/16 runiversal-net
   docker build -t runiversal -f Dockerfile.init .
   docker build -t runiversal .
 
-elif [ "$1" = "build" ]; then
+elif [[ "$A1" = "build" ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run build
+
+Do an incremental build based on the prior Docker image."
+    exit 0
+  fi
+
   docker build -t runiversal .
 
 # Spin a client and turn the current shell into an interactive CLI.
-elif [ "$1" = "new_client" ]; then
-  docker run --cap-add=NET_ADMIN -it --name=rclient"$2" --ip 172.20.0."$2" --network=runiversal-net runiversal scripts/client -i 172.20.0."$2" -e 172.20.0."$3"
+elif [[ "$A1" = "new_client" ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run new_client <n> <m>
+
+Create a client container, turning the current shell into an interactive session.
+
+E.g. \`./run new_client 3 10\` will create a docker container named \`rclient3\` with
+IP \`172.20.0.3\` who will register itself with the system by contacting \`172.20.0.10\`,
+which needs to be the current leader of the Master group."
+    exit 0
+  fi
+
+  docker run --cap-add=NET_ADMIN -it --name=rclient"$A2" --ip 172.20.0."$A2" --network=runiversal-net runiversal scripts/client -i 172.20.0."$A2" -e 172.20.0."$A3"
 
 # Spin up a slave in the background (starting as a FreeNode)
-elif [ "$1" = "new_node" ]; then
-  docker run --cap-add=NET_ADMIN -d --name=runiversal"$2" --ip 172.20.0."$2" --network=runiversal-net runiversal scripts/transact -i 172.20.0."$2" -t freenode -f "$3" -e 172.20.0."$4"
+elif [[ "$A1" = "new_node" ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run new_node <n> <new_node_type> <m>
 
-elif [ "$1" = "masters" ]; then
+Create and register a new node with the system for use as either a replacement
+in case an existing node goes down, or to expand the system to scale it up.
+
+Values for <new_node_type>: 
+  reconfig    Create a free node that is used to replace an existing node that died.
+  new_slave   Create a free node that is used to create a new SlaveGroup if enough
+              such nodes have been registered.
+
+E.g. \`./run new_node 31 reconfig 10\` will create a docker container named \`runiversal31\` with
+IP \`172.20.0.31\` who will register itself with the system as a node meant for reconfiguration by
+contacting \`172.20.0.10\`, which needs to be the current leader of the Master group."
+    exit 0
+  fi
+
+  docker run --cap-add=NET_ADMIN -d --name=runiversal"$A2" --ip 172.20.0."$A2" --network=runiversal-net runiversal scripts/transact -i 172.20.0."$A2" -t freenode -f "$A3" -e 172.20.0."$A4"
+
+elif [[ "$A1" = "masters" ]]; then
   masters
 
-elif [ "$1" = "slaves" ]; then
+elif [[ "$A1" = "slaves" ]]; then
   slaves
 
-elif [ "$1" = "client_init" ]; then
+elif [[ "$A1" = "client_init" ]]; then
   client_init
 
-elif [ "$1" = "client" ]; then
+elif [[ "$A1" = "client" ]]; then
   client
 
 # Spin up the Master Group, `NUM_SLAVES_GROUPS` number of Slave Groups, and a an interactive client.
-elif [ "$1" = "start" ]; then
+elif [[ "$A1" = "start" ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run start
+
+Instantiate the system locally using Docker."
+    exit 0
+  fi
+
   masters
   client_init
   slaves
   client
 
 # Clean only what is allocated by the `start`
-elif [ "$1" = "clean" ]; then
-  CONTAINERS="rclient";
-  for ((i = 10; i < $((15 + $NUM_SLAVES)); i++)); do
-    CONTAINERS="${CONTAINERS} runiversal${i}";
+elif [[ "$A1" = "clean" ]]; then
+  CONTAINERS=("rclient");
+  for ((i = 10; i < $((15 + NUM_SLAVES)); i++)); do
+    CONTAINERS+=("runiversal${i}");
   done
-  docker kill ${CONTAINERS} &> /dev/null;
-  docker container rm ${CONTAINERS} &> /dev/null;
+  docker kill "${CONTAINERS[@]}" &> /dev/null;
+  docker container rm "${CONTAINERS[@]}" &> /dev/null;
 
 # Do a deep clean, where we just kill all `runiversal` and `rclient` nodes that we might have spun up.
-elif [ "$1" = "dclean" ]; then
-  CONTAINERS="rclient";
+elif [[ "$A1" = "dclean" ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run dclean
+
+Stop and delete all Docker containers associated with rUniversalDB. 'd' stands for 'deep'."
+    exit 0
+  fi
+
+  CONTAINERS=("rclient");
   for ((i = 2; i < 10; i++)); do
-    CONTAINERS="${CONTAINERS} rclient${i}";
+    CONTAINERS+=("rclient${i}");
   done
   for ((i = 10; i < 45; i++)); do
-    CONTAINERS="${CONTAINERS} runiversal${i}";
+    CONTAINERS+=("runiversal${i}");
   done
-  docker kill ${CONTAINERS} &> /dev/null;
-  docker container rm ${CONTAINERS} &> /dev/null;
+  docker kill "${CONTAINERS[@]}" &> /dev/null;
+  docker container rm "${CONTAINERS[@]}" &> /dev/null;
 
 # Clean up single `runiversal` node.
-elif [ "$1" = "nclean" ]; then
-  CONTAINER=runiversal"$2"
-  docker kill ${CONTAINER} &> /dev/null;
-  docker container rm ${CONTAINER} &> /dev/null;
+elif [[ "$A1" = "nclean" ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run nclean <n>
+
+Stop and delete a specific system node.
+
+E.g. \`./run nclean 20\` will stop and remove the docker container \`runiversal20\`."
+    exit 0
+  fi
+
+  CONTAINER="runiversal${A2}"
+  docker kill "${CONTAINER}" &> /dev/null;
+  docker container rm "${CONTAINER}" &> /dev/null;
 
 # Clean up single `rclient` node.
-elif [ "$1" = "cclean" ]; then
-  CONTAINER=rclient"$2"
-  docker kill ${CONTAINER} &> /dev/null;
-  docker container rm ${CONTAINER} &> /dev/null;
+elif [[ "$A1" = "cclean" ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run cclean <n>
 
-elif [ "$1" = "test" ]; then
+Stop and delete a specific client node.
+
+E.g. \`./run cclean 3\` will stop and remove the docker container \`rclient3\`."
+    exit 0
+  fi
+
+  CONTAINER="rclient${A2}"
+  docker kill "${CONTAINER}" &> /dev/null;
+  docker container rm "${CONTAINER}" &> /dev/null;
+
+elif [[ "$A1" = "test" ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run test
+
+Run the main simulation tests."
+    exit 0
+  fi
+
   cargo run --release --bin simtest -- -i 8 -r 80
 
-elif [ "$1" = "test_all" ]; then
+elif [[ "$A1" = "test_all"  ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run test_all
+
+Run all simulation tests."
+    exit 0
+  fi
+
   cargo run --release --bin paxos;
   cargo run --release --bin paxos2pc_sim;
   cargo run --release --bin simtest -- -i 8 -r 80;
 
-elif [ "$1" = "bench" ]; then
+elif [[ "$A1" = "bench" ]]; then
+  if is_help_flag "$A2"; then
+    echo "Usage: ./run bench
+
+Do a small run of the main simulation tests to guage performance regressions."
+    exit 0
+  fi
+
   cargo run --release --bin simtest -- -i 4 -r 8
 
 else
-  echo "unrecognized command: ${1}"
+  if ! is_help_flag "$A1"; then
+    echo "unrecognized command: $A1
+"
+  fi
+
+  echo "Usage: ./run [COMMAND]
+
+A tool to help build, run, and test rUniversalDB locally.
+
+Commands:
+  setup         Setup a bridge network and the initial Docker image.
+  build         Do an incremental build based on the prior Docker image.
+  new_client    Create a client container, turning the current shell into an interactive session.
+  new_node      Create a new node for the system to use if needed.
+  start         Instantiate the system locally using Docker.
+  dclean        Stop and delete all Docker container associated with rUniverslDB.
+  nclean        Stop and delete a specific system node.
+  cclean        Stop and delete a specific client node.
+  test          Run the main simulation tests.
+  test_all      Run all simulation tests.
+  bench         Do a small run of the main simulation test to guage performance regressions."
 
 fi
