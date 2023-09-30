@@ -5,7 +5,7 @@ cargo build
 # Docker
 
 ## Setup
-docker network create --subnet=172.19.0.0/16 runiversal-net
+docker network create --subnet=172.20.0.0/16 runiversal-net
 
 ## Build
 docker build -t runiversal -f Dockerfile.init .
@@ -23,9 +23,9 @@ cargo run --bin client 2>/dev/null
 docker run -it runiversal
 
 ## Run & Stop
-docker run --cap-add=NET_ADMIN -it --name=rclient4 --ip 172.19.0.4 --network=runiversal-net runiversal scripts/client -i 172.19.0.4 -e 172.19.0.10
-docker run --cap-add=NET_ADMIN -it --name=runiversal10 --ip 172.19.0.10 --network=runiversal-net runiversal scripts/transact -i 172.19.0.10 -t masterbootup
-docker run --cap-add=NET_ADMIN -d --name=runiversal15 --ip 172.19.0.15 --network=runiversal-net runiversal scripts/transact -i 172.19.0.15 -t freenode -f newslave -e 172.19.0.10
+docker run --cap-add=NET_ADMIN -it --name=rclient4 --ip 172.20.0.4 --network=runiversal-net runiversal scripts/client -i 172.20.0.4 -e 172.20.0.10
+docker run --cap-add=NET_ADMIN -it --name=runiversal10 --ip 172.20.0.10 --network=runiversal-net runiversal scripts/transact -i 172.20.0.10 -t masterbootup
+docker run --cap-add=NET_ADMIN -d --name=runiversal15 --ip 172.20.0.15 --network=runiversal-net runiversal scripts/transact -i 172.20.0.15 -t freenode -f newslave -e 172.20.0.10
 
 docker kill rclient; docker container rm rclient;
 docker kill runiversal10; docker container rm runiversal10;
@@ -55,8 +55,8 @@ To create extra clients and nodes, do:
 ./run new_node 34 reconfig 10
 ./run new_node 35 reconfig 10
 
-master_target 172.19.0.1
-slave_target 172.19.0.16
+master_target 172.20.0.1
+slave_target 172.20.0.16
 
 To clean up everything, do:
 
@@ -70,16 +70,16 @@ To clean up everything, do:
 ## Demo
 1. Run `./run start` in terminal pane. This will start the MasterGroup, 2 SlaveGroups, and a client. Run `live` in that view
 3. Run `./run new_client 3 10` to start a new client.
-2. Explicitly connect to `172.19.0.15` with `slave_target 172.19.0.15` (the Leadership for the first SlaveGroup). (This is useful for showcasing node deletion later.)
+2. Explicitly connect to `172.20.0.15` with `slave_target 172.20.0.15` (the Leadership for the first SlaveGroup). (This is useful for showcasing node deletion later.)
 4. Run the Basic/Advanced Queries.
-5. Kill `172.19.0.15` with `./run nclean 15` (or similar). (This shows reconfiguration.)
+5. Kill `172.20.0.15` with `./run nclean 15` (or similar). (This shows reconfiguration.)
 6. Create a Slave free node so that it can replace the one that was just killed: `./run new_node 25 reconfig 10`
-7. Explicitly connect to `172.19.0.17` with `slave_target 172.19.0.17` and then fire some queries (just to show that new leaders are actually possible to use).
+7. Explicitly connect to `172.20.0.17` with `slave_target 172.20.0.17` and then fire some queries (just to show that new leaders are actually possible to use).
 8. Create 5 Slaves as newslave, e.g. `./run new_node 26 newslave 10` to show how new SlaveGroups are formed automatically.
-9. Explicitly connect to `172.19.0.26` with `slave_target 172.19.0.26` and then fire some queries (just to show that new Groups are actually used).
+9. Explicitly connect to `172.20.0.26` with `slave_target 172.20.0.26` and then fire some queries (just to show that new Groups are actually used).
 10. Run the `./run new_node 31 reconfig 10` commands to create lots of free nodes.
-11. Kill `172.19.0.26` with `./run nclean 26` (or similar). (This shows reconfiguration, immediately follows by the consumption of a free node.)
-12. Explicitly connect to `172.19.0.29` with `slave_target 172.19.0.29` and then fire some queries (just to show that new Groups are actually used). 
+11. Kill `172.20.0.26` with `./run nclean 26` (or similar). (This shows reconfiguration, immediately follows by the consumption of a free node.)
+12. Explicitly connect to `172.20.0.29` with `slave_target 172.20.0.29` and then fire some queries (just to show that new Groups are actually used). 
 13. Quit the live system with `q`, and call `./run dclean` to clean up.
 
 ## Basic Queries

@@ -1,5 +1,6 @@
+# IDE
+.vscode
 .idea
-rUniversalDB.iml
-target
 
-cockroach-data
+# Build
+target

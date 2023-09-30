@@ -1,4 +1,9 @@
 FROM rustlang/rust:nightly
 WORKDIR /home
 COPY ./ ./
+
+# Install the `tc` command
+RUN apt-get update && apt-get install -y iproute2
+
+# Build
 RUN cargo build --bin transact; cargo build --bin client;

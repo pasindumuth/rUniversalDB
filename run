@@ -8,7 +8,7 @@ function masters() {
   # Start the image by running transact, and have it be in the background.
   for ((i = 10; i < 15; i++)); do
     CONTAINER_NAME="runiversal${i}";
-    docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.19.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.19.0."${i}" -t masterbootup > /dev/null &
+    docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.20.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.20.0."${i}" -t masterbootup > /dev/null &
   done
   wait
 }
@@ -17,21 +17,21 @@ function slaves() {
   # Start the image by running transact, and have it be in the background.
   for ((i = 15; i < $((15 + $NUM_SLAVES)); i++)); do
     CONTAINER_NAME="runiversal${i}";
-    docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.19.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.19.0."${i}" -t freenode -f newslave -e 172.19.0.10 > /dev/null &
+    docker run --cap-add=NET_ADMIN -d --name="${CONTAINER_NAME}" --ip 172.20.0."${i}" --network=runiversal-net runiversal scripts/transact -i 172.20.0."${i}" -t freenode -f newslave -e 172.20.0.10 > /dev/null &
   done
   wait
 }
 
 function client_init () {
   # Start the image by running the client, but only to initialize the Master Group.
-  docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal scripts/client -i 172.19.0.2 -m '172.19.0.10 172.19.0.11 172.19.0.12 172.19.0.13 172.19.0.14' > /dev/null;
+  docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.20.0.2 --network=runiversal-net runiversal scripts/client -i 172.20.0.2 -m '172.20.0.10 172.20.0.11 172.20.0.12 172.20.0.13 172.20.0.14' > /dev/null;
   # After we exit the terminal, clean up the container.
   docker container rm rclient > /dev/null;
 }
 
 function client() {
   # Start the image by running the client, and start an interactive terminal.
-  docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.19.0.2 --network=runiversal-net runiversal scripts/client -i 172.19.0.2 -e 172.19.0.10;
+  docker run --cap-add=NET_ADMIN -it --name=rclient --ip 172.20.0.2 --network=runiversal-net runiversal scripts/client -i 172.20.0.2 -e 172.20.0.10;
   # After we exit the terminal, clean up the container.
   docker container rm rclient;
 }
@@ -39,7 +39,7 @@ function client() {
 if [ "$1" = "setup" ]; then
   # This should be run once after installing docker to create the docker
   # network, the base image, etc.
-  docker network create --subnet=172.19.0.0/16 runiversal-net
+  docker network create --subnet=172.20.0.0/16 runiversal-net
   docker build -t runiversal -f Dockerfile.init .
   docker build -t runiversal .
 
@@ -48,11 +48,11 @@ elif [ "$1" = "build" ]; then
 
 # Spin a client and turn the current shell into an interactive CLI.
 elif [ "$1" = "new_client" ]; then
-  docker run --cap-add=NET_ADMIN -it --name=rclient"$2" --ip 172.19.0."$2" --network=runiversal-net runiversal scripts/client -i 172.19.0."$2" -e 172.19.0."$3"
+  docker run --cap-add=NET_ADMIN -it --name=rclient"$2" --ip 172.20.0."$2" --network=runiversal-net runiversal scripts/client -i 172.20.0."$2" -e 172.20.0."$3"
 
 # Spin up a slave in the background (starting as a FreeNode)
 elif [ "$1" = "new_node" ]; then
-  docker run --cap-add=NET_ADMIN -d --name=runiversal"$2" --ip 172.19.0."$2" --network=runiversal-net runiversal scripts/transact -i 172.19.0."$2" -t freenode -f "$3" -e 172.19.0."$4"
+  docker run --cap-add=NET_ADMIN -d --name=runiversal"$2" --ip 172.20.0."$2" --network=runiversal-net runiversal scripts/transact -i 172.20.0."$2" -t freenode -f "$3" -e 172.20.0."$4"
 
 elif [ "$1" = "masters" ]; then
   masters

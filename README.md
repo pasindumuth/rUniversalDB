@@ -45,14 +45,19 @@ rUniversalDB is a Distributed Database Management System (DDBMS), similar to Goo
 We use the [`sqlparser`](https://docs.rs/sqlparser/latest/sqlparser/) project for parsing SQL.
 
 # Getting Started
-An instance of the system can be deployed locally using docker. First, install docker from the official [website](https://www.docker.com/). Then, to build the docker image, run:
+An instance of the system can be deployed locally using docker. First, install docker from the official [website](https://www.docker.com/). To build the docker image, first do a one-time setup:
 
 ```sh
 ./run setup
+```
+
+Then, build the docker image:
+
+```sh
 ./run build
 ```
 
-Finally, to spin up a toy system, do:
+Finally, to spin up a toy system locally, do:
 
 ```sh
 ./run start
@@ -62,9 +67,13 @@ This will start up several nodes locally and it will turn the current shell into
 
 To connect to the system and open up a live admin UI in the CLI, type in `live`. This will show you the current database schema, the set of nodes currently in the system, etc., and it will update in real time as those things change. Press `ESC` / `q` to exit the admin UI.
 
-To spin up a new client (in case you are using the original client to view the admin UI), do `./run new_client 3 10`. Generally, running the command `./run new_client <n> <m>` will start an interactive client, where it will connect to the node `172.19.0.<m>` (which needs to be the Leader of the Master Group) from the IP address `172.19.0.<n>`. 
+To spin up a new client (in case you are using the original client to view the admin UI), do `./run new_client 3 10` in a new terminal window. Generally, running the command `./run new_client <n> <m>` will start an interactive client, where it will connect to the node `172.20.0.<m>` (which needs to be the Leader of the Master Group) from the IP address `172.20.0.<n>`. 
 
-Finally, you may run any of the below SQL from the interactive CLI.
+Finally, you may run any of the below SQL from the interactive CLI. When you are finished, you can shut down and delete all of the docker nodes by doing this:
+
+```sh
+./run dclean
+```
 
 # Supported SQL
 
@@ -86,7 +95,7 @@ CREATE TABLE user (
 ALTER TABLE user ADD COLUMN name VARCHAR;
 
 -- Remove column
-ALTER TABLE user DROP COLUMN name VARCHAR;
+ALTER TABLE user DROP COLUMN name;
 
 -- Drop table
 DROP TABLE user;
@@ -144,7 +153,7 @@ We can rename the table used in the FROM clause, as well as the names of the col
 -- Note that as columns are used, we can optionally qualify them with the Table Aliases.
 SELECT email AS em, salary * 2 AS double_salary
 FROM user AS U
-WHERE U.is_admin AND salary < 3;
+WHERE U.is_admin AND salary > 3;
 ```
 
 ## Correlated Subqueries
@@ -167,7 +176,7 @@ SET salary = salary * 2
 WHERE salary <= (
     SELECT AVG(salary)
     FROM user as U1
-    WHERE is_admin AND 1 = (SELECT COUNT(id)
+    WHERE is_admin AND 2 = (SELECT COUNT(id)
                             FROM user AS U2
                             WHERE U1.username = U2.username));
 ```
@@ -329,7 +338,7 @@ WHERE 10 = (
 Suppose `age` is an integer. In the above, even if the `user` table was very large, the number of different inner subqueries that need to be evaluated should not be more than 100 (if we assume that most `age` values are below 100). Our system does exactly this optimization to minimize the amount of work that needs to be done and data that needs to be transferred over the network.
 
 # Core Algorithms
-Here, we discuss this high-level architecture of the system, and then discuss some of the core algorithms that were needed in order to make the system work. We provide links to [this document](https://docs.google.com/document/d/14bBCSwyxvbAby_8fBfFuoKTanpaV1YXoi1MKlBzJxSQ), which contains many formalization and proofs of these core algorithms, providing us a strong foundation to have a correct, working system.
+Here, we discuss this high-level architecture of the system, and then discuss some of the core algorithms that were needed in order to make the system work. [This document](https://docs.google.com/document/d/14bBCSwyxvbAby_8fBfFuoKTanpaV1YXoi1MKlBzJxSQ) contains many formalization and proofs of these core algorithms, providing us a strong foundation to have a correct, working system.
 
 ## Architectural Overview
 The below is a diagram that shows the architecture of our system. Recall that our system is distributed; data is replicated across multiple servers to minimize the possibility of data loss. Servers are grouped into "Paxos Groups", all of which contain the exact same data and are kept in-sync using the Paxos algorithm. In addition to replication, our system is capable of sharding tables, where each shard would be managed by its own Paxos Group. This way, tables can grow arbitrarily large and they have no obligation to fit on a single server. We refer to such a shard as a "Tablet" (a term taken from Google Spanner). At any time, there is a leader for every Paxos Group that performs most of the work for executing transactions that concern all tablets managed by the Paxos Group.
