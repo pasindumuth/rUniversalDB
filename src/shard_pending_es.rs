@@ -43,6 +43,8 @@ enum State {
   InsertingShardingSnapshot { buffered_msgs: Vec<msg::TabletMessage> },
 }
 
+/// The ES used by a Slave to anticipate the arrival of a `ShardingSnapshot` from the Tablet
+/// who is being split up, which will be used to construct a new Tablet in the Slave.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 struct PendingShardingES {
   state: State,
@@ -220,8 +222,8 @@ impl Paxos2PCContainer<ShardSplitSlaveRMES>
 // -----------------------------------------------------------------------------------------------
 //  ES Container Functions
 // -----------------------------------------------------------------------------------------------
-// Here, we hold all containers related to Sharding that occurs in a Slave
 
+/// Holds all containers related to Sharding that occurs in a Slave.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShardSplitESS {
   /// The `STMPaxos2PC` container shard splitting.

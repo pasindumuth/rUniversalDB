@@ -75,7 +75,7 @@ fn main() {
 
   if let Some(instances) = matches.value_of("instances") {
     let instances: u32 = instances.parse().unwrap();
-    execute_multi(&mut rand, instances, rounds);
+    execute_multi(instances, rounds);
   } else {
     execute_once(&mut rand, rounds);
   }
@@ -159,12 +159,13 @@ fn execute_once(rand: &mut XorShiftRng, rounds: u32) {
 }
 
 /// Execute parallel tests in multiple threads.
-fn execute_multi(rand: &mut XorShiftRng, instances: u32, rounds: u32) {
+fn execute_multi(instances: u32, rounds: u32) {
   let (sender, receiver) = mpsc::channel::<ParallelTestMessage>();
 
   // Create `instances` number of threads to run the test in parallel.
-  for _ in 0..instances {
-    let seed = mk_seed(rand);
+  for i in 0..instances {
+    let mut seed: [u8; 16] = [0; 16];
+    seed[0] = i as u8;
     let sender = sender.clone();
     std::thread::spawn(move || {
       let mut writer = ConcurrentWriter::create(&sender);

@@ -2,5 +2,8 @@
 .vscode
 .idea
 
+# OS
+.DS_Store
+
 # Build
 target

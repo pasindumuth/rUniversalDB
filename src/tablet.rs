@@ -51,6 +51,7 @@ use crate::shard_split_tablet_rm_es::{
 use crate::slave::{SlaveBackMessage, TabletBundleInsertion};
 use crate::sql_ast::proc;
 use crate::stmpaxos2pc_rm;
+use crate::stmpaxos2pc_tm;
 use crate::storage::{GenericMVTable, GenericTable, StorageView};
 use crate::table_read_es::{ExecutionS, TableReadES};
 use crate::tm_status::TMStatus;
@@ -60,6 +61,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser::test_utils::table;
 use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{Debug, Formatter};
 use std::ops::Bound;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1266,7 +1268,39 @@ pub struct TabletState {
   pub statuses: Statuses,
 }
 
-#[derive(Debug)]
+impl Debug for TabletContext {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    let mut debug_trait_builder = f.debug_struct("TabletContext");
+    let _ = debug_trait_builder.field("tablet_config", &self.tablet_config);
+    let _ = debug_trait_builder.field("this_sid", &self.this_sid);
+    let _ = debug_trait_builder.field("this_gid", &self.this_gid);
+    let _ = debug_trait_builder.field("this_tid", &self.this_tid);
+    let _ = debug_trait_builder.field("sub_node_path", &self.sub_node_path);
+    let _ = debug_trait_builder.field("this_eid", &self.this_eid);
+    let _ = debug_trait_builder.field("this_table_path", &self.this_table_path);
+    // let _ = debug_trait_builder.field("gossip", &self.gossip);
+    // let _ = debug_trait_builder.field("leader_map", &self.leader_map);
+    let _ = debug_trait_builder.field("this_sharding_gen", &self.this_sharding_gen);
+    let _ = debug_trait_builder.field("this_tablet_key_range", &self.this_tablet_key_range);
+    let _ = debug_trait_builder.field("sharding_done", &self.sharding_done);
+    // let _ = debug_trait_builder.field("storage", &self.storage);
+    // let _ = debug_trait_builder.field("table_schema", &self.table_schema);
+    let _ = debug_trait_builder.field("presence_timestamp", &self.presence_timestamp);
+    let _ = debug_trait_builder.field("verifying_writes", &self.verifying_writes);
+    let _ = debug_trait_builder.field("inserting_prepared_writes", &self.inserting_prepared_writes);
+    let _ = debug_trait_builder.field("prepared_writes", &self.prepared_writes);
+    // let _ = debug_trait_builder.field("committed_writes", &self.committed_writes);
+    let _ = debug_trait_builder.field("waiting_read_protected", &self.waiting_read_protected);
+    let _ = debug_trait_builder.field("inserting_read_protected", &self.inserting_read_protected);
+    // let _ = debug_trait_builder.field("read_protected", &self.read_protected);
+    let _ = debug_trait_builder.field("waiting_locked_cols", &self.waiting_locked_cols);
+    let _ = debug_trait_builder.field("inserting_locked_cols", &self.inserting_locked_cols);
+    let _ = debug_trait_builder.field("ms_root_query_map", &self.ms_root_query_map);
+    let _ = debug_trait_builder.field("tablet_bundle", &self.tablet_bundle);
+    debug_trait_builder.finish()
+  }
+}
+
 pub struct TabletContext {
   /// Metadata
   pub tablet_config: TabletConfig,
@@ -1746,14 +1780,20 @@ impl TabletContext {
         match &mut statuses.ddl_es {
           DDLES::None => {}
           DDLES::Alter(es) => {
-            es.leader_changed(self);
+            if let (stmpaxos2pc_rm::STMPaxos2PCRMAction::Exit(None)) = es.leader_changed(self) {
+              statuses.ddl_es = DDLES::None;
+            }
           }
           DDLES::Drop(es) => {
-            es.leader_changed(self);
+            if let (stmpaxos2pc_rm::STMPaxos2PCRMAction::Exit(None)) = es.leader_changed(self) {
+              statuses.ddl_es = DDLES::None;
+            }
           }
           DDLES::Dropped(_) => {}
           DDLES::ShardSplit(es) => {
-            es.leader_changed(self);
+            if let (stmpaxos2pc_rm::STMPaxos2PCRMAction::Exit(None)) = es.leader_changed(self) {
+              statuses.ddl_es = DDLES::None;
+            }
           }
         }
 
@@ -2908,7 +2948,7 @@ impl TabletContext {
     }
   }
 
-  /// Handles the actions produced by a ShardSplitTabletES.
+  /// Handles the actions produced by a ShardSplitTabletRMES.
   fn handle_shard_split_es_action<IO: CoreIOCtx>(
     &mut self,
     io_ctx: &mut IO,
@@ -2927,7 +2967,7 @@ impl TabletContext {
         if let Some(target_new) = maybe_commit_action {
           // If this is the Leader, abort all non-Prepared TPESs, including any `PerformQuerys`
           // that are buffered. These will all inevitably have a `ShardingGen` that is too old
-          // anyways. (In constract, we will let the Prepared ESs finish, since it's too
+          // anyways. (In contrast, we will let the Prepared ESs finish, since it's too
           // late to abort them.)
           if self.is_leader() {
             // For PerformQuery, we simply remove them and respond; there are no child queries.
@@ -2972,7 +3012,7 @@ impl TabletContext {
     }
   }
 
-  /// Handles the actions produced by a ShardSplitTabletES.
+  /// Handles the actions produced by a ShardSplitTabletRMES.
   fn handle_shard_send_es_action(
     &mut self,
     statuses: &mut Statuses,

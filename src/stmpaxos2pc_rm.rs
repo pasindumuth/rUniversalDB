@@ -254,7 +254,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
         ctx.push_plm(committed_plm);
         self.state = State::InsertingCommitted;
       }
-      _ => {}
+      _ => {
+        debug_assert!(false);
+      }
     }
     STMPaxos2PCRMAction::Wait
   }
@@ -284,7 +286,10 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
         self.state = State::InsertingAborted;
         STMPaxos2PCRMAction::Wait
       }
-      _ => STMPaxos2PCRMAction::Wait,
+      _ => {
+        debug_assert!(false);
+        STMPaxos2PCRMAction::Wait
+      }
     }
   }
 
@@ -331,7 +336,9 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
         ctx.push_plm(aborted_plm);
         self.state = State::InsertingAborted;
       }
-      _ => {}
+      _ => {
+        debug_assert!(false);
+      }
     }
     STMPaxos2PCRMAction::Wait
   }
@@ -354,7 +361,10 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
         self.send_closed(ctx, io_ctx);
         STMPaxos2PCRMAction::Exit(Some(action))
       }
-      _ => STMPaxos2PCRMAction::Wait,
+      _ => {
+        debug_assert!(false);
+        STMPaxos2PCRMAction::Wait
+      }
     }
   }
 
@@ -375,7 +385,10 @@ impl<T: RMPayloadTypes, InnerT: STMPaxos2PCRMInner<T>> STMPaxos2PCRMOuter<T, Inn
         self.send_closed(ctx, io_ctx);
         STMPaxos2PCRMAction::Exit(None)
       }
-      _ => STMPaxos2PCRMAction::Wait,
+      _ => {
+        debug_assert!(false);
+        STMPaxos2PCRMAction::Wait
+      }
     }
   }
 

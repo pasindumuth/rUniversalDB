@@ -16,9 +16,10 @@ use crate::shard_split_slave_rm_es::{
   ShardSplitSlaveRMAction, ShardSplitSlaveRMES, ShardSplitSlaveRMPayloadTypes,
 };
 use crate::stmpaxos2pc_rm;
+use crate::stmpaxos2pc_rm::RMPLm;
 use crate::storage::GenericMVTable;
 use crate::tablet::{
-  ShardingSnapshot, TabletBundle, TabletContext, TabletForwardMsg, TabletSnapshot,
+  ShardingSnapshot, TabletBundle, TabletContext, TabletForwardMsg, TabletPLm, TabletSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -278,14 +279,17 @@ impl Debug for SlaveContext {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     let mut debug_trait_builder = f.debug_struct("SlaveContext");
     let _ = debug_trait_builder.field("coord_positions", &self.coord_positions);
+    let _ = debug_trait_builder.field("slave_config", &self.slave_config);
     let _ = debug_trait_builder.field("this_sid", &self.this_sid);
     let _ = debug_trait_builder.field("this_gid", &self.this_gid);
     let _ = debug_trait_builder.field("this_eid", &self.this_eid);
-    let _ = debug_trait_builder.field("gossip", &self.gossip);
+    // let _ = debug_trait_builder.field("gossip", &self.gossip);
     let _ = debug_trait_builder.field("leader_map", &self.leader_map);
+    // let _ = debug_trait_builder.field("all_eids", &self.all_eids);
     let _ = debug_trait_builder.field("network_driver", &self.network_driver);
     let _ = debug_trait_builder.field("slave_bundle", &self.slave_bundle);
     let _ = debug_trait_builder.field("tablet_bundles", &self.tablet_bundles);
+    let _ = debug_trait_builder.field("paxos_driver", &self.paxos_driver);
     debug_trait_builder.finish()
   }
 }

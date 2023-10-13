@@ -1,4 +1,4 @@
-use crate::common::{cur_timestamp, Timestamp};
+use crate::common::{cur_timestamp, QueryId, Timestamp};
 use crate::common::{mk_t, BasicIOCtx};
 use crate::common::{
   ShardingGen, SlaveGroupId, TNodePath, TablePath, TabletGroupId, TabletKeyRange,
@@ -81,7 +81,7 @@ impl RMServerContext<ShardSplitTabletRMPayloadTypes> for TabletContext {
 }
 
 // -----------------------------------------------------------------------------------------------
-//  ShardSplitTabletES Implementation
+//  ShardSplitTabletRMES Implementation
 // -----------------------------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
